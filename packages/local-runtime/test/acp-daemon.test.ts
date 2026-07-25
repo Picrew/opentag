@@ -455,6 +455,81 @@ describe("ACP daemon workspaces", () => {
     expect(completed[0]?.conclusion).toBe("needs_human");
   });
 
+  it("requeues an authoritative placement when the selected executor is absent locally", async () => {
+    const completed: OpenTagRunResult[] = [];
+    const rejected: Array<{ executorId: string; reason: string }> = [];
+    const client = clientFor({
+      claimed: { ...claimed({ event: event({ id: "evt_missing_selected_executor" }) }), executorId: "missing" },
+      completed
+    });
+    client.rejectAttemptStart = async (_runId, executorId, reason) => {
+      rejected.push({ executorId, reason });
+    };
+
+    await runOneDaemonIteration({
+      runnerId: "runner_local",
+      repositories: [],
+      executors: {},
+      heartbeatIntervalMs: 0,
+      client
+    });
+
+    expect(rejected).toEqual([{
+      executorId: "missing",
+      reason: "No local executor is configured for 'missing'."
+    }]);
+    expect(completed).toEqual([]);
+  });
+
+  it.each(["rejectAttemptStart", "fallback complete"] as const)(
+    "treats a stale lease during %s as an already-terminal iteration",
+    async (terminalPath) => {
+      const completed: OpenTagRunResult[] = [];
+      const client = clientFor({
+        claimed: { ...claimed({ event: event({ id: `evt_stale_${terminalPath}` }) }), executorId: "missing" },
+        completed
+      });
+      if (terminalPath === "rejectAttemptStart") {
+        client.rejectAttemptStart = async () => { throw new Error("stale_attempt"); };
+      } else {
+        client.complete = async () => { throw new Error("run_not_claimed_by_runner"); };
+      }
+
+      await expect(runOneDaemonIteration({
+        runnerId: "runner_local",
+        repositories: [],
+        executors: {},
+        heartbeatIntervalMs: 0,
+        client
+      })).resolves.toBe(true);
+      expect(completed).toEqual([]);
+    }
+  );
+
+  it("treats a stale lease while marking running as an already-terminal iteration", async () => {
+    const scratchRoot = join(mkdtempSync(join(tmpdir(), "opentag-scratch-parent-")), "scratch");
+    const completed: OpenTagRunResult[] = [];
+    const runs: ExecutorRunInput[] = [];
+    const client = clientFor({
+      claimed: claimed({ event: event({ id: "evt_stale_mark_running" }) }),
+      completed
+    });
+    client.markRunning = async () => { throw new Error("run_not_found"); };
+
+    await expect(runOneDaemonIteration({
+      runnerId: "runner_local",
+      repositories: [],
+      executors: { reviewer: recordingExecutor({ runs }) },
+      scratchRoot,
+      heartbeatIntervalMs: 0,
+      client
+    })).resolves.toBe(true);
+    expect(runs).toEqual([]);
+    expect(existsSync(scratchRoot)).toBe(true);
+    expect(readdirSync(scratchRoot)).toEqual([]);
+    expect(completed).toEqual([]);
+  });
+
   it("removes a newly-created scratch directory when executor readiness fails", async () => {
     const scratchRoot = join(mkdtempSync(join(tmpdir(), "opentag-scratch-parent-")), "scratch");
     const completed: OpenTagRunResult[] = [];
@@ -475,7 +550,7 @@ describe("ACP daemon workspaces", () => {
     expect(completed[0]).toMatchObject({ conclusion: "needs_human", summary: "not configured" });
   });
 
-  it("snapshots an unverified custom capability before readiness rejects without running the executor", async () => {
+  it("rejects an unready custom executor before marking the attempt running", async () => {
     const scratchRoot = join(mkdtempSync(join(tmpdir(), "opentag-scratch-parent-")), "scratch");
     const completed: OpenTagRunResult[] = [];
     const order: string[] = [];
@@ -483,6 +558,7 @@ describe("ACP daemon workspaces", () => {
       executor: string;
       options: Parameters<DaemonClient["markRunning"]>[3];
     }> = [];
+    const rejected: string[] = [];
     const acpExecutor = createAcpExecutor({
       manifest: {
         protocol: "opentag.integration.v1",
@@ -529,6 +605,10 @@ describe("ACP daemon workspaces", () => {
       order.push("complete");
       completed.push(result);
     };
+    client.rejectAttemptStart = async (_runId, _executorId, reason) => {
+      order.push("rejectAttemptStart");
+      rejected.push(reason);
+    };
 
     await runOneDaemonIteration({
       runnerId: "runner_local",
@@ -539,24 +619,11 @@ describe("ACP daemon workspaces", () => {
       client
     });
 
-    expect(order).toEqual(["markRunning", "canRun:start", "canRun:end", "complete"]);
-    expect(markRunningCalls).toEqual([
-      expect.objectContaining({
-        executor: "reviewer",
-        options: expect.objectContaining({
-          executorCapability: expect.objectContaining({
-            writeAccess: "external",
-            workspaceIsolation: "external",
-            workspaceCwdConformance: "unverified"
-          })
-        })
-      })
-    ]);
+    expect(order).toEqual(["canRun:start", "canRun:end", "rejectAttemptStart"]);
+    expect(markRunningCalls).toEqual([]);
+    expect(completed).toEqual([]);
+    expect(rejected).toEqual(["Executor workspace conformance is unverified."]);
     expect(run).not.toHaveBeenCalled();
-    expect(completed[0]).toMatchObject({
-      conclusion: "needs_human",
-      summary: "Executor workspace conformance is unverified."
-    });
     expect(readdirSync(scratchRoot)).toEqual([]);
   });
 

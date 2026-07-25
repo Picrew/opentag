@@ -6,7 +6,7 @@ import { Command } from "commander";
 import { createInitialConfig, formatConfigError, loadConfigFromEnv, normalizeChannelBindings } from "./config.js";
 import { runOneDaemonIteration, serveDaemon } from "./daemon.js";
 import { doctorHasFailures, formatDoctorChecks, runDoctor } from "./doctor.js";
-import { createDaemonRuntimeInput, executorsFromConfig } from "./runtime.js";
+import { createDaemonRuntimeInput, executorsFromConfig, runnerExecutorRegistrations } from "./runtime.js";
 
 const program = new Command();
 
@@ -111,7 +111,11 @@ program
       dispatcherUrl: config.dispatcherUrl,
       runnerId: config.runnerId,
       ...(config.pairingToken ? { pairingToken: config.pairingToken } : {})
-    }).registerRunner(config.runnerId);
+    }).registerRunner(config.runnerId, {
+      locality: "local",
+      executors: runnerExecutorRegistrations(executorsFromConfig(config)),
+      maxConcurrentRuns: 1
+    });
     console.log(`Registered OpenTag runner ${config.runnerId}`);
   });
 

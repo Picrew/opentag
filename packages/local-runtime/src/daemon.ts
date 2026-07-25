@@ -37,6 +37,7 @@ export type ClaimedRun = {
   attemptId: string;
   attemptNumber: number;
   fencingToken: string;
+  executorId?: string;
 };
 
 export type AttemptLease = Pick<ClaimedRun, "attemptId" | "fencingToken">;
@@ -49,6 +50,7 @@ export type DaemonClient = {
     lease: AttemptLease,
     options?: { executorCapability?: Record<string, unknown>; runTimeoutMs?: number; idempotencyKey?: string }
   ): Promise<void>;
+  rejectAttemptStart?(runId: string, executorId: string, reason: string, lease: AttemptLease): Promise<void>;
   heartbeat(runId: string, lease: AttemptLease): Promise<void>;
   progress(runId: string, lease: AttemptLease, input: { type: string; message: string; at: string }): Promise<void>;
   complete(runId: string, lease: AttemptLease, result: OpenTagRunResult): Promise<void>;
@@ -219,6 +221,7 @@ export async function runOneDaemonIteration(input: {
   const claimed = await input.client.claim();
   if (!claimed) return false;
   const lease: AttemptLease = { attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+  const runId = claimed.run.id;
 
   const projectTargetRef = projectTargetRefFromEvent(claimed.event);
   const claimedTargetFailure = claimedProjectTargetFailure({
@@ -242,11 +245,20 @@ export async function runOneDaemonIteration(input: {
     return true;
   }
   const binding = resolveRepositoryBinding(claimed.event, input.repositories);
+  const executorId = claimed.executorId ?? claimed.event.target.executorHint ?? binding?.defaultExecutor ?? "echo";
+  async function rejectUnreadyAttempt(reason: string): Promise<void> {
+    try {
+      if (input.client.rejectAttemptStart) {
+        await input.client.rejectAttemptStart(runId, executorId, reason, lease);
+        return;
+      }
+      await input.client.complete(runId, lease, { conclusion: "needs_human", summary: reason });
+    } catch (error) {
+      if (!runNoLongerClaimed(error)) throw error;
+    }
+  }
   if (projectTargetRef && !binding) {
-    await input.client.complete(claimed.run.id, lease, {
-      conclusion: "needs_human",
-      summary: "No local workspace mapping is configured for this run's repository."
-    });
+    await rejectUnreadyAttempt("No local workspace mapping is configured for this run's repository.");
     return true;
   }
   const scratchRoot = resolve(input.scratchRoot ?? join(process.cwd(), ".opentag", "scratch"));
@@ -256,13 +268,9 @@ export async function runOneDaemonIteration(input: {
         kind: "scratch",
         path: scratchPathForAttempt(scratchRoot, claimed.attemptId)
       };
-  const executorId = claimed.event.target.executorHint ?? binding?.defaultExecutor ?? "echo";
   const executor = input.executors[executorId];
   if (!executor) {
-    await input.client.complete(claimed.run.id, lease, {
-      conclusion: "needs_human",
-      summary: `No local executor is configured for '${executorId}'.`
-    });
+    await rejectUnreadyAttempt(`No local executor is configured for '${executorId}'.`);
     return true;
   }
   const metadata = executorMetadata(claimed.event);
@@ -367,20 +375,8 @@ export async function runOneDaemonIteration(input: {
     scratchAttemptCreated = false;
   }
 
-  const runId = claimed.run.id;
   const activeExecutor = executor;
   const runTimeoutMs = input.runTimeoutMs;
-  try {
-    await input.client.markRunning(runId, activeExecutor.id, lease, {
-      ...(activeExecutor.capability ? { executorCapability: activeExecutor.capability as unknown as Record<string, unknown> } : {}),
-      idempotencyKey: `${input.runnerId}:${runId}:running`,
-      ...(runTimeoutMs ? { runTimeoutMs } : {})
-    });
-  } catch (error) {
-    await cleanupUnexecutedScratch();
-    throw error;
-  }
-
   let readiness: Awaited<ReturnType<ExecutorAdapter["canRun"]>>;
   try {
     readiness = await executor.canRun({
@@ -399,16 +395,26 @@ export async function runOneDaemonIteration(input: {
     });
   } catch (error) {
     await cleanupUnexecutedScratch();
-    await input.client.complete(claimed.run.id, lease, failedRunResult(`${executor.displayName} readiness check`, error));
+    const result = failedRunResult(`${executor.displayName} readiness check`, error);
+    await rejectUnreadyAttempt(result.summary);
     return true;
   }
 
   if (!readiness.ready) {
     await cleanupUnexecutedScratch();
-    await input.client.complete(claimed.run.id, lease, {
-      conclusion: "needs_human",
-      summary: readiness.reason ?? `${executor.displayName} is not ready`
+    await rejectUnreadyAttempt(readiness.reason ?? `${executor.displayName} is not ready`);
+    return true;
+  }
+
+  try {
+    await input.client.markRunning(runId, activeExecutor.id, lease, {
+      ...(activeExecutor.capability ? { executorCapability: activeExecutor.capability as unknown as Record<string, unknown> } : {}),
+      idempotencyKey: `${input.runnerId}:${runId}:running`,
+      ...(runTimeoutMs ? { runTimeoutMs } : {})
     });
+  } catch (error) {
+    await cleanupUnexecutedScratch();
+    if (!runNoLongerClaimed(error)) throw error;
     return true;
   }
 
