@@ -799,9 +799,10 @@ Invariants:
 Routing begins as deterministic eligibility plus stable selection, not an
 opaque model-based optimizer.
 
-Initially record the decision as a structured `placement.decided` or
-`routing.decided` audit event. Promote it to a public `RoutingDecision` schema
-only after more than one control-plane caller needs the interface.
+Record the decision as a structured `routing.decided` audit event. Phase 3
+promotes `RoutingDecision` to a public additive schema because the claim
+response, dispatcher client, CLI status, and audit ledger all consume the same
+validated explanation.
 
 ```ts
 type RoutingCandidate = {
@@ -1297,6 +1298,66 @@ Exit gate:
 
 > For every run, OpenTag can explain why the selected target was eligible and why
 > alternatives were rejected, without relaxing policy implicitly.
+
+Phase 3 implementation boundary:
+
+- `@opentag/governance` owns the pure deterministic routing evaluation. The
+  store supplies captured policy/access identifiers, ordered candidates, and
+  current directory facts; it does not invent a second routing policy.
+- A runner directory combines declared locality and executor capability with a
+  current heartbeat, draining state, and active-attempt concurrency. Local
+  daemons register their configured executors and concurrency budget.
+- Repository bindings retain one authoritative primary runner/executor and may
+  add ordered fallback runner and executor ids. Run admission freezes that
+  ordered routing policy on the Run itself, alongside the immutable access and
+  policy snapshots, so later binding changes cannot reinterpret admitted work.
+  The complete frozen object is persisted separately from its nullable query
+  fields: an absent object marks a migrated legacy Run, while a present `null`
+  dimension means “no captured preference” and never falls back to a later
+  binding value. Explicit empty arrays remain deny-all.
+- Claim remains pull-based and fencing remains authoritative. Every poll may
+  refresh directory presence, but only the runner selected by the current
+  `routing.decided` snapshot may create the next Attempt lease. The current
+  decision id is a compare-and-swap precondition and the resulting Attempt
+  stores both that id and its authoritative executor placement in the same
+  transaction. Each poll recovers at most 32 expired leases and evaluates at
+  most 64 queued Runs. A per-runner `(createdAt, runId)` cursor advances after
+  every window, including a no-match window, so eligible work beyond the first
+  window is reached without an unbounded scan. Claim and routing-event lookup
+  paths have matching composite indexes and bound the runner directory read to
+  256 registrations.
+- Hard filters cover directory presence/readiness, Project Target binding,
+  access allowlists, locality, credential-resolution reporting, executor
+  registration/readiness/capability, run requirements, and concurrency. An
+  explicitly empty runner or executor allowlist denies every placement. Modern
+  executor registrations with unknown readiness or missing capability are
+  ineligible; only executor-less legacy runners use the narrow compatibility
+  path. The first eligible target in stable configured order wins; historical
+  performance never overrides a hard filter.
+- An unavailable executor or a no-eligible-runner result stays queued. A
+  run-specific executor preflight failure interrupts the still-assigned Attempt,
+  records the rejected placement, and requeues the Run before `running`, allowing
+  deterministic selection of the next frozen fallback. Equivalent decisions
+  share a stable semantic id, so repeated polling does not create an audit-event
+  storm or silently relax the policy.
+- `opentag status` exposes current runner readiness/capacity and accepted
+  completion by runner/executor. `opentag status --run <id>` exposes the selected
+  target plus every eligible or rejected alternative and its reason codes.
+- Accepted-completion attribution uses the current CompletionAssessment, the
+  authoritative latest run for its WorkThread, and the executor placement stored
+  on the terminal Attempt—not an older successful run or executor self-report.
+  Runs paused in `needs_approval` are excluded. Both claim evaluation and the
+  metrics view use bounded directory/correlation queries rather than per-run
+  lookups.
+- Existing callers remain additive-compatible: legacy registrations receive
+  the previous effectively-unbounded concurrency default, old claim responses
+  still parse without routing fields, and a runner that previously claimed
+  directly receives an implicit legacy directory heartbeat without overwriting
+  a later explicit capability registration.
+
+This phase does not add adaptive or accepted-completion-weighted selection,
+organization cost budgets, workflow DAGs, automatic batching, or a factory
+console. Those remain Phase 4 or later work.
 
 ### Phase 4 — Factory recipes, workstreams, and evaluation
 
