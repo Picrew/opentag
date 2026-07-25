@@ -12,8 +12,12 @@ import {
   platformCapabilityForProvider,
   projectTargetRefFromEvent,
   renderOpenTagPresentationPlainText,
+  RoutingDecisionSchema,
   type OpenTagEvent,
   type OpenTagRun,
+  type AcceptedCompletionMetrics,
+  type RunnerDirectoryEntry,
+  type RoutingDecision,
   type PlatformLivenessStrategy
 } from "@opentag/core";
 import { DEFAULT_AGENT_SESSION_PROFILE_TEMPLATE } from "@opentag/local-runtime";
@@ -56,6 +60,10 @@ export type StatusSummary = {
   platforms: string[];
   agentSessionProfile: string[];
   capabilities: string[];
+  runnerDirectory?: RunnerDirectoryEntry[];
+  runnerDirectoryError?: string;
+  acceptedCompletionMetrics?: AcceptedCompletionMetrics;
+  acceptedCompletionMetricsError?: string;
 };
 
 type RunAuditEvent = {
@@ -164,6 +172,11 @@ export async function statusFromConfig(input: {
     dispatcher,
     ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
   });
+  const routingState = await loadRoutingState({
+    config: input.config,
+    dispatcher,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+  });
 
   const platforms = Object.entries(input.config.platforms)
     .filter(([, value]) => value !== undefined)
@@ -189,7 +202,44 @@ export async function statusFromConfig(input: {
     capabilities: formatConfiguredCapabilities({
       platforms: platforms as PlatformId[],
       executors
-    })
+    }),
+    runnerDirectory: routingState.runners,
+    ...(routingState.runnersError ? { runnerDirectoryError: routingState.runnersError } : {}),
+    ...(routingState.metrics ? { acceptedCompletionMetrics: routingState.metrics } : {}),
+    ...(routingState.metricsError ? { acceptedCompletionMetricsError: routingState.metricsError } : {})
+  };
+}
+
+async function loadRoutingState(input: {
+  config: OpenTagCliConfig;
+  dispatcher: "online" | "offline";
+  fetchImpl?: typeof fetch;
+}): Promise<{
+  runners: RunnerDirectoryEntry[];
+  runnersError?: string;
+  metrics?: AcceptedCompletionMetrics;
+  metricsError?: string;
+}> {
+  if (input.dispatcher !== "online") return { runners: [] };
+  const token = runnerDispatcherToken(input.config.daemon);
+  const client = createOpenTagClient({
+    dispatcherUrl: input.config.daemon.dispatcherUrl,
+    ...(token ? { pairingToken: token } : {}),
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+  });
+  const [runners, metrics] = await Promise.allSettled([
+    client.listRunners(),
+    client.getAcceptedCompletionMetrics()
+  ]);
+  return {
+    runners: runners.status === "fulfilled" ? runners.value.runners : [],
+    ...(runners.status === "rejected"
+      ? { runnersError: runners.reason instanceof Error ? runners.reason.message : String(runners.reason) }
+      : {}),
+    ...(metrics.status === "fulfilled" ? { metrics: metrics.value.metrics } : {}),
+    ...(metrics.status === "rejected"
+      ? { metricsError: metrics.reason instanceof Error ? metrics.reason.message : String(metrics.reason) }
+      : {})
   };
 }
 
@@ -327,6 +377,8 @@ export function formatStatus(summary: StatusSummary): string {
     `Dispatcher: ${summary.dispatcher} (${summary.dispatcherUrl})`,
     ...formatControlPlaneAlerts(summary),
     `Runner: ${summary.runnerId}`,
+    ...formatRunnerDirectory(summary),
+    ...formatAcceptedCompletionMetrics(summary),
     `Run Timeout: ${summary.runTimeoutPolicy}`,
     ...summary.secrets,
     ...summary.agentSessionProfile,
@@ -335,6 +387,42 @@ export function formatStatus(summary: StatusSummary): string {
     "Project Targets:",
     ...(summary.repositories.length ? summary.repositories.map((repository) => `  ${repository}`) : ["  none"])
   ].join("\n");
+}
+
+function formatRunnerDirectory(summary: StatusSummary): string[] {
+  if (summary.dispatcher !== "online") return ["Runner Directory:", "  unavailable (dispatcher offline)"];
+  if (summary.runnerDirectoryError) return ["Runner Directory:", `  unavailable: ${summary.runnerDirectoryError}`];
+  if (!summary.runnerDirectory?.length) return ["Runner Directory:", "  none"];
+  return [
+    "Runner Directory:",
+    ...summary.runnerDirectory.map((runner) => {
+      const executors = runner.executors.length ? runner.executors.map((executor) => executor.executorId).join(",") : "legacy-unspecified";
+      return `  ${runner.runnerId}: ${runner.readiness.state}; locality=${runner.locality}; capacity=${runner.capacity.active}/${runner.capacity.limit}; executors=${executors}`;
+    })
+  ];
+}
+
+function formatAcceptedCompletionMetrics(summary: StatusSummary): string[] {
+  if (summary.dispatcher !== "online") {
+    return ["Accepted Completion:", "  unavailable (dispatcher offline)"];
+  }
+  if (summary.acceptedCompletionMetricsError) {
+    return ["Accepted Completion:", `  unavailable: ${summary.acceptedCompletionMetricsError}`];
+  }
+  const metrics = summary.acceptedCompletionMetrics;
+  if (!metrics) return [];
+  const segment = (label: string, values: AcceptedCompletionMetrics["byRunner"]): string[] => [
+    `  ${label}:`,
+    ...(values.length
+      ? values.map((value) => `    ${value.id}: ${value.acceptedCompletions}/${value.completedRuns} (${(value.acceptanceRate * 100).toFixed(1)}%)`)
+      : ["    none"])
+  ];
+  return [
+    "Accepted Completion:",
+    `  total: ${metrics.acceptedCompletions}/${metrics.completedRuns}`,
+    ...segment("by runner", metrics.byRunner),
+    ...segment("by executor", metrics.byExecutor)
+  ];
 }
 
 function formatControlPlaneAlerts(summary: StatusSummary): string[] {
@@ -501,6 +589,30 @@ function formatRunProvenance(summary: RunStatusSummary): string[] {
     `  Admission: ${admissionLineFromProvenance(provenance)}`,
     `  Expected runner: ${expectedRunnerId ?? "unbound"}`,
     `  Claimed runner: ${claimedRunnerId(summary) ?? "none"}`
+  ];
+}
+
+function routingDecisionFromSummary(summary: RunStatusSummary): RoutingDecision | undefined {
+  for (const event of [...summary.events].reverse()) {
+    if (event.type !== "routing.decided") continue;
+    const parsed = RoutingDecisionSchema.safeParse(event.payload);
+    if (parsed.success) return parsed.data;
+  }
+  return undefined;
+}
+
+function formatRunRouting(summary: RunStatusSummary): string[] {
+  const decision = routingDecisionFromSummary(summary);
+  if (!decision) return ["Routing:", "  no structured routing decision recorded (legacy run)"];
+  return [
+    "Routing:",
+    `  Decision: ${decision.reasonCode} - ${decision.reason}`,
+    `  Selected: ${decision.selected ? `${decision.selected.runnerId}/${decision.selected.executorId}` : "none"}`,
+    ...decision.candidates.map((candidate) => {
+      const state = candidate.eligible ? "eligible" : "rejected";
+      const capacity = candidate.capacity ? `; capacity=${candidate.capacity.active}/${candidate.capacity.limit}` : "";
+      return `  ${state} ${candidate.runnerId}/${candidate.executorId}${capacity}: ${candidate.reasons.map((reason) => reason.code).join(", ")}`;
+    })
   ];
 }
 
@@ -674,6 +786,7 @@ function ledgerCategoryForStatus(type: unknown): string {
   if (type === "source_event.received") return "source_event";
   if (type.startsWith("admission.")) return "admission";
   if (type.startsWith("context_packet.")) return "context_packet";
+  if (type.startsWith("routing.")) return "routing";
   if (type.startsWith("executor.capability.")) return "executor_capability";
   if (type === "callback.progress.suppressed") return "progress_visibility";
   if (type.startsWith("callback.") || type.startsWith("source_receipt.")) return "callback_delivery";
@@ -737,6 +850,7 @@ export function formatRunStatus(summary: RunStatusSummary): string {
     ...runTerminalSemantics(summary),
     `Source: ${summary.event.source} (${summary.event.sourceEventId})`,
     ...formatRunProvenance(summary),
+    ...formatRunRouting(summary),
     `Command: ${summary.event.command.rawText}`,
     `Updated: ${summary.run.updatedAt}`,
     ...formatRunContextPacket(summary.run),
