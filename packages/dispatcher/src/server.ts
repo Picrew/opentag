@@ -42,6 +42,8 @@ import {
   OpenTagRunResultSchema,
   PolicyRuleSchema,
   PolicyScopeSchema,
+  RunnerRegistrationRequestSchema,
+  RunnerRegistrationInputSchema,
   RunEventImportanceSchema,
   RunEventVisibilitySchema,
   DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -432,19 +434,34 @@ function safeExecutorLabel(executor: string | undefined): string {
   return executor;
 }
 
-const CreateRunnerSchema = z.object({
-  runnerId: z.string().min(1),
-  name: z.string().min(1)
-});
+const CreateRunnerSchema = RunnerRegistrationRequestSchema;
 
 const CreateRepoBindingSchema = z.object({
   provider: z.string().min(1),
   owner: z.string().min(1),
   repo: z.string().min(1),
   runnerId: z.string().min(1),
+  fallbackRunnerIds: z.array(z.string().min(1)).max(63).optional(),
   workspacePath: z.string().min(1).optional(),
   defaultExecutor: z.string().min(1).optional(),
+  fallbackExecutorIds: z.array(z.string().min(1)).max(63).optional(),
   allowedActors: z.array(z.string().min(1)).optional()
+}).superRefine((binding, ctx) => {
+  const validatePreference = (primary: string | undefined, fallback: string[] | undefined, path: string) => {
+    if (!fallback?.length) return;
+    if (!primary) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Fallback ${path} ids require a primary ${path} id.`, path: [`fallback${path[0]!.toUpperCase()}${path.slice(1)}Ids`] });
+      return;
+    }
+    if (fallback.includes(primary)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Fallback ${path} ids cannot repeat the primary ${path} id.`, path: [`fallback${path[0]!.toUpperCase()}${path.slice(1)}Ids`] });
+    }
+    if (new Set(fallback).size !== fallback.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Fallback ${path} ids must be unique.`, path: [`fallback${path[0]!.toUpperCase()}${path.slice(1)}Ids`] });
+    }
+  };
+  validatePreference(binding.runnerId, binding.fallbackRunnerIds, "runner");
+  validatePreference(binding.defaultExecutor, binding.fallbackExecutorIds, "executor");
 });
 
 const CreateSlackChannelBindingSchema = z.object({
@@ -785,6 +802,11 @@ const MarkRunningSchema = AttemptLeaseSchema.extend({
   executorCapability: z.record(z.string(), z.unknown()).optional(),
   runTimeoutMs: z.number().int().positive().optional(),
   idempotencyKey: z.string().min(1).max(256).optional()
+});
+
+const RejectAttemptStartSchema = AttemptLeaseSchema.extend({
+  executorId: z.string().min(1),
+  reason: z.string().min(1).max(2_000)
 });
 
 const CancelRunSchema = z.object({
@@ -2733,7 +2755,7 @@ type DispatcherAuthResult =
 function isRunnerRuntimeEndpoint(method: string, path: string): boolean {
   if (method !== "POST") return false;
   if (/^\/v1\/runners\/[^/]+\/claim$/.test(path)) return true;
-  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/(running|heartbeat|progress|complete|action-permissions)$/.test(path)) return true;
+  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/(running|reject-start|heartbeat|progress|complete|action-permissions)$/.test(path)) return true;
   if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/action-permissions\/[^/]+\/resolve$/.test(path)) return true;
   if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/material-actions\/[^/]+\/receipt$/.test(path)) return true;
   return /^\/v1\/runs\/[^/]+\/(running|progress|complete)$/.test(path);
@@ -2742,6 +2764,8 @@ function isRunnerRuntimeEndpoint(method: string, path: string): boolean {
 function isRunnerOperatorEndpoint(method: string, path: string): boolean {
   if (method === "GET") {
     if (path === "/v1/control-plane-alerts") return true;
+    if (path === "/v1/runners") return true;
+    if (path === "/v1/routing/accepted-completion-metrics") return true;
     if (/^\/v1\/runners\/[^/]+$/.test(path)) return true;
     if (/^\/v1\/repo-bindings\/[^/]+\/[^/]+\/[^/]+$/.test(path)) return true;
     if (/^\/v1\/channel-bindings\/[^/]+\/[^/]+\/[^/]+(?:\/status)?$/.test(path)) return true;
@@ -4089,6 +4113,7 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/runners", async (c) => {
     const parsed = await parseDispatcherBody(c, CreateRunnerSchema);
+    const registration = RunnerRegistrationInputSchema.parse(parsed);
     await repo.registerRunner(parsed);
     await recordControlPlaneEvent({
       type: "runner.registered",
@@ -4096,7 +4121,12 @@ export function createDispatcherApp(input: {
       subject: parsed.runnerId,
       payload: {
         runnerId: parsed.runnerId,
-        name: parsed.name
+        name: parsed.name,
+        locality: registration.locality,
+        declaredState: registration.declaredState,
+        executorIds: registration.executors.map((executor) => executor.executorId),
+        maxConcurrentRuns: registration.maxConcurrentRuns,
+        preference: registration.preference
       }
     });
     return c.json({ ok: true }, 201);
@@ -4108,6 +4138,10 @@ export function createDispatcherApp(input: {
     return c.json({ runner });
   });
 
+  app.get("/v1/runners", async (c) => {
+    return c.json({ runners: await repo.listRunners() });
+  });
+
   app.post("/v1/repo-bindings", async (c) => {
     const parsed = await parseDispatcherBody(c, CreateRepoBindingSchema);
     await repo.createRepoBinding({
@@ -4115,8 +4149,10 @@ export function createDispatcherApp(input: {
       owner: parsed.owner,
       repo: parsed.repo,
       runnerId: parsed.runnerId,
+      ...(parsed.fallbackRunnerIds?.length ? { fallbackRunnerIds: parsed.fallbackRunnerIds } : {}),
       ...(parsed.workspacePath ? { workspacePath: parsed.workspacePath } : {}),
       ...(parsed.defaultExecutor ? { defaultExecutor: parsed.defaultExecutor } : {}),
+      ...(parsed.fallbackExecutorIds?.length ? { fallbackExecutorIds: parsed.fallbackExecutorIds } : {}),
       ...(parsed.allowedActors?.length ? { allowedActors: parsed.allowedActors } : {})
     });
     await recordControlPlaneEvent({
@@ -4128,8 +4164,10 @@ export function createDispatcherApp(input: {
         owner: parsed.owner,
         repo: parsed.repo,
         runnerId: parsed.runnerId,
+        fallbackRunnerIds: parsed.fallbackRunnerIds ?? [],
         hasWorkspacePath: Boolean(parsed.workspacePath),
         ...(parsed.defaultExecutor ? { defaultExecutor: parsed.defaultExecutor } : {}),
+        fallbackExecutorIds: parsed.fallbackExecutorIds ?? [],
         allowedActorsCount: parsed.allowedActors?.length ?? 0
       }
     });
@@ -4345,6 +4383,10 @@ export function createDispatcherApp(input: {
     if (!threadId) return c.json({ error: "thread_id_required" }, 422);
     const metrics = await repo.getWorkThreadMetrics({ threadId });
     return c.json({ metrics });
+  });
+
+  app.get("/v1/routing/accepted-completion-metrics", async (c) => {
+    return c.json({ metrics: await repo.getAcceptedCompletionMetrics() });
   });
 
   app.post("/v1/channel-bindings", async (c) => {
@@ -4694,7 +4736,8 @@ export function createDispatcherApp(input: {
       id: parsed.runId,
       event: parsed.event,
       accessProfileSnapshot: admitted.accessProfileSnapshot,
-      policySnapshotProvenance: admitted.policySnapshotProvenance
+      policySnapshotProvenance: admitted.policySnapshotProvenance,
+      routingPolicy: admitted.routingPolicy
     });
     if (!createdRun.created) {
       return c.json(
@@ -5353,6 +5396,22 @@ export function createDispatcherApp(input: {
       error: "runner_scoped_endpoint_required",
       message: "Use /v1/runners/:runnerId/runs/:runId/running, /progress, or /complete."
     }, 410);
+  });
+
+  app.post("/v1/runners/:runnerId/runs/:runId/reject-start", async (c) => {
+    const runId = c.req.param("runId");
+    const body = await parseDispatcherBody(c, RejectAttemptStartSchema);
+    const outcome = await repo.rejectAttemptStart({
+      runId,
+      runnerId: c.req.param("runnerId"),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken,
+      executorId: body.executorId,
+      reason: body.reason
+    });
+    if (outcome === "not_found") return c.json({ error: "run_not_found" }, 404);
+    if (outcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
+    return c.json({ ok: true, replayed: outcome === "duplicate" });
   });
 
   app.post("/v1/runners/:runnerId/runs/:runId/running", async (c) => {

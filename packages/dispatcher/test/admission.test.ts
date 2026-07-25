@@ -1,4 +1,7 @@
 import { projectTargetRefFromLocalPath } from "@opentag/core";
+import { createOpenTagRepository, migrateSchema } from "@opentag/store";
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
 import { describe, expect, it, vi } from "vitest";
 import { createAdmissionRuntime } from "../src/admission.js";
 
@@ -111,6 +114,77 @@ describe("Admission Runtime", () => {
     });
 
     expect(result).toMatchObject({ outcome: "start" });
+  });
+
+  it("preserves fallback-only executor restrictions from a legacy binding", async () => {
+    const admission = createAdmissionRuntime({
+      repo: bindingRepo({ ...githubBinding, fallbackExecutorIds: ["hermes", "codex"] })
+    });
+
+    const result = await admission.admitRun({
+      requestId: "req_fallback_only_executors",
+      event: { ...event, id: "evt_fallback_only_executors", context: privateIssueContext }
+    });
+
+    expect(result).toMatchObject({
+      outcome: "start",
+      accessProfileSnapshot: {
+        constraints: { allowedExecutorIds: ["hermes", "codex"] }
+      },
+      routingPolicy: { executorIds: ["hermes", "codex"] }
+    });
+  });
+
+  it("keeps the admitted routing policy authoritative if the repository binding changes before run creation", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner-admitted",
+      fallbackRunnerIds: ["runner-admitted-fallback"]
+    });
+    const admittedEvent = { ...event, id: "evt_binding_interleave", context: privateIssueContext };
+    const admission = createAdmissionRuntime({ repo, now: () => "2026-07-25T00:00:00.000Z" });
+
+    const admitted = await admission.admitRun({ requestId: "run_binding_interleave", event: admittedEvent });
+    if (admitted.outcome !== "start") throw new Error("expected admitted run");
+    expect(admitted.routingPolicy).toEqual({
+      runnerIds: ["runner-admitted", "runner-admitted-fallback"],
+      executorIds: null
+    });
+
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner-rebound",
+      defaultExecutor: "hermes"
+    });
+    await repo.createRun({
+      id: "run_binding_interleave",
+      event: admittedEvent,
+      accessProfileSnapshot: admitted.accessProfileSnapshot,
+      policySnapshotProvenance: admitted.policySnapshotProvenance,
+      routingPolicy: admitted.routingPolicy
+    });
+
+    expect(sqlite.prepare(`
+      SELECT routing_policy_json AS routingPolicy,
+             routing_runner_ids_json AS runnerIds,
+             routing_executor_ids_json AS executorIds
+      FROM runs WHERE id = ?
+    `).get("run_binding_interleave")).toEqual({
+      routingPolicy: JSON.stringify(admitted.routingPolicy),
+      runnerIds: JSON.stringify(["runner-admitted", "runner-admitted-fallback"]),
+      executorIds: null
+    });
+    await expect(repo.claimNextRun({ runnerId: "runner-admitted", leaseSeconds: 60 })).resolves.toMatchObject({
+      run: { id: "run_binding_interleave" },
+      executorId: "echo"
+    });
   });
 
   it("lets an explicit allowedActors list override the public-repo default", async () => {
@@ -251,7 +325,8 @@ describe("Admission Runtime", () => {
         requestedBy: expect.objectContaining({ providerUserId: "42" }),
         agentPrincipal: { id: "opentag", kind: "opentag_agent" }
       }),
-      policySnapshotProvenance: expect.objectContaining({ source: "repo_binding" })
+      policySnapshotProvenance: expect.objectContaining({ source: "repo_binding" }),
+      routingPolicy: { runnerIds: ["runner_1"], executorIds: null }
     }));
     expect(appendRunEvent).not.toHaveBeenCalled();
   });

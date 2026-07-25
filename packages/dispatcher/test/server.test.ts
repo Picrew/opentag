@@ -77,6 +77,32 @@ const validEvent = {
   metadata: { repoProvider: "github", owner: "acme", repo: "demo" }
 };
 
+const echoExecutorRegistration = {
+  executorId: "echo",
+  readiness: "ready" as const,
+  capability: {
+    id: "echo",
+    invocation: "spawn" as const,
+    supportsProfile: false,
+    supportsStreaming: false,
+    supportsCancel: false,
+    supportsHookCompletion: false,
+    progressEvents: "audit" as const,
+    approvalMode: "opentag_policy" as const,
+    contextAccess: ["context_packet" as const, "context_pointers" as const],
+    promptAssembly: "opentag" as const,
+    writeAccess: "none" as const,
+    conversationAccess: "request" as const,
+    promptMutation: "none" as const,
+    rawContextAccess: false,
+    writeActionAccess: "none" as const,
+    workspaceIsolation: "none" as const,
+    sourceControl: "none" as const,
+    requiredSecrets: [],
+    completionSignals: [{ type: "process_exit" as const, required: true, description: "Echo returns immediately." }]
+  }
+};
+
 function jsonRequest(body: unknown) {
   return {
     method: "POST",
@@ -458,7 +484,14 @@ describe("dispatcher API", () => {
     const runnerCannotRegister = await app.request("/v1/runners", runnerJson({ runnerId: "runner_1", name: "Local Runner" }));
     expect(runnerCannotRegister.status).toBe(401);
 
-    const register = await app.request("/v1/runners", pairJson({ runnerId: "runner_1", name: "Local Runner" }));
+    const register = await app.request("/v1/runners", pairJson({
+      runnerId: "runner_1",
+      name: "Local Runner",
+      locality: "local",
+      executors: [echoExecutorRegistration],
+      maxConcurrentRuns: 2,
+      preference: 10
+    }));
     expect(register.status).toBe(201);
 
     const bind = await app.request("/v1/repo-bindings", pairJson({
@@ -466,15 +499,47 @@ describe("dispatcher API", () => {
       owner: "acme",
       repo: "demo",
       runnerId: "runner_1",
+      fallbackRunnerIds: ["runner_2"],
       workspacePath: "/Users/test/demo",
-      defaultExecutor: "echo"
+      defaultExecutor: "echo",
+      fallbackExecutorIds: ["codex"]
     }));
     expect(bind.status).toBe(201);
 
     const runnerCanReadRegistration = await app.request("/v1/runners/runner_1", { headers: runnerAuth });
     expect(runnerCanReadRegistration.status).toBe(200);
+    await expect(runnerCanReadRegistration.json()).resolves.toMatchObject({
+      runner: {
+        runnerId: "runner_1",
+        locality: "local",
+        executors: [{ executorId: "echo", readiness: "ready" }],
+        maxConcurrentRuns: 2,
+        preference: 10
+      }
+    });
+    const runnerCanReadDirectory = await app.request("/v1/runners", { headers: runnerAuth });
+    expect(runnerCanReadDirectory.status).toBe(200);
+    await expect(runnerCanReadDirectory.json()).resolves.toMatchObject({
+      runners: [{ runnerId: "runner_1", readiness: { state: "ready" }, capacity: { active: 0, limit: 2 } }]
+    });
     const runnerCanReadBinding = await app.request("/v1/repo-bindings/github/acme/demo", { headers: runnerAuth });
     expect(runnerCanReadBinding.status).toBe(200);
+    await expect(runnerCanReadBinding.json()).resolves.toMatchObject({
+      binding: {
+        runnerId: "runner_1",
+        fallbackRunnerIds: ["runner_2"],
+        defaultExecutor: "echo",
+        fallbackExecutorIds: ["codex"]
+      }
+    });
+    const runnerCanReadAcceptedCompletionMetrics = await app.request(
+      "/v1/routing/accepted-completion-metrics",
+      { headers: runnerAuth }
+    );
+    expect(runnerCanReadAcceptedCompletionMetrics.status).toBe(200);
+    await expect(runnerCanReadAcceptedCompletionMetrics.json()).resolves.toEqual({
+      metrics: { completedRuns: 0, acceptedCompletions: 0, byRunner: [], byExecutor: [] }
+    });
 
     const runnerCannotCreateRun = await app.request("/v1/runs", runnerJson({ runId: "run_scope", event: validEvent }));
     expect(runnerCannotCreateRun.status).toBe(401);
@@ -497,6 +562,29 @@ describe("dispatcher API", () => {
       headers: runnerAuth
     });
     expect(claim.status).toBe(200);
+    const claimed = await claim.json() as { attemptId: string; fencingToken: string; executorId: string };
+
+    const pairCannotRejectStart = await app.request(
+      "/v1/runners/runner_1/runs/run_scope/reject-start",
+      pairJson({
+        attemptId: claimed.attemptId,
+        fencingToken: claimed.fencingToken,
+        executorId: claimed.executorId,
+        reason: "Run-specific executor readiness failed."
+      })
+    );
+    expect(pairCannotRejectStart.status).toBe(401);
+    const runnerCanRejectStart = await app.request(
+      "/v1/runners/runner_1/runs/run_scope/reject-start",
+      runnerJson({
+        attemptId: claimed.attemptId,
+        fencingToken: claimed.fencingToken,
+        executorId: claimed.executorId,
+        reason: "Run-specific executor readiness failed."
+      })
+    );
+    expect(runnerCanRejectStart.status).toBe(200);
+    await expect(runnerCanRejectStart.json()).resolves.toEqual({ ok: true, replayed: false });
 
     const runnerCanReadRun = await app.request("/v1/runs/run_scope", { headers: runnerAuth });
     expect(runnerCanReadRun.status).toBe(200);
@@ -623,15 +711,15 @@ describe("dispatcher API", () => {
         expect.objectContaining({
           type: "runner.registered",
           subject: "runner_1",
-          payload: {
+          payload: expect.objectContaining({
             runnerId: "runner_1",
             name: "Local Runner"
-          }
+          })
         }),
         expect.objectContaining({
           type: "binding.repository.upserted",
           subject: "github:acme/demo",
-          payload: {
+          payload: expect.objectContaining({
             provider: "github",
             owner: "acme",
             repo: "demo",
@@ -639,7 +727,7 @@ describe("dispatcher API", () => {
             hasWorkspacePath: true,
             defaultExecutor: "echo",
             allowedActorsCount: 1
-          }
+          })
         }),
         expect.objectContaining({
           type: "binding.channel.upserted",
@@ -676,6 +764,37 @@ describe("dispatcher API", () => {
       ])
     );
     expect(JSON.stringify(events)).not.toContain("/Users/alice/repos/demo");
+  });
+
+  it("rejects ambiguous fallback routing preferences at the HTTP boundary", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    const missingPrimaryExecutor = await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      fallbackExecutorIds: ["codex"]
+    }));
+    expect(missingPrimaryExecutor.status).toBe(400);
+
+    const repeatedPrimaryRunner = await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      fallbackRunnerIds: ["runner_1"]
+    }));
+    expect(repeatedPrimaryRunner.status).toBe(400);
+
+    const oversizedFallbackSet = await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      fallbackRunnerIds: Array.from({ length: 64 }, (_, index) => `runner_${index + 2}`)
+    }));
+    expect(oversizedFallbackSet.status).toBe(400);
   });
 
   it("accepts multiple runner tokens during a rotation window", async () => {
@@ -2957,6 +3076,7 @@ describe("dispatcher API", () => {
       "agent_access_profile.captured",
       "callback.acknowledgement.queued",
       "callback.acknowledgement.delivered",
+      "routing.decided",
       "run.claimed",
       "run.progress",
       "callback.progress.queued",
@@ -3034,6 +3154,7 @@ describe("dispatcher API", () => {
       "agent_access_profile.captured",
       "callback.acknowledgement.queued",
       "callback.acknowledgement.delivered",
+      "routing.decided",
       "run.claimed",
       "run.progress"
     ]);
@@ -3582,6 +3703,7 @@ describe("dispatcher API", () => {
       "context_packet.generated",
       "agent_access_profile.captured",
       "source_receipt.delivered",
+      "routing.decided",
       "run.claimed",
       "run.running",
       "source_receipt.delivered",
@@ -4066,6 +4188,7 @@ describe("dispatcher API", () => {
       "agent_access_profile.captured",
       "callback.acknowledgement.queued",
       "callback.acknowledgement.delivered",
+      "routing.decided",
       "run.claimed",
       "run.running",
       "callback.progress.queued",
