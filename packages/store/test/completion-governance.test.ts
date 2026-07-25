@@ -764,7 +764,16 @@ describe("completion governance persistence", () => {
     await repo.openHumanEscalation({ escalation: second });
     const transition = repo.transitionHumanEscalation.bind(repo);
     repo.transitionHumanEscalation = async (input) => {
-      if (input.id === first.id) throw new Error("simulated concurrent terminal transition");
+      if (input.id === first.id) {
+        await transition({
+          id: first.id,
+          toState: "resolved",
+          actor: { provider: "github", providerUserId: "user-1", handle: "octocat" },
+          reason: "Resolved concurrently before the expiry write.",
+          at: "2026-07-21T10:09:00.000Z"
+        });
+        throw new Error("simulated concurrent terminal transition");
+      }
       return transition(input);
     };
 
@@ -772,7 +781,7 @@ describe("completion governance persistence", () => {
       at: "2026-07-21T10:10:00.000Z",
       workThreadId: thread.id
     })).resolves.toEqual({ scanned: 2, expired: 1 });
-    await expect(repo.getHumanEscalation({ id: first.id })).resolves.toMatchObject({ state: "open" });
+    await expect(repo.getHumanEscalation({ id: first.id })).resolves.toMatchObject({ state: "resolved" });
     await expect(repo.getHumanEscalation({ id: second.id })).resolves.toMatchObject({ state: "expired" });
   });
 
