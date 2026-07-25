@@ -199,6 +199,9 @@ OpenTag's CLI path is local-first.
 | `opentag service autostart disable` | Disable background service login autostart |
 | `opentag status` | Show local config and runtime status; add `--run <run_id>` or `--channel provider:account/conversation` for scoped detail |
 | `opentag cancel` | Request cancellation for a run or the active run in a source container |
+| `opentag completion escalations --run <run_id>` | List structured human escalations, audiences, options, expiry, and attribution for a run |
+| `opentag completion acknowledge --escalation <id> ...` | Attribute acknowledgement without resolving the blocking escalation |
+| `opentag completion resolve --escalation <id> ...` | Record an attributed bounded resolution; resume work through a new source-thread task |
 | `opentag doctor` | Check dispatcher, bindings, checkouts, and executors |
 | `opentag ingest` | Ingest a fenced local external agent progress or completion event |
 | `opentag ingest-template` | Print a shell template or manifest for local external agent hook ingest |
