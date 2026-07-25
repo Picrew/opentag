@@ -27,11 +27,18 @@ export const runs = sqliteTable(
     leaseExpiresAt: text("lease_expires_at"),
     heartbeatAt: text("heartbeat_at"),
     currentAttemptId: text("current_attempt_id"),
+    currentRoutingDecisionId: text("current_routing_decision_id"),
+    routingPolicyJson: text("routing_policy_json"),
+    routingRunnerIdsJson: text("routing_runner_ids_json"),
+    routingExecutorIdsJson: text("routing_executor_ids_json"),
+    routingRejectionsJson: text("routing_rejections_json").notNull().default("[]"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull()
   },
   (table) => ({
     statusIdx: index("runs_status_idx").on(table.status),
+    claimQueueIdx: index("runs_claim_queue_idx").on(table.status, table.createdAt, table.id),
+    leaseRecoveryIdx: index("runs_lease_recovery_idx").on(table.status, table.leaseExpiresAt, table.createdAt, table.id),
     runnerIdx: index("runs_runner_idx").on(table.assignedRunnerId),
     repoIdx: index("runs_repo_idx").on(table.repoProvider, table.repoOwner, table.repoName),
     workThreadIdx: index("runs_work_thread_idx").on(table.workThreadId),
@@ -47,6 +54,8 @@ export const attempts = sqliteTable(
     runId: text("run_id").notNull(),
     number: integer("number").notNull(),
     runnerId: text("runner_id").notNull(),
+    selectedExecutorId: text("selected_executor_id"),
+    routingDecisionId: text("routing_decision_id"),
     fencingToken: text("fencing_token").notNull(),
     status: text("status").notNull(),
     startedAt: text("started_at").notNull(),
@@ -75,6 +84,7 @@ export const followUpRequests = sqliteTable(
     decisionJson: text("decision_json").notNull(),
     accessProfileSnapshotJson: text("access_profile_snapshot_json"),
     policySnapshotProvenanceJson: text("policy_snapshot_provenance_json"),
+    routingPolicyJson: text("routing_policy_json"),
     status: text("status").notNull(),
     createdRunId: text("created_run_id"),
     createdAt: text("created_at").notNull(),
@@ -101,6 +111,7 @@ export const runEvents = sqliteTable(
   },
   (table) => ({
     runIdx: index("run_events_run_idx").on(table.runId),
+    routingLatestIdx: index("run_events_routing_latest_idx").on(table.runId, table.type, table.id),
     progressIdempotencyIdx: uniqueIndex("run_events_progress_idempotency_idx").on(
       table.runId,
       table.progressIdempotencyDigest
@@ -209,6 +220,13 @@ export const applyPlans = sqliteTable("apply_plans", {
 export const runners = sqliteTable("runners", {
   runnerId: text("runner_id").primaryKey(),
   name: text("name").notNull(),
+  locality: text("locality").notNull().default("local"),
+  declaredState: text("declared_state").notNull().default("ready"),
+  executorsJson: text("executors_json").notNull().default("[]"),
+  maxConcurrentRuns: integer("max_concurrent_runs").notNull().default(1000),
+  preference: integer("preference").notNull().default(0),
+  claimCursorCreatedAt: text("claim_cursor_created_at"),
+  claimCursorRunId: text("claim_cursor_run_id"),
   createdAt: text("created_at").notNull(),
   heartbeatAt: text("heartbeat_at")
 });
@@ -221,8 +239,10 @@ export const repoBindings = sqliteTable(
     owner: text("owner").notNull(),
     repo: text("repo").notNull(),
     runnerId: text("runner_id").notNull(),
+    fallbackRunnerIdsJson: text("fallback_runner_ids_json"),
     workspacePath: text("workspace_path"),
     defaultExecutor: text("default_executor"),
+    fallbackExecutorIdsJson: text("fallback_executor_ids_json"),
     allowedActorsJson: text("allowed_actors_json"),
     createdAt: text("created_at").notNull()
   },
@@ -704,10 +724,17 @@ export function migrateSchema(sqlite: Database.Database): void {
       lease_expires_at TEXT,
       heartbeat_at TEXT,
       current_attempt_id TEXT,
+      current_routing_decision_id TEXT,
+      routing_policy_json TEXT,
+      routing_runner_ids_json TEXT,
+      routing_executor_ids_json TEXT,
+      routing_rejections_json TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status);
+    CREATE INDEX IF NOT EXISTS runs_claim_queue_idx ON runs(status, created_at, id);
+    CREATE INDEX IF NOT EXISTS runs_lease_recovery_idx ON runs(status, lease_expires_at, created_at, id);
     CREATE INDEX IF NOT EXISTS runs_runner_idx ON runs(assigned_runner_id);
     CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_key);
     CREATE TABLE IF NOT EXISTS attempts (
@@ -715,6 +742,8 @@ export function migrateSchema(sqlite: Database.Database): void {
       run_id TEXT NOT NULL,
       number INTEGER NOT NULL,
       runner_id TEXT NOT NULL,
+      selected_executor_id TEXT,
+      routing_decision_id TEXT,
       fencing_token TEXT NOT NULL,
       status TEXT NOT NULL,
       started_at TEXT NOT NULL,
@@ -740,6 +769,7 @@ export function migrateSchema(sqlite: Database.Database): void {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS run_events_run_idx ON run_events(run_id);
+    CREATE INDEX IF NOT EXISTS run_events_routing_latest_idx ON run_events(run_id, type, id);
     CREATE TABLE IF NOT EXISTS source_deliveries (
       source TEXT NOT NULL,
       delivery_id TEXT NOT NULL,
@@ -803,6 +833,13 @@ export function migrateSchema(sqlite: Database.Database): void {
     CREATE TABLE IF NOT EXISTS runners (
       runner_id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
+      locality TEXT NOT NULL DEFAULT 'local',
+      declared_state TEXT NOT NULL DEFAULT 'ready',
+      executors_json TEXT NOT NULL DEFAULT '[]',
+      max_concurrent_runs INTEGER NOT NULL DEFAULT 1000,
+      preference INTEGER NOT NULL DEFAULT 0,
+      claim_cursor_created_at TEXT,
+      claim_cursor_run_id TEXT,
       created_at TEXT NOT NULL,
       heartbeat_at TEXT
     );
@@ -812,8 +849,10 @@ export function migrateSchema(sqlite: Database.Database): void {
       owner TEXT NOT NULL,
       repo TEXT NOT NULL,
       runner_id TEXT NOT NULL,
+      fallback_runner_ids_json TEXT,
       workspace_path TEXT,
       default_executor TEXT,
+      fallback_executor_ids_json TEXT,
       allowed_actors_json TEXT,
       created_at TEXT NOT NULL
     );
@@ -919,6 +958,7 @@ export function migrateSchema(sqlite: Database.Database): void {
       decision_json TEXT NOT NULL,
       access_profile_snapshot_json TEXT,
       policy_snapshot_provenance_json TEXT,
+      routing_policy_json TEXT,
       status TEXT NOT NULL,
       created_run_id TEXT,
       created_at TEXT NOT NULL,
@@ -939,6 +979,39 @@ export function migrateSchema(sqlite: Database.Database): void {
   }
   if (!columnNames.has("allowed_actors_json")) {
     sqlite.exec("ALTER TABLE repo_bindings ADD COLUMN allowed_actors_json TEXT");
+  }
+  if (!columnNames.has("fallback_runner_ids_json")) {
+    sqlite.exec("ALTER TABLE repo_bindings ADD COLUMN fallback_runner_ids_json TEXT");
+  }
+  if (!columnNames.has("fallback_executor_ids_json")) {
+    sqlite.exec("ALTER TABLE repo_bindings ADD COLUMN fallback_executor_ids_json TEXT");
+  }
+  const runnerColumns = sqlite.prepare("PRAGMA table_info(runners)").all() as { name: string }[];
+  const runnerColumnNames = new Set(runnerColumns.map((column) => column.name));
+  if (!runnerColumnNames.has("locality")) {
+    sqlite.exec("ALTER TABLE runners ADD COLUMN locality TEXT NOT NULL DEFAULT 'local'");
+  }
+  if (!runnerColumnNames.has("declared_state")) {
+    sqlite.exec("ALTER TABLE runners ADD COLUMN declared_state TEXT NOT NULL DEFAULT 'ready'");
+  }
+  if (!runnerColumnNames.has("executors_json")) {
+    sqlite.exec("ALTER TABLE runners ADD COLUMN executors_json TEXT NOT NULL DEFAULT '[]'");
+  }
+  if (!runnerColumnNames.has("max_concurrent_runs")) {
+    sqlite.exec("ALTER TABLE runners ADD COLUMN max_concurrent_runs INTEGER NOT NULL DEFAULT 1000");
+  }
+  if (!runnerColumnNames.has("preference")) {
+    sqlite.exec("ALTER TABLE runners ADD COLUMN preference INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!runnerColumnNames.has("claim_cursor_created_at")) {
+    sqlite.exec("ALTER TABLE runners ADD COLUMN claim_cursor_created_at TEXT");
+  }
+  if (!runnerColumnNames.has("claim_cursor_run_id")) {
+    sqlite.exec("ALTER TABLE runners ADD COLUMN claim_cursor_run_id TEXT");
+  }
+  const followUpRoutingColumns = sqlite.prepare("PRAGMA table_info(follow_up_requests)").all() as { name: string }[];
+  if (!followUpRoutingColumns.some((column) => column.name === "routing_policy_json")) {
+    sqlite.exec("ALTER TABLE follow_up_requests ADD COLUMN routing_policy_json TEXT");
   }
   const channelBindingColumns = sqlite.prepare("PRAGMA table_info(channel_bindings)").all() as { name: string }[];
   const channelBindingColumnNames = new Set(channelBindingColumns.map((column) => column.name));
@@ -1022,7 +1095,24 @@ export function migrateSchema(sqlite: Database.Database): void {
   if (!runColumnNames.has("current_attempt_id")) {
     sqlite.exec("ALTER TABLE runs ADD COLUMN current_attempt_id TEXT");
   }
+  if (!runColumnNames.has("current_routing_decision_id")) {
+    sqlite.exec("ALTER TABLE runs ADD COLUMN current_routing_decision_id TEXT");
+  }
+  if (!runColumnNames.has("routing_policy_json")) {
+    sqlite.exec("ALTER TABLE runs ADD COLUMN routing_policy_json TEXT");
+  }
+  if (!runColumnNames.has("routing_runner_ids_json")) {
+    sqlite.exec("ALTER TABLE runs ADD COLUMN routing_runner_ids_json TEXT");
+  }
+  if (!runColumnNames.has("routing_executor_ids_json")) {
+    sqlite.exec("ALTER TABLE runs ADD COLUMN routing_executor_ids_json TEXT");
+  }
+  if (!runColumnNames.has("routing_rejections_json")) {
+    sqlite.exec("ALTER TABLE runs ADD COLUMN routing_rejections_json TEXT NOT NULL DEFAULT '[]'");
+  }
   sqlite.exec("CREATE INDEX IF NOT EXISTS runs_repo_idx ON runs(repo_provider, repo_owner, repo_name)");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS runs_claim_queue_idx ON runs(status, created_at, id)");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS runs_lease_recovery_idx ON runs(status, lease_expires_at, created_at, id)");
   sqlite.exec("CREATE INDEX IF NOT EXISTS runs_work_thread_idx ON runs(work_thread_id)");
   sqlite.exec("CREATE INDEX IF NOT EXISTS runs_work_thread_authority_idx ON runs(work_thread_id, created_at, id)");
   sqlite.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_key)");
@@ -1046,6 +1136,14 @@ export function migrateSchema(sqlite: Database.Database): void {
   sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS attempts_run_number_idx ON attempts(run_id, number)");
   sqlite.exec("CREATE INDEX IF NOT EXISTS attempts_run_idx ON attempts(run_id)");
   sqlite.exec("CREATE INDEX IF NOT EXISTS attempts_runner_idx ON attempts(runner_id)");
+  const attemptColumns = sqlite.prepare("PRAGMA table_info(attempts)").all() as { name: string }[];
+  const attemptColumnNames = new Set(attemptColumns.map((column) => column.name));
+  if (!attemptColumnNames.has("selected_executor_id")) {
+    sqlite.exec("ALTER TABLE attempts ADD COLUMN selected_executor_id TEXT");
+  }
+  if (!attemptColumnNames.has("routing_decision_id")) {
+    sqlite.exec("ALTER TABLE attempts ADD COLUMN routing_decision_id TEXT");
+  }
   sqlite.exec(`
     UPDATE runs
     SET event_id = event_id || '#duplicate:' || id
@@ -1077,6 +1175,7 @@ export function migrateSchema(sqlite: Database.Database): void {
     sqlite.exec("ALTER TABLE run_events ADD COLUMN progress_idempotency_digest TEXT");
   }
   sqlite.exec("CREATE INDEX IF NOT EXISTS run_events_run_idx ON run_events(run_id)");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS run_events_routing_latest_idx ON run_events(run_id, type, id)");
   sqlite.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS run_events_progress_idempotency_idx
       ON run_events(run_id, progress_idempotency_digest)

@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@opentag/core": "workspace:*",
+    "@opentag/governance": "workspace:*",
     "better-sqlite3": "^11.7.0",
     "drizzle-orm": "^0.45.2"
   },
