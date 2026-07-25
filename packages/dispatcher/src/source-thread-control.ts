@@ -452,7 +452,6 @@ export function createSourceThreadControlHandler(options: SourceThreadControlOpt
         ...(input.command.reason ? { reason: input.command.reason } : {}),
         at: options.now?.() ?? new Date().toISOString()
       });
-      await options.onHumanEscalationChanged?.(transitioned.escalation);
       if (transitioned.escalation.state === "expired") {
         await deliverThreadControlReply({
           request: input.request,
@@ -461,6 +460,9 @@ export function createSourceThreadControlHandler(options: SourceThreadControlOpt
           ...(target ? { auditRunId: target.run.id } : {})
         });
         return jsonResponse({ outcome: "conflict", escalation: transitioned.escalation, message: "Human escalation expired." });
+      }
+      if (transitioned.changed) {
+        await options.onHumanEscalationChanged?.(transitioned.escalation);
       }
       const selected = transitioned.escalation.resolution?.optionId;
       const selectedOption = selected

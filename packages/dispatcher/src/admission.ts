@@ -174,7 +174,7 @@ function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
       .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
       .join(",")}}`;
   }
@@ -256,8 +256,13 @@ function validateAdmissionSnapshots(input: {
   policySnapshotProvenance: PolicySnapshotProvenance;
   now: string;
 }): string | null {
-  const access = AgentAccessProfileSnapshotSchema.parse(input.accessProfileSnapshot);
-  const policy = PolicySnapshotProvenanceSchema.parse(input.policySnapshotProvenance);
+  const accessResult = AgentAccessProfileSnapshotSchema.safeParse(input.accessProfileSnapshot);
+  const policyResult = PolicySnapshotProvenanceSchema.safeParse(input.policySnapshotProvenance);
+  if (!accessResult.success || !policyResult.success) {
+    return "The captured access profile or policy snapshot is invalid.";
+  }
+  const access = accessResult.data;
+  const policy = policyResult.data;
   if (access.policySnapshotId !== policy.id) return "The access profile does not reference the captured policy snapshot.";
   if (
     access.requestedBy.provider !== input.event.actor.provider

@@ -2352,21 +2352,17 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return db.transaction((tx) => {
         const thread = tx.select({ id: workThreads.id }).from(workThreads).where(eq(workThreads.id, escalation.workThreadId)).limit(1).get();
         if (!thread) throw new Error(`WorkThread ${escalation.workThreadId} does not exist.`);
-        if (escalation.dedupeKey) {
-          const existing = tx.select().from(humanEscalations).where(and(
-            eq(humanEscalations.workThreadId, escalation.workThreadId),
-            isNotNull(humanEscalations.activeDedupeKey)
-          )).all().find((row) => {
-            const active = humanEscalationFromRow(row);
-            return active.dedupeKey === escalation.dedupeKey
-              && active.runId === escalation.runId;
-          });
-          if (existing) return { escalation: humanEscalationFromRow(existing), created: false };
-        }
         const activeDedupeKey = escalation.dedupeKey
           ? `${escalation.runId ?? "thread"}:${escalation.dedupeKey}`
           : null;
-        tx.insert(humanEscalations).values({
+        const active = activeDedupeKey
+          ? tx.select().from(humanEscalations).where(and(
+              eq(humanEscalations.workThreadId, escalation.workThreadId),
+              eq(humanEscalations.activeDedupeKey, activeDedupeKey)
+            )).limit(1).get()
+          : undefined;
+        if (active) return { escalation: humanEscalationFromRow(active), created: false };
+        const inserted = tx.insert(humanEscalations).values({
           id: escalation.id,
           workThreadId: escalation.workThreadId,
           class: escalation.class,
@@ -2376,7 +2372,27 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           escalationJson: JSON.stringify(escalation),
           createdAt,
           updatedAt: createdAt
-        }).run();
+        }).onConflictDoNothing().run();
+        if (inserted.changes !== 1) {
+          const existingByDedupe = activeDedupeKey
+            ? tx.select().from(humanEscalations).where(and(
+                eq(humanEscalations.workThreadId, escalation.workThreadId),
+                eq(humanEscalations.activeDedupeKey, activeDedupeKey)
+              )).limit(1).get()
+            : undefined;
+          const existing = existingByDedupe
+            ?? tx.select().from(humanEscalations).where(eq(humanEscalations.id, escalation.id)).limit(1).get();
+          if (!existing) throw new Error("A conflicting HumanEscalation could not be correlated.");
+          const correlated = humanEscalationFromRow(existing);
+          if (
+            correlated.workThreadId !== escalation.workThreadId
+            || correlated.runId !== escalation.runId
+            || correlated.dedupeKey !== escalation.dedupeKey
+          ) {
+            throw new Error("A conflicting HumanEscalation does not match the requested identity.");
+          }
+          return { escalation: correlated, created: false };
+        }
         tx.insert(governanceEvents).values({
           workThreadId: escalation.workThreadId,
           type: "human_escalation.opened",
@@ -2490,12 +2506,18 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           });
         }
 
-        tx.update(humanEscalations).set({
+        const swapped = tx.update(humanEscalations).set({
           state: escalation.state,
           activeDedupeKey: escalation.state === "acknowledged" ? existing.activeDedupeKey : null,
           escalationJson: JSON.stringify(escalation),
           updatedAt: transitionedAt
-        }).where(eq(humanEscalations.id, escalation.id)).run();
+        }).where(and(
+          eq(humanEscalations.id, escalation.id),
+          eq(humanEscalations.state, current.state)
+        )).run();
+        if (swapped.changes !== 1) {
+          throw new Error(`HumanEscalation ${escalation.id} changed state concurrently.`);
+        }
         tx.insert(governanceEvents).values({
           workThreadId: escalation.workThreadId,
           type: `human_escalation.${escalation.state}`,
@@ -2520,24 +2542,32 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       runId?: string;
     }): Promise<{ scanned: number; expired: number }> {
       const at = OpenTagEventSchema.shape.receivedAt.parse(input.at);
+      const activeStateFilter = inArray(humanEscalations.state, ["open", "acknowledged"]);
       const rows = input.workThreadId
-        ? await db.select().from(humanEscalations).where(eq(humanEscalations.workThreadId, input.workThreadId))
-        : await db.select().from(humanEscalations);
+        ? await db.select().from(humanEscalations).where(and(
+            eq(humanEscalations.workThreadId, input.workThreadId),
+            activeStateFilter
+          ))
+        : await db.select().from(humanEscalations).where(activeStateFilter);
       const candidates = rows.map(humanEscalationFromRow).filter((escalation) =>
-        (escalation.state === "open" || escalation.state === "acknowledged")
-        && (!input.runId || escalation.runId === input.runId)
+        (!input.runId || escalation.runId === input.runId)
         && Boolean(escalation.expiresAt)
         && Date.parse(escalation.expiresAt!) <= Date.parse(at)
       );
       let expired = 0;
       for (const escalation of candidates) {
-        const result = await this.transitionHumanEscalation({
-          id: escalation.id,
-          toState: "expired",
-          at,
-          reason: "Escalation expired without implicit approval."
-        });
-        if (result.changed) expired += 1;
+        try {
+          const result = await this.transitionHumanEscalation({
+            id: escalation.id,
+            toState: "expired",
+            at,
+            reason: "Escalation expired without implicit approval."
+          });
+          if (result.changed) expired += 1;
+        } catch {
+          // Each candidate is an independent best-effort transition. A
+          // concurrent terminal decision must not prevent later expirations.
+        }
       }
       return { scanned: rows.length, expired };
     },
@@ -4181,7 +4211,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ...(snapshot.workThread || !runThread ? {} : { workThread: runThread })
         })
       );
-      const completionEvents: Array<typeof runEvents.$inferInsert> = [
+      const completionEventsForResult = (completedResult: OpenTagRunResult): Array<typeof runEvents.$inferInsert> => [
         ...parsedSnapshots.map((snapshot) =>
           runEventValues({
             runId: input.runId,
@@ -4193,7 +4223,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             createdAt: updatedAt
           })
         ),
-        ...(result.artifacts ?? []).map((artifact) =>
+        ...(completedResult.artifacts ?? []).map((artifact) =>
           runEventValues({
             runId: input.runId,
             type: "artifact.created",
@@ -4208,24 +4238,24 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           runId: input.runId,
           type: "run.completed",
           payload: {
-            ...result,
+            ...completedResult,
             ...(attemptId ? { attemptId } : {}),
             ...(safeIdempotencyKey ? { idempotencyKey: safeIdempotencyKey } : {})
           },
           visibility: "audit",
           importance: "high",
-          message: result.summary,
+          message: completedResult.summary,
           createdAt: updatedAt
         }),
-        ...((result.suggestedChanges?.length ?? 0) > 0 || (result.artifacts?.length ?? 0) > 0
+        ...((completedResult.suggestedChanges?.length ?? 0) > 0 || (completedResult.artifacts?.length ?? 0) > 0
           ? [
               runEventValues({
                 runId: input.runId,
                 type: "success_metric.observed",
                 payload: {
                   metric: "time_to_first_useful_artifact",
-                  artifactCount: result.artifacts?.length ?? 0,
-                  suggestedChangesCount: result.suggestedChanges?.length ?? 0
+                  artifactCount: completedResult.artifacts?.length ?? 0,
+                  suggestedChangesCount: completedResult.suggestedChanges?.length ?? 0
                 },
                 visibility: "audit",
                 importance: "normal",
@@ -4262,24 +4292,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         } else if (terminalRunStatus(currentRun.status)) {
           return "not_found" as const;
         }
-        tx.update(runs)
-          .set({
-            status,
-            resultJson: JSON.stringify(result),
-            assignedRunnerId: null,
-            leasedAt: null,
-            leaseExpiresAt: null,
-            heartbeatAt: null,
-            currentAttemptId: null,
-            updatedAt
-          })
-          .where(eq(runs.id, input.runId))
-          .run();
+        let completedResult = result;
         if (humanEscalation) {
           const activeDedupeKey = humanEscalation.dedupeKey
             ? `${humanEscalation.runId ?? "thread"}:${humanEscalation.dedupeKey}`
             : null;
-          tx.insert(humanEscalations).values({
+          const inserted = tx.insert(humanEscalations).values({
             id: humanEscalation.id,
             workThreadId: humanEscalation.workThreadId,
             class: humanEscalation.class,
@@ -4289,27 +4307,68 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             escalationJson: JSON.stringify(humanEscalation),
             createdAt: humanEscalation.openedAt,
             updatedAt: humanEscalation.openedAt
-          }).run();
-          tx.insert(governanceEvents).values({
-            workThreadId: humanEscalation.workThreadId,
-            type: "human_escalation.opened",
-            subjectId: humanEscalation.id,
-            payloadJson: JSON.stringify({
-              class: humanEscalation.class,
-              blocking: humanEscalation.blocking,
-              dedupeKey: humanEscalation.dedupeKey ?? null,
-              source: "run_result"
-            }),
-            createdAt: humanEscalation.openedAt
-          }).run();
+          }).onConflictDoNothing().run();
+          let effectiveEscalation = humanEscalation;
+          if (inserted.changes === 1) {
+            tx.insert(governanceEvents).values({
+              workThreadId: humanEscalation.workThreadId,
+              type: "human_escalation.opened",
+              subjectId: humanEscalation.id,
+              payloadJson: JSON.stringify({
+                class: humanEscalation.class,
+                blocking: humanEscalation.blocking,
+                dedupeKey: humanEscalation.dedupeKey ?? null,
+                source: "run_result"
+              }),
+              createdAt: humanEscalation.openedAt
+            }).run();
+          } else {
+            const existingById = tx.select().from(humanEscalations)
+              .where(eq(humanEscalations.id, humanEscalation.id)).limit(1).get();
+            const existingByDedupe = activeDedupeKey
+              ? tx.select().from(humanEscalations).where(and(
+                  eq(humanEscalations.workThreadId, humanEscalation.workThreadId),
+                  eq(humanEscalations.activeDedupeKey, activeDedupeKey)
+                )).limit(1).get()
+              : undefined;
+            const existing = existingById ?? existingByDedupe;
+            if (!existing) {
+              throw new Error("A conflicting HumanEscalation could not be correlated to the run result.");
+            }
+            effectiveEscalation = humanEscalationFromRow(existing);
+            if (
+              effectiveEscalation.workThreadId !== humanEscalation.workThreadId
+              || effectiveEscalation.runId !== humanEscalation.runId
+              || effectiveEscalation.dedupeKey !== humanEscalation.dedupeKey
+            ) {
+              throw new Error("A conflicting HumanEscalation does not match the run result identity.");
+            }
+          }
+          completedResult = OpenTagRunResultSchema.parse({
+            ...result,
+            humanEscalationId: effectiveEscalation.id
+          });
         }
+        tx.update(runs)
+          .set({
+            status,
+            resultJson: JSON.stringify(completedResult),
+            assignedRunnerId: null,
+            leasedAt: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            currentAttemptId: null,
+            updatedAt
+          })
+          .where(eq(runs.id, input.runId))
+          .run();
         if (attemptId) {
           tx.update(materialActions)
             .set({ status: "unknown", updatedAt })
             .where(and(eq(materialActions.attemptId, attemptId), eq(materialActions.status, "executing")))
             .run();
           tx.update(attempts)
-            .set({ status: attemptStatus, finishedAt: updatedAt, resultJson: JSON.stringify(result), updatedAt })
+            .set({ status: attemptStatus, finishedAt: updatedAt, resultJson: JSON.stringify(completedResult), updatedAt })
             .where(eq(attempts.id, attemptId))
             .run();
         }
@@ -4331,7 +4390,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             })
             .run();
         }
-        for (const event of completionEvents) {
+        for (const event of completionEventsForResult(completedResult)) {
           tx.insert(runEvents).values(event).run();
         }
         return "completed" as const;

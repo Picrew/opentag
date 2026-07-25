@@ -734,6 +734,13 @@ describe("Completion governance schemas", () => {
       }
     });
     expect(resolved.resolution?.actor.handle).toBe("octocat");
+    expect(() => HumanEscalationSchema.parse({
+      ...resolved,
+      acknowledgement: {
+        actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+        acknowledgedAt: "2026-07-21T00:06:00.000Z"
+      }
+    })).toThrow(/resolvedAt cannot precede acknowledgedAt/u);
   });
 
   it("captures requesting-human and executing-agent identity in immutable admission snapshots", () => {

@@ -1106,7 +1106,7 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
     },
 
     async listHumanEscalations(input) {
-      const response = await fetchImpl(`${baseUrl}/v1/runs/${input.runId}/human-escalations`, {
+      const response = await fetchImpl(`${baseUrl}/v1/runs/${encodeURIComponent(input.runId)}/human-escalations`, {
         headers: authHeaders(options.pairingToken)
       });
       await assertOk(response, "listHumanEscalations");
@@ -1123,7 +1123,7 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
     },
 
     async acknowledgeHumanEscalation(input) {
-      const response = await fetchImpl(`${baseUrl}/v1/human-escalations/${input.escalationId}/acknowledge`, {
+      const response = await fetchImpl(`${baseUrl}/v1/human-escalations/${encodeURIComponent(input.escalationId)}/acknowledge`, {
         method: "POST",
         headers: jsonHeaders(options.pairingToken),
         body: JSON.stringify({
@@ -1140,7 +1140,7 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
     },
 
     async resolveHumanEscalation(input) {
-      const response = await fetchImpl(`${baseUrl}/v1/human-escalations/${input.escalationId}/resolve`, {
+      const response = await fetchImpl(`${baseUrl}/v1/human-escalations/${encodeURIComponent(input.escalationId)}/resolve`, {
         method: "POST",
         headers: jsonHeaders(options.pairingToken),
         body: JSON.stringify({

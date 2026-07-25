@@ -702,12 +702,18 @@ type HumanEscalation = {
   dedupeKey?: string;
   openedAt: string;
   expiresAt?: string;
+  acknowledgement?: {
+    actor: ActorIdentity;
+    acknowledgedAt: string;
+  };
   resolution?: {
     optionId?: string;
     actor: ActorIdentity;
     reason?: string;
     resolvedAt: string;
   };
+  terminalReason?: string;
+  supersededById?: string;
 };
 ```
 

@@ -147,9 +147,9 @@ describe("@opentag/client", () => {
   it("lists, acknowledges, and resolves attributed human escalations", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const escalation = {
-      id: "escalation_client_1",
+      id: "escalation/client?1",
       workThreadId: "thread_client_1",
-      runId: "run_client_1",
+      runId: "run/client?1",
       class: "missing_input" as const,
       audience: "requester" as const,
       subjectRef: "deployment-target",
@@ -194,7 +194,7 @@ describe("@opentag/client", () => {
       }
     });
 
-    await expect(client.listHumanEscalations({ runId: "run_client_1" })).resolves.toMatchObject({
+    await expect(client.listHumanEscalations({ runId: escalation.runId })).resolves.toMatchObject({
       escalations: [{ id: escalation.id, state: "open" }]
     });
     await expect(client.acknowledgeHumanEscalation({
@@ -209,10 +209,13 @@ describe("@opentag/client", () => {
       resolvedAt: "2026-07-25T00:02:00.000Z"
     })).resolves.toMatchObject({ outcome: "resolved", resume: { required: true } });
     expect(requests.map((request) => request.url)).toEqual([
-      "http://dispatcher.test/v1/runs/run_client_1/human-escalations",
-      `http://dispatcher.test/v1/human-escalations/${escalation.id}/acknowledge`,
-      `http://dispatcher.test/v1/human-escalations/${escalation.id}/resolve`
+      "http://dispatcher.test/v1/runs/run%2Fclient%3F1/human-escalations",
+      "http://dispatcher.test/v1/human-escalations/escalation%2Fclient%3F1/acknowledge",
+      "http://dispatcher.test/v1/human-escalations/escalation%2Fclient%3F1/resolve"
     ]);
+    expect(requests.map((request) => request.init?.method ?? "GET")).toEqual(["GET", "POST", "POST"]);
+    expect(requests.map((request) => new Headers(request.init?.headers).get("authorization")))
+      .toEqual(["Bearer pair_1", "Bearer pair_1", "Bearer pair_1"]);
   });
 
   it("sends and reads repo-less channel bindings", async () => {

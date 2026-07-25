@@ -1045,6 +1045,17 @@ export const HumanEscalationSchema = z
         path: ["acknowledgement", "acknowledgedAt"]
       });
     }
+    if (
+      escalation.acknowledgement
+      && escalation.resolution
+      && Date.parse(escalation.resolution.resolvedAt) < Date.parse(escalation.acknowledgement.acknowledgedAt)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Human escalation resolvedAt cannot precede acknowledgedAt.",
+        path: ["resolution", "resolvedAt"]
+      });
+    }
     if (escalation.supersededById && escalation.state !== "superseded") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

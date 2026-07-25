@@ -5174,6 +5174,18 @@ describe("dispatcher API", () => {
       escalation: { state: "resolved", resolution: { actor: { providerUserId: "42" } } },
       resume: { required: true }
     });
+    const missingAcknowledgement = await app.request(
+      "/v1/human-escalations/missing-escalation/acknowledge",
+      jsonRequest({ actor: { provider: "github", providerUserId: "42" } })
+    );
+    expect(missingAcknowledgement.status).toBe(404);
+    await expect(missingAcknowledgement.json()).resolves.toEqual({ error: "human_escalation_not_found" });
+    const missingResolution = await app.request(
+      "/v1/human-escalations/missing-escalation/resolve",
+      jsonRequest({ actor: { provider: "github", providerUserId: "42" } })
+    );
+    expect(missingResolution.status).toBe(404);
+    await expect(missingResolution.json()).resolves.toEqual({ error: "human_escalation_not_found" });
   });
 
   it("resolves a bounded needs-human option from the originating source thread", async () => {

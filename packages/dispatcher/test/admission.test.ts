@@ -79,6 +79,29 @@ describe("Admission Runtime", () => {
     expect(result.accessProfileSnapshot.policySnapshotId).toBe(result.policySnapshotProvenance.id);
   });
 
+  it("fails closed when an access checker returns an invalid snapshot", async () => {
+    const admission = createAdmissionRuntime({
+      repo: bindingRepo(githubBinding),
+      agentAccessProfileCheck: async () => ({
+        allowed: true,
+        accessProfileSnapshot: { id: "incomplete_snapshot" } as never
+      })
+    });
+
+    const result = await admission.admitRun({
+      requestId: "req_invalid_snapshot",
+      event: { ...event, id: "evt_invalid_snapshot", context: privateIssueContext }
+    });
+
+    expect(result).toMatchObject({
+      outcome: "needs_human_decision",
+      decision: {
+        reasonCode: "agent_access_profile_denied",
+        reason: "The captured access profile or policy snapshot is invalid."
+      }
+    });
+  });
+
   it("keeps private-repo runs open to actors without reported write access", async () => {
     const admission = createAdmissionRuntime({ repo: bindingRepo(githubBinding) });
 

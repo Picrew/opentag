@@ -736,6 +736,118 @@ describe("completion governance persistence", () => {
     expect((await repo.getHumanEscalation({ id: lateResolution.id }))?.resolution).toBeUndefined();
   });
 
+  it("continues an expiry sweep when one candidate changes concurrently", async () => {
+    const { repo } = repository();
+    const thread = (await repo.upsertWorkThread({ thread: workThread({ anchorId: "comment-expiry-race" }) })).thread;
+    const first: HumanEscalation = {
+      id: "escalation-expiry-race-1",
+      workThreadId: thread.id,
+      class: "approval",
+      audience: "requester",
+      subjectRef: "deployment:first",
+      state: "open",
+      blocking: true,
+      summary: "First approval expires.",
+      reason: "The first bounded decision is still open.",
+      dedupeKey: "expiry-race:first:v1",
+      openedAt: timestamp,
+      expiresAt: "2026-07-21T10:10:00.000Z"
+    };
+    const second: HumanEscalation = {
+      ...first,
+      id: "escalation-expiry-race-2",
+      subjectRef: "deployment:second",
+      summary: "Second approval expires.",
+      dedupeKey: "expiry-race:second:v1"
+    };
+    await repo.openHumanEscalation({ escalation: first });
+    await repo.openHumanEscalation({ escalation: second });
+    const transition = repo.transitionHumanEscalation.bind(repo);
+    repo.transitionHumanEscalation = async (input) => {
+      if (input.id === first.id) throw new Error("simulated concurrent terminal transition");
+      return transition(input);
+    };
+
+    await expect(repo.expireHumanEscalations({
+      at: "2026-07-21T10:10:00.000Z",
+      workThreadId: thread.id
+    })).resolves.toEqual({ scanned: 2, expired: 1 });
+    await expect(repo.getHumanEscalation({ id: first.id })).resolves.toMatchObject({ state: "open" });
+    await expect(repo.getHumanEscalation({ id: second.id })).resolves.toMatchObject({ state: "expired" });
+  });
+
+  it("supersedes an escalation only with a successor in the same WorkThread", async () => {
+    const { repo } = repository();
+    const thread = (await repo.upsertWorkThread({ thread: workThread({ anchorId: "comment-supersession" }) })).thread;
+    const foreignThreadInput = workThread({ anchorId: "comment-supersession-foreign" });
+    foreignThreadInput.workItemReference = {
+      ...foreignThreadInput.workItemReference,
+      externalId: "acme/demo#43",
+      uri: "https://github.com/acme/demo/issues/43"
+    };
+    foreignThreadInput.primaryAnchor = {
+      ...foreignThreadInput.primaryAnchor,
+      uri: "https://github.com/acme/demo/issues/43#comment-supersession-foreign",
+      threadKey: "acme/demo#43"
+    };
+    const foreignThread = (await repo.upsertWorkThread({ thread: foreignThreadInput })).thread;
+    const predecessor: HumanEscalation = {
+      id: "escalation-superseded",
+      workThreadId: thread.id,
+      class: "configuration",
+      audience: "operator",
+      subjectRef: "configuration:provider",
+      state: "open",
+      blocking: true,
+      summary: "Provider configuration is stale.",
+      reason: "The provider settings need a new decision.",
+      dedupeKey: "configuration:provider:v1",
+      openedAt: timestamp
+    };
+    const successor: HumanEscalation = {
+      ...predecessor,
+      id: "escalation-successor",
+      dedupeKey: "configuration:provider:v2",
+      summary: "Provider configuration needs an updated decision."
+    };
+    const foreignSuccessor: HumanEscalation = {
+      ...successor,
+      id: "escalation-foreign-successor",
+      workThreadId: foreignThread.id,
+      dedupeKey: "configuration:provider:foreign:v2"
+    };
+    await repo.openHumanEscalation({ escalation: predecessor });
+    await repo.openHumanEscalation({ escalation: successor });
+    await repo.openHumanEscalation({ escalation: foreignSuccessor });
+
+    await expect(repo.transitionHumanEscalation({
+      id: predecessor.id,
+      toState: "superseded",
+      supersededById: predecessor.id,
+      at: "2026-07-21T10:01:00.000Z"
+    })).rejects.toThrow(/different supersededById/u);
+    await expect(repo.transitionHumanEscalation({
+      id: predecessor.id,
+      toState: "superseded",
+      supersededById: foreignSuccessor.id,
+      at: "2026-07-21T10:01:00.000Z"
+    })).rejects.toThrow(/same WorkThread/u);
+    await expect(repo.transitionHumanEscalation({
+      id: predecessor.id,
+      toState: "superseded",
+      supersededById: successor.id,
+      reason: "A newer configuration decision replaced this request.",
+      at: "2026-07-21T10:01:00.000Z"
+    })).resolves.toMatchObject({
+      changed: true,
+      escalation: {
+        state: "superseded",
+        supersededById: successor.id,
+        terminalReason: "A newer configuration decision replaced this request."
+      }
+    });
+  });
+
   it("atomically links a needs-human run result to its durable escalation", async () => {
     const { repo } = repository();
     const created = await repo.createRun({ id: "run-needs-human", event: githubEvent("event-needs-human", "delivery-needs-human") });
@@ -794,6 +906,50 @@ describe("completion governance persistence", () => {
       reason: "Use production instead.",
       at: "2026-07-21T10:06:00.000Z"
     })).rejects.toThrow(/different resolution/u);
+  });
+
+  it("reuses the authoritative active escalation when run completion races on its dedupe key", async () => {
+    const { repo } = repository();
+    const created = await repo.createRun({
+      id: "run-needs-human-dedupe-race",
+      event: githubEvent("event-needs-human-dedupe-race", "delivery-needs-human-dedupe-race")
+    });
+    const workThreadId = created.run.thread?.id;
+    if (!workThreadId) throw new Error("expected work thread");
+    const authoritative: HumanEscalation = {
+      id: "escalation-authoritative",
+      workThreadId,
+      runId: created.run.id,
+      class: "missing_input",
+      audience: "requester",
+      subjectRef: created.run.id,
+      state: "open",
+      blocking: true,
+      summary: "Choose a target environment.",
+      reason: "The executor cannot infer the deployment target.",
+      dedupeKey: "target-environment:v1",
+      openedAt: timestamp
+    };
+    const racing = { ...authoritative, id: "escalation-racing-completion" };
+    await repo.openHumanEscalation({ escalation: authoritative });
+
+    await expect(repo.completeRun({
+      runId: created.run.id,
+      result: {
+        conclusion: "needs_human",
+        summary: "A deployment target is required.",
+        humanEscalationId: racing.id
+      },
+      humanEscalation: racing
+    })).resolves.toBe("completed");
+    await expect(repo.getRun({ runId: created.run.id })).resolves.toMatchObject({
+      run: { result: { humanEscalationId: authoritative.id } }
+    });
+    await expect(repo.listHumanEscalations({ workThreadId })).resolves.toHaveLength(1);
+    const openedEvents = (await repo.listGovernanceEvents({ workThreadId }))
+      .filter((event) => event.type === "human_escalation.opened");
+    expect(openedEvents).toHaveLength(1);
+    expect(openedEvents[0]?.subjectId).toBe(authoritative.id);
   });
 
   it("records a stable unavailable reason when a direct persistence caller omits an escalation", async () => {

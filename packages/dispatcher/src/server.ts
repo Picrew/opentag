@@ -3235,7 +3235,7 @@ export function createDispatcherApp(input: {
     const projectTarget = projectTargetRefFromEvent(inputValue.event);
     const subjectRef = projectTarget
       ? `${projectTarget.provider}:${projectTarget.owner}/${projectTarget.repo}`
-      : inputValue.event.id;
+      : `${workThread.workItemReference.provider}:${workThread.workItemReference.kind}:${workThread.workItemReference.externalId}`;
     const securityReason = [
       "actor_not_allowed_for_write",
       "actor_not_authorized_for_public_repo",
@@ -6014,6 +6014,9 @@ export function createDispatcherApp(input: {
     const parsed = HumanEscalationAcknowledgeInputSchema.parse(sanitizeCredentialLikeValue(
       await parseDispatcherBody(c, HumanEscalationAcknowledgeInputSchema)
     ));
+    if (!await repo.getHumanEscalation({ id: escalationId })) {
+      return c.json({ error: "human_escalation_not_found" }, 404);
+    }
     try {
       const result = await repo.transitionHumanEscalation({
         id: escalationId,
@@ -6031,8 +6034,7 @@ export function createDispatcherApp(input: {
       return c.json({ outcome: result.changed ? "acknowledged" : "duplicate", escalation: result.escalation }, result.changed ? 201 : 200);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Invalid human escalation acknowledgement.";
-      const status = message.includes("does not exist") ? 404 : 409;
-      return c.json({ error: status === 404 ? "human_escalation_not_found" : "invalid_human_escalation_transition", message }, status);
+      return c.json({ error: "invalid_human_escalation_transition", message }, 409);
     }
   });
 
@@ -6041,6 +6043,9 @@ export function createDispatcherApp(input: {
     const parsed = HumanEscalationResolveInputSchema.parse(sanitizeCredentialLikeValue(
       await parseDispatcherBody(c, HumanEscalationResolveInputSchema)
     ));
+    if (!await repo.getHumanEscalation({ id: escalationId })) {
+      return c.json({ error: "human_escalation_not_found" }, 404);
+    }
     try {
       const result = await repo.transitionHumanEscalation({
         id: escalationId,
@@ -6075,8 +6080,7 @@ export function createDispatcherApp(input: {
       }, result.changed ? 201 : 200);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Invalid human escalation resolution.";
-      const status = message.includes("does not exist") ? 404 : 409;
-      return c.json({ error: status === 404 ? "human_escalation_not_found" : "invalid_human_escalation_transition", message }, status);
+      return c.json({ error: "invalid_human_escalation_transition", message }, 409);
     }
   });
 
