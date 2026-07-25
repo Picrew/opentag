@@ -144,6 +144,77 @@ describe("@opentag/client", () => {
     });
   });
 
+  it("lists, acknowledges, and resolves attributed human escalations", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const escalation = {
+      id: "escalation_client_1",
+      workThreadId: "thread_client_1",
+      runId: "run_client_1",
+      class: "missing_input" as const,
+      audience: "requester" as const,
+      subjectRef: "deployment-target",
+      state: "open" as const,
+      blocking: true,
+      summary: "Choose a deployment target.",
+      reason: "No target was provided.",
+      openedAt: "2026-07-25T00:00:00.000Z"
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        if (String(url).endsWith("/human-escalations")) return jsonResponse({ escalations: [escalation] });
+        if (String(url).endsWith("/acknowledge")) {
+          return jsonResponse({
+            outcome: "acknowledged",
+            escalation: {
+              ...escalation,
+              state: "acknowledged",
+              acknowledgement: {
+                actor: { provider: "github", providerUserId: "42" },
+                acknowledgedAt: "2026-07-25T00:01:00.000Z"
+              }
+            }
+          }, 201);
+        }
+        return jsonResponse({
+          outcome: "resolved",
+          escalation: {
+            ...escalation,
+            state: "resolved",
+            resolution: {
+              actor: { provider: "github", providerUserId: "42" },
+              reason: "Use staging.",
+              resolvedAt: "2026-07-25T00:02:00.000Z"
+            }
+          },
+          resume: { required: true, reason: "Executor stopped.", nextAction: "Send a new task." }
+        }, 201);
+      }
+    });
+
+    await expect(client.listHumanEscalations({ runId: "run_client_1" })).resolves.toMatchObject({
+      escalations: [{ id: escalation.id, state: "open" }]
+    });
+    await expect(client.acknowledgeHumanEscalation({
+      escalationId: escalation.id,
+      actor: { provider: "github", providerUserId: "42" },
+      acknowledgedAt: "2026-07-25T00:01:00.000Z"
+    })).resolves.toMatchObject({ outcome: "acknowledged", escalation: { state: "acknowledged" } });
+    await expect(client.resolveHumanEscalation({
+      escalationId: escalation.id,
+      actor: { provider: "github", providerUserId: "42" },
+      reason: "Use staging.",
+      resolvedAt: "2026-07-25T00:02:00.000Z"
+    })).resolves.toMatchObject({ outcome: "resolved", resume: { required: true } });
+    expect(requests.map((request) => request.url)).toEqual([
+      "http://dispatcher.test/v1/runs/run_client_1/human-escalations",
+      `http://dispatcher.test/v1/human-escalations/${escalation.id}/acknowledge`,
+      `http://dispatcher.test/v1/human-escalations/${escalation.id}/resolve`
+    ]);
+  });
+
   it("sends and reads repo-less channel bindings", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const binding: ChannelBindingInput = {
@@ -842,6 +913,18 @@ describe("@opentag/client", () => {
               reasonCode: "repo_not_bound",
               decidedAt: "2026-06-24T00:00:00.000Z",
               eventId: "evt_1"
+            },
+            escalation: {
+              id: "escalation_admission_1",
+              workThreadId: "thread_admission_1",
+              class: "configuration",
+              audience: "operator",
+              subjectRef: "github:acme/demo",
+              state: "open",
+              blocking: true,
+              summary: "Run admission needs human attention.",
+              reason: "repo binding missing",
+              openedAt: "2026-06-24T00:00:00.000Z"
             }
           },
           202
@@ -850,7 +933,8 @@ describe("@opentag/client", () => {
 
     await expect(client.createRun({ runId: "run_1", event })).resolves.toMatchObject({
       outcome: "needs_human_decision",
-      decision: { reasonCode: "repo_not_bound" }
+      decision: { reasonCode: "repo_not_bound" },
+      escalation: { id: "escalation_admission_1", state: "open" }
     });
   });
 
