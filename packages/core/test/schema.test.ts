@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AgentAccessProfileSnapshotSchema,
   ActionPermissionRequestSchema,
   ApprovalDecisionSchema,
   ApplyPlanSchema,
@@ -12,6 +13,7 @@ import {
   OpenTagEventSchema,
   OpenTagRunResultSchema,
   OpenTagRunSchema,
+  PolicySnapshotProvenanceSchema,
   PolicyResolutionSchema,
   RunAdmissionDecisionSchema,
   RunEventSchema,
@@ -732,5 +734,107 @@ describe("Completion governance schemas", () => {
       }
     });
     expect(resolved.resolution?.actor.handle).toBe("octocat");
+    expect(() => HumanEscalationSchema.parse({
+      ...resolved,
+      acknowledgement: {
+        actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+        acknowledgedAt: "2026-07-21T00:06:00.000Z"
+      }
+    })).toThrow(/resolvedAt cannot precede acknowledgedAt/u);
+  });
+
+  it("captures requesting-human and executing-agent identity in immutable admission snapshots", () => {
+    const policy = PolicySnapshotProvenanceSchema.parse({
+      id: "policy_snapshot_1",
+      source: "repo_binding",
+      rules: [{
+        id: "rule_repo_write",
+        scope: "work_context_owner_container",
+        effect: "allow",
+        capabilityId: "repo:write",
+        reason: "Repository binding allows the requested write capability."
+      }],
+      contentDigest: `sha256:${"a".repeat(64)}`,
+      capturedAt: createdAt
+    });
+    const access = AgentAccessProfileSnapshotSchema.parse({
+      id: "access_snapshot_1",
+      agentPrincipal: { id: "agent_opentag", kind: "opentag_agent" },
+      requestedBy: { provider: "github", providerUserId: "42", handle: "octocat" },
+      projectTargets: ["github:acme/demo"],
+      connectionRefs: [],
+      permissions: [{ scope: "repo:write", reason: "Requested source change." }],
+      constraints: {
+        locality: "local_required",
+        maximumRiskTier: "high",
+        allowedExecutorIds: ["codex"],
+        allowedRunnerIds: ["runner_local"]
+      },
+      policySnapshotId: policy.id,
+      capturedAt: createdAt
+    });
+    const run = OpenTagRunSchema.parse({
+      id: "run_access",
+      eventId: "evt_access",
+      status: "queued",
+      accessProfileSnapshot: access,
+      policySnapshotProvenance: policy,
+      createdAt,
+      updatedAt: createdAt
+    });
+
+    expect(run.accessProfileSnapshot?.requestedBy.providerUserId).toBe("42");
+    expect(run.accessProfileSnapshot?.agentPrincipal.id).toBe("agent_opentag");
+    expect(run.policySnapshotProvenance?.id).toBe(run.accessProfileSnapshot?.policySnapshotId);
+    expect(() => OpenTagRunSchema.parse({
+      id: "run_partial_access",
+      eventId: "evt_partial_access",
+      status: "queued",
+      accessProfileSnapshot: access,
+      createdAt,
+      updatedAt: createdAt
+    })).toThrow(/attached together/u);
+  });
+
+  it("accepts structured needs-human requests and validates option and expiry semantics", () => {
+    const result = OpenTagRunResultSchema.parse({
+      conclusion: "needs_human",
+      summary: "Choose a deployment environment.",
+      humanEscalation: {
+        class: "missing_input",
+        audience: "requester",
+        blocking: true,
+        summary: "Deployment target is missing.",
+        reason: "The task names no environment.",
+        options: [
+          { id: "staging", label: "Use staging", consequence: "Deploys only to the staging environment." },
+          { id: "production", label: "Use production", consequence: "Requires the production approval policy." }
+        ],
+        nextAction: { kind: "request_human_decision", targetId: "deployment-target" },
+        dedupeKey: "deployment-target:v1",
+        expiresAt: "2026-07-22T00:00:00.000Z"
+      }
+    });
+
+    expect(result.humanEscalation?.options?.map((option) => option.id)).toEqual(["staging", "production"]);
+    expect(() => HumanEscalationSchema.parse({
+      id: "escalation_bad_option",
+      workThreadId: "thread_github_1",
+      class: "missing_input",
+      audience: "requester",
+      subjectRef: "deployment-target",
+      state: "resolved",
+      blocking: true,
+      summary: "Deployment target is missing.",
+      reason: "The task names no environment.",
+      options: [{ id: "staging", label: "Use staging", consequence: "Deploy to staging." }],
+      openedAt: createdAt,
+      expiresAt: "2026-07-20T23:59:00.000Z",
+      resolution: {
+        optionId: "production",
+        actor: { provider: "github", providerUserId: "42" },
+        resolvedAt: "2026-07-21T00:01:00.000Z"
+      }
+    })).toThrow(/expiresAt|optionId/u);
   });
 });

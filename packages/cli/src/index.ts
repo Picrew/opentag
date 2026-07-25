@@ -8,7 +8,12 @@ import {
 import { runExecutorsCommand } from "./commands/executors.js";
 import { runPlatformsCommand } from "./commands/platforms.js";
 import { runCancelCommand } from "./cancel.js";
-import { runCompletionWaiveCommand } from "./completion.js";
+import {
+  runCompletionAcknowledgeCommand,
+  runCompletionEscalationsCommand,
+  runCompletionResolveCommand,
+  runCompletionWaiveCommand
+} from "./completion.js";
 import { runDoctorCommand } from "./doctor.js";
 import { runIngestCommand, runIngestTemplateCommand } from "./ingest.js";
 import { runMaintenancePruneSourceDeliveriesCommand } from "./maintenance.js";
@@ -166,6 +171,37 @@ program
   .action(runCliAction(runCancelCommand));
 
 const completionCommand = program.command("completion").description("Inspect or govern completion state");
+
+completionCommand
+  .command("escalations")
+  .description("List attributed human escalations for a run")
+  .option("--config <path>", "Config file path")
+  .requiredOption("--run <runId>", "Run whose human escalations should be listed")
+  .action(runCliAction(runCompletionEscalationsCommand));
+
+completionCommand
+  .command("acknowledge")
+  .description("Acknowledge a human escalation without resolving it")
+  .option("--config <path>", "Config file path")
+  .requiredOption("--escalation <escalationId>", "Human escalation id")
+  .requiredOption("--actor-provider <provider>", "Provider identifying the human actor")
+  .requiredOption("--actor-id <id>", "Stable provider user id for the human actor")
+  .option("--actor-handle <handle>", "Human-readable actor handle")
+  .option("--acknowledged-at <iso>", "Attributed acknowledgement timestamp; defaults to now")
+  .action(runCliAction(runCompletionAcknowledgeCommand));
+
+completionCommand
+  .command("resolve")
+  .description("Resolve a human escalation with an attributed bounded decision")
+  .option("--config <path>", "Config file path")
+  .requiredOption("--escalation <escalationId>", "Human escalation id")
+  .requiredOption("--actor-provider <provider>", "Provider identifying the human actor")
+  .requiredOption("--actor-id <id>", "Stable provider user id for the human actor")
+  .option("--actor-handle <handle>", "Human-readable actor handle")
+  .option("--option <optionId>", "One option offered by the escalation")
+  .option("--reason <reason>", "Auditable resolution reason")
+  .option("--resolved-at <iso>", "Attributed resolution timestamp; defaults to now")
+  .action(runCliAction(runCompletionResolveCommand));
 
 completionCommand
   .command("waive")

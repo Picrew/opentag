@@ -406,6 +406,25 @@ describe("thread action commands", () => {
       rawText: "/stop run_1",
       runId: "run_1"
     });
+    expect(parseThreadControlCommand("@opentag /ack escalation_1")).toEqual({
+      verb: "acknowledge",
+      rawText: "/ack escalation_1",
+      escalationId: "escalation_1"
+    });
+    expect(parseThreadControlCommand("@opentag /resolve escalation_1 --option staging --reason Use the safe target")).toEqual({
+      verb: "resolve",
+      rawText: "/resolve escalation_1 --option staging --reason Use the safe target",
+      escalationId: "escalation_1",
+      optionId: "staging",
+      reason: "Use the safe target"
+    });
+    expect(parseThreadControlCommand("@opentag /resolve custom-human-gate --reason Use the safe target --option staging")).toEqual({
+      verb: "resolve",
+      rawText: "/resolve custom-human-gate --reason Use the safe target --option staging",
+      escalationId: "custom-human-gate",
+      optionId: "staging",
+      reason: "Use the safe target"
+    });
   });
 
   it("does not parse non-slash status words as control commands", () => {

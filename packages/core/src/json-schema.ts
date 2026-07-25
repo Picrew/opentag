@@ -1,5 +1,6 @@
 import { zodToJsonSchema } from "zod-to-json-schema";
 import {
+  AgentAccessProfileSnapshotSchema,
   ActionHintSchema,
   MaterialActionReceiptSchema,
   ActionSchema,
@@ -39,6 +40,7 @@ import {
   RunEventSchema,
   RunEventVisibilitySchema,
   PolicyResolutionSchema,
+  PolicySnapshotProvenanceSchema,
   SuggestedChangesSnapshotSchema,
   SuccessMetricNameSchema,
   VerificationEvidenceSchema,
@@ -68,6 +70,8 @@ export const OpenTagJsonSchemas = {
   OpenTagRun: zodToJsonSchema(OpenTagRunSchema, "OpenTagRun"),
   OpenTagRunResult: zodToJsonSchema(OpenTagRunResultSchema, "OpenTagRunResult"),
   ConnectionRef: zodToJsonSchema(ConnectionRefSchema, "ConnectionRef"),
+  AgentAccessProfileSnapshot: zodToJsonSchema(AgentAccessProfileSnapshotSchema, "AgentAccessProfileSnapshot"),
+  PolicySnapshotProvenance: zodToJsonSchema(PolicySnapshotProvenanceSchema, "PolicySnapshotProvenance"),
   Attempt: zodToJsonSchema(AttemptSchema, "Attempt"),
   AttemptStatus: zodToJsonSchema(AttemptStatusSchema, "AttemptStatus"),
   Grant: zodToJsonSchema(GrantSchema, "Grant"),

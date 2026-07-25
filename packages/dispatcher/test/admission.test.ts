@@ -51,7 +51,8 @@ describe("Admission Runtime", () => {
   });
 
   it("admits public-repo runs when the actor carries platform-reported write access", async () => {
-    const admission = createAdmissionRuntime({ repo: bindingRepo(githubBinding) });
+    const capturedAt = "2026-06-24T00:00:00.000Z";
+    const admission = createAdmissionRuntime({ repo: bindingRepo(githubBinding), now: () => capturedAt });
 
     const result = await admission.admitRun({
       requestId: "req_public_maintainer",
@@ -63,7 +64,42 @@ describe("Admission Runtime", () => {
       }
     });
 
-    expect(result).toMatchObject({ outcome: "start" });
+    expect(result).toMatchObject({
+      outcome: "start",
+      decision: { decidedAt: capturedAt },
+      accessProfileSnapshot: {
+        requestedBy: { providerUserId: "42" },
+        agentPrincipal: { id: "opentag", kind: "opentag_agent" },
+        projectTargets: ["github:acme/demo"],
+        constraints: { locality: "local_required", allowedRunnerIds: ["runner_1"] }
+      },
+      policySnapshotProvenance: { source: "repo_binding", sourceRef: "github:acme/demo", capturedAt }
+    });
+    if (result.outcome !== "start") throw new Error("expected start");
+    expect(result.accessProfileSnapshot.policySnapshotId).toBe(result.policySnapshotProvenance.id);
+  });
+
+  it("fails closed when an access checker returns an invalid snapshot", async () => {
+    const admission = createAdmissionRuntime({
+      repo: bindingRepo(githubBinding),
+      agentAccessProfileCheck: async () => ({
+        allowed: true,
+        accessProfileSnapshot: { id: "incomplete_snapshot" } as never
+      })
+    });
+
+    const result = await admission.admitRun({
+      requestId: "req_invalid_snapshot",
+      event: { ...event, id: "evt_invalid_snapshot", context: privateIssueContext }
+    });
+
+    expect(result).toMatchObject({
+      outcome: "needs_human_decision",
+      decision: {
+        reasonCode: "agent_access_profile_denied",
+        reason: "The captured access profile or policy snapshot is invalid."
+      }
+    });
   });
 
   it("keeps private-repo runs open to actors without reported write access", async () => {
@@ -159,6 +195,27 @@ describe("Admission Runtime", () => {
 
   it("does not duplicate active-run timeline events for replayed follow-up requests", async () => {
     const appendRunEvent = vi.fn(async () => undefined);
+    const createFollowUpRequest = vi.fn(async () => ({
+      followUpRequest: {
+        id: "follow_up_1",
+        sourceEventId: event.id,
+        conversationKey: "github:https://api.github.com/repos/acme/demo/issues/1/comments",
+        activeRunId: "run_active",
+        event,
+        decision: {
+          action: "queue_follow_up" as const,
+          reason: "active run exists",
+          reasonCode: "active_run_same_thread" as const,
+          decidedAt: "2026-06-24T00:00:00.000Z",
+          activeRunId: "run_active",
+          eventId: event.id
+        },
+        status: "queued" as const,
+        createdAt: "2026-06-24T00:00:00.000Z",
+        updatedAt: "2026-06-24T00:00:00.000Z"
+      },
+      created: false
+    }));
     const admission = createAdmissionRuntime({
       repo: {
         getRunByEventId: async () => null,
@@ -178,27 +235,7 @@ describe("Admission Runtime", () => {
           },
           event
         }),
-        createFollowUpRequest: async () => ({
-          followUpRequest: {
-            id: "follow_up_1",
-            sourceEventId: event.id,
-            conversationKey: "github:https://api.github.com/repos/acme/demo/issues/1/comments",
-            activeRunId: "run_active",
-            event,
-            decision: {
-              action: "queue_follow_up",
-              reason: "active run exists",
-              reasonCode: "active_run_same_thread",
-              decidedAt: "2026-06-24T00:00:00.000Z",
-              activeRunId: "run_active",
-              eventId: event.id
-            },
-            status: "queued",
-            createdAt: "2026-06-24T00:00:00.000Z",
-            updatedAt: "2026-06-24T00:00:00.000Z"
-          },
-          created: false
-        }),
+        createFollowUpRequest,
         appendRunEvent
       } as never
     });
@@ -209,6 +246,13 @@ describe("Admission Runtime", () => {
       outcome: "follow_up_queued",
       decision: { action: "queue_follow_up" }
     });
+    expect(createFollowUpRequest).toHaveBeenCalledWith(expect.objectContaining({
+      accessProfileSnapshot: expect.objectContaining({
+        requestedBy: expect.objectContaining({ providerUserId: "42" }),
+        agentPrincipal: { id: "opentag", kind: "opentag_agent" }
+      }),
+      policySnapshotProvenance: expect.objectContaining({ source: "repo_binding" })
+    }));
     expect(appendRunEvent).not.toHaveBeenCalled();
   });
 

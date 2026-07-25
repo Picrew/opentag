@@ -2,7 +2,27 @@
 
 ## Unreleased
 
-No changes yet.
+### Added
+
+- Additive agent access-profile and policy-provenance snapshots that preserve
+  the requesting human, executing agent principal, project targets,
+  permissions, and routing constraints for runs and queued follow-ups.
+- Structured human-escalation acknowledgement and resolution through the
+  source thread, dispatcher API, TypeScript client, and CLI, including bounded
+  options, audience, expiry, deduplication, and attributed audit events.
+
+### Changed
+
+- Runner claims now skip runs outside the captured runner eligibility and fail
+  closed before creating an attempt when the access profile is expired or
+  revoked. Inactive snapshots open a durable security escalation when the run
+  has a resolvable work thread.
+- Executor `needs_human` results are atomically correlated with a durable
+  escalation. Callers receive a stable reason instead when no human-resolution
+  route exists.
+- Human resolution is persisted as follow-up context; OpenTag no longer implies
+  that a stopped executor can receive live input. Conflicting acknowledgement
+  or resolution replays are rejected instead of rewriting history.
 
 ## v0.7.0 - 2026-07-22
 

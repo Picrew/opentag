@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft architecture proposal, updated 2026-07-21.
+Draft architecture proposal, updated 2026-07-25.
 
 This document defines the proposed product and architecture direction for
 OpenTag as an open control plane for governed software factories. It builds on
@@ -702,12 +702,18 @@ type HumanEscalation = {
   dedupeKey?: string;
   openedAt: string;
   expiresAt?: string;
+  acknowledgement?: {
+    actor: ActorIdentity;
+    acknowledgedAt: string;
+  };
   resolution?: {
     optionId?: string;
     actor: ActorIdentity;
     reason?: string;
     resolvedAt: string;
   };
+  terminalReason?: string;
+  supersededById?: string;
 };
 ```
 
@@ -749,8 +755,8 @@ follow-up run with the human response included in a new Context Packet.
 The human actor who asks for work and the agent principal that performs work are
 different identities.
 
-In the multi-runner phase, add an additive access snapshot. It is not one of the
-three new Phase 1 protocol objects:
+Phase 2 adds an access snapshot without changing the Phase 1 completion
+objects:
 
 ```ts
 type AgentAccessProfileSnapshot = {
@@ -771,6 +777,8 @@ type AgentAccessProfileSnapshot = {
   };
   policySnapshotId: string;
   capturedAt: string;
+  expiresAt?: string;
+  revokedAt?: string;
 };
 ```
 
@@ -1240,6 +1248,34 @@ Exit gate:
 
 > Every `needs_human` state points to one structured escalation or a stable
 > reason why no human resolution is available.
+
+Phase 2 implementation boundary:
+
+- admission freezes the requesting actor, executing agent principal, project
+  targets, permissions, runner/executor constraints, and resolved policy into
+  linked immutable snapshots before a run starts or a follow-up is queued;
+- promoted follow-ups retain their original admission snapshots, and every new
+  runner claim rechecks expiry, revocation, and runner eligibility before an
+  attempt can start;
+- executor `needs_human` results are atomically linked to a durable
+  `HumanEscalation`; admission denials also create a structured escalation when
+  a durable `WorkThread` exists, otherwise the response contains a stable
+  `humanResolutionUnavailableReason`;
+- acknowledgement and resolution require an attributed human actor, bounded
+  options are enforced, repeated equivalent transitions are idempotent, and a
+  conflicting replay cannot rewrite the durable decision;
+- expiry closes an escalation without implicit approval, active deduplication
+  prevents repeated interruptions, and every lifecycle transition is recorded
+  as a governance event;
+- source-thread `/ack` and `/resolve` commands and pairing-authenticated CLI/API
+  commands use the same store transition rules;
+- resolving an escalation records durable context but does not pretend to
+  inject input into an executor that has already stopped. Resumption is an
+  explicit follow-up event and run.
+
+This phase intentionally does not add cross-runner placement decisions,
+automatic multi-run batching, a workflow DAG, or a factory console. Those
+remain Phase 3 or later work.
 
 ### Phase 3 — Explainable multi-runner routing
 

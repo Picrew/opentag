@@ -2954,6 +2954,7 @@ describe("dispatcher API", () => {
       "admission.decided",
       "run.created",
       "context_packet.generated",
+      "agent_access_profile.captured",
       "callback.acknowledgement.queued",
       "callback.acknowledgement.delivered",
       "run.claimed",
@@ -3030,6 +3031,7 @@ describe("dispatcher API", () => {
       "admission.decided",
       "run.created",
       "context_packet.generated",
+      "agent_access_profile.captured",
       "callback.acknowledgement.queued",
       "callback.acknowledgement.delivered",
       "run.claimed",
@@ -3578,6 +3580,7 @@ describe("dispatcher API", () => {
       "admission.decided",
       "run.created",
       "context_packet.generated",
+      "agent_access_profile.captured",
       "source_receipt.delivered",
       "run.claimed",
       "run.running",
@@ -3652,6 +3655,7 @@ describe("dispatcher API", () => {
       "admission.decided",
       "run.created",
       "context_packet.generated",
+      "agent_access_profile.captured",
       "callback.acknowledgement.queued",
       "callback.acknowledgement.delivered"
     ]);
@@ -3712,6 +3716,7 @@ describe("dispatcher API", () => {
       "admission.decided",
       "run.created",
       "context_packet.generated",
+      "agent_access_profile.captured",
       "source_receipt.delivered"
     ]);
   });
@@ -4058,6 +4063,7 @@ describe("dispatcher API", () => {
       "admission.decided",
       "run.created",
       "context_packet.generated",
+      "agent_access_profile.captured",
       "callback.acknowledgement.queued",
       "callback.acknowledgement.delivered",
       "run.claimed",
@@ -5073,7 +5079,7 @@ describe("dispatcher API", () => {
     expect(JSON.stringify(events)).not.toContain("codex");
   });
 
-  it("delivers a waiting-for-approval liveness status before a needs_human final callback", async () => {
+  it("materializes and links a structured escalation before a needs_human final callback", async () => {
     const delivered: Array<{ kind: string; body: string; statusMessageKey?: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
@@ -5116,6 +5122,8 @@ describe("dispatcher API", () => {
         result: {
           conclusion: "needs_human",
           summary: "Prepared approval request.",
+          humanEscalationId: "runner_supplied_id_must_not_be_trusted",
+          humanResolutionUnavailableReason: "Runner supplied route state must not be trusted.",
           nextAction: "Approve or reject the proposed action."
         }
       })
@@ -5129,7 +5137,7 @@ describe("dispatcher API", () => {
       },
       {
         kind: "progress",
-        body: "OpenTag progress for `run_waiting_approval`: Waiting for approval.",
+        body: "OpenTag progress for `run_waiting_approval`: Prepared approval request.",
         statusMessageKey: "run_waiting_approval:status"
       },
       {
@@ -5137,6 +5145,113 @@ describe("dispatcher API", () => {
         body: expect.stringContaining("OpenTag finished with **needs_human**.")
       }
     ]);
+    const stored = await app.request("/v1/runs/run_waiting_approval");
+    const storedBody = await stored.json() as { run: { result: { humanEscalationId?: string; humanResolutionUnavailableReason?: string } } };
+    expect(storedBody.run.result.humanEscalationId).toMatch(/^escalation_/u);
+    expect(storedBody.run.result.humanEscalationId).not.toBe("runner_supplied_id_must_not_be_trusted");
+    expect(storedBody.run.result.humanResolutionUnavailableReason).toBeUndefined();
+    const escalationId = storedBody.run.result.humanEscalationId!;
+    const listed = await app.request("/v1/runs/run_waiting_approval/human-escalations");
+    await expect(listed.json()).resolves.toMatchObject({
+      escalations: [{ id: escalationId, runId: "run_waiting_approval", state: "open", audience: "requester" }]
+    });
+    const acknowledged = await app.request(
+      `/v1/human-escalations/${escalationId}/acknowledge`,
+      jsonRequest({ actor: { provider: "github", providerUserId: "42", handle: "octocat" } })
+    );
+    expect(acknowledged.status).toBe(201);
+    await expect(acknowledged.json()).resolves.toMatchObject({ outcome: "acknowledged", escalation: { state: "acknowledged" } });
+    const resolved = await app.request(
+      `/v1/human-escalations/${escalationId}/resolve`,
+      jsonRequest({
+        actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+        reason: "The missing input was supplied in the source thread."
+      })
+    );
+    expect(resolved.status).toBe(201);
+    await expect(resolved.json()).resolves.toMatchObject({
+      outcome: "resolved",
+      escalation: { state: "resolved", resolution: { actor: { providerUserId: "42" } } },
+      resume: { required: true }
+    });
+    const missingAcknowledgement = await app.request(
+      "/v1/human-escalations/missing-escalation/acknowledge",
+      jsonRequest({ actor: { provider: "github", providerUserId: "42" } })
+    );
+    expect(missingAcknowledgement.status).toBe(404);
+    await expect(missingAcknowledgement.json()).resolves.toEqual({ error: "human_escalation_not_found" });
+    const missingResolution = await app.request(
+      "/v1/human-escalations/missing-escalation/resolve",
+      jsonRequest({ actor: { provider: "github", providerUserId: "42" } })
+    );
+    expect(missingResolution.status).toBe(404);
+    await expect(missingResolution.json()).resolves.toEqual({ error: "human_escalation_not_found" });
+  });
+
+  it("resolves a bounded needs-human option from the originating source thread", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: { async deliver(message) { delivered.push({ kind: message.kind, body: message.body }); } }
+    });
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+    await app.request("/v1/runs", jsonRequest({
+      runId: "run_source_resolution",
+      event: githubIssueEvent({ id: "evt_source_resolution", sourceEventId: "comment_source_resolution", threadKey: "acme/demo#1" })
+    }));
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const completed = await app.request(
+      "/v1/runners/runner_1/runs/run_source_resolution/complete",
+      jsonRequest({
+        result: {
+          conclusion: "needs_human",
+          summary: "Choose a deployment target.",
+          humanEscalation: {
+            class: "missing_input",
+            audience: "requester",
+            summary: "Deployment target is missing.",
+            reason: "The task did not specify an environment.",
+            options: [
+              { id: "staging", label: "Use staging", consequence: "Deploys only to staging." },
+              { id: "production", label: "Use production", consequence: "Requires production policy review." }
+            ],
+            dedupeKey: "deployment-target:v1"
+          }
+        }
+      })
+    );
+    expect(completed.status).toBe(200);
+    const stored = await app.request("/v1/runs/run_source_resolution");
+    const storedBody = await stored.json() as { run: { result: { humanEscalationId: string } } };
+    const escalationId = storedBody.run.result.humanEscalationId;
+    delivered.length = 0;
+
+    const resolved = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: `@opentag /resolve ${escalationId} --option staging --reason Use the bounded target`,
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo#1"
+      },
+      metadata: { repoProvider: "github", owner: "acme", repo: "demo", issueNumber: 1 }
+    }));
+
+    expect(resolved.status).toBe(200);
+    await expect(resolved.json()).resolves.toMatchObject({
+      outcome: "resolved",
+      escalation: { id: escalationId, state: "resolved", resolution: { optionId: "staging", actor: { providerUserId: "42" } } },
+      resume: { required: true }
+    });
+    expect(delivered.some((message) => message.body.includes(`Resolved human escalation ${escalationId} with Use staging.`))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("did not inject it into the executor process"))).toBe(true);
   });
 
   it("deduplicates runner progress retries by idempotency key before callback delivery", async () => {
@@ -5400,11 +5515,31 @@ describe("dispatcher API", () => {
     });
 
     expect(response.status).toBe(202);
-    await expect(response.json()).resolves.toMatchObject({
+    const denied = await response.json() as { escalation: { id: string } };
+    expect(denied).toMatchObject({
       decision: {
         action: "needs_human_decision",
         reasonCode: "agent_access_profile_denied"
+      },
+      escalation: {
+        class: "security",
+        audience: "repo_owner",
+        state: "open",
+        blocking: true,
+        reason: "The configured agent access profile does not allow this run in the current container."
       }
+    });
+    const resolved = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: `@opentag /resolve ${denied.escalation.id} --reason Access policy was corrected`,
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
+      callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+      metadata: { repoProvider: "github", owner: "acme", repo: "demo", issueNumber: 1 }
+    }));
+    expect(resolved.status).toBe(200);
+    await expect(resolved.json()).resolves.toMatchObject({
+      outcome: "resolved",
+      escalation: { id: denied.escalation.id, state: "resolved", resolution: { actor: { providerUserId: "42" } } },
+      resume: { required: true }
     });
   });
 

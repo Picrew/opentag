@@ -79,6 +79,24 @@ export type BoundedCompletionWaiverInput = Pick<
   "actor" | "reason" | "scope" | "policyScope" | "gateIds" | "waivedAt" | "expiresAt"
 >;
 
+export type HumanEscalationActorInput = {
+  escalationId: string;
+  actor: ActorIdentity;
+};
+
+export type HumanEscalationResolutionInput = HumanEscalationActorInput & {
+  optionId?: string;
+  reason?: string;
+  resolvedAt?: string;
+};
+
+export type HumanEscalationResolutionResult = {
+  outcome: "resolved" | "duplicate";
+  escalation: HumanEscalation;
+  completion?: CompletionExplanation;
+  resume: { required: true; reason: string; nextAction: string };
+};
+
 export type AttemptLease = Pick<ClaimedOpenTagRun, "attemptId" | "fencingToken">;
 
 export type RepoBindingInput = {
@@ -257,6 +275,8 @@ export type CreateRunResult =
   | {
       outcome: "needs_human_decision";
       decision: import("@opentag/core").RunAdmissionDecision;
+      escalation?: HumanEscalation;
+      resolutionUnavailableReason?: string;
     };
 
 export type CompleteRunInput = {
@@ -470,6 +490,15 @@ export type OpenTagClient = {
   }): Promise<CancelRunResult>;
   getRun(input: { runId: string }): Promise<OpenTagRunRecord>;
   getCompletion(input: { runId: string }): Promise<{ completion: CompletionExplanation }>;
+  listHumanEscalations(input: { runId: string }): Promise<{
+    escalations: HumanEscalation[];
+    resolutionUnavailableReason?: string;
+  }>;
+  acknowledgeHumanEscalation(input: HumanEscalationActorInput & { acknowledgedAt?: string }): Promise<{
+    outcome: "acknowledged" | "duplicate";
+    escalation: HumanEscalation;
+  }>;
+  resolveHumanEscalation(input: HumanEscalationResolutionInput): Promise<HumanEscalationResolutionResult>;
   waiveCompletion(input: { runId: string; waiver: BoundedCompletionWaiverInput }): Promise<{
     outcome: "recorded" | "duplicate" | "conflict";
     completion: CompletionExplanation;
@@ -547,6 +576,21 @@ function parseCompletionExplanation(value: unknown): CompletionExplanation {
     assessmentHistory: completion.assessmentHistory.map((assessment) => CompletionAssessmentSchema.parse(assessment)),
     openHumanEscalations: completion.openHumanEscalations.map((escalation) => HumanEscalationSchema.parse(escalation))
   };
+}
+
+function parseHumanEscalationResume(value: unknown): HumanEscalationResolutionResult["resume"] {
+  const resume = value as { required?: unknown; reason?: unknown; nextAction?: unknown } | null;
+  if (
+    !resume
+    || resume.required !== true
+    || typeof resume.reason !== "string"
+    || resume.reason.length === 0
+    || typeof resume.nextAction !== "string"
+    || resume.nextAction.length === 0
+  ) {
+    throw new Error("resolveHumanEscalation returned an invalid resume contract.");
+  }
+  return { required: true, reason: resume.reason, nextAction: resume.nextAction };
 }
 
 async function assertOk(response: Response, action: string): Promise<void> {
@@ -834,6 +878,8 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         run?: unknown;
         followUpRequest?: unknown;
         idempotentReplay?: unknown;
+        escalation?: unknown;
+        resolutionUnavailableReason?: unknown;
       };
       const decision = RunAdmissionDecisionSchema.parse(body.decision);
       if (body.run) {
@@ -853,7 +899,11 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       }
       return {
         outcome: "needs_human_decision",
-        decision
+        decision,
+        ...(body.escalation ? { escalation: HumanEscalationSchema.parse(body.escalation) } : {}),
+        ...(typeof body.resolutionUnavailableReason === "string"
+          ? { resolutionUnavailableReason: body.resolutionUnavailableReason }
+          : {})
       };
     },
 
@@ -1053,6 +1103,69 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       await assertOk(response, "getCompletion");
       const body = (await response.json()) as { completion: CompletionExplanation };
       return { completion: parseCompletionExplanation(body.completion) };
+    },
+
+    async listHumanEscalations(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/runs/${encodeURIComponent(input.runId)}/human-escalations`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "listHumanEscalations");
+      const body = (await response.json()) as { escalations?: unknown; resolutionUnavailableReason?: unknown };
+      if (!Array.isArray(body.escalations)) {
+        throw new Error("listHumanEscalations returned an invalid escalation list.");
+      }
+      return {
+        escalations: body.escalations.map((escalation) => HumanEscalationSchema.parse(escalation)),
+        ...(typeof body.resolutionUnavailableReason === "string" && body.resolutionUnavailableReason.length > 0
+          ? { resolutionUnavailableReason: body.resolutionUnavailableReason }
+          : {})
+      };
+    },
+
+    async acknowledgeHumanEscalation(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/human-escalations/${encodeURIComponent(input.escalationId)}/acknowledge`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify({
+          actor: input.actor,
+          ...(input.acknowledgedAt ? { acknowledgedAt: input.acknowledgedAt } : {})
+        })
+      });
+      await assertOk(response, "acknowledgeHumanEscalation");
+      const body = (await response.json()) as { outcome?: unknown; escalation: unknown };
+      if (body.outcome !== "acknowledged" && body.outcome !== "duplicate") {
+        throw new Error("acknowledgeHumanEscalation returned an invalid outcome.");
+      }
+      return { outcome: body.outcome, escalation: HumanEscalationSchema.parse(body.escalation) };
+    },
+
+    async resolveHumanEscalation(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/human-escalations/${encodeURIComponent(input.escalationId)}/resolve`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify({
+          actor: input.actor,
+          ...(input.optionId ? { optionId: input.optionId } : {}),
+          ...(input.reason ? { reason: input.reason } : {}),
+          ...(input.resolvedAt ? { resolvedAt: input.resolvedAt } : {})
+        })
+      });
+      await assertOk(response, "resolveHumanEscalation");
+      const body = (await response.json()) as {
+        outcome: "resolved" | "duplicate";
+        escalation: unknown;
+        completion?: unknown;
+        resume: unknown;
+      };
+      if (body.outcome !== "resolved" && body.outcome !== "duplicate") {
+        throw new Error("resolveHumanEscalation returned an invalid outcome.");
+      }
+      return {
+        outcome: body.outcome,
+        escalation: HumanEscalationSchema.parse(body.escalation),
+        ...(body.completion ? { completion: parseCompletionExplanation(body.completion) } : {}),
+        resume: parseHumanEscalationResume(body.resume)
+      };
     },
 
     async waiveCompletion(input) {

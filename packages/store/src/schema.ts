@@ -9,6 +9,8 @@ export const runs = sqliteTable(
     status: text("status").notNull(),
     eventJson: text("event_json").notNull(),
     contextPacketJson: text("context_packet_json"),
+    accessProfileSnapshotJson: text("access_profile_snapshot_json"),
+    policySnapshotProvenanceJson: text("policy_snapshot_provenance_json"),
     resultJson: text("result_json"),
     assignedRunnerId: text("assigned_runner_id"),
     executor: text("executor"),
@@ -71,6 +73,8 @@ export const followUpRequests = sqliteTable(
     activeRunId: text("active_run_id"),
     eventJson: text("event_json").notNull(),
     decisionJson: text("decision_json").notNull(),
+    accessProfileSnapshotJson: text("access_profile_snapshot_json"),
+    policySnapshotProvenanceJson: text("policy_snapshot_provenance_json"),
     status: text("status").notNull(),
     createdRunId: text("created_run_id"),
     createdAt: text("created_at").notNull(),
@@ -646,6 +650,34 @@ function migrateCompletionWaiverSchema(sqlite: Database.Database): void {
   })();
 }
 
+function migrateHumanEscalationAccessIdentitySchema(sqlite: Database.Database): void {
+  const migrationId = "2026-07-25-human-escalation-access-identity-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    const columns = sqlite.prepare("PRAGMA table_info(runs)").all() as { name: string }[];
+    const columnNames = new Set(columns.map((column) => column.name));
+    if (!columnNames.has("access_profile_snapshot_json")) {
+      sqlite.exec("ALTER TABLE runs ADD COLUMN access_profile_snapshot_json TEXT");
+    }
+    if (!columnNames.has("policy_snapshot_provenance_json")) {
+      sqlite.exec("ALTER TABLE runs ADD COLUMN policy_snapshot_provenance_json TEXT");
+    }
+    const followUpColumns = sqlite.prepare("PRAGMA table_info(follow_up_requests)").all() as { name: string }[];
+    const followUpColumnNames = new Set(followUpColumns.map((column) => column.name));
+    if (!followUpColumnNames.has("access_profile_snapshot_json")) {
+      sqlite.exec("ALTER TABLE follow_up_requests ADD COLUMN access_profile_snapshot_json TEXT");
+    }
+    if (!followUpColumnNames.has("policy_snapshot_provenance_json")) {
+      sqlite.exec("ALTER TABLE follow_up_requests ADD COLUMN policy_snapshot_provenance_json TEXT");
+    }
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
 export function migrateSchema(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS runs (
@@ -654,6 +686,8 @@ export function migrateSchema(sqlite: Database.Database): void {
       status TEXT NOT NULL,
       event_json TEXT NOT NULL,
       context_packet_json TEXT,
+      access_profile_snapshot_json TEXT,
+      policy_snapshot_provenance_json TEXT,
       result_json TEXT,
       assigned_runner_id TEXT,
       executor TEXT,
@@ -883,6 +917,8 @@ export function migrateSchema(sqlite: Database.Database): void {
       active_run_id TEXT,
       event_json TEXT NOT NULL,
       decision_json TEXT NOT NULL,
+      access_profile_snapshot_json TEXT,
+      policy_snapshot_provenance_json TEXT,
       status TEXT NOT NULL,
       created_run_id TEXT,
       created_at TEXT NOT NULL,
@@ -1156,4 +1192,5 @@ export function migrateSchema(sqlite: Database.Database): void {
   }
   migrateCompletionGovernanceSchema(sqlite);
   migrateCompletionWaiverSchema(sqlite);
+  migrateHumanEscalationAccessIdentitySchema(sqlite);
 }
