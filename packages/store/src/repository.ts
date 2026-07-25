@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
+  AcceptedCompletionMetricsSchema,
   AgentAccessProfileSnapshotSchema,
   ApprovalDecisionSchema,
   ActorIdentitySchema,
@@ -29,6 +30,7 @@ import {
   grantMatchesAction,
   containsCredentialLikeData,
   FollowUpRequestSchema,
+  FrozenRoutingPolicySchema,
   isCredentialFieldName,
   redactCredentialLikeData,
   sanitizeCredentialLikeValue,
@@ -40,6 +42,9 @@ import {
   RunAdmissionDecisionSchema,
   RunEventImportanceSchema,
   RunEventVisibilitySchema,
+  RoutingDecisionSchema,
+  RunnerDirectoryEntrySchema,
+  RunnerRegistrationInputSchema,
   SuggestedChangesSnapshotSchema,
   HumanEscalationSchema,
   VerificationEvidenceSchema,
@@ -59,6 +64,7 @@ import {
   type CompletionAssessment,
   type CompletionContract,
   type CompletionWaiver,
+  type FrozenRoutingPolicy,
   type HumanEscalation,
   type MutationIntentActionability,
   type OpenTagEvent,
@@ -72,11 +78,17 @@ import {
   type RunAdmissionDecision,
   type RunEventImportance,
   type RunEventVisibility,
+  type AcceptedCompletionMetrics,
+  type RoutingDecision,
+  type RunnerDirectoryEntry,
+  type RunnerRegistrationConfig,
+  type RunnerRegistrationInput,
   type SuggestedChangesSnapshot,
   type VerificationEvidence,
   type WorkThread
 } from "@opentag/core";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, notExists, sql } from "drizzle-orm";
+import { evaluateRouting } from "@opentag/governance";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, notExists, or, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { alias } from "drizzle-orm/sqlite-core";
 import {
@@ -158,6 +170,8 @@ export type ClaimedOpenTagRun = OpenTagRunWithEvent & {
   attemptId: string;
   attemptNumber: number;
   fencingToken: string;
+  executorId: string;
+  routingDecision: RoutingDecision;
 };
 
 export type OpenTagAuditEvent = {
@@ -233,8 +247,10 @@ export type RepoBinding = {
   owner: string;
   repo: string;
   runnerId: string;
+  fallbackRunnerIds?: string[];
   workspacePath?: string;
   defaultExecutor?: string;
+  fallbackExecutorIds?: string[];
   allowedActors?: string[];
 };
 
@@ -306,9 +322,7 @@ export type LinearOAuthInstallState = {
   completedAt?: string;
 };
 
-export type RunnerRegistration = {
-  runnerId: string;
-  name: string;
+export type RunnerRegistration = RunnerRegistrationConfig & {
   createdAt: string;
   heartbeatAt?: string;
 };
@@ -375,6 +389,7 @@ export type FollowUpRequest = {
   decision: RunAdmissionDecision;
   accessProfileSnapshot?: AgentAccessProfileSnapshot;
   policySnapshotProvenance?: PolicySnapshotProvenance;
+  routingPolicy?: FrozenRoutingPolicy;
   status: "queued" | "promoting" | "promoted" | "cancelled";
   createdRunId?: string;
   createdAt: string;
@@ -422,6 +437,7 @@ export type RecordProgressOutcome =
   | AttemptMutationConflict
   | "not_found";
 export type MarkRunningOutcome = "running" | "duplicate" | AttemptMutationConflict | "not_found";
+export type RejectAttemptStartOutcome = "requeued" | "duplicate" | AttemptMutationConflict | "not_found";
 export type CompleteRunOutcome = "completed" | "duplicate" | AttemptMutationConflict | "not_found";
 
 export type ControlPlaneEventSeverity = "info" | "warn" | "error";
@@ -867,6 +883,9 @@ function followUpRequestFromRow(row: typeof followUpRequests.$inferSelect): Foll
     ...(row.policySnapshotProvenanceJson
       ? { policySnapshotProvenance: PolicySnapshotProvenanceSchema.parse(JSON.parse(row.policySnapshotProvenanceJson)) }
       : {}),
+    ...(row.routingPolicyJson
+      ? { routingPolicy: FrozenRoutingPolicySchema.parse(JSON.parse(row.routingPolicyJson)) }
+      : {}),
     status: row.status as FollowUpRequest["status"],
     ...(row.createdRunId ? { createdRunId: row.createdRunId } : {}),
     createdAt: row.createdAt,
@@ -875,12 +894,110 @@ function followUpRequestFromRow(row: typeof followUpRequests.$inferSelect): Foll
 }
 
 function runnerFromRow(row: typeof runners.$inferSelect): RunnerRegistration {
-  return {
+  const registration = RunnerRegistrationInputSchema.parse({
     runnerId: row.runnerId,
     name: row.name,
+    locality: row.locality,
+    declaredState: row.declaredState,
+    executors: JSON.parse(row.executorsJson) as unknown,
+    maxConcurrentRuns: row.maxConcurrentRuns,
+    preference: row.preference
+  });
+  return {
+    ...registration,
     createdAt: row.createdAt,
     ...(row.heartbeatAt ? { heartbeatAt: row.heartbeatAt } : {})
   };
+}
+
+function routingPreferenceIdsFromJson(value: string | null): string[] {
+  if (!value) return [];
+  const parsed = JSON.parse(value) as unknown;
+  if (
+    !Array.isArray(parsed)
+    || parsed.length > 64
+    || parsed.some((item) => typeof item !== "string" || item.length === 0)
+    || new Set(parsed).size !== parsed.length
+  ) {
+    throw new Error("Persisted routing preference ids must be a unique JSON string array with at most 64 entries.");
+  }
+  return parsed;
+}
+
+const RUNNER_HEARTBEAT_FRESHNESS_MS = 60_000;
+const CLAIM_SCAN_LIMIT = 64;
+const EXPIRED_LEASE_RECOVERY_LIMIT = 32;
+const ROUTING_DIRECTORY_LIMIT = 256;
+const DEFAULT_ROUTING_EXECUTOR_IDS = ["echo"] as const;
+const WRITE_CAPABLE_PERMISSION_SCOPES: ReadonlySet<string> = new Set(["repo:write", "pr:create", "pr:update"]);
+
+function runnerReadiness(input: {
+  registration: RunnerRegistration;
+  active: number;
+  now: Date;
+}): RunnerDirectoryEntry["readiness"] {
+  if (input.registration.declaredState === "draining") {
+    return {
+      state: "draining",
+      reasonCode: "runner_draining",
+      reason: "Runner declared itself draining and will not accept a new attempt."
+    };
+  }
+  const heartbeatAt = input.registration.heartbeatAt ? Date.parse(input.registration.heartbeatAt) : Number.NaN;
+  if (!Number.isFinite(heartbeatAt) || input.now.getTime() - heartbeatAt > RUNNER_HEARTBEAT_FRESHNESS_MS) {
+    return {
+      state: "stale",
+      reasonCode: "runner_heartbeat_stale",
+      reason: "Runner heartbeat is outside the current readiness window."
+    };
+  }
+  if (input.active >= input.registration.maxConcurrentRuns) {
+    return {
+      state: "at_capacity",
+      reasonCode: "runner_at_capacity",
+      reason: "Runner has no free concurrency slot."
+    };
+  }
+  return {
+    state: "ready",
+    reasonCode: "runner_heartbeat_current",
+    reason: "Runner heartbeat is current and capacity is available."
+  };
+}
+
+function runnerDirectoryEntry(input: {
+  registration: RunnerRegistration;
+  active: number;
+  now: Date;
+}): RunnerDirectoryEntry {
+  const { heartbeatAt, ...registration } = input.registration;
+  const parsedHeartbeatAt = heartbeatAt ? Date.parse(heartbeatAt) : Number.NaN;
+  return RunnerDirectoryEntrySchema.parse({
+    ...registration,
+    ...(Number.isFinite(parsedHeartbeatAt) ? { heartbeatAt } : {}),
+    readiness: runnerReadiness(input),
+    capacity: {
+      active: input.active,
+      limit: input.registration.maxConcurrentRuns
+    }
+  });
+}
+
+function uniquePreferenceIds(ids: string[], primary: string | undefined, label: string): string[] {
+  const normalized = ids.map((id) => id.trim());
+  if (normalized.length > 63) {
+    throw new Error(`Fallback ${label} ids cannot exceed 63 entries.`);
+  }
+  if (normalized.some((id) => id.length === 0)) {
+    throw new Error(`Fallback ${label} ids cannot be empty.`);
+  }
+  if (primary && normalized.includes(primary)) {
+    throw new Error(`Fallback ${label} ids cannot repeat the primary ${label} id.`);
+  }
+  if (new Set(normalized).size !== normalized.length) {
+    throw new Error(`Fallback ${label} ids must be unique.`);
+  }
+  return normalized;
 }
 
 function recordFromJson(value: string | null): Record<string, unknown> | undefined {
@@ -1478,7 +1595,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     return { outcome: "active", run, attempt };
   }
 
-  async function repoBindingRunnerId(projectTarget: ProjectTargetRef | null): Promise<string | null> {
+  async function repoBindingForProjectTarget(projectTarget: ProjectTargetRef | null): Promise<typeof repoBindings.$inferSelect | null> {
     if (!projectTarget) return null;
     const row = await db
       .select()
@@ -1492,7 +1609,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       )
       .limit(1)
       .get();
-    return row?.runnerId ?? null;
+    return row ?? null;
   }
 
   function runEventValues(input: {
@@ -1587,6 +1704,126 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
   async function appendRunEvent(input: Parameters<typeof runEventValues>[0]): Promise<void> {
     const safeInput = sanitizeRunEventValue(input, await attemptFencingTokensForRun(input.runId));
     await db.insert(runEvents).values(runEventValues(safeInput));
+  }
+
+  type RoutingDirectorySnapshot = {
+    registrations: RunnerRegistration[];
+    directory: RunnerDirectoryEntry[];
+    legacyBindings: Map<string, typeof repoBindings.$inferSelect>;
+  };
+
+  function repositoryRoutingKey(provider: string, owner: string, repo: string): string {
+    return `${provider}\0${owner}\0${repo}`;
+  }
+
+  function routingRejectionsFromJson(value: string): Array<{ runnerId: string; executorId: string; reason: string }> {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) throw new Error("Persisted routing rejections must be an array.");
+    return parsed.map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("Persisted routing rejection is invalid.");
+      const rejection = item as Record<string, unknown>;
+      if (typeof rejection["runnerId"] !== "string" || typeof rejection["executorId"] !== "string" || typeof rejection["reason"] !== "string") {
+        throw new Error("Persisted routing rejection is invalid.");
+      }
+      return { runnerId: rejection["runnerId"], executorId: rejection["executorId"], reason: rejection["reason"] };
+    });
+  }
+
+  function routingDecisionForRun(input: {
+    runRow: typeof runs.$inferSelect;
+    now: Date;
+    snapshot: RoutingDirectorySnapshot;
+    event?: OpenTagEvent;
+  }): RoutingDecision {
+    const event = input.event ?? OpenTagEventSchema.parse(JSON.parse(input.runRow.eventJson));
+    const accessProfile = input.runRow.accessProfileSnapshotJson
+      ? AgentAccessProfileSnapshotSchema.parse(JSON.parse(input.runRow.accessProfileSnapshotJson))
+      : undefined;
+    const policySnapshot = input.runRow.policySnapshotProvenanceJson
+      ? PolicySnapshotProvenanceSchema.parse(JSON.parse(input.runRow.policySnapshotProvenanceJson))
+      : undefined;
+    const projectTarget = projectTargetRefFromEvent(event);
+    const legacyBinding = projectTarget
+      ? input.snapshot.legacyBindings.get(repositoryRoutingKey(projectTarget.provider, projectTarget.owner, projectTarget.repo))
+      : undefined;
+    const frozenPolicy = input.runRow.routingPolicyJson
+      ? FrozenRoutingPolicySchema.parse(JSON.parse(input.runRow.routingPolicyJson))
+      : undefined;
+    const frozenRunnerIds = frozenPolicy
+      ? frozenPolicy.runnerIds
+      : input.runRow.routingRunnerIdsJson !== null
+        ? routingPreferenceIdsFromJson(input.runRow.routingRunnerIdsJson)
+        : undefined;
+    const bindingRunnerIds = Array.isArray(frozenRunnerIds)
+      ? frozenRunnerIds
+      : !frozenPolicy && legacyBinding
+        ? [legacyBinding.runnerId, ...routingPreferenceIdsFromJson(legacyBinding.fallbackRunnerIdsJson)]
+        : [];
+    const registeredRunnerIds = input.snapshot.registrations.map((registration) => registration.runnerId);
+    const runnerIds = Array.isArray(frozenRunnerIds)
+      ? frozenRunnerIds
+      : frozenPolicy
+        ? registeredRunnerIds
+        : bindingRunnerIds.length
+          ? [
+              ...bindingRunnerIds,
+              ...registeredRunnerIds.filter((runnerId) => !bindingRunnerIds.includes(runnerId))
+            ]
+          : registeredRunnerIds;
+    const registrationsByRunnerId = new Map(
+      input.snapshot.registrations.map((registration) => [registration.runnerId, registration])
+    );
+    const registeredExecutorIds = [...new Set(
+      runnerIds.flatMap((runnerId) =>
+        registrationsByRunnerId.get(runnerId)?.executors.map((executor) => executor.executorId) ?? []
+      )
+    )];
+    const frozenExecutorIds = frozenPolicy
+      ? frozenPolicy.executorIds
+      : input.runRow.routingExecutorIdsJson !== null
+        ? routingPreferenceIdsFromJson(input.runRow.routingExecutorIdsJson)
+        : undefined;
+    const executorIds = Array.isArray(frozenExecutorIds)
+      ? frozenExecutorIds
+      : frozenPolicy
+        ? registeredExecutorIds.length > 0 ? registeredExecutorIds : [...DEFAULT_ROUTING_EXECUTOR_IDS]
+        : event.target.executorHint
+          ? [event.target.executorHint]
+          : legacyBinding?.defaultExecutor
+            ? [legacyBinding.defaultExecutor, ...routingPreferenceIdsFromJson(legacyBinding.fallbackExecutorIdsJson)]
+            : accessProfile?.constraints.allowedExecutorIds !== undefined
+              ? accessProfile.constraints.allowedExecutorIds
+              : registeredExecutorIds.length > 0 ? registeredExecutorIds : [...DEFAULT_ROUTING_EXECUTOR_IDS];
+    const writeCapable = event.permissions.some((permission) => WRITE_CAPABLE_PERMISSION_SCOPES.has(permission.scope));
+    return evaluateRouting({
+      runId: input.runRow.id,
+      ...(policySnapshot?.id ? { policySnapshotId: policySnapshot.id } : {}),
+      ...(accessProfile?.id ? { accessProfileSnapshotId: accessProfile.id } : {}),
+      runnerIds,
+      executorIds,
+      runners: input.snapshot.directory,
+      requirements: {
+        requiredContextAccess: ["context_packet"],
+        minimumWriteAccess: writeCapable ? "workspace" : "none",
+        minimumWorkspaceIsolation: writeCapable && projectTarget ? "branch" : "none",
+        requiresCancel: false,
+        requiresSourceControl: Boolean(writeCapable && projectTarget),
+        requiresCompletionSignal: true
+      },
+      rejectedPlacements: routingRejectionsFromJson(input.runRow.routingRejectionsJson),
+      ...(projectTarget ? { projectTarget: { bound: bindingRunnerIds.length > 0, allowedRunnerIds: bindingRunnerIds } } : {}),
+      access: {
+        ...(accessProfile?.constraints.allowedRunnerIds !== undefined
+          ? { allowedRunnerIds: accessProfile.constraints.allowedRunnerIds }
+          : {}),
+        ...(accessProfile?.constraints.allowedExecutorIds !== undefined
+          ? { allowedExecutorIds: accessProfile.constraints.allowedExecutorIds }
+          : {}),
+        ...(accessProfile?.constraints.locality ? { locality: accessProfile.constraints.locality } : {}),
+        unresolvedConnectionRefs: Boolean(accessProfile?.connectionRefs.length)
+      },
+      decidedAt: input.now.toISOString()
+    });
   }
 
   async function recordCreateRunReplay(input: {
@@ -2828,6 +3065,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       activeRunId?: string;
       accessProfileSnapshot?: AgentAccessProfileSnapshot;
       policySnapshotProvenance?: PolicySnapshotProvenance;
+      routingPolicy?: FrozenRoutingPolicy;
     }): Promise<{ followUpRequest: FollowUpRequest; created: boolean }> {
       const event = OpenTagEventSchema.parse(input.event);
       const decision = RunAdmissionDecisionSchema.parse(input.decision);
@@ -2836,6 +3074,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         : undefined;
       const policySnapshotProvenance = input.policySnapshotProvenance
         ? PolicySnapshotProvenanceSchema.parse(input.policySnapshotProvenance)
+        : undefined;
+      const routingPolicy = input.routingPolicy
+        ? FrozenRoutingPolicySchema.parse(input.routingPolicy)
         : undefined;
       if (Boolean(accessProfileSnapshot) !== Boolean(policySnapshotProvenance)) {
         throw new Error("Follow-up access and policy snapshots must be captured together.");
@@ -2856,6 +3097,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           decisionJson: JSON.stringify(decision),
           accessProfileSnapshotJson: accessProfileSnapshot ? JSON.stringify(accessProfileSnapshot) : null,
           policySnapshotProvenanceJson: policySnapshotProvenance ? JSON.stringify(policySnapshotProvenance) : null,
+          routingPolicyJson: routingPolicy ? JSON.stringify(routingPolicy) : null,
           status: "queued",
           createdRunId: null,
           createdAt,
@@ -2916,6 +3158,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           event: followUp.event,
           ...(followUp.accessProfileSnapshot ? { accessProfileSnapshot: followUp.accessProfileSnapshot } : {}),
           ...(followUp.policySnapshotProvenance ? { policySnapshotProvenance: followUp.policySnapshotProvenance } : {}),
+          ...(followUp.routingPolicy ? { routingPolicy: followUp.routingPolicy } : {}),
           ...(followUp.activeRunId ? { parentRunId: followUp.activeRunId } : {})
         });
         if (!created) {
@@ -2956,15 +3199,42 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       }
     },
 
-    async registerRunner(input: { runnerId: string; name: string }): Promise<void> {
+    async registerRunner(input: RunnerRegistrationInput): Promise<void> {
+      const registration = RunnerRegistrationInputSchema.parse(input);
       const createdAt = nowIso();
+      const hasDirectoryConfiguration = ["locality", "declaredState", "executors", "maxConcurrentRuns", "preference"]
+        .some((field) => (input as Record<string, unknown>)[field] !== undefined);
+      if (!hasDirectoryConfiguration) {
+        const existing = await db.select({ runnerId: runners.runnerId }).from(runners)
+          .where(eq(runners.runnerId, registration.runnerId)).limit(1).get();
+        if (existing) {
+          await db.update(runners).set({ name: registration.name, heartbeatAt: createdAt })
+            .where(eq(runners.runnerId, registration.runnerId));
+          return;
+        }
+      }
       await db
         .insert(runners)
-        .values({ runnerId: input.runnerId, name: input.name, createdAt, heartbeatAt: createdAt })
+        .values({
+          runnerId: registration.runnerId,
+          name: registration.name,
+          locality: registration.locality,
+          declaredState: registration.declaredState,
+          executorsJson: JSON.stringify(registration.executors),
+          maxConcurrentRuns: registration.maxConcurrentRuns,
+          preference: registration.preference,
+          createdAt,
+          heartbeatAt: createdAt
+        })
         .onConflictDoUpdate({
           target: runners.runnerId,
           set: {
-            name: input.name,
+            name: registration.name,
+            locality: registration.locality,
+            declaredState: registration.declaredState,
+            executorsJson: JSON.stringify(registration.executors),
+            maxConcurrentRuns: registration.maxConcurrentRuns,
+            preference: registration.preference,
             heartbeatAt: createdAt
           }
         });
@@ -2975,21 +3245,50 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return row ? runnerFromRow(row) : null;
     },
 
+    async listRunners(): Promise<RunnerDirectoryEntry[]> {
+      const now = new Date();
+      const runnerRows = await db.select().from(runners).orderBy(asc(runners.preference), asc(runners.runnerId));
+      const activeRows = await db
+        .select({ runnerId: runs.assignedRunnerId, active: sql<number>`count(*)` })
+        .from(runs)
+        .where(and(inArray(runs.status, ["assigned", "running", "needs_approval"]), isNotNull(runs.assignedRunnerId)))
+        .groupBy(runs.assignedRunnerId);
+      const activeByRunner = new Map<string, number>();
+      for (const active of activeRows) {
+        if (!active.runnerId) continue;
+        activeByRunner.set(active.runnerId, active.active);
+      }
+      return runnerRows.map((row) => runnerDirectoryEntry({
+        registration: runnerFromRow(row),
+        active: activeByRunner.get(row.runnerId) ?? 0,
+        now
+      }));
+    },
+
     async createRepoBinding(input: {
       provider: string;
       owner: string;
       repo: string;
       runnerId: string;
+      fallbackRunnerIds?: string[];
       workspacePath?: string;
       defaultExecutor?: string;
+      fallbackExecutorIds?: string[];
       allowedActors?: string[];
     }): Promise<void> {
+      const fallbackRunnerIds = uniquePreferenceIds(input.fallbackRunnerIds ?? [], input.runnerId, "runner");
+      const fallbackExecutorIds = uniquePreferenceIds(input.fallbackExecutorIds ?? [], input.defaultExecutor, "executor");
+      if (fallbackExecutorIds.length > 0 && !input.defaultExecutor) {
+        throw new Error("Fallback executor ids require a primary default executor.");
+      }
       await db
         .insert(repoBindings)
         .values({
           ...input,
+          fallbackRunnerIdsJson: fallbackRunnerIds.length ? JSON.stringify(fallbackRunnerIds) : null,
           workspacePath: input.workspacePath ?? null,
           defaultExecutor: input.defaultExecutor ?? null,
+          fallbackExecutorIdsJson: fallbackExecutorIds.length ? JSON.stringify(fallbackExecutorIds) : null,
           allowedActorsJson: input.allowedActors ? JSON.stringify(input.allowedActors) : null,
           createdAt: nowIso()
         })
@@ -2997,8 +3296,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           target: [repoBindings.provider, repoBindings.owner, repoBindings.repo],
           set: {
             runnerId: input.runnerId,
+            fallbackRunnerIdsJson: fallbackRunnerIds.length ? JSON.stringify(fallbackRunnerIds) : null,
             workspacePath: input.workspacePath ?? null,
             defaultExecutor: input.defaultExecutor ?? null,
+            fallbackExecutorIdsJson: fallbackExecutorIds.length ? JSON.stringify(fallbackExecutorIds) : null,
             allowedActorsJson: input.allowedActors ? JSON.stringify(input.allowedActors) : null
           }
         });
@@ -3369,6 +3670,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       event: OpenTagEvent;
       accessProfileSnapshot?: AgentAccessProfileSnapshot;
       policySnapshotProvenance?: PolicySnapshotProvenance;
+      routingPolicy?: FrozenRoutingPolicy;
       parentRunId?: string;
       triggeredByAction?: ActionHint;
       sourceProposalId?: string;
@@ -3380,6 +3682,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         : undefined;
       const policySnapshotProvenance = input.policySnapshotProvenance
         ? PolicySnapshotProvenanceSchema.parse(input.policySnapshotProvenance)
+        : undefined;
+      const routingPolicy = input.routingPolicy
+        ? FrozenRoutingPolicySchema.parse(input.routingPolicy)
         : undefined;
       if (Boolean(accessProfileSnapshot) !== Boolean(policySnapshotProvenance)) {
         throw new Error("Run access and policy snapshots must be attached together.");
@@ -3394,7 +3699,30 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         ? (await upsertWorkThreadRecord({ thread: protocolFields.thread, recordedAt: createdAt })).thread
         : undefined;
       const repoKey = projectTargetRefFromEvent(event);
-      const expectedRunnerId = await repoBindingRunnerId(repoKey);
+      const routingBinding = routingPolicy ? null : await repoBindingForProjectTarget(repoKey);
+      const expectedRunnerId = routingPolicy?.runnerIds?.[0] ?? routingBinding?.runnerId ?? null;
+      const frozenRunnerIds = routingPolicy
+        ? routingPolicy.runnerIds
+        : repoKey
+        ? routingBinding
+          ? [routingBinding.runnerId, ...routingPreferenceIdsFromJson(routingBinding.fallbackRunnerIdsJson)]
+          : []
+        : accessProfileSnapshot?.constraints.allowedRunnerIds !== undefined
+          ? accessProfileSnapshot.constraints.allowedRunnerIds
+          : null;
+      const frozenExecutorIds = routingPolicy
+        ? routingPolicy.executorIds
+        : event.target.executorHint
+        ? [event.target.executorHint]
+        : routingBinding?.defaultExecutor
+          ? [routingBinding.defaultExecutor, ...routingPreferenceIdsFromJson(routingBinding.fallbackExecutorIdsJson)]
+          : accessProfileSnapshot?.constraints.allowedExecutorIds !== undefined
+            ? accessProfileSnapshot.constraints.allowedExecutorIds
+            : null;
+      const capturedRoutingPolicy = routingPolicy ?? FrozenRoutingPolicySchema.parse({
+        runnerIds: frozenRunnerIds,
+        executorIds: frozenExecutorIds
+      });
       const sourceDeliveryId = sourceDeliveryIdFromEvent(event);
       if (sourceDeliveryId) {
         const existingDelivery = await db
@@ -3438,6 +3766,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         repoName: repoKey?.repo ?? null,
         workThreadId: durableThread?.id ?? null,
         conversationKey: conversationKeyFromEvent(event),
+        routingPolicyJson: JSON.stringify(capturedRoutingPolicy),
+        routingRunnerIdsJson: frozenRunnerIds === null ? null : JSON.stringify(frozenRunnerIds),
+        routingExecutorIdsJson: frozenExecutorIds === null ? null : JSON.stringify(frozenExecutorIds),
+        routingRejectionsJson: "[]",
         createdAt,
         updatedAt: createdAt
         })
@@ -3605,11 +3937,33 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async claimNextRun(input: { runnerId: string; leaseSeconds: number }): Promise<ClaimedOpenTagRun | null> {
       const now = new Date();
       const runnerHeartbeatAt = nowIso();
+      await db
+        .insert(runners)
+        .values({
+          runnerId: input.runnerId,
+          name: input.runnerId,
+          locality: "local",
+          declaredState: "ready",
+          executorsJson: "[]",
+          maxConcurrentRuns: 1_000,
+          preference: 0,
+          createdAt: runnerHeartbeatAt,
+          heartbeatAt: runnerHeartbeatAt
+        })
+        .onConflictDoUpdate({
+          target: runners.runnerId,
+          set: { heartbeatAt: runnerHeartbeatAt }
+        });
       const activeRows = await db
         .select()
         .from(runs)
-        .where(inArray(runs.status, ["assigned", "running", "needs_approval"]))
-        .orderBy(asc(runs.createdAt));
+        .where(and(
+          inArray(runs.status, ["assigned", "running", "needs_approval"]),
+          isNotNull(runs.leaseExpiresAt),
+          lte(runs.leaseExpiresAt, now.toISOString())
+        ))
+        .orderBy(asc(runs.leaseExpiresAt), asc(runs.createdAt), asc(runs.id))
+        .limit(EXPIRED_LEASE_RECOVERY_LIMIT);
       for (const activeRow of activeRows) {
         if (!isIsoExpired(activeRow.leaseExpiresAt, now)) continue;
         const updatedAt = nowIso();
@@ -3645,6 +3999,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               leaseExpiresAt: null,
               heartbeatAt: null,
               currentAttemptId: null,
+              currentRoutingDecisionId: null,
               updatedAt
             })
             .where(eq(runs.id, current.id))
@@ -3670,39 +4025,190 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         if (!interrupted) continue;
       }
 
-      const queuedRows = await db.select().from(runs).where(eq(runs.status, "queued")).orderBy(asc(runs.createdAt));
-      let row: typeof runs.$inferSelect | undefined;
-      for (const candidate of queuedRows) {
-        const accessProfile = candidate.accessProfileSnapshotJson
-          ? AgentAccessProfileSnapshotSchema.parse(JSON.parse(candidate.accessProfileSnapshotJson))
-          : undefined;
-        if (
-          accessProfile?.constraints.allowedRunnerIds?.length
-          && !accessProfile.constraints.allowedRunnerIds.includes(input.runnerId)
-        ) {
-          continue;
+      await db.update(runners).set({ heartbeatAt: runnerHeartbeatAt }).where(eq(runners.runnerId, input.runnerId));
+      const updatedAt = nowIso();
+      const leasedAt = updatedAt;
+      const leaseExpiresAt = new Date(Date.now() + input.leaseSeconds * 1000).toISOString();
+      const attemptId = newAttemptId();
+      const fencingToken = newFencingToken();
+      const claim = db.transaction((tx) => {
+        const caller = tx.select({
+          claimCursorCreatedAt: runners.claimCursorCreatedAt,
+          claimCursorRunId: runners.claimCursorRunId
+        }).from(runners).where(eq(runners.runnerId, input.runnerId)).limit(1).get();
+        const hasCursor = Boolean(caller?.claimCursorCreatedAt && caller.claimCursorRunId);
+        const queuedAfterCursor = hasCursor
+          ? tx.select().from(runs).where(and(
+              eq(runs.status, "queued"),
+              or(
+                gt(runs.createdAt, caller!.claimCursorCreatedAt!),
+                and(eq(runs.createdAt, caller!.claimCursorCreatedAt!), gt(runs.id, caller!.claimCursorRunId!))
+              )
+            )).orderBy(asc(runs.createdAt), asc(runs.id)).limit(CLAIM_SCAN_LIMIT).all()
+          : tx.select().from(runs).where(eq(runs.status, "queued"))
+              .orderBy(asc(runs.createdAt), asc(runs.id)).limit(CLAIM_SCAN_LIMIT).all();
+        const remainingWindow = CLAIM_SCAN_LIMIT - queuedAfterCursor.length;
+        const queuedBeforeCursor = hasCursor && remainingWindow > 0
+          ? tx.select().from(runs).where(and(
+              eq(runs.status, "queued"),
+              or(
+                lt(runs.createdAt, caller!.claimCursorCreatedAt!),
+                and(eq(runs.createdAt, caller!.claimCursorCreatedAt!), lte(runs.id, caller!.claimCursorRunId!))
+              )
+            )).orderBy(asc(runs.createdAt), asc(runs.id)).limit(remainingWindow).all()
+          : [];
+        const queuedRows = [...queuedAfterCursor, ...queuedBeforeCursor];
+        if (queuedRows.length === 0) return null;
+
+        const queuedEvents = new Map<string, OpenTagEvent>();
+        function eventForQueuedRun(queued: typeof runs.$inferSelect): OpenTagEvent {
+          const cached = queuedEvents.get(queued.id);
+          if (cached) return cached;
+          const event = OpenTagEventSchema.parse(JSON.parse(queued.eventJson));
+          queuedEvents.set(queued.id, event);
+          return event;
         }
-        const accessBlockedReason = accessProfile?.revokedAt && Date.parse(accessProfile.revokedAt) <= now.getTime()
-          ? "The captured agent access profile was revoked before a new attempt could start."
-          : accessProfile?.expiresAt && Date.parse(accessProfile.expiresAt) <= now.getTime()
-            ? "The captured agent access profile expired before a new attempt could start."
-            : null;
-        if (accessBlockedReason) {
-          const blockedAt = now.toISOString();
-          db.transaction((tx) => {
-            const current = tx.select().from(runs).where(eq(runs.id, candidate.id)).limit(1).get();
-            if (!current || current.status !== "queued") return;
-            tx.update(runs).set({ status: "needs_approval", updatedAt: blockedAt }).where(eq(runs.id, current.id)).run();
+        const projectTargets = new Map<string, ProjectTargetRef>();
+        for (const queued of queuedRows) {
+          const event = eventForQueuedRun(queued);
+          const projectTarget = projectTargetRefFromEvent(event);
+          if (projectTarget) {
+            projectTargets.set(repositoryRoutingKey(projectTarget.provider, projectTarget.owner, projectTarget.repo), projectTarget);
+          }
+        }
+        const projectTargetConditions = [...projectTargets.values()].map((projectTarget) => and(
+          eq(repoBindings.provider, projectTarget.provider),
+          eq(repoBindings.owner, projectTarget.owner),
+          eq(repoBindings.repo, projectTarget.repo)
+        ));
+        const bindingRows = projectTargetConditions.length
+          ? tx.select().from(repoBindings).where(or(...projectTargetConditions)).limit(CLAIM_SCAN_LIMIT).all()
+          : [];
+        const legacyBindings = new Map(bindingRows.map((binding) => [
+          repositoryRoutingKey(binding.provider, binding.owner, binding.repo),
+          binding
+        ]));
+
+        function directoryRequirementForRun(queued: typeof runs.$inferSelect): {
+          explicitRunnerIds: string[];
+          mode: "closed" | "explicit" | "wildcard";
+        } {
+          if (queued.routingPolicyJson !== null) {
+            const policy = FrozenRoutingPolicySchema.parse(JSON.parse(queued.routingPolicyJson));
+            if (policy.runnerIds !== null) {
+              return { explicitRunnerIds: policy.runnerIds, mode: "explicit" };
+            }
+            const projectTarget = projectTargetRefFromEvent(eventForQueuedRun(queued));
+            return { explicitRunnerIds: [], mode: projectTarget ? "closed" : "wildcard" };
+          }
+          if (queued.routingRunnerIdsJson !== null) {
+            return {
+              explicitRunnerIds: routingPreferenceIdsFromJson(queued.routingRunnerIdsJson),
+              mode: "explicit"
+            };
+          }
+          const event = eventForQueuedRun(queued);
+          const projectTarget = projectTargetRefFromEvent(event);
+          if (!projectTarget) {
+            return { explicitRunnerIds: [], mode: "wildcard" };
+          }
+          const binding = legacyBindings.get(repositoryRoutingKey(projectTarget.provider, projectTarget.owner, projectTarget.repo));
+          return {
+            explicitRunnerIds: binding
+              ? [binding.runnerId, ...routingPreferenceIdsFromJson(binding.fallbackRunnerIdsJson)]
+              : [],
+            mode: binding ? "explicit" : "closed"
+          };
+        }
+
+        const requiredRunnerIds = new Set<string>();
+        const evaluationRows: typeof queuedRows = [];
+        const evaluationMode = directoryRequirementForRun(queuedRows[0]!).mode;
+        for (const queued of queuedRows) {
+          const requirement = directoryRequirementForRun(queued);
+          if (requirement.mode !== evaluationMode) break;
+          const newRunnerIds = requirement.explicitRunnerIds.filter((runnerId) => !requiredRunnerIds.has(runnerId));
+          if (requiredRunnerIds.size + newRunnerIds.length > ROUTING_DIRECTORY_LIMIT) {
+            break;
+          }
+          for (const runnerId of newRunnerIds) requiredRunnerIds.add(runnerId);
+          evaluationRows.push(queued);
+        }
+        if (evaluationRows.length === 0) return null;
+        const requiredRunnerIdList = [...requiredRunnerIds];
+        const explicitRunnerRows = requiredRunnerIdList.length
+          ? tx.select().from(runners)
+              .where(inArray(runners.runnerId, requiredRunnerIdList))
+              .orderBy(asc(runners.preference), asc(runners.runnerId))
+              .limit(ROUTING_DIRECTORY_LIMIT)
+              .all()
+          : [];
+        const repositoryFreeRunnerRows = evaluationMode === "wildcard"
+          ? tx.select().from(runners)
+              .orderBy(asc(runners.preference), asc(runners.runnerId))
+              .limit(ROUTING_DIRECTORY_LIMIT)
+              .all()
+          : [];
+        const runnerRows = [...explicitRunnerRows, ...repositoryFreeRunnerRows]
+          .sort((left, right) => left.preference - right.preference || left.runnerId.localeCompare(right.runnerId));
+        const registrations = runnerRows.map(runnerFromRow);
+        const activeRows = runnerRows.length
+          ? tx.select({ runnerId: runs.assignedRunnerId, active: sql<number>`count(*)` }).from(runs)
+              .where(and(
+                inArray(runs.status, ["assigned", "running", "needs_approval"]),
+                inArray(runs.assignedRunnerId, runnerRows.map((runner) => runner.runnerId))
+              ))
+              .groupBy(runs.assignedRunnerId).all()
+          : [];
+        const activeByRunner = new Map<string, number>();
+        for (const active of activeRows) {
+          if (!active.runnerId) continue;
+          activeByRunner.set(active.runnerId, active.active);
+        }
+        const snapshot: RoutingDirectorySnapshot = {
+          registrations,
+          directory: registrations.map((registration) => runnerDirectoryEntry({
+            registration,
+            active: activeByRunner.get(registration.runnerId) ?? 0,
+            now
+          })),
+          legacyBindings
+        };
+        const latestRoutingEventIds = tx.select({ id: sql<number>`max(${runEvents.id})` }).from(runEvents)
+          .where(and(inArray(runEvents.runId, evaluationRows.map((run) => run.id)), eq(runEvents.type, "routing.decided")))
+          .groupBy(runEvents.runId)
+          .limit(CLAIM_SCAN_LIMIT)
+          .all()
+          .map((event) => event.id);
+        const existingRoutingEvents = latestRoutingEventIds.length
+          ? tx.select().from(runEvents).where(inArray(runEvents.id, latestRoutingEventIds)).all()
+          : [];
+        const latestRoutingEventByRun = new Map<string, typeof runEvents.$inferSelect>();
+        for (const event of existingRoutingEvents) latestRoutingEventByRun.set(event.runId, event);
+
+        for (const candidate of evaluationRows) {
+          const accessProfile = candidate.accessProfileSnapshotJson
+            ? AgentAccessProfileSnapshotSchema.parse(JSON.parse(candidate.accessProfileSnapshotJson))
+            : undefined;
+          const accessBlockedReason = accessProfile?.revokedAt && Date.parse(accessProfile.revokedAt) <= now.getTime()
+            ? "The captured agent access profile was revoked before a new attempt could start."
+            : accessProfile?.expiresAt && Date.parse(accessProfile.expiresAt) <= now.getTime()
+              ? "The captured agent access profile expired before a new attempt could start."
+              : null;
+          if (accessBlockedReason) {
+            const blockedAt = now.toISOString();
+            tx.update(runs).set({ status: "needs_approval", currentRoutingDecisionId: null, updatedAt: blockedAt })
+              .where(and(eq(runs.id, candidate.id), eq(runs.status, "queued"))).run();
             const dedupeKey = `access-profile:${accessProfile!.id}:inactive:v1`;
             const escalationId = `escalation_${createHash("sha256")
-              .update(`${current.id}\0${dedupeKey}`)
+              .update(`${candidate.id}\0${dedupeKey}`)
               .digest("hex")
               .slice(0, 24)}`;
-            if (current.workThreadId) {
+            if (candidate.workThreadId) {
               const escalation = HumanEscalationSchema.parse({
                 id: escalationId,
-                workThreadId: current.workThreadId,
-                runId: current.id,
+                workThreadId: candidate.workThreadId,
+                runId: candidate.id,
                 class: "security",
                 audience: "operator",
                 subjectRef: accessProfile!.id,
@@ -3720,13 +4226,13 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                 class: escalation.class,
                 state: escalation.state,
                 dedupeKey,
-                activeDedupeKey: `${current.id}:${dedupeKey}`,
+                activeDedupeKey: `${candidate.id}:${dedupeKey}`,
                 escalationJson: JSON.stringify(escalation),
                 createdAt: blockedAt,
                 updatedAt: blockedAt
               }).onConflictDoNothing({ target: humanEscalations.id }).run();
               tx.insert(governanceEvents).values({
-                workThreadId: current.workThreadId,
+                workThreadId: candidate.workThreadId,
                 type: "human_escalation.opened",
                 subjectId: escalation.id,
                 payloadJson: JSON.stringify({ class: escalation.class, blocking: true, dedupeKey, source: "access_profile" }),
@@ -3734,12 +4240,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               }).run();
             }
             tx.insert(runEvents).values(runEventValues({
-              runId: current.id,
+              runId: candidate.id,
               type: "agent_access_profile.blocked",
               payload: {
                 accessProfileSnapshotId: accessProfile!.id,
                 reason: accessBlockedReason,
-                ...(current.workThreadId
+                ...(candidate.workThreadId
                   ? { humanEscalationId: escalationId }
                   : { humanResolutionUnavailableReason: "The run has no durable WorkThread for resolution." })
               },
@@ -3748,58 +4254,50 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               message: accessBlockedReason,
               createdAt: blockedAt
             })).run();
-          });
-          continue;
-        }
-        const event = OpenTagEventSchema.parse(JSON.parse(candidate.eventJson));
-        const repoKey = projectTargetRefFromEvent(event);
-        if (!repoKey) {
-          if (db.select().from(runners).where(eq(runners.runnerId, input.runnerId)).limit(1).get()) {
-            row = candidate;
-            break;
+            continue;
           }
-          continue;
-        }
-        const binding = db
-          .select()
-          .from(repoBindings)
-          .where(
-            and(
-              eq(repoBindings.provider, repoKey.provider),
-              eq(repoBindings.owner, repoKey.owner),
-              eq(repoBindings.repo, repoKey.repo),
-              eq(repoBindings.runnerId, input.runnerId)
-            )
-          )
-          .limit(1)
-          .get();
-        if (binding) {
-          row = candidate;
-          break;
-        }
-      }
-      if (!row) {
-        await db.update(runners).set({ heartbeatAt: runnerHeartbeatAt }).where(eq(runners.runnerId, input.runnerId));
-        return null;
-      }
 
-      const updatedAt = nowIso();
-      const leasedAt = updatedAt;
-      const leaseExpiresAt = new Date(Date.now() + input.leaseSeconds * 1000).toISOString();
-      const attemptId = newAttemptId();
-      const fencingToken = newFencingToken();
-      const attemptNumber = db.transaction((tx) => {
-        const previous = tx
-          .select({ number: attempts.number })
-          .from(attempts)
-          .where(eq(attempts.runId, row.id))
-          .orderBy(desc(attempts.number))
-          .limit(1)
-          .get();
-        const number = (previous?.number ?? 0) + 1;
-        const updateResult = tx
-          .update(runs)
-          .set({
+          const requirement = directoryRequirementForRun(candidate);
+          const candidateRunnerIds = requirement.mode === "explicit"
+            ? new Set(requirement.explicitRunnerIds)
+            : null;
+          const candidateSnapshot = candidateRunnerIds
+            ? {
+                ...snapshot,
+                registrations: snapshot.registrations.filter((registration) => candidateRunnerIds.has(registration.runnerId)),
+                directory: snapshot.directory.filter((entry) => candidateRunnerIds.has(entry.runnerId))
+              }
+            : snapshot;
+          const routingDecision = routingDecisionForRun({
+            runRow: candidate,
+            now,
+            snapshot: candidateSnapshot,
+            event: eventForQueuedRun(candidate)
+          });
+          const latest = latestRoutingEventByRun.get(candidate.id);
+          const previous = latest ? RoutingDecisionSchema.safeParse(JSON.parse(latest.payloadJson)) : undefined;
+          if (!previous?.success || previous.data.id !== routingDecision.id) {
+            tx.insert(runEvents).values(runEventValues({
+              runId: candidate.id,
+              type: "routing.decided",
+              payload: routingDecision,
+              visibility: "audit",
+              importance: routingDecision.selected ? "normal" : "blocking",
+              message: routingDecision.reason,
+              createdAt: routingDecision.decidedAt
+            })).run();
+          }
+          tx.update(runs).set({ currentRoutingDecisionId: routingDecision.id, updatedAt })
+            .where(and(eq(runs.id, candidate.id), eq(runs.status, "queued"))).run();
+          if (routingDecision.selected?.runnerId !== input.runnerId) continue;
+
+          const executorId = routingDecision.selected.executorId;
+          const selectedRunner = registrations.find((registration) => registration.runnerId === input.runnerId);
+          const authoritativeExecutorId = selectedRunner?.executors.length ? executorId : null;
+          const previousAttempt = tx.select({ number: attempts.number }).from(attempts)
+            .where(eq(attempts.runId, candidate.id)).orderBy(desc(attempts.number)).limit(1).get();
+          const number = (previousAttempt?.number ?? 0) + 1;
+          const updateResult = tx.update(runs).set({
             status: "assigned",
             assignedRunnerId: input.runnerId,
             leasedAt,
@@ -3807,16 +4305,19 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             heartbeatAt: leasedAt,
             currentAttemptId: attemptId,
             updatedAt
-          })
-          .where(and(eq(runs.id, row.id), eq(runs.status, "queued")))
-          .run();
-        if (updateResult.changes === 0) return null;
-        tx.insert(attempts)
-          .values({
+          }).where(and(
+            eq(runs.id, candidate.id),
+            eq(runs.status, "queued"),
+            eq(runs.currentRoutingDecisionId, routingDecision.id)
+          )).run();
+          if (updateResult.changes === 0) continue;
+          tx.insert(attempts).values({
             id: attemptId,
-            runId: row.id,
+            runId: candidate.id,
             number,
             runnerId: input.runnerId,
+            selectedExecutorId: authoritativeExecutorId,
+            routingDecisionId: routingDecision.id,
             fencingToken,
             status: "assigned",
             startedAt: leasedAt,
@@ -3824,41 +4325,60 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             leaseExpiresAt,
             createdAt: leasedAt,
             updatedAt
-          })
-          .run();
-        tx.update(runners).set({ heartbeatAt: runnerHeartbeatAt }).where(eq(runners.runnerId, input.runnerId)).run();
-        tx.insert(runEvents)
-          .values(
-            runEventValues({
-              runId: row.id,
-              type: "run.claimed",
-              payload: { runnerId: input.runnerId, attemptId, attemptNumber: number, leasedAt, leaseExpiresAt },
-              visibility: "audit",
-              importance: "normal",
-              createdAt: updatedAt
-            })
-          )
-          .run();
-        return number;
+          }).run();
+          tx.update(runners).set({
+            heartbeatAt: runnerHeartbeatAt,
+            claimCursorCreatedAt: candidate.createdAt,
+            claimCursorRunId: candidate.id
+          }).where(eq(runners.runnerId, input.runnerId)).run();
+          tx.insert(runEvents).values(runEventValues({
+            runId: candidate.id,
+            type: "run.claimed",
+            payload: {
+              runnerId: input.runnerId,
+              executorId,
+              routingDecisionId: routingDecision.id,
+              attemptId,
+              attemptNumber: number,
+              leasedAt,
+              leaseExpiresAt
+            },
+            visibility: "audit",
+            importance: "normal",
+            createdAt: updatedAt
+          })).run();
+          return { row: candidate, routingDecision, executorId, attemptNumber: number };
+        }
+        const lastScanned = evaluationRows.at(-1)!;
+        tx.update(runners).set({
+          heartbeatAt: runnerHeartbeatAt,
+          claimCursorCreatedAt: lastScanned.createdAt,
+          claimCursorRunId: lastScanned.id
+        }).where(eq(runners.runnerId, input.runnerId)).run();
+        return null;
       });
-      if (attemptNumber === null) return null;
+      if (!claim) return null;
 
       return {
         run: {
           ...runFromRow({
-            ...row,
+            ...claim.row,
             status: "assigned",
             assignedRunnerId: input.runnerId,
+            currentAttemptId: attemptId,
+            currentRoutingDecisionId: claim.routingDecision.id,
             updatedAt
           }),
           status: "assigned",
           assignedRunnerId: input.runnerId,
           updatedAt
         },
-        event: OpenTagEventSchema.parse(JSON.parse(row.eventJson)),
+        event: OpenTagEventSchema.parse(JSON.parse(claim.row.eventJson)),
         attemptId,
-        attemptNumber,
-        fencingToken
+        attemptNumber: claim.attemptNumber,
+        fencingToken,
+        executorId: claim.executorId,
+        routingDecision: claim.routingDecision
       };
     },
 
@@ -3877,8 +4397,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         owner: row.owner,
         repo: row.repo,
         runnerId: row.runnerId,
+        ...(row.fallbackRunnerIdsJson ? { fallbackRunnerIds: routingPreferenceIdsFromJson(row.fallbackRunnerIdsJson) } : {}),
         ...(row.workspacePath ? { workspacePath: row.workspacePath } : {}),
         ...(row.defaultExecutor ? { defaultExecutor: row.defaultExecutor } : {}),
+        ...(row.fallbackExecutorIdsJson ? { fallbackExecutorIds: routingPreferenceIdsFromJson(row.fallbackExecutorIdsJson) } : {}),
         ...(row.allowedActorsJson ? { allowedActors: JSON.parse(row.allowedActorsJson) as string[] } : {})
       };
     },
@@ -3974,6 +4496,69 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return "updated";
     },
 
+    async rejectAttemptStart(input: AttemptLease & { executorId: string; reason: string }): Promise<RejectAttemptStartOutcome> {
+      const rejectedAt = nowIso();
+      const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
+      return db.transaction((tx) => {
+        const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        if (!currentRun || !currentAttempt) return "not_found" as const;
+        const alreadyRejected = routingRejectionsFromJson(currentRun.routingRejectionsJson).some(
+          (rejection) => rejection.runnerId === input.runnerId && rejection.executorId === safeInput.executorId
+        );
+        if (alreadyRejected && currentRun.currentAttemptId !== input.attemptId) return "duplicate" as const;
+        if (
+          currentRun.status !== "assigned"
+          || currentRun.currentAttemptId !== input.attemptId
+          || currentRun.assignedRunnerId !== input.runnerId
+          || currentAttempt.runId !== input.runId
+          || currentAttempt.runnerId !== input.runnerId
+          || currentAttempt.fencingToken !== input.fencingToken
+          || currentAttempt.status !== "assigned"
+          || currentAttempt.selectedExecutorId !== safeInput.executorId
+          || !hasActiveAttemptLease(currentAttempt)
+        ) {
+          return "stale_attempt" as const;
+        }
+        const rejections = routingRejectionsFromJson(currentRun.routingRejectionsJson);
+        rejections.push({ runnerId: input.runnerId, executorId: safeInput.executorId, reason: safeInput.reason });
+        tx.update(attempts).set({
+          status: "interrupted",
+          finishedAt: rejectedAt,
+          resultJson: JSON.stringify({ conclusion: "interrupted", summary: safeInput.reason }),
+          updatedAt: rejectedAt
+        }).where(eq(attempts.id, input.attemptId)).run();
+        tx.update(runs).set({
+          status: "queued",
+          assignedRunnerId: null,
+          executor: null,
+          leasedAt: null,
+          leaseExpiresAt: null,
+          heartbeatAt: null,
+          currentAttemptId: null,
+          currentRoutingDecisionId: null,
+          routingRejectionsJson: JSON.stringify(rejections),
+          updatedAt: rejectedAt
+        }).where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId))).run();
+        tx.insert(runEvents).values(runEventValues({
+          runId: input.runId,
+          type: "routing.preflight_rejected",
+          payload: {
+            runnerId: input.runnerId,
+            executorId: safeInput.executorId,
+            attemptId: input.attemptId,
+            routingDecisionId: currentAttempt.routingDecisionId,
+            reason: safeInput.reason
+          },
+          visibility: "audit",
+          importance: "blocking",
+          message: safeInput.reason,
+          createdAt: rejectedAt
+        })).run();
+        return "requeued" as const;
+      });
+    },
+
     async markRunning(input: {
       runId: string;
       executor: string;
@@ -4020,6 +4605,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                 (currentRun.status !== "assigned" && currentRun.status !== "running") ||
                 currentAttempt.runId !== input.runId ||
                 currentAttempt.runnerId !== input.runnerId ||
+                (currentAttempt.selectedExecutorId !== null && currentAttempt.selectedExecutorId !== safeInput.executor) ||
                 currentAttempt.fencingToken !== input.fencingToken ||
                 (currentAttempt.status !== "assigned" && currentAttempt.status !== "running") ||
                 !hasActiveAttemptLease(currentAttempt)
@@ -5905,6 +6491,121 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       }
 
       return claimed;
+    },
+
+    async getAcceptedCompletionMetrics(): Promise<AcceptedCompletionMetrics> {
+      const currentAssessmentRows = await db.select({
+        id: completionAssessments.id,
+        threadId: workThreads.id,
+        persistedThreadId: completionAssessments.workThreadId,
+        assessmentJson: completionAssessments.assessmentJson
+      }).from(workThreads)
+        .innerJoin(completionAssessments, eq(completionAssessments.id, workThreads.currentAssessmentId));
+      const acceptedAssessmentRefs = currentAssessmentRows.flatMap((assessment) => {
+        try {
+          const parsed = CompletionAssessmentSchema.safeParse(JSON.parse(assessment.assessmentJson));
+          return parsed.success && (
+            parsed.data.state === "waived"
+            || (parsed.data.state === "satisfied" && parsed.data.evidenceBacked)
+          )
+            && parsed.data.id === assessment.id
+            && parsed.data.workThreadId === assessment.threadId
+            && assessment.persistedThreadId === assessment.threadId
+            ? [{ assessmentId: assessment.id, workThreadId: assessment.threadId }]
+            : [];
+        } catch {
+          return [];
+        }
+      });
+      type AggregateRow = {
+        dimension: "total" | "runner" | "executor";
+        id: string | null;
+        completedRuns: number;
+        acceptedCompletions: number;
+      };
+      const aggregateRows = db.all<AggregateRow>(sql`
+        WITH accepted_assessments AS (
+          SELECT DISTINCT
+            json_extract(value, '$.assessmentId') AS id,
+            json_extract(value, '$.workThreadId') AS work_thread_id
+          FROM json_each(${JSON.stringify(acceptedAssessmentRefs)})
+        ),
+        latest_attempt_numbers AS (
+          SELECT run_id, max(number) AS number
+          FROM attempts
+          GROUP BY run_id
+        ),
+        latest_attempts AS (
+          SELECT attempt.run_id, attempt.runner_id, attempt.selected_executor_id, attempt.status
+          FROM attempts AS attempt
+          INNER JOIN latest_attempt_numbers AS latest
+            ON latest.run_id = attempt.run_id AND latest.number = attempt.number
+        ),
+        ranked_thread_runs AS (
+          SELECT id,
+            row_number() OVER (
+              PARTITION BY work_thread_id
+              ORDER BY created_at DESC, id DESC
+            ) AS authority_rank
+          FROM runs
+          WHERE work_thread_id IS NOT NULL
+        ),
+        attributable_runs AS (
+          SELECT
+            run.id,
+            attempt.runner_id,
+            attempt.selected_executor_id,
+            CASE WHEN ranked.authority_rank = 1 AND accepted_assessment.id IS NOT NULL THEN 1 ELSE 0 END AS accepted
+          FROM runs AS run
+          INNER JOIN latest_attempts AS attempt ON attempt.run_id = run.id
+          LEFT JOIN ranked_thread_runs AS ranked ON ranked.id = run.id
+          LEFT JOIN work_threads AS thread ON thread.id = run.work_thread_id
+          LEFT JOIN accepted_assessments AS accepted_assessment
+            ON accepted_assessment.id = thread.current_assessment_id
+            AND accepted_assessment.work_thread_id = thread.id
+          WHERE run.status IN ('succeeded', 'failed', 'cancelled', 'interrupted', 'timed_out')
+            AND run.current_attempt_id IS NULL
+            AND run.assigned_runner_id IS NULL
+            AND attempt.selected_executor_id IS NOT NULL
+            AND attempt.status = run.status
+        ),
+        dimension_rows AS (
+          SELECT 'runner' AS dimension, runner_id AS id, accepted FROM attributable_runs
+          UNION ALL
+          SELECT 'executor' AS dimension, selected_executor_id AS id, accepted FROM attributable_runs
+        )
+        SELECT
+          'total' AS dimension,
+          NULL AS id,
+          count(*) AS completedRuns,
+          coalesce(sum(accepted), 0) AS acceptedCompletions
+        FROM attributable_runs
+        UNION ALL
+        SELECT
+          dimension,
+          id,
+          count(*) AS completedRuns,
+          coalesce(sum(accepted), 0) AS acceptedCompletions
+        FROM dimension_rows
+        GROUP BY dimension, id
+        ORDER BY dimension, id
+      `);
+      const total = aggregateRows.find((row) => row.dimension === "total");
+      const segment = (dimension: "runner" | "executor") => aggregateRows
+        .filter((row): row is AggregateRow & { id: string } => row.dimension === dimension && row.id !== null)
+        .map((row) => ({
+          id: row.id,
+          completedRuns: row.completedRuns,
+          acceptedCompletions: row.acceptedCompletions,
+          acceptanceRate: row.completedRuns === 0 ? 0 : row.acceptedCompletions / row.completedRuns
+        }));
+
+      return AcceptedCompletionMetricsSchema.parse({
+        completedRuns: total?.completedRuns ?? 0,
+        acceptedCompletions: total?.acceptedCompletions ?? 0,
+        byRunner: segment("runner"),
+        byExecutor: segment("executor")
+      });
     },
 
     async getRunMetrics(input: { runId: string }): Promise<OpenTagRunMetrics> {

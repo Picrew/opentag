@@ -455,6 +455,8 @@ describe("OpenTag CLI status", () => {
     const formatted = formatStatus(summary);
     expect(summary.dispatcher).toBe("offline");
     expect(formatted).toContain("Dispatcher: offline");
+    expect(formatted).toContain("Runner Directory:\n  unavailable (dispatcher offline)");
+    expect(formatted).toContain("Accepted Completion:\n  unavailable (dispatcher offline)");
     expect(formatted).toContain("Run Timeout: disabled");
     expect(formatted).toContain("Secrets:");
     expect(formatted).toContain("daemon.pairingToken: inline (redacted)");
@@ -707,6 +709,33 @@ describe("OpenTag CLI status", () => {
             ]
           });
         }
+        if (href.endsWith("/v1/runners")) {
+          return Response.json({
+            runners: [{
+              runnerId: "runner_local",
+              name: "Local runner",
+              locality: "local",
+              declaredState: "ready",
+              executors: [{ executorId: "codex", readiness: "unknown" }],
+              maxConcurrentRuns: 2,
+              preference: 0,
+              readiness: { state: "ready", reasonCode: "runner_heartbeat_current", reason: "Runner heartbeat is current." },
+              capacity: { active: 1, limit: 2 },
+              createdAt: "2026-07-25T00:00:00.000Z",
+              heartbeatAt: "2026-07-25T00:00:01.000Z"
+            }]
+          });
+        }
+        if (href.endsWith("/v1/routing/accepted-completion-metrics")) {
+          return Response.json({
+            metrics: {
+              completedRuns: 2,
+              acceptedCompletions: 1,
+              byRunner: [{ id: "runner_local", completedRuns: 2, acceptedCompletions: 1, acceptanceRate: 0.5 }],
+              byExecutor: [{ id: "codex", completedRuns: 2, acceptedCompletions: 1, acceptanceRate: 0.5 }]
+            }
+          });
+        }
         return Response.json({ error: "unexpected_url" }, { status: 500 });
       }) as unknown as typeof fetch
     });
@@ -714,9 +743,13 @@ describe("OpenTag CLI status", () => {
     const formatted = formatStatus(summary);
     expect(requests.map((request) => request.url)).toEqual([
       "http://localhost:3030/healthz",
-      "http://localhost:3030/v1/control-plane-alerts?limit=5"
+      "http://localhost:3030/v1/control-plane-alerts?limit=5",
+      "http://localhost:3030/v1/runners",
+      "http://localhost:3030/v1/routing/accepted-completion-metrics"
     ]);
     expect(requests[1]?.init?.headers).toMatchObject({ authorization: "Bearer runner_token" });
+    expect(requests[2]?.init?.headers).toMatchObject({ authorization: "Bearer runner_token" });
+    expect(requests[3]?.init?.headers).toMatchObject({ authorization: "Bearer runner_token" });
     expect(formatted).toContain("Control Plane Alerts:");
     expect(formatted).toContain("WARN abnormal_runner_claim_rate: runner_local count=10 threshold=10 last=2026-06-24T00:01:00.000Z");
     expect(formatted).toContain("Runner claim volume exceeded the local alert threshold.");
@@ -724,6 +757,12 @@ describe("OpenTag CLI status", () => {
     expect(formatted).toContain("WARN token_misuse: slack:app_token count=1 threshold=1 last=2026-06-24T00:02:00.000Z");
     expect(formatted).toContain("A platform or relay token failed with a terminal authentication or configuration error.");
     expect(formatted).toContain("Next: Rotate or replace the affected token, then restart or re-pair the ingress or runner that owns it.");
+    expect(formatted).toContain("Runner Directory:");
+    expect(formatted).toContain("runner_local: ready; locality=local; capacity=1/2; executors=codex");
+    expect(formatted).toContain("Accepted Completion:");
+    expect(formatted).toContain("total: 1/2");
+    expect(formatted).toContain("runner_local: 1/2 (50.0%)");
+    expect(formatted).toContain("codex: 1/2 (50.0%)");
     expect(formatted).not.toContain("xapp-");
   });
 
@@ -1121,9 +1160,9 @@ describe("OpenTag CLI status", () => {
       },
       metrics: {
         runId: "run_provenance_visible",
-        totalEventCount: 2,
+        totalEventCount: 3,
         humanEventCount: 0,
-        auditEventCount: 2,
+        auditEventCount: 3,
         debugEventCount: 0,
         humanCallbackCount: 0,
         threadNoiseRatio: 0,
@@ -1158,6 +1197,40 @@ describe("OpenTag CLI status", () => {
           }
         },
         {
+          type: "routing.decided",
+          visibility: "audit",
+          importance: "normal",
+          createdAt: "2026-06-24T00:00:05.000Z",
+          payload: {
+            id: "routing_status_1",
+            runId: "run_provenance_visible",
+            candidates: [
+              {
+                runnerId: "runner_1",
+                executorId: "codex",
+                eligible: true,
+                reasons: [{ code: "executor_ready", message: "Runner reported this executor ready." }],
+                locality: "local",
+                readiness: "ready",
+                capacity: { active: 0, limit: 1 }
+              },
+              {
+                runnerId: "runner_2",
+                executorId: "codex",
+                eligible: false,
+                reasons: [{ code: "runner_at_capacity", message: "Runner has no free concurrency slot." }],
+                locality: "private",
+                readiness: "at_capacity",
+                capacity: { active: 1, limit: 1 }
+              }
+            ],
+            selected: { runnerId: "runner_1", executorId: "codex" },
+            reasonCode: "preferred_eligible_candidate",
+            reason: "Selected the first eligible target in the configured stable preference order.",
+            decidedAt: "2026-06-24T00:00:05.000Z"
+          }
+        },
+        {
           type: "run.claimed",
           visibility: "audit",
           importance: "normal",
@@ -1176,6 +1249,10 @@ describe("OpenTag CLI status", () => {
     expect(formatted).toContain("Admission: start (new_event); event=evt_status_run");
     expect(formatted).toContain("Expected runner: runner_1");
     expect(formatted).toContain("Claimed runner: runner_1");
+    expect(formatted).toContain("Routing:");
+    expect(formatted).toContain("Selected: runner_1/codex");
+    expect(formatted).toContain("eligible runner_1/codex; capacity=0/1: executor_ready");
+    expect(formatted).toContain("rejected runner_2/codex; capacity=1/1: runner_at_capacity");
     expect(formatted).not.toContain("delivery_from_event");
     expect(formatted).not.toContain("checkoutPath");
     expect(formatted).not.toContain("localPath");

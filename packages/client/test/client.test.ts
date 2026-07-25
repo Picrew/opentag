@@ -98,6 +98,108 @@ function completionExplanationFixture() {
 }
 
 describe("@opentag/client", () => {
+  it("reports a fenced executor preflight rejection through the runner-scoped route", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test/",
+      pairingToken: "runner_token",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({ ok: true, replayed: false });
+      }
+    });
+
+    await client.rejectAttemptStart({
+      runnerId: "runner_private",
+      runId: "run_preflight",
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
+      executorId: "codex",
+      reason: "Run-specific executor readiness failed."
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(
+      "http://dispatcher.test/v1/runners/runner_private/runs/run_preflight/reject-start"
+    );
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect(new Headers(requests[0]?.init?.headers).get("authorization")).toBe("Bearer runner_token");
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
+      executorId: "codex",
+      reason: "Run-specific executor readiness failed."
+    });
+  });
+
+  it("registers and reads explainable runner routing control-plane data", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test/",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        const href = String(url);
+        requests.push({ url: href, init });
+        if (init?.method === "POST") return jsonResponse({ ok: true }, 201);
+        if (href.endsWith("/v1/runners")) {
+          return jsonResponse({
+            runners: [{
+              runnerId: "runner_private",
+              name: "Private runner",
+              locality: "private",
+              declaredState: "ready",
+              executors: [{ executorId: "codex", readiness: "ready" }],
+              maxConcurrentRuns: 2,
+              preference: 10,
+              readiness: { state: "ready", reasonCode: "runner_heartbeat_current", reason: "Runner heartbeat is current." },
+              capacity: { active: 1, limit: 2 },
+              createdAt: "2026-07-25T00:00:00.000Z",
+              heartbeatAt: "2026-07-25T00:00:01.000Z"
+            }]
+          });
+        }
+        return jsonResponse({
+          metrics: {
+            completedRuns: 2,
+            acceptedCompletions: 1,
+            byRunner: [{ id: "runner_private", completedRuns: 2, acceptedCompletions: 1, acceptanceRate: 0.5 }],
+            byExecutor: [{ id: "codex", completedRuns: 2, acceptedCompletions: 1, acceptanceRate: 0.5 }]
+          }
+        });
+      }
+    });
+
+    await client.registerRunner({
+      runnerId: "runner_private",
+      name: "Private runner",
+      locality: "private",
+      executors: [{ executorId: "codex", readiness: "ready" }],
+      maxConcurrentRuns: 2,
+      preference: 10
+    });
+    await expect(client.listRunners()).resolves.toMatchObject({
+      runners: [{ runnerId: "runner_private", readiness: { state: "ready" }, capacity: { active: 1, limit: 2 } }]
+    });
+    await expect(client.getAcceptedCompletionMetrics()).resolves.toMatchObject({
+      metrics: { completedRuns: 2, acceptedCompletions: 1, byExecutor: [{ id: "codex", acceptanceRate: 0.5 }] }
+    });
+
+    expect(requests.map((request) => request.url)).toEqual([
+      "http://dispatcher.test/v1/runners",
+      "http://dispatcher.test/v1/runners",
+      "http://dispatcher.test/v1/routing/accepted-completion-metrics"
+    ]);
+    expect(JSON.parse(String(requests[0]?.init?.body))).toMatchObject({
+      runnerId: "runner_private",
+      locality: "private",
+      executors: [{ executorId: "codex", readiness: "ready" }],
+      maxConcurrentRuns: 2,
+      preference: 10
+    });
+    expect(requests.map((request) => new Headers(request.init?.headers).get("authorization")))
+      .toEqual(["Bearer pair_1", "Bearer pair_1", "Bearer pair_1"]);
+  });
+
   it("reads completion explanations and submits attributed bounded waivers", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fixture = completionExplanationFixture();
@@ -347,6 +449,49 @@ describe("@opentag/client", () => {
     expect(claimed?.run.status).toBe("assigned");
     expect(claimed?.event.id).toBe("evt_1");
     expect(claimed).toMatchObject({ attemptId: "attempt_1", attemptNumber: 1, fencingToken: "fence_1" });
+  });
+
+  it("parses additive executor and routing decision fields from a claim", async () => {
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => jsonResponse({
+        run: {
+          id: "run_routed",
+          eventId: "evt_1",
+          status: "assigned",
+          assignedRunnerId: "runner_1",
+          createdAt: "2026-07-25T00:00:00.000Z",
+          updatedAt: "2026-07-25T00:00:01.000Z"
+        },
+        event,
+        attemptId: "attempt_routed",
+        attemptNumber: 1,
+        fencingToken: "fence_routed",
+        executorId: "codex",
+        routingDecision: {
+          id: "routing_routed",
+          runId: "run_routed",
+          candidates: [{
+            runnerId: "runner_1",
+            executorId: "codex",
+            eligible: true,
+            reasons: [{ code: "executor_ready", message: "Runner reported this executor ready." }]
+          }],
+          selected: { runnerId: "runner_1", executorId: "codex" },
+          reasonCode: "preferred_eligible_candidate",
+          reason: "Selected the first eligible target in the configured stable preference order.",
+          decidedAt: "2026-07-25T00:00:01.000Z"
+        }
+      })
+    });
+
+    await expect(client.claim({ runnerId: "runner_1" })).resolves.toMatchObject({
+      executorId: "codex",
+      routingDecision: {
+        selected: { runnerId: "runner_1", executorId: "codex" },
+        candidates: [{ eligible: true }]
+      }
+    });
   });
 
   it("includes dispatcher error bodies in thrown errors", async () => {

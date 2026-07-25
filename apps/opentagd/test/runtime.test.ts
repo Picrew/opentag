@@ -71,6 +71,7 @@ describe("opentagd runtime helpers", () => {
     expect(input.client).toEqual({
       claim: expect.any(Function),
       markRunning: expect.any(Function),
+      rejectAttemptStart: expect.any(Function),
       heartbeat: expect.any(Function),
       progress: expect.any(Function),
       complete: expect.any(Function),

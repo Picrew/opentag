@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isCredentialSafeDisplayResource, isCredentialSafeText, isCredentialSafeValue } from "./credential-safety.js";
+import { FrozenRoutingPolicySchema } from "./routing.js";
 
 export const ProviderSchema = z.string().min(1);
 export const SourceSchema = ProviderSchema;
@@ -502,9 +503,10 @@ export const FollowUpRequestSchema = z.object({
   conversationKey: z.string().min(1),
   activeRunId: z.string().min(1).optional(),
   event: z.lazy(() => OpenTagEventSchema),
-  decision: RunAdmissionDecisionSchema,
-  accessProfileSnapshot: AgentAccessProfileSnapshotSchema.optional(),
-  policySnapshotProvenance: PolicySnapshotProvenanceSchema.optional(),
+    decision: RunAdmissionDecisionSchema,
+    accessProfileSnapshot: AgentAccessProfileSnapshotSchema.optional(),
+    policySnapshotProvenance: PolicySnapshotProvenanceSchema.optional(),
+    routingPolicy: FrozenRoutingPolicySchema.optional(),
   status: FollowUpRequestStatusSchema,
   createdRunId: z.string().min(1).optional(),
   createdAt: z.string().datetime(),

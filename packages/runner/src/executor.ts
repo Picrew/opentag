@@ -1,5 +1,6 @@
 import {
   contextPointerLabel,
+  type ExecutorCapabilityContract,
   type ContextPacket,
   type ContextPointer,
   type OpenTagCommand,
@@ -145,28 +146,7 @@ export type ExecutorPromptMutation = "none" | "append" | "replace";
 export type ExecutorWriteActionAccess = "none" | "propose" | "execute";
 export type ExecutorWorkspaceCwdConformance = "declared" | "unverified";
 
-export type ExecutorCapabilityContract = {
-  id: string;
-  invocation: "spawn" | "hook_ingest" | "hybrid";
-  supportsProfile: boolean;
-  supportsStreaming: boolean;
-  supportsCancel: boolean;
-  supportsHookCompletion: boolean;
-  progressEvents: ExecutorProgressEventMode;
-  approvalMode: ExecutorApprovalMode;
-  contextAccess: ExecutorContextAccess[];
-  promptAssembly: ExecutorPromptAssembly;
-  writeAccess: ExecutorWriteAccess;
-  conversationAccess: ExecutorConversationAccess;
-  promptMutation: ExecutorPromptMutation;
-  rawContextAccess: boolean;
-  writeActionAccess: ExecutorWriteActionAccess;
-  workspaceIsolation: "none" | "branch" | "worktree" | "external";
-  workspaceCwdConformance?: ExecutorWorkspaceCwdConformance;
-  sourceControl?: "none" | "daemon_managed" | "self_committing";
-  requiredSecrets: ExecutorSecretRequirement[];
-  completionSignals: ExecutorCompletionSignal[];
-};
+export type { ExecutorCapabilityContract } from "@opentag/core";
 
 export type ExecutorAdapter = {
   id: string;

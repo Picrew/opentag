@@ -9,6 +9,9 @@ import {
   OpenTagEventSchema,
   OpenTagRunResultSchema,
   OpenTagRunSchema,
+  AcceptedCompletionMetricsSchema,
+  RoutingDecisionSchema,
+  RunnerDirectoryEntrySchema,
   RunAdmissionDecisionSchema,
   type ActorIdentity,
   type Action,
@@ -28,8 +31,13 @@ import {
   type OpenTagManagedChannelBindingOwnership,
   type OpenTagRun,
   type OpenTagRunResult,
+  type AcceptedCompletionMetrics,
   type PolicyRule,
   type ProposalLineage,
+  type RoutingDecision,
+  type RunnerDirectoryEntry,
+  type RunnerRegistrationConfig,
+  type RunnerRegistrationInput,
   type RunEventImportance,
   type RunEventVisibility,
   type SuggestedChangesSnapshot,
@@ -42,6 +50,8 @@ export type ClaimedOpenTagRun = {
   attemptId: string;
   attemptNumber: number;
   fencingToken: string;
+  executorId?: string;
+  routingDecision?: RoutingDecision;
 };
 
 export type OpenTagRunRecord = Pick<ClaimedOpenTagRun, "run" | "event">;
@@ -104,8 +114,10 @@ export type RepoBindingInput = {
   owner: string;
   repo: string;
   runnerId: string;
+  fallbackRunnerIds?: string[];
   workspacePath?: string;
   defaultExecutor?: string;
+  fallbackExecutorIds?: string[];
   allowedActors?: string[];
 };
 
@@ -115,6 +127,8 @@ export type RepositoryBindingConfig = {
   repo: string;
   checkoutPath: string;
   defaultExecutor?: string;
+  fallbackRunnerIds?: string[];
+  fallbackExecutorIds?: string[];
   baseBranch?: string;
   pushRemote?: string;
   worktreeRoot?: string;
@@ -146,12 +160,12 @@ type ChannelBindingRejectsPartialRepositoryTarget = Assert<
   { provider: string; accountId: string; conversationId: string; repoProvider: string } extends ChannelBindingInput ? false : true
 >;
 
-export type RunnerRegistration = {
-  runnerId: string;
-  name: string;
+export type RunnerRegistration = RunnerRegistrationConfig & {
   createdAt: string;
   heartbeatAt?: string;
 };
+
+export type RegisterRunnerInput = Omit<RunnerRegistrationInput, "name"> & { name?: string };
 
 export type ControlPlaneAlert = {
   id: string;
@@ -433,8 +447,9 @@ export type LinearOAuthInstallationStart = {
 };
 
 export type OpenTagClient = {
-  registerRunner(input: { runnerId: string; name?: string }): Promise<void>;
+  registerRunner(input: RegisterRunnerInput): Promise<void>;
   getRunner(input: { runnerId: string }): Promise<{ runner: RunnerRegistration }>;
+  listRunners(): Promise<{ runners: RunnerDirectoryEntry[] }>;
   listControlPlaneAlerts(input?: { limit?: number; since?: string }): Promise<{ alerts: ControlPlaneAlert[] }>;
   recordControlPlaneEvent(input: RecordControlPlaneEventInput): Promise<void>;
   ingestGitHubCompletionEvidence(input: GitHubCompletionEvidenceInput): Promise<void>;
@@ -464,6 +479,7 @@ export type OpenTagClient = {
   createRunFromFollowUpRequest(input: { id: string; runId: string }): Promise<{ followUpRequest: import("@opentag/core").FollowUpRequest; run: OpenTagRun }>;
   claim(input: { runnerId: string }): Promise<ClaimedOpenTagRun | null>;
   heartbeat(input: { runnerId: string; runId: string } & AttemptLease): Promise<void>;
+  rejectAttemptStart(input: { runnerId: string; runId: string; executorId: string; reason: string } & AttemptLease): Promise<void>;
   requestActionPermission(input: { runnerId: string; runId: string } & AttemptLease & { request: ActionPermissionRequest }): Promise<ActionPermissionResolution>;
   resolveActionPermission(input: { runnerId: string; runId: string; actionId: string } & AttemptLease): Promise<ActionPermissionResolution>;
   recordMaterialActionReceipt(input: { runnerId: string; runId: string; actionId: string; receipt: MaterialActionReceipt } & AttemptLease): Promise<ActionPermissionResolution>;
@@ -509,6 +525,7 @@ export type OpenTagClient = {
   getRunMetrics(input: { runId: string }): Promise<{ metrics: RunMetrics }>;
   getRepoMetrics(input: { provider: string; owner: string; repo: string }): Promise<{ metrics: AggregateMetrics }>;
   getWorkThreadMetrics(input: { threadId: string }): Promise<{ metrics: AggregateMetrics }>;
+  getAcceptedCompletionMetrics(): Promise<{ metrics: AcceptedCompletionMetrics }>;
   getProposal(input: { proposalId: string }): Promise<{ runId: string; snapshot: SuggestedChangesSnapshot }>;
   getProposalLineage(input: { proposalId: string }): Promise<{ lineage: ProposalLineage }>;
   listCurrentMutationIntents(input: { proposalId: string }): Promise<{ intents: MutationIntentActionability[] }>;
@@ -528,6 +545,7 @@ export type DispatcherRunnerClient = {
     lease: AttemptLease,
     options?: { executorCapability?: Record<string, unknown>; runTimeoutMs?: number; idempotencyKey?: string }
   ): Promise<void>;
+  rejectAttemptStart(runId: string, executorId: string, reason: string, lease: AttemptLease): Promise<void>;
   heartbeat(runId: string, lease: AttemptLease): Promise<void>;
   requestActionPermission(runId: string, lease: AttemptLease, request: ActionPermissionRequest): Promise<ActionPermissionResolution>;
   resolveActionPermission(runId: string, lease: AttemptLease, actionId: string): Promise<ActionPermissionResolution>;
@@ -623,6 +641,8 @@ function parseClaimedRun(body: {
   attemptId?: unknown;
   attemptNumber?: unknown;
   fencingToken?: unknown;
+  executorId?: unknown;
+  routingDecision?: unknown;
 }): ClaimedOpenTagRun {
   if (typeof body.attemptId !== "string" || !body.attemptId || typeof body.fencingToken !== "string" || !body.fencingToken) {
     throw new Error("claim returned an invalid attempt lease.");
@@ -630,12 +650,17 @@ function parseClaimedRun(body: {
   if (typeof body.attemptNumber !== "number" || !Number.isInteger(body.attemptNumber) || body.attemptNumber < 1) {
     throw new Error("claim returned an invalid attempt number.");
   }
+  if (body.executorId !== undefined && (typeof body.executorId !== "string" || !body.executorId)) {
+    throw new Error("claim returned an invalid executor placement.");
+  }
   return {
     run: OpenTagRunSchema.parse(body.run),
     event: OpenTagEventSchema.parse(body.event),
     attemptId: body.attemptId,
     attemptNumber: body.attemptNumber,
-    fencingToken: body.fencingToken
+    fencingToken: body.fencingToken,
+    ...(body.executorId ? { executorId: body.executorId } : {}),
+    ...(body.routingDecision !== undefined ? { routingDecision: RoutingDecisionSchema.parse(body.routingDecision) } : {})
   };
 }
 
@@ -654,7 +679,7 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       const response = await fetchImpl(`${baseUrl}/v1/runners`, {
         method: "POST",
         headers: jsonHeaders(options.pairingToken),
-        body: JSON.stringify({ runnerId: input.runnerId, name: input.name ?? input.runnerId })
+        body: JSON.stringify({ ...input, name: input.name ?? input.runnerId })
       });
       await assertOk(response, "registerRunner");
     },
@@ -665,6 +690,16 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       });
       await assertOk(response, "getRunner");
       return (await response.json()) as { runner: RunnerRegistration };
+    },
+
+    async listRunners() {
+      const response = await fetchImpl(`${baseUrl}/v1/runners`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "listRunners");
+      const body = (await response.json()) as { runners?: unknown };
+      if (!Array.isArray(body.runners)) throw new Error("listRunners returned an invalid directory.");
+      return { runners: body.runners.map((runner) => RunnerDirectoryEntrySchema.parse(runner)) };
     },
 
     async listControlPlaneAlerts(input = {}) {
@@ -943,6 +978,8 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         attemptId?: unknown;
         attemptNumber?: unknown;
         fencingToken?: unknown;
+        executorId?: unknown;
+        routingDecision?: unknown;
       });
     },
 
@@ -953,6 +990,20 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         body: JSON.stringify({ attemptId: input.attemptId, fencingToken: input.fencingToken })
       });
       await assertOk(response, "heartbeat");
+    },
+
+    async rejectAttemptStart(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}/runs/${input.runId}/reject-start`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify({
+          attemptId: input.attemptId,
+          fencingToken: input.fencingToken,
+          executorId: input.executorId,
+          reason: input.reason
+        })
+      });
+      await assertOk(response, "rejectAttemptStart");
     },
 
     async requestActionPermission(input) {
@@ -1227,6 +1278,15 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       return (await response.json()) as { metrics: AggregateMetrics };
     },
 
+    async getAcceptedCompletionMetrics() {
+      const response = await fetchImpl(`${baseUrl}/v1/routing/accepted-completion-metrics`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "getAcceptedCompletionMetrics");
+      const body = (await response.json()) as { metrics?: unknown };
+      return { metrics: AcceptedCompletionMetricsSchema.parse(body.metrics) };
+    },
+
     async getProposal(input) {
       const response = await fetchImpl(`${baseUrl}/v1/proposals/${input.proposalId}`, {
         headers: authHeaders(options.pairingToken)
@@ -1356,6 +1416,8 @@ export function createDispatcherClient(options: RunnerClientOptions): Dispatcher
         ...(markRunningOptions?.idempotencyKey ? { idempotencyKey: markRunningOptions.idempotencyKey } : {})
       }),
     heartbeat: (runId, lease) => client.heartbeat({ runnerId: options.runnerId, runId, ...lease }),
+    rejectAttemptStart: (runId, executorId, reason, lease) =>
+      client.rejectAttemptStart({ runnerId: options.runnerId, runId, executorId, reason, ...lease }),
     requestActionPermission: (runId, lease, request) => client.requestActionPermission({ runnerId: options.runnerId, runId, ...lease, request }),
     resolveActionPermission: (runId, lease, actionId) => client.resolveActionPermission({ runnerId: options.runnerId, runId, actionId, ...lease }),
     recordMaterialActionReceipt: (runId, lease, actionId, receipt) => client.recordMaterialActionReceipt({ runnerId: options.runnerId, runId, actionId, receipt, ...lease }),
@@ -1374,8 +1436,11 @@ export function createDispatcherClient(options: RunnerClientOptions): Dispatcher
 export function createDispatcherAdminClient(options: RunnerClientOptions) {
   const client = createOpenTagClient(options);
   return {
-    registerRunner(name = options.runnerId): Promise<void> {
-      return client.registerRunner({ runnerId: options.runnerId, name });
+    registerRunner(
+      name = options.runnerId,
+      registration: Omit<RegisterRunnerInput, "runnerId" | "name"> = {}
+    ): Promise<void> {
+      return client.registerRunner({ runnerId: options.runnerId, name, ...registration });
     },
 
     bindRepository(binding: RepositoryBindingConfig): Promise<void> {
@@ -1384,8 +1449,10 @@ export function createDispatcherAdminClient(options: RunnerClientOptions) {
         owner: binding.owner,
         repo: binding.repo,
         runnerId: options.runnerId,
+        ...(binding.fallbackRunnerIds?.length ? { fallbackRunnerIds: binding.fallbackRunnerIds } : {}),
         workspacePath: binding.checkoutPath,
-        ...(binding.defaultExecutor ? { defaultExecutor: binding.defaultExecutor } : {})
+        ...(binding.defaultExecutor ? { defaultExecutor: binding.defaultExecutor } : {}),
+        ...(binding.fallbackExecutorIds?.length ? { fallbackExecutorIds: binding.fallbackExecutorIds } : {})
       });
     },
 

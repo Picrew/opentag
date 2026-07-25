@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   AgentAccessProfileSnapshotSchema,
   conversationKeysFromEvent,
+  FrozenRoutingPolicySchema,
   isRepositoryFreePermissionScope,
   projectTargetRefFromEvent,
   PolicySnapshotProvenanceSchema,
@@ -9,6 +10,7 @@ import {
   type OpenTagEvent,
   type OpenTagRun,
   type AgentAccessProfileSnapshot,
+  type FrozenRoutingPolicy,
   type PolicyRule,
   type PolicySnapshotProvenance,
   type RunAdmissionDecision,
@@ -48,6 +50,7 @@ export type AdmitRunResult =
       decision: RunAdmissionDecision;
       accessProfileSnapshot: AgentAccessProfileSnapshot;
       policySnapshotProvenance: PolicySnapshotProvenance;
+      routingPolicy: FrozenRoutingPolicy;
       binding?: RepoBinding;
     }
   | {
@@ -68,6 +71,31 @@ export type AdmitRunResult =
 
 function isWriteCapable(event: OpenTagEvent): boolean {
   return event.permissions.some((permission) => ["repo:write", "pr:create", "pr:update"].includes(permission.scope));
+}
+
+function bindingExecutorIds(binding: RepoBinding | undefined): string[] | undefined {
+  if (!binding) return undefined;
+  const executorIds = [binding.defaultExecutor, ...(binding.fallbackExecutorIds ?? [])]
+    .filter((executorId): executorId is string => executorId !== undefined);
+  return executorIds.length > 0 ? executorIds : undefined;
+}
+
+function frozenRoutingPolicy(input: {
+  event: OpenTagEvent;
+  binding?: RepoBinding;
+  accessProfileSnapshot: AgentAccessProfileSnapshot;
+}): FrozenRoutingPolicy {
+  const configuredExecutorIds = bindingExecutorIds(input.binding);
+  return FrozenRoutingPolicySchema.parse({
+    runnerIds: input.binding
+      ? [input.binding.runnerId, ...(input.binding.fallbackRunnerIds ?? [])]
+      : input.accessProfileSnapshot.constraints.allowedRunnerIds ?? null,
+    executorIds: input.event.target.executorHint
+      ? [input.event.target.executorHint]
+      : configuredExecutorIds
+        ? configuredExecutorIds
+        : input.accessProfileSnapshot.constraints.allowedExecutorIds ?? null
+  });
 }
 
 function sourceRequiresRepositoryContext(source: OpenTagEvent["source"]): source is "github" | "gitlab" {
@@ -194,6 +222,7 @@ function defaultAdmissionSnapshots(input: {
   const projectTarget = projectTargetRefFromEvent(input.event);
   const sourceRef = projectTarget ? `${projectTarget.provider}:${projectTarget.owner}/${projectTarget.repo}` : undefined;
   const policySource = input.binding ? "repo_binding" as const : "repository_free" as const;
+  const configuredExecutorIds = bindingExecutorIds(input.binding);
   const policyContent = {
     source: policySource,
     ...(sourceRef ? { sourceRef } : {}),
@@ -202,7 +231,9 @@ function defaultAdmissionSnapshots(input: {
       ? {
           binding: {
             runnerId: input.binding.runnerId,
+            fallbackRunnerIds: input.binding.fallbackRunnerIds ?? [],
             ...(input.binding.defaultExecutor ? { defaultExecutor: input.binding.defaultExecutor } : {}),
+            fallbackExecutorIds: input.binding.fallbackExecutorIds ?? [],
             allowedActors: [...(input.binding.allowedActors ?? [])].sort()
           }
         }
@@ -241,8 +272,12 @@ function defaultAdmissionSnapshots(input: {
     constraints: {
       locality: "local_required",
       maximumRiskTier: "high",
-      ...(input.binding?.defaultExecutor ? { allowedExecutorIds: [input.binding.defaultExecutor] } : {}),
-      ...(input.binding ? { allowedRunnerIds: [input.binding.runnerId] } : {})
+      ...(configuredExecutorIds
+        ? { allowedExecutorIds: configuredExecutorIds }
+        : {}),
+      ...(input.binding
+        ? { allowedRunnerIds: [input.binding.runnerId, ...(input.binding.fallbackRunnerIds ?? [])] }
+        : {})
     },
     policySnapshotId: policySnapshotProvenance.id,
     capturedAt: input.capturedAt
@@ -410,6 +445,11 @@ export function createAdmissionRuntime(input: {
           })
         };
       }
+      const routingPolicy = frozenRoutingPolicy({
+        event: request.event,
+        ...(binding ? { binding } : {}),
+        accessProfileSnapshot: snapshots.accessProfileSnapshot
+      });
 
       let activeRun: { run: OpenTagRun; event: OpenTagEvent } | null = null;
       for (const conversationKey of conversationKeysFromEvent(request.event)) {
@@ -430,7 +470,8 @@ export function createAdmissionRuntime(input: {
           event: request.event,
           decision,
           activeRunId: activeRun.run.id,
-          ...snapshots
+          ...snapshots,
+          routingPolicy
         });
         if (created) {
           await input.repo.appendRunEvent({
@@ -459,6 +500,7 @@ export function createAdmissionRuntime(input: {
           decidedAt: admittedAt
         }),
         ...snapshots,
+        routingPolicy,
         ...(binding ? { binding } : {})
       };
     }

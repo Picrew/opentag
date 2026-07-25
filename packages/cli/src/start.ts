@@ -26,6 +26,8 @@ import {
   dispatcherRuntimeHardeningInputFromEnv,
   hermesProfileConfigurationWarning,
   normalizeChannelBindings,
+  executorsFromConfig,
+  runnerExecutorRegistrations,
   serveDaemon,
   startDispatcher,
   type LocalDispatcherRuntimeInput
@@ -93,7 +95,10 @@ export type StartFromConfigInput = {
 };
 
 export type BootstrapClient = {
-  registerRunner(name?: string): Promise<void>;
+  registerRunner(
+    name?: string,
+    registration?: Parameters<ReturnType<typeof createDispatcherAdminClient>["registerRunner"]>[1]
+  ): Promise<void>;
   bindRepository(binding: RepositoryBindingConfig): Promise<void>;
   upsertRepoMutationMapping?(input: {
     provider: string;
@@ -735,7 +740,11 @@ export async function bootstrapLocalDispatcher(config: OpenTagCliConfig, client?
       ...(config.daemon.pairingToken ? { pairingToken: config.daemon.pairingToken } : {})
     });
 
-  await admin.registerRunner(config.daemon.runnerId);
+  await admin.registerRunner(config.daemon.runnerId, {
+    locality: "local",
+    executors: runnerExecutorRegistrations(executorsFromConfig(config.daemon)),
+    maxConcurrentRuns: 1
+  });
   for (const repository of config.daemon.repositories) {
     await admin.bindRepository({
       provider: repository.provider,

@@ -257,6 +257,78 @@ describe("OpenTag repository", () => {
     );
   });
 
+  it("migrates legacy runner and repository bindings to explainable routing defaults without losing rows", async () => {
+    const sqlite = new Database(":memory:");
+    sqlite.exec(`
+      CREATE TABLE runners (
+        runner_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        heartbeat_at TEXT
+      );
+      INSERT INTO runners (runner_id, name, created_at, heartbeat_at)
+      VALUES ('runner_legacy', 'Legacy runner', '2026-07-25T00:00:00.000Z', '2026-07-25T00:00:01.000Z');
+
+      CREATE TABLE repo_bindings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        runner_id TEXT NOT NULL,
+        workspace_path TEXT,
+        default_executor TEXT,
+        allowed_actors_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO repo_bindings (
+        provider, owner, repo, runner_id, workspace_path, default_executor, allowed_actors_json, created_at
+      ) VALUES (
+        'github', 'acme', 'demo', 'runner_legacy', '/private/demo', 'echo', '["octocat"]',
+        '2026-07-25T00:00:00.000Z'
+      );
+    `);
+
+    expect(() => migrateSchema(sqlite)).not.toThrow();
+    expect(() => migrateSchema(sqlite)).not.toThrow();
+    expect(sqlite.prepare("SELECT * FROM runners WHERE runner_id = ?").get("runner_legacy")).toMatchObject({
+      name: "Legacy runner",
+      locality: "local",
+      declared_state: "ready",
+      executors_json: "[]",
+      max_concurrent_runs: 1_000,
+      preference: 0,
+      claim_cursor_created_at: null,
+      claim_cursor_run_id: null
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await expect(repo.getRepoBinding({ provider: "github", owner: "acme", repo: "demo" })).resolves.toEqual({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_legacy",
+      workspacePath: "/private/demo",
+      defaultExecutor: "echo",
+      allowedActors: ["octocat"]
+    });
+    expect(sqlite.prepare("SELECT fallback_runner_ids_json, fallback_executor_ids_json FROM repo_bindings").get())
+      .toEqual({ fallback_runner_ids_json: null, fallback_executor_ids_json: null });
+    const runColumns = sqlite.prepare("PRAGMA table_info(runs)").all() as { name: string }[];
+    expect(runColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "current_routing_decision_id",
+      "routing_policy_json",
+      "routing_runner_ids_json",
+      "routing_executor_ids_json",
+      "routing_rejections_json"
+    ]));
+    const attemptColumns = sqlite.prepare("PRAGMA table_info(attempts)").all() as { name: string }[];
+    expect(attemptColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "selected_executor_id",
+      "routing_decision_id"
+    ]));
+    const followUpColumns = sqlite.prepare("PRAGMA table_info(follow_up_requests)").all() as { name: string }[];
+    expect(followUpColumns.map((column) => column.name)).toContain("routing_policy_json");
+  });
+
   it("migrates repository-required channel bindings to nullable repository fields without losing rows", async () => {
     const sqlite = new Database(":memory:");
     sqlite.exec(`
@@ -3072,6 +3144,38 @@ describe("non-repository runner eligibility", () => {
     expect(claimed).toMatchObject({ run: { id: "run_scratch" }, event: { id: "evt_scratch" }, attemptNumber: 1 });
   });
 
+  it("keeps legacy direct-claim runners compatible through an implicit directory heartbeat", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    await repo.createRun({ id: "run_legacy_claim", event: ordinaryEvent("legacy_claim") });
+
+    const claimed = await repo.claimNextRun({ runnerId: "runner_legacy", leaseSeconds: 60 });
+
+    expect(claimed).toMatchObject({
+      run: { id: "run_legacy_claim", assignedRunnerId: "runner_legacy" },
+      routingDecision: {
+        selected: { runnerId: "runner_legacy", executorId: "custom" },
+        candidates: [
+          expect.objectContaining({
+            runnerId: "runner_legacy",
+            executorId: "custom",
+            eligible: true,
+            reasons: expect.arrayContaining([
+              expect.objectContaining({ code: "executor_capability_legacy_unspecified" })
+            ])
+          })
+        ]
+      }
+    });
+    await expect(repo.getRunner({ runnerId: "runner_legacy" })).resolves.toMatchObject({
+      runnerId: "runner_legacy",
+      name: "runner_legacy",
+      executors: [],
+      maxConcurrentRuns: 1_000
+    });
+  });
+
   it("does not let an unbound repository target fall back to scratch eligibility", async () => {
     const sqlite = new Database(":memory:");
     const repo = createOpenTagRepository(drizzle(sqlite));
@@ -3083,6 +3187,1114 @@ describe("non-repository runner eligibility", () => {
     });
 
     await expect(repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 })).resolves.toBeNull();
+  });
+});
+
+describe("explainable multi-runner routing", () => {
+  function routingEvent(id: string, executorHint = "codex") {
+    return {
+      id: `evt_${id}`,
+      source: "github" as const,
+      sourceEventId: `source_${id}`,
+      receivedAt: "2026-07-25T00:00:00.000Z",
+      actor: { provider: "github" as const, providerUserId: "42", handle: "octocat" },
+      target: { mention: "@opentag", agentId: "opentag", executorHint },
+      command: { rawText: "fix this", intent: "fix" as const, args: {} },
+      context: githubIssueContext(42),
+      workItem: githubIssueWorkItem(42),
+      permissions: [{ scope: "issue:comment" as const, reason: "reply to source thread" }],
+      callback: { provider: "github" as const, uri: "https://api.github.com/repos/acme/demo/issues/42/comments" },
+      metadata: { repoProvider: "github", owner: "acme", repo: "demo" }
+    };
+  }
+
+  function repositoryFreeRoutingEvent(id: string) {
+    return {
+      id: `evt_${id}`,
+      source: "slack" as const,
+      sourceEventId: `source_${id}`,
+      receivedAt: "2026-07-25T00:00:00.000Z",
+      actor: { provider: "slack" as const, providerUserId: "U123", handle: "alice" },
+      target: { mention: "@opentag", agentId: "opentag" },
+      command: { rawText: "summarize this thread", intent: "run" as const, args: {} },
+      context: [],
+      permissions: [],
+      callback: { provider: "slack" as const, uri: "https://example.com/callback" },
+      metadata: {}
+    };
+  }
+
+  function routingRepository() {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    return { sqlite, repo: createOpenTagRepository(drizzle(sqlite)) };
+  }
+
+  function routingExecutor(executorId: string, readiness: "ready" | "unknown" | "unavailable" = "ready") {
+    return {
+      executorId,
+      readiness,
+      capability: {
+        id: executorId,
+        invocation: "spawn" as const,
+        supportsProfile: false,
+        supportsStreaming: true,
+        supportsCancel: true,
+        supportsHookCompletion: false,
+        progressEvents: "audit" as const,
+        approvalMode: "opentag_policy" as const,
+        contextAccess: ["context_packet" as const, "context_pointers" as const, "workspace" as const],
+        promptAssembly: "opentag" as const,
+        writeAccess: "workspace" as const,
+        conversationAccess: "request" as const,
+        promptMutation: "none" as const,
+        rawContextAccess: false,
+        writeActionAccess: "propose" as const,
+        workspaceIsolation: "worktree" as const,
+        sourceControl: "self_committing" as const,
+        requiredSecrets: [],
+        completionSignals: [{ type: "stream_event" as const, required: true, description: "Executor stop response." }]
+      }
+    };
+  }
+
+  function routingAccess(
+    event: ReturnType<typeof routingEvent>,
+    constraints: { allowedRunnerIds?: string[]; allowedExecutorIds?: string[] }
+  ) {
+    const capturedAt = "2026-07-25T00:00:00.000Z";
+    const policySnapshotProvenance = {
+      id: `policy_${event.id}`,
+      source: "agent_access_profile" as const,
+      sourceRef: "github:acme/demo",
+      rules: [],
+      contentDigest: `sha256:${"a".repeat(64)}`,
+      capturedAt
+    };
+    return {
+      policySnapshotProvenance,
+      accessProfileSnapshot: {
+        id: `access_${event.id}`,
+        agentPrincipal: { id: "opentag", kind: "opentag_agent" as const },
+        requestedBy: event.actor,
+        projectTargets: ["github:acme/demo"],
+        connectionRefs: [],
+        permissions: [...event.permissions],
+        constraints: { locality: "local_required" as const, ...constraints },
+        policySnapshotId: policySnapshotProvenance.id,
+        capturedAt
+      }
+    };
+  }
+
+  it("keeps the configured primary target authoritative and explains eligible alternatives", async () => {
+    const { sqlite, repo } = routingRepository();
+    await repo.registerRunner({
+      runnerId: "runner-primary",
+      name: "Primary",
+      executors: [routingExecutor("codex")],
+      preference: 100
+    });
+    await repo.registerRunner({
+      runnerId: "runner-fallback",
+      name: "Fallback",
+      executors: [routingExecutor("codex")],
+      preference: 0
+    });
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner-primary",
+      fallbackRunnerIds: ["runner-fallback"],
+      defaultExecutor: "codex"
+    });
+    await repo.createRun({ id: "run_routing_preference", event: routingEvent("routing_preference") });
+
+    await expect(repo.claimNextRun({ runnerId: "runner-fallback", leaseSeconds: 60 })).resolves.toBeNull();
+    const claimed = await repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 });
+
+    expect(claimed).toMatchObject({
+      run: { id: "run_routing_preference", assignedRunnerId: "runner-primary" },
+      executorId: "codex",
+      routingDecision: {
+        reasonCode: "preferred_eligible_candidate",
+        selected: { runnerId: "runner-primary", executorId: "codex" },
+        candidates: [
+          { runnerId: "runner-primary", executorId: "codex", eligible: true },
+          { runnerId: "runner-fallback", executorId: "codex", eligible: true }
+        ]
+      }
+    });
+    const routingEvents = (await repo.listRunEvents({ runId: "run_routing_preference" }))
+      .filter((event) => event.type === "routing.decided");
+    expect(routingEvents).toHaveLength(1);
+    const runPlacement = sqlite.prepare(`
+      SELECT current_routing_decision_id AS currentRoutingDecisionId
+      FROM runs WHERE id = ?
+    `).get("run_routing_preference") as { currentRoutingDecisionId: string };
+    const attemptPlacement = sqlite.prepare(`
+      SELECT selected_executor_id AS selectedExecutorId, routing_decision_id AS routingDecisionId
+      FROM attempts WHERE id = ?
+    `).get(claimed!.attemptId) as { selectedExecutorId: string; routingDecisionId: string };
+    expect(attemptPlacement).toEqual({
+      selectedExecutorId: "codex",
+      routingDecisionId: runPlacement.currentRoutingDecisionId
+    });
+    expect(routingEvents[0]?.payload).toMatchObject({ id: runPlacement.currentRoutingDecisionId });
+  });
+
+  it("treats explicit empty runner and executor allowlists as deny-all constraints", async () => {
+    for (const [constraint, expectedReason] of [
+      ["allowedRunnerIds", "runner_not_allowed_by_access_profile"],
+      ["allowedExecutorIds", "executor_not_allowed_by_access_profile"]
+    ] as const) {
+      const { repo } = routingRepository();
+      await repo.registerRunner({
+        runnerId: "runner-primary",
+        name: "Primary",
+        executors: [routingExecutor("codex")]
+      });
+      await repo.createRepoBinding({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner-primary",
+        defaultExecutor: "codex"
+      });
+      const event = routingEvent(`empty_${constraint}`);
+      await repo.createRun({
+        id: `run_empty_${constraint}`,
+        event,
+        ...routingAccess(event, { [constraint]: [] })
+      });
+
+      await expect(repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 })).resolves.toBeNull();
+      const routingEvents = (await repo.listRunEvents({ runId: `run_empty_${constraint}` }))
+        .filter((candidate) => candidate.type === "routing.decided");
+      expect(routingEvents.at(-1)?.payload).toMatchObject({
+        reasonCode: "no_eligible_runner",
+        candidates: [expect.objectContaining({
+          eligible: false,
+          reasons: expect.arrayContaining([expect.objectContaining({ code: expectedReason })])
+        })]
+      });
+    }
+  });
+
+  it("keeps a run queued when its frozen executor policy is explicit deny-all", async () => {
+    const { repo } = routingRepository();
+    await repo.registerRunner({
+      runnerId: "runner-primary",
+      name: "Primary",
+      executors: [routingExecutor("codex")]
+    });
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner-primary",
+      defaultExecutor: "codex"
+    });
+    await repo.createRun({
+      id: "run_frozen_executor_deny_all",
+      event: routingEvent("frozen_executor_deny_all"),
+      routingPolicy: { runnerIds: ["runner-primary"], executorIds: [] }
+    });
+
+    await expect(repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 })).resolves.toBeNull();
+    await expect(repo.getRun({ runId: "run_frozen_executor_deny_all" })).resolves.toMatchObject({
+      run: { status: "queued" }
+    });
+    const routingEvents = (await repo.listRunEvents({ runId: "run_frozen_executor_deny_all" }))
+      .filter((candidate) => candidate.type === "routing.decided");
+    expect(routingEvents.at(-1)?.payload).toMatchObject({
+      reasonCode: "no_eligible_runner",
+      candidates: []
+    });
+  });
+
+  it("does not relax a frozen runner deny-all while claiming another run in the same window", async () => {
+    const { sqlite, repo } = routingRepository();
+    await repo.registerRunner({
+      runnerId: "runner-primary",
+      name: "Primary",
+      executors: [routingExecutor("codex")]
+    });
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner-primary",
+      defaultExecutor: "codex"
+    });
+    await repo.createRun({
+      id: "run_frozen_runner_deny_all",
+      event: routingEvent("frozen_runner_deny_all"),
+      routingPolicy: { runnerIds: [], executorIds: null }
+    });
+    await repo.createRun({
+      id: "run_frozen_runner_eligible",
+      event: routingEvent("frozen_runner_eligible")
+    });
+    sqlite.prepare("UPDATE runs SET created_at = ?").run("2026-07-25T00:00:00.000Z");
+
+    await expect(repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 })).resolves.toMatchObject({
+      run: { id: "run_frozen_runner_eligible" }
+    });
+    await expect(repo.getRun({ runId: "run_frozen_runner_deny_all" })).resolves.toMatchObject({
+      run: { status: "queued" }
+    });
+    const routingEvents = (await repo.listRunEvents({ runId: "run_frozen_runner_deny_all" }))
+      .filter((candidate) => candidate.type === "routing.decided");
+    expect(routingEvents.at(-1)?.payload).toMatchObject({
+      reasonCode: "no_eligible_runner",
+      candidates: []
+    });
+  });
+
+  it("freezes ordered runner and executor policy when the run is admitted", async () => {
+    const { sqlite, repo } = routingRepository();
+    await repo.registerRunner({
+      runnerId: "runner-primary",
+      name: "Primary",
+      executors: [routingExecutor("codex")]
+    });
+    await repo.registerRunner({
+      runnerId: "runner-fallback",
+      name: "Fallback",
+      executors: [routingExecutor("hermes")]
+    });
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner-primary",
+      fallbackRunnerIds: ["runner-fallback"],
+      defaultExecutor: "codex",
+      fallbackExecutorIds: ["hermes"]
+    });
+    const event = {
+      ...routingEvent("frozen_policy"),
+      target: { mention: "@opentag", agentId: "opentag" }
+    };
+    await repo.createRun({ id: "run_frozen_policy", event });
+
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner-fallback",
+      fallbackRunnerIds: ["runner-primary"],
+      defaultExecutor: "hermes",
+      fallbackExecutorIds: ["codex"]
+    });
+
+    await expect(repo.claimNextRun({ runnerId: "runner-fallback", leaseSeconds: 60 })).resolves.toBeNull();
+    await expect(repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 })).resolves.toMatchObject({
+      run: { id: "run_frozen_policy", assignedRunnerId: "runner-primary" },
+      executorId: "codex",
+      routingDecision: {
+        selected: { runnerId: "runner-primary", executorId: "codex" }
+      }
+    });
+    expect(sqlite.prepare(`
+      SELECT routing_runner_ids_json AS runnerIds, routing_executor_ids_json AS executorIds
+      FROM runs WHERE id = ?
+    `).get("run_frozen_policy")).toEqual({
+      runnerIds: JSON.stringify(["runner-primary", "runner-fallback"]),
+      executorIds: JSON.stringify(["codex", "hermes"])
+    });
+  });
+
+  it("preserves a queued follow-up routing policy through rebinding and promotion", async () => {
+    const { sqlite, repo } = routingRepository();
+    const event = {
+      ...routingEvent("follow_up_frozen_policy"),
+      target: { mention: "@opentag", agentId: "opentag" }
+    };
+    const routingPolicy = {
+      runnerIds: ["runner-admitted", "runner-admitted-fallback"],
+      executorIds: null
+    };
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner-admitted",
+      fallbackRunnerIds: ["runner-admitted-fallback"]
+    });
+    const queued = await repo.createFollowUpRequest({
+      id: "follow_up_frozen_policy",
+      event,
+      decision: {
+        action: "queue_follow_up",
+        reason: "An active run owns this conversation.",
+        reasonCode: "active_run_same_thread",
+        eventId: event.id,
+        activeRunId: "run_active",
+        decidedAt: "2026-07-25T00:00:00.000Z"
+      },
+      activeRunId: "run_active",
+      routingPolicy
+    });
+    expect(queued.followUpRequest.routingPolicy).toEqual(routingPolicy);
+
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner-rebound",
+      defaultExecutor: "hermes"
+    });
+    await repo.createRunFromFollowUpRequest({
+      followUpRequestId: "follow_up_frozen_policy",
+      runId: "run_from_frozen_follow_up"
+    });
+
+    expect(sqlite.prepare(`
+      SELECT routing_policy_json AS routingPolicy,
+             routing_runner_ids_json AS runnerIds,
+             routing_executor_ids_json AS executorIds
+      FROM runs WHERE id = ?
+    `).get("run_from_frozen_follow_up")).toEqual({
+      routingPolicy: JSON.stringify(routingPolicy),
+      runnerIds: JSON.stringify(routingPolicy.runnerIds),
+      executorIds: null
+    });
+    await expect(repo.claimNextRun({ runnerId: "runner-admitted", leaseSeconds: 60 })).resolves.toMatchObject({
+      run: { id: "run_from_frozen_follow_up" },
+      executorId: "echo"
+    });
+  });
+
+  it("preserves explicit directory capability when an older runner sends a minimal heartbeat", async () => {
+    const { repo } = routingRepository();
+    await repo.registerRunner({
+      runnerId: "runner-preserved",
+      name: "Modern registration",
+      locality: "private",
+      declaredState: "draining",
+      executors: [routingExecutor("codex")],
+      maxConcurrentRuns: 1,
+      preference: 25
+    });
+
+    await repo.registerRunner({ runnerId: "runner-preserved", name: "Legacy heartbeat" });
+    await repo.registerRunner({
+      runnerId: "runner-preserved",
+      name: "Forwarded heartbeat",
+      executors: undefined,
+      maxConcurrentRuns: undefined
+    });
+
+    await expect(repo.getRunner({ runnerId: "runner-preserved" })).resolves.toMatchObject({
+      runnerId: "runner-preserved",
+      name: "Forwarded heartbeat",
+      locality: "private",
+      declaredState: "draining",
+      executors: [expect.objectContaining({ executorId: "codex" })],
+      maxConcurrentRuns: 1,
+      preference: 25
+    });
+  });
+
+  it("requeues a failed executor preflight and selects the next frozen placement", async () => {
+    const { sqlite, repo } = routingRepository();
+    await repo.registerRunner({
+      runnerId: "runner-primary",
+      name: "Primary",
+      executors: [routingExecutor("codex"), routingExecutor("hermes")]
+    });
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner-primary",
+      defaultExecutor: "codex",
+      fallbackExecutorIds: ["hermes"]
+    });
+    const event = {
+      ...routingEvent("preflight_fallback"),
+      target: { mention: "@opentag", agentId: "opentag" }
+    };
+    await repo.createRun({ id: "run_preflight_fallback", event });
+    const first = await repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 });
+    if (!first) throw new Error("expected primary executor claim");
+    expect(first.executorId).toBe("codex");
+
+    await expect(repo.rejectAttemptStart({
+      runnerId: "runner-primary",
+      runId: "run_preflight_fallback",
+      attemptId: first.attemptId,
+      fencingToken: first.fencingToken,
+      executorId: "codex",
+      reason: "Run-specific executor readiness failed."
+    })).resolves.toBe("requeued");
+    await expect(repo.rejectAttemptStart({
+      runnerId: "runner-primary",
+      runId: "run_preflight_fallback",
+      attemptId: first.attemptId,
+      fencingToken: first.fencingToken,
+      executorId: "codex",
+      reason: "Run-specific executor readiness failed."
+    })).resolves.toBe("duplicate");
+
+    const second = await repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 });
+    expect(second).toMatchObject({
+      attemptNumber: 2,
+      executorId: "hermes",
+      routingDecision: {
+        selected: { runnerId: "runner-primary", executorId: "hermes" },
+        candidates: expect.arrayContaining([
+          expect.objectContaining({
+            executorId: "codex",
+            eligible: false,
+            reasons: expect.arrayContaining([expect.objectContaining({ code: "executor_preflight_rejected" })])
+          })
+        ])
+      }
+    });
+    expect(sqlite.prepare(`
+      SELECT status, selected_executor_id AS selectedExecutorId
+      FROM attempts WHERE run_id = ? ORDER BY number
+    `).all("run_preflight_fallback")).toEqual([
+      { status: "interrupted", selectedExecutorId: "codex" },
+      { status: "assigned", selectedExecutorId: "hermes" }
+    ]);
+  });
+
+  it("rejects a runner-reported executor that differs from authoritative placement", async () => {
+    const { repo } = routingRepository();
+    await repo.registerRunner({
+      runnerId: "runner-primary",
+      name: "Primary",
+      executors: [routingExecutor("codex"), routingExecutor("hermes")]
+    });
+    await repo.createRepoBinding({
+      provider: "github", owner: "acme", repo: "demo", runnerId: "runner-primary", defaultExecutor: "codex"
+    });
+    await repo.createRun({ id: "run_executor_fence", event: routingEvent("executor_fence") });
+    const claim = await repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 });
+    if (!claim) throw new Error("expected authoritative executor claim");
+    const lease = {
+      runnerId: "runner-primary",
+      runId: "run_executor_fence",
+      attemptId: claim.attemptId,
+      fencingToken: claim.fencingToken
+    };
+
+    await expect(repo.markRunning({ ...lease, executor: "hermes" })).resolves.toBe("stale_attempt");
+    await expect(repo.markRunning({ ...lease, executor: "codex" })).resolves.toBe("running");
+  });
+
+  it("falls back deterministically when the preferred runner reaches its concurrency budget", async () => {
+    const { repo } = routingRepository();
+    await repo.registerRunner({
+      runnerId: "runner-primary",
+      name: "Primary",
+      executors: [routingExecutor("codex")],
+      maxConcurrentRuns: 1
+    });
+    await repo.registerRunner({
+      runnerId: "runner-fallback",
+      name: "Fallback",
+      executors: [routingExecutor("codex")],
+      maxConcurrentRuns: 1
+    });
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner-primary",
+      fallbackRunnerIds: ["runner-fallback"],
+      defaultExecutor: "codex"
+    });
+    await repo.createRun({ id: "run_routing_active", event: routingEvent("routing_active") });
+    await expect(repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 })).resolves.toMatchObject({
+      run: { id: "run_routing_active" }
+    });
+    await repo.createRun({ id: "run_routing_fallback", event: routingEvent("routing_fallback") });
+
+    const claimed = await repo.claimNextRun({ runnerId: "runner-fallback", leaseSeconds: 60 });
+
+    expect(claimed).toMatchObject({
+      run: { id: "run_routing_fallback", assignedRunnerId: "runner-fallback" },
+      routingDecision: {
+        selected: { runnerId: "runner-fallback", executorId: "codex" },
+        candidates: [
+          {
+            runnerId: "runner-primary",
+            eligible: false,
+            reasons: expect.arrayContaining([expect.objectContaining({ code: "runner_at_capacity" })])
+          },
+          { runnerId: "runner-fallback", eligible: true }
+        ]
+      }
+    });
+  });
+
+  it("keeps a run queued and deduplicates the no-eligible-runner explanation", async () => {
+    const { repo } = routingRepository();
+    await repo.registerRunner({
+      runnerId: "runner-primary",
+      name: "Primary",
+      executors: [routingExecutor("echo")]
+    });
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner-primary",
+      defaultExecutor: "codex"
+    });
+    await repo.createRun({ id: "run_routing_none", event: routingEvent("routing_none") });
+
+    await expect(Promise.all([
+      repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 }),
+      repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 })
+    ])).resolves.toEqual([null, null]);
+    await expect(repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 })).resolves.toBeNull();
+
+    await expect(repo.getRun({ runId: "run_routing_none" })).resolves.toMatchObject({ run: { status: "queued" } });
+    const routingEvents = (await repo.listRunEvents({ runId: "run_routing_none" }))
+      .filter((event) => event.type === "routing.decided");
+    expect(routingEvents).toHaveLength(1);
+    expect(routingEvents[0]?.payload).toMatchObject({
+      reasonCode: "no_eligible_runner",
+      candidates: [{
+        runnerId: "runner-primary",
+        executorId: "codex",
+        eligible: false,
+        reasons: expect.arrayContaining([expect.objectContaining({ code: "executor_not_configured" })])
+      }]
+    });
+  });
+
+  it("keeps claim directory queries bounded as the queued run count grows", async () => {
+    async function selectCount(runCount: number) {
+      const { sqlite, repo } = routingRepository();
+      await repo.registerRunner({
+        runnerId: "runner-primary",
+        name: "Primary",
+        executors: [routingExecutor("echo")]
+      });
+      await repo.createRepoBinding({
+        provider: "github", owner: "acme", repo: "demo", runnerId: "runner-primary", defaultExecutor: "codex"
+      });
+      for (let index = 0; index < runCount; index += 1) {
+        await repo.createRun({ id: `run_query_${runCount}_${index}`, event: routingEvent(`query_${runCount}_${index}`) });
+      }
+      const originalPrepareMethod = sqlite.prepare;
+      const originalPrepare = sqlite.prepare.bind(sqlite);
+      let selectStatements = 0;
+      sqlite.prepare = ((source: string) => {
+        if (/^\s*select\b/iu.test(source)) selectStatements += 1;
+        return originalPrepare(source);
+      }) as typeof sqlite.prepare;
+      try {
+        await expect(repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 })).resolves.toBeNull();
+      } finally {
+        sqlite.prepare = originalPrepareMethod;
+      }
+      return selectStatements;
+    }
+
+    const oneRun = await selectCount(1);
+    const eightyRuns = await selectCount(80);
+    expect(eightyRuns).toBe(oneRun);
+  });
+
+  it("retains an explicit runner outside the bounded wildcard directory", async () => {
+    const { sqlite, repo } = routingRepository();
+    for (let index = 0; index < 256; index += 1) {
+      const suffix = index.toString().padStart(3, "0");
+      await repo.registerRunner({ runnerId: `runner_${suffix}`, name: `Runner ${suffix}` });
+    }
+    await repo.registerRunner({ runnerId: "runner_z", name: "Explicit Runner" });
+    await repo.createRun({
+      id: "run_directory_000_wildcard",
+      event: repositoryFreeRoutingEvent("directory_wildcard"),
+      routingPolicy: { runnerIds: null, executorIds: [] }
+    });
+    await repo.createRun({
+      id: "run_directory_001_explicit",
+      event: repositoryFreeRoutingEvent("directory_explicit"),
+      routingPolicy: { runnerIds: ["runner_z"], executorIds: null }
+    });
+    sqlite.prepare("UPDATE runs SET created_at = ?").run("2026-07-25T00:00:00.000Z");
+
+    await expect(repo.claimNextRun({ runnerId: "runner_z", leaseSeconds: 60 })).resolves.toBeNull();
+    expect(sqlite.prepare(`
+      SELECT claim_cursor_run_id AS claimCursorRunId FROM runners WHERE runner_id = ?
+    `).get("runner_z")).toEqual({ claimCursorRunId: "run_directory_000_wildcard" });
+    await expect(repo.claimNextRun({ runnerId: "runner_z", leaseSeconds: 60 })).resolves.toMatchObject({
+      run: { id: "run_directory_001_explicit", assignedRunnerId: "runner_z" },
+      routingDecision: { selected: { runnerId: "runner_z", executorId: "echo" } }
+    });
+    expect(sqlite.prepare(`
+      SELECT claim_cursor_run_id AS claimCursorRunId FROM runners WHERE runner_id = ?
+    `).get("runner_z")).toEqual({ claimCursorRunId: "run_directory_001_explicit" });
+    await expect(repo.getRun({ runId: "run_directory_000_wildcard" })).resolves.toMatchObject({
+      run: { status: "queued" }
+    });
+  });
+
+  it("keeps a wildcard decision stable when later exact policies fill the directory cap", async () => {
+    const { sqlite, repo } = routingRepository();
+    await repo.registerRunner({ runnerId: "runner_top", name: "Top Runner", preference: -100 });
+    await repo.registerRunner({ runnerId: "runner_caller", name: "Polling Runner", preference: -50 });
+    const exactRunnerIds: string[] = [];
+    for (let index = 0; index < 255; index += 1) {
+      const suffix = index.toString().padStart(3, "0");
+      const runnerId = `runner_exact_${suffix}`;
+      exactRunnerIds.push(runnerId);
+      await repo.registerRunner({ runnerId, name: `Exact Runner ${suffix}` });
+    }
+    await repo.createRun({
+      id: "run_directory_stability_000_wildcard",
+      event: repositoryFreeRoutingEvent("directory_stability_wildcard"),
+      routingPolicy: { runnerIds: null, executorIds: null }
+    });
+    for (let index = 0; index < exactRunnerIds.length; index += 64) {
+      const group = (index / 64 + 1).toString().padStart(3, "0");
+      await repo.createRun({
+        id: `run_directory_stability_${group}_exact`,
+        event: repositoryFreeRoutingEvent(`directory_stability_${group}_exact`),
+        routingPolicy: { runnerIds: exactRunnerIds.slice(index, index + 64), executorIds: [] }
+      });
+    }
+    sqlite.prepare("UPDATE runs SET created_at = ?").run("2026-07-25T00:00:00.000Z");
+
+    await expect(repo.claimNextRun({ runnerId: "runner_caller", leaseSeconds: 60 })).resolves.toBeNull();
+    const routingEvents = (await repo.listRunEvents({ runId: "run_directory_stability_000_wildcard" }))
+      .filter((candidate) => candidate.type === "routing.decided");
+    expect(routingEvents.at(-1)?.payload).toMatchObject({
+      selected: { runnerId: "runner_top", executorId: "echo" }
+    });
+    expect(sqlite.prepare(`
+      SELECT claim_cursor_run_id AS claimCursorRunId FROM runners WHERE runner_id = ?
+    `).get("runner_caller")).toEqual({ claimCursorRunId: "run_directory_stability_000_wildcard" });
+    await expect(repo.getRun({ runId: "run_directory_stability_000_wildcard" })).resolves.toMatchObject({
+      run: { status: "queued" }
+    });
+  });
+
+  it("keeps the bounded wildcard directory independent of the polling runner", async () => {
+    const { repo } = routingRepository();
+    for (let index = 0; index < 256; index += 1) {
+      const suffix = index.toString().padStart(3, "0");
+      await repo.registerRunner({
+        runnerId: `runner_ranked_${suffix}`,
+        name: `Ranked Runner ${suffix}`,
+        declaredState: index < 255 ? "draining" : "ready",
+        preference: index
+      });
+    }
+    await repo.registerRunner({ runnerId: "runner_ranked_caller", name: "Polling Runner", preference: 1_000 });
+    await repo.createRun({
+      id: "run_wildcard_preference_boundary",
+      event: repositoryFreeRoutingEvent("wildcard_preference_boundary"),
+      routingPolicy: { runnerIds: null, executorIds: null }
+    });
+
+    await expect(repo.claimNextRun({ runnerId: "runner_ranked_caller", leaseSeconds: 60 })).resolves.toBeNull();
+    const routingEvents = (await repo.listRunEvents({ runId: "run_wildcard_preference_boundary" }))
+      .filter((candidate) => candidate.type === "routing.decided");
+    expect(routingEvents.at(-1)?.payload).toMatchObject({
+      selected: { runnerId: "runner_ranked_255", executorId: "echo" },
+      candidates: expect.not.arrayContaining([
+        expect.objectContaining({ runnerId: "runner_ranked_caller" })
+      ])
+    });
+  });
+
+  it("advances a fair claim cursor beyond an ineligible scan window", async () => {
+    const { sqlite, repo } = routingRepository();
+    await repo.registerRunner({
+      runnerId: "runner-primary",
+      name: "Primary",
+      executors: [routingExecutor("codex")]
+    });
+    await repo.createRepoBinding({
+      provider: "github", owner: "acme", repo: "demo", runnerId: "runner-primary", defaultExecutor: "codex"
+    });
+    for (let index = 0; index < 80; index += 1) {
+      const suffix = index.toString().padStart(3, "0");
+      await repo.createRun({
+        id: `run_fair_${suffix}`,
+        event: routingEvent(`fair_${suffix}`, "hermes")
+      });
+    }
+    await repo.createRun({ id: "run_fair_999", event: routingEvent("fair_999", "codex") });
+    sqlite.prepare("UPDATE runs SET created_at = ?").run("2026-07-25T00:00:00.000Z");
+
+    await expect(repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 })).resolves.toBeNull();
+    const firstCursor = sqlite.prepare(`
+      SELECT claim_cursor_run_id AS claimCursorRunId FROM runners WHERE runner_id = ?
+    `).get("runner-primary") as { claimCursorRunId: string | null };
+    expect(firstCursor.claimCursorRunId).toMatch(/^run_fair_\d{3}$/u);
+    expect(firstCursor.claimCursorRunId).not.toBe("run_fair_999");
+    await expect(repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 })).resolves.toMatchObject({
+      run: { id: "run_fair_999" },
+      executorId: "codex"
+    });
+  });
+
+  it("recovers expired leases in a fixed-size batch", async () => {
+    const { sqlite, repo } = routingRepository();
+    await repo.registerRunner({
+      runnerId: "runner-recovery",
+      name: "Recovery poller",
+      executors: [routingExecutor("codex")]
+    });
+    for (let index = 0; index < 40; index += 1) {
+      const suffix = index.toString().padStart(2, "0");
+      await repo.createRun({
+        id: `run_expired_${suffix}`,
+        event: {
+          ...routingEvent(`expired_${suffix}`),
+          metadata: { repoProvider: "github", owner: "acme", repo: `unbound-${suffix}` }
+        }
+      });
+    }
+    sqlite.prepare(`
+      UPDATE runs
+      SET status = 'assigned', assigned_runner_id = 'runner-expired',
+          leased_at = '2026-07-24T00:00:00.000Z', lease_expires_at = '2026-07-24T00:01:00.000Z',
+          heartbeat_at = '2026-07-24T00:00:30.000Z'
+    `).run();
+
+    await expect(repo.claimNextRun({ runnerId: "runner-recovery", leaseSeconds: 60 })).resolves.toBeNull();
+    expect(sqlite.prepare("SELECT status, count(*) AS count FROM runs GROUP BY status ORDER BY status").all()).toEqual([
+      { status: "assigned", count: 8 },
+      { status: "queued", count: 32 }
+    ]);
+  });
+
+  it("projects current heartbeat and capacity in the runner directory", async () => {
+    const { sqlite, repo } = routingRepository();
+    await repo.registerRunner({ runnerId: "runner-ready", name: "Ready", maxConcurrentRuns: 2 });
+    await repo.registerRunner({ runnerId: "runner-stale", name: "Stale" });
+    await repo.registerRunner({ runnerId: "runner-invalid", name: "Invalid heartbeat" });
+    sqlite.prepare("UPDATE runners SET heartbeat_at = ? WHERE runner_id = ?")
+      .run("2020-01-01T00:00:00.000Z", "runner-stale");
+    sqlite.prepare("UPDATE runners SET heartbeat_at = ? WHERE runner_id = ?")
+      .run("not-a-timestamp", "runner-invalid");
+
+    await expect(repo.listRunners()).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        runnerId: "runner-ready",
+        readiness: expect.objectContaining({ state: "ready" }),
+        capacity: { active: 0, limit: 2 }
+      }),
+      expect.objectContaining({
+        runnerId: "runner-stale",
+        readiness: expect.objectContaining({ state: "stale" })
+      }),
+      expect.objectContaining({
+        runnerId: "runner-invalid",
+        readiness: expect.objectContaining({ state: "stale" })
+      })
+    ]));
+  });
+
+  it("rejects fallback executors without an authoritative primary executor", async () => {
+    const { repo } = routingRepository();
+
+    await expect(repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner-primary",
+      fallbackExecutorIds: ["codex"]
+    })).rejects.toThrow(/require a primary default executor/iu);
+  });
+
+  it("attributes accepted completion to the authoritative latest run without per-run correlation queries", async () => {
+    const { sqlite, repo } = routingRepository();
+    await repo.registerRunner({
+      runnerId: "runner-old",
+      name: "Old",
+      executors: [routingExecutor("codex")]
+    });
+    await repo.registerRunner({
+      runnerId: "runner-new",
+      name: "New",
+      executors: [routingExecutor("hermes")]
+    });
+    await repo.createRepoBinding({
+      provider: "github", owner: "acme", repo: "demo", runnerId: "runner-old", defaultExecutor: "codex"
+    });
+    const oldRun = await repo.createRun({ id: "run_metric_old", event: routingEvent("metric_old", "codex") });
+    const oldClaim = await repo.claimNextRun({ runnerId: "runner-old", leaseSeconds: 60 });
+    if (!oldClaim) throw new Error("expected old run claim");
+    await repo.markRunning({
+      runnerId: "runner-old",
+      runId: oldRun.run.id,
+      attemptId: oldClaim.attemptId,
+      fencingToken: oldClaim.fencingToken,
+      executor: "codex"
+    });
+    await repo.completeRun({
+      runnerId: "runner-old",
+      runId: oldRun.run.id,
+      attemptId: oldClaim.attemptId,
+      fencingToken: oldClaim.fencingToken,
+      result: { conclusion: "success", summary: "Old run complete." }
+    });
+
+    await repo.createRepoBinding({
+      provider: "github", owner: "acme", repo: "demo", runnerId: "runner-new", defaultExecutor: "hermes"
+    });
+    const newRun = await repo.createRun({ id: "run_metric_new", event: routingEvent("metric_new", "hermes") });
+    const newClaim = await repo.claimNextRun({ runnerId: "runner-new", leaseSeconds: 60 });
+    if (!newClaim) throw new Error("expected new run claim");
+    await repo.markRunning({
+      runnerId: "runner-new",
+      runId: newRun.run.id,
+      attemptId: newClaim.attemptId,
+      fencingToken: newClaim.fencingToken,
+      executor: "hermes"
+    });
+    await repo.completeRun({
+      runnerId: "runner-new",
+      runId: newRun.run.id,
+      attemptId: newClaim.attemptId,
+      fencingToken: newClaim.fencingToken,
+      result: { conclusion: "success", summary: "New run complete." }
+    });
+    const threadId = newRun.run.thread?.id;
+    if (!threadId) throw new Error("expected durable WorkThread");
+    sqlite.prepare(`
+      INSERT INTO completion_assessments (
+        id, work_thread_id, contract_id, contract_version, cycle, sequence,
+        input_digest, state, assessment_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "assessment_metric_current",
+      threadId,
+      "contract_metric",
+      1,
+      1,
+      1,
+      `sha256:${"a".repeat(64)}`,
+      "satisfied",
+      JSON.stringify({
+        id: "assessment_metric_current",
+        workThreadId: threadId,
+        triggeredByRunId: newRun.run.id,
+        contractId: "contract_metric",
+        contractVersion: 1,
+        cycle: 1,
+        sequence: 1,
+        inputDigest: `sha256:${"a".repeat(64)}`,
+        targetBindings: [],
+        state: "satisfied",
+        evidenceBacked: true,
+        gateResults: [{
+          gateId: "checks",
+          state: "passed",
+          evidenceIds: ["evidence_metric"],
+          reasonCode: "verification_passed",
+          reason: "Required checks passed with provider evidence.",
+          evaluatedAt: "2026-07-25T00:01:00.000Z"
+        }],
+        assessedAt: "2026-07-25T00:01:00.000Z",
+        assessedBy: "opentag",
+        acceptedAt: "2026-07-25T00:01:00.000Z"
+      }),
+      "2026-07-25T00:01:00.000Z"
+    );
+    sqlite.prepare("UPDATE work_threads SET current_assessment_id = ? WHERE id = ?")
+      .run("assessment_metric_current", threadId);
+
+    await repo.createRepoBinding({
+      provider: "github", owner: "acme", repo: "demo", runnerId: "runner-old", defaultExecutor: "codex"
+    });
+    const compatibilityRun = await repo.createRun({
+      id: "run_metric_compatibility",
+      event: {
+        ...routingEvent("metric_compatibility", "codex"),
+        context: githubIssueContext(43),
+        workItem: githubIssueWorkItem(43),
+        callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/43/comments" }
+      }
+    });
+    const compatibilityClaim = await repo.claimNextRun({ runnerId: "runner-old", leaseSeconds: 60 });
+    if (!compatibilityClaim) throw new Error("expected compatibility run claim");
+    await repo.markRunning({
+      runnerId: "runner-old",
+      runId: compatibilityRun.run.id,
+      attemptId: compatibilityClaim.attemptId,
+      fencingToken: compatibilityClaim.fencingToken,
+      executor: "codex"
+    });
+    await repo.completeRun({
+      runnerId: "runner-old",
+      runId: compatibilityRun.run.id,
+      attemptId: compatibilityClaim.attemptId,
+      fencingToken: compatibilityClaim.fencingToken,
+      result: { conclusion: "success", summary: "Compatibility execution succeeded." }
+    });
+    const compatibilityThreadId = compatibilityRun.run.thread?.id;
+    if (!compatibilityThreadId) throw new Error("expected compatibility WorkThread");
+    const compatibilityAssessment = {
+      id: "assessment_metric_compatibility",
+      workThreadId: compatibilityThreadId,
+      triggeredByRunId: compatibilityRun.run.id,
+      contractId: "contract_metric_compatibility",
+      contractVersion: 1,
+      cycle: 1,
+      sequence: 1,
+      inputDigest: `sha256:${"b".repeat(64)}`,
+      targetBindings: [],
+      state: "satisfied",
+      evidenceBacked: false,
+      gateResults: [{
+        gateId: "execution",
+        state: "passed",
+        evidenceIds: [],
+        reasonCode: "execution_succeeded",
+        reason: "Executor reported success through the compatibility contract.",
+        evaluatedAt: "2026-07-25T00:02:00.000Z"
+      }],
+      assessedAt: "2026-07-25T00:02:00.000Z",
+      assessedBy: "opentag",
+      acceptedAt: "2026-07-25T00:02:00.000Z"
+    };
+    sqlite.prepare(`
+      INSERT INTO completion_assessments (
+        id, work_thread_id, contract_id, contract_version, cycle, sequence,
+        input_digest, state, assessment_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      compatibilityAssessment.id,
+      compatibilityThreadId,
+      compatibilityAssessment.contractId,
+      1,
+      1,
+      1,
+      compatibilityAssessment.inputDigest,
+      compatibilityAssessment.state,
+      JSON.stringify(compatibilityAssessment),
+      compatibilityAssessment.assessedAt
+    );
+    sqlite.prepare("UPDATE work_threads SET current_assessment_id = ? WHERE id = ?")
+      .run(compatibilityAssessment.id, compatibilityThreadId);
+
+    const originalPrepareMethod = sqlite.prepare;
+    const originalPrepare = sqlite.prepare.bind(sqlite);
+    let aggregateReadStatements = 0;
+    sqlite.prepare = ((source: string) => {
+      if (/^\s*(?:select|with)\b/iu.test(source)) aggregateReadStatements += 1;
+      return originalPrepare(source);
+    }) as typeof sqlite.prepare;
+    let metrics;
+    try {
+      metrics = await repo.getAcceptedCompletionMetrics();
+    } finally {
+      sqlite.prepare = originalPrepareMethod;
+    }
+
+    expect(metrics).toEqual({
+      completedRuns: 3,
+      acceptedCompletions: 1,
+      byRunner: [
+        { id: "runner-new", completedRuns: 1, acceptedCompletions: 1, acceptanceRate: 1 },
+        { id: "runner-old", completedRuns: 2, acceptedCompletions: 0, acceptanceRate: 0 }
+      ],
+      byExecutor: [
+        { id: "codex", completedRuns: 2, acceptedCompletions: 0, acceptanceRate: 0 },
+        { id: "hermes", completedRuns: 1, acceptedCompletions: 1, acceptanceRate: 1 }
+      ]
+    });
+    expect(aggregateReadStatements).toBe(2);
+
+    sqlite.prepare("UPDATE work_threads SET current_assessment_id = ? WHERE id = ?")
+      .run("assessment_metric_current", compatibilityThreadId);
+    await expect(repo.getAcceptedCompletionMetrics()).resolves.toEqual(metrics);
+    sqlite.prepare("UPDATE work_threads SET current_assessment_id = ? WHERE id = ?")
+      .run(compatibilityAssessment.id, compatibilityThreadId);
+
+    const acceptedAssessmentRow = sqlite.prepare(`
+      SELECT assessment_json AS assessmentJson FROM completion_assessments WHERE id = ?
+    `).get("assessment_metric_current") as { assessmentJson: string };
+    const acceptedAssessment = JSON.parse(acceptedAssessmentRow.assessmentJson) as Record<string, unknown>;
+    sqlite.prepare("UPDATE completion_assessments SET assessment_json = ? WHERE id = ?").run(JSON.stringify({
+      id: "assessment_metric_current",
+      workThreadId: threadId,
+      state: "satisfied",
+      evidenceBacked: true
+    }), "assessment_metric_current");
+    await expect(repo.getAcceptedCompletionMetrics()).resolves.toMatchObject({
+      completedRuns: 3,
+      acceptedCompletions: 0,
+      byRunner: [
+        { id: "runner-new", acceptedCompletions: 0 },
+        { id: "runner-old", acceptedCompletions: 0 }
+      ],
+      byExecutor: [
+        { id: "codex", acceptedCompletions: 0 },
+        { id: "hermes", acceptedCompletions: 0 }
+      ]
+    });
+
+    sqlite.prepare("UPDATE completion_assessments SET assessment_json = ? WHERE id = ?").run(JSON.stringify({
+      ...acceptedAssessment,
+      state: "waived",
+      assessedBy: "human"
+    }), "assessment_metric_current");
+    await expect(repo.getAcceptedCompletionMetrics()).resolves.toMatchObject({
+      completedRuns: 3,
+      acceptedCompletions: 0
+    });
+
+    sqlite.prepare("UPDATE completion_assessments SET assessment_json = ? WHERE id = ?")
+      .run("not-json", "assessment_metric_current");
+    await expect(repo.getAcceptedCompletionMetrics()).resolves.toMatchObject({
+      completedRuns: 3,
+      acceptedCompletions: 0
+    });
+  });
+
+  it("does not count needs-approval completion as an accepted completion attempt", async () => {
+    const { repo } = routingRepository();
+    await repo.registerRunner({
+      runnerId: "runner-primary",
+      name: "Primary",
+      executors: [routingExecutor("codex")]
+    });
+    await repo.createRepoBinding({
+      provider: "github", owner: "acme", repo: "demo", runnerId: "runner-primary", defaultExecutor: "codex"
+    });
+    await repo.createRun({ id: "run_metrics_needs_approval", event: routingEvent("metrics_needs_approval") });
+    const claim = await repo.claimNextRun({ runnerId: "runner-primary", leaseSeconds: 60 });
+    if (!claim) throw new Error("expected metrics claim");
+    await repo.markRunning({
+      runnerId: "runner-primary",
+      runId: "run_metrics_needs_approval",
+      attemptId: claim.attemptId,
+      fencingToken: claim.fencingToken,
+      executor: "codex"
+    });
+    await repo.completeRun({
+      runnerId: "runner-primary",
+      runId: "run_metrics_needs_approval",
+      attemptId: claim.attemptId,
+      fencingToken: claim.fencingToken,
+      result: { conclusion: "needs_human", summary: "Approval is still required." }
+    });
+
+    await expect(repo.getRun({ runId: "run_metrics_needs_approval" })).resolves.toMatchObject({
+      run: { status: "needs_approval" }
+    });
+    await expect(repo.getAcceptedCompletionMetrics()).resolves.toEqual({
+      completedRuns: 0,
+      acceptedCompletions: 0,
+      byRunner: [],
+      byExecutor: []
+    });
   });
 });
 

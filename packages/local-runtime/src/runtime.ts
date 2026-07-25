@@ -8,6 +8,7 @@ import {
   type ExecutorAdapter,
   type RunnerSecurityPolicy
 } from "@opentag/runner";
+import type { RunnerExecutorRegistration } from "@opentag/core";
 import { runnerDispatcherToken, type OpenTagDaemonConfig } from "./config.js";
 import type { DaemonClient } from "./daemon.js";
 import type { PullRequestOptions } from "./pr.js";
@@ -86,6 +87,19 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
     );
   }
   return executors;
+}
+
+export function runnerExecutorRegistrations(
+  executors: Record<string, ExecutorAdapter>
+): RunnerExecutorRegistration[] {
+  return Object.values(executors)
+    .map((executor) => ({
+      executorId: executor.id,
+      ...(executor.capability ? { capability: { ...executor.capability } } : {}),
+      readiness: "ready" as const,
+      reason: "Executor is configured; run-specific readiness is verified before execution starts."
+    }))
+    .sort((left, right) => left.executorId.localeCompare(right.executorId));
 }
 
 export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {

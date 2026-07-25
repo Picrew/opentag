@@ -64,6 +64,13 @@ import {
   OpenTagThreadRefSchema,
   OpenTagWorkItemRefSchema
 } from "./integration-protocol.js";
+import {
+  AcceptedCompletionMetricsSchema,
+  FrozenRoutingPolicySchema,
+  RoutingDecisionSchema,
+  RunnerDirectoryEntrySchema,
+  RunnerRegistrationInputSchema
+} from "./routing.js";
 
 export const OpenTagJsonSchemas = {
   OpenTagEvent: zodToJsonSchema(OpenTagEventSchema, "OpenTagEvent"),
@@ -124,5 +131,10 @@ export const OpenTagJsonSchemas = {
   SuggestedChangesSnapshot: zodToJsonSchema(SuggestedChangesSnapshotSchema, "SuggestedChangesSnapshot"),
   ApprovalDecision: zodToJsonSchema(ApprovalDecisionSchema, "ApprovalDecision"),
   ApplyPlan: zodToJsonSchema(ApplyPlanSchema, "ApplyPlan"),
-  ApplyIntentOutcome: zodToJsonSchema(ApplyIntentOutcomeSchema, "ApplyIntentOutcome")
+  ApplyIntentOutcome: zodToJsonSchema(ApplyIntentOutcomeSchema, "ApplyIntentOutcome"),
+  FrozenRoutingPolicy: zodToJsonSchema(FrozenRoutingPolicySchema, "FrozenRoutingPolicy"),
+  RunnerRegistration: zodToJsonSchema(RunnerRegistrationInputSchema, "RunnerRegistration"),
+  RunnerDirectoryEntry: zodToJsonSchema(RunnerDirectoryEntrySchema, "RunnerDirectoryEntry"),
+  RoutingDecision: zodToJsonSchema(RoutingDecisionSchema, "RoutingDecision"),
+  AcceptedCompletionMetrics: zodToJsonSchema(AcceptedCompletionMetricsSchema, "AcceptedCompletionMetrics")
 } as const;
