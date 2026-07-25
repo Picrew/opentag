@@ -1,6 +1,8 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
+  AgentAccessProfileSnapshotSchema,
   ApprovalDecisionSchema,
+  ActorIdentitySchema,
   ActionPermissionRequestSchema,
   ActionPermissionResolutionSchema,
   ActionSchema,
@@ -20,11 +22,13 @@ import {
   OpenTagEventSchema,
   OpenTagRunResultSchema,
   PolicyRuleSchema,
+  PolicySnapshotProvenanceSchema,
   ProposalLineageSchema,
   preflightMutationIntent,
   evaluateActionPermission,
   grantMatchesAction,
   containsCredentialLikeData,
+  FollowUpRequestSchema,
   isCredentialFieldName,
   redactCredentialLikeData,
   sanitizeCredentialLikeValue,
@@ -41,6 +45,8 @@ import {
   VerificationEvidenceSchema,
   WorkThreadSchema,
   type ApprovalDecision,
+  type AgentAccessProfileSnapshot,
+  type ActorIdentity,
   type Action,
   type ActionPermissionRequest,
   type ActionPermissionResolution,
@@ -60,6 +66,7 @@ import {
   type OpenTagRun,
   type OpenTagRunResult,
   type PolicyRule,
+  type PolicySnapshotProvenance,
   type ProjectTargetRef,
   type ProposalLineage,
   type RunAdmissionDecision,
@@ -366,7 +373,9 @@ export type FollowUpRequest = {
   activeRunId?: string;
   event: OpenTagEvent;
   decision: RunAdmissionDecision;
-  status: "queued" | "promoted" | "cancelled";
+  accessProfileSnapshot?: AgentAccessProfileSnapshot;
+  policySnapshotProvenance?: PolicySnapshotProvenance;
+  status: "queued" | "promoting" | "promoted" | "cancelled";
   createdRunId?: string;
   createdAt: string;
   updatedAt: string;
@@ -708,12 +717,20 @@ function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
   const contextPacket = row.contextPacketJson
     ? ContextPacketSchema.parse(JSON.parse(row.contextPacketJson))
     : protocolFields.contextPacket;
+  const accessProfileSnapshot = row.accessProfileSnapshotJson
+    ? AgentAccessProfileSnapshotSchema.parse(JSON.parse(row.accessProfileSnapshotJson))
+    : undefined;
+  const policySnapshotProvenance = row.policySnapshotProvenanceJson
+    ? PolicySnapshotProvenanceSchema.parse(JSON.parse(row.policySnapshotProvenanceJson))
+    : undefined;
   return {
     id: row.id,
     eventId: row.eventId,
     status: row.status as OpenTagRun["status"],
     ...(durableThread ? { thread: durableThread } : {}),
     contextPacket,
+    ...(accessProfileSnapshot ? { accessProfileSnapshot } : {}),
+    ...(policySnapshotProvenance ? { policySnapshotProvenance } : {}),
     ...(row.parentRunId ? { parentRunId: row.parentRunId } : {}),
     ...(triggeredByAction ? { triggeredByAction } : {}),
     ...(row.sourceProposalId ? { sourceProposalId: row.sourceProposalId } : {}),
@@ -837,18 +854,24 @@ function callbackIdempotencyKey(input: {
 }
 
 function followUpRequestFromRow(row: typeof followUpRequests.$inferSelect): FollowUpRequest {
-  return {
+  return FollowUpRequestSchema.parse({
     id: row.id,
     sourceEventId: row.sourceEventId,
     conversationKey: row.conversationKey,
     ...(row.activeRunId ? { activeRunId: row.activeRunId } : {}),
     event: OpenTagEventSchema.parse(JSON.parse(row.eventJson)),
     decision: RunAdmissionDecisionSchema.parse(JSON.parse(row.decisionJson)),
+    ...(row.accessProfileSnapshotJson
+      ? { accessProfileSnapshot: AgentAccessProfileSnapshotSchema.parse(JSON.parse(row.accessProfileSnapshotJson)) }
+      : {}),
+    ...(row.policySnapshotProvenanceJson
+      ? { policySnapshotProvenance: PolicySnapshotProvenanceSchema.parse(JSON.parse(row.policySnapshotProvenanceJson)) }
+      : {}),
     status: row.status as FollowUpRequest["status"],
     ...(row.createdRunId ? { createdRunId: row.createdRunId } : {}),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
-  };
+  }) as FollowUpRequest;
 }
 
 function runnerFromRow(row: typeof runners.$inferSelect): RunnerRegistration {
@@ -2365,6 +2388,160 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       });
     },
 
+    async transitionHumanEscalation(input: {
+      id: string;
+      toState: "acknowledged" | "resolved" | "expired" | "superseded";
+      at: string;
+      actor?: ActorIdentity;
+      optionId?: string;
+      reason?: string;
+      supersededById?: string;
+    }): Promise<{ escalation: HumanEscalation; changed: boolean }> {
+      const transitionedAt = OpenTagEventSchema.shape.receivedAt.parse(input.at);
+      return db.transaction((tx) => {
+        const existing = tx.select().from(humanEscalations).where(eq(humanEscalations.id, input.id)).limit(1).get();
+        if (!existing) throw new Error(`HumanEscalation ${input.id} does not exist.`);
+        const current = humanEscalationFromRow(existing);
+        const expiredDueToDeadline = Boolean(
+          (input.toState === "acknowledged" || input.toState === "resolved")
+          && current.expiresAt
+          && Date.parse(transitionedAt) >= Date.parse(current.expiresAt)
+        );
+        const toState = expiredDueToDeadline ? "expired" as const : input.toState;
+        if (current.state === toState) {
+          if (toState === "acknowledged") {
+            if (!input.actor) throw new Error("Acknowledging a HumanEscalation requires an attributed actor.");
+            const actor = ActorIdentitySchema.parse(input.actor);
+            if (!current.acknowledgement || stableActionJson(current.acknowledgement.actor) !== stableActionJson(actor)) {
+              throw new Error(`HumanEscalation ${input.id} already has a different acknowledgement.`);
+            }
+          } else if (toState === "resolved") {
+            if (!input.actor) throw new Error("Resolving a HumanEscalation requires an attributed actor.");
+            const actor = ActorIdentitySchema.parse(input.actor);
+            if (
+              !current.resolution
+              || stableActionJson(current.resolution.actor) !== stableActionJson(actor)
+              || current.resolution.optionId !== input.optionId
+              || current.resolution.reason !== input.reason
+            ) {
+              throw new Error(`HumanEscalation ${input.id} already has a different resolution.`);
+            }
+          } else if (
+            (input.reason && current.terminalReason !== input.reason)
+            || (toState === "superseded" && input.supersededById && current.supersededById !== input.supersededById)
+          ) {
+            throw new Error(`HumanEscalation ${input.id} already has different terminal details.`);
+          }
+          return { escalation: current, changed: false };
+        }
+        if (current.state === "resolved" || current.state === "expired" || current.state === "superseded") {
+          throw new Error(`HumanEscalation ${input.id} is already terminal in state ${current.state}.`);
+        }
+
+        let escalation: HumanEscalation;
+        if (toState === "acknowledged") {
+          if (!input.actor) throw new Error("Acknowledging a HumanEscalation requires an attributed actor.");
+          escalation = HumanEscalationSchema.parse({
+            ...current,
+            state: "acknowledged",
+            acknowledgement: { actor: input.actor, acknowledgedAt: transitionedAt }
+          });
+        } else if (toState === "resolved") {
+          if (!input.actor) throw new Error("Resolving a HumanEscalation requires an attributed actor.");
+          if (current.options?.length && !input.optionId) {
+            throw new Error("Resolving this HumanEscalation requires one offered optionId.");
+          }
+          escalation = HumanEscalationSchema.parse({
+            ...current,
+            state: "resolved",
+            resolution: {
+              ...(input.optionId ? { optionId: input.optionId } : {}),
+              actor: input.actor,
+              ...(input.reason ? { reason: input.reason } : {}),
+              resolvedAt: transitionedAt
+            }
+          });
+        } else if (toState === "expired") {
+          if (!current.expiresAt || Date.parse(transitionedAt) < Date.parse(current.expiresAt)) {
+            throw new Error(`HumanEscalation ${input.id} has not reached expiresAt.`);
+          }
+          escalation = HumanEscalationSchema.parse({
+            ...current,
+            state: "expired",
+            terminalReason: expiredDueToDeadline
+              ? "Escalation expired without implicit approval."
+              : input.reason ?? "Escalation expired without implicit approval."
+          });
+        } else {
+          if (!input.supersededById || input.supersededById === input.id) {
+            throw new Error("Superseding a HumanEscalation requires a different supersededById.");
+          }
+          const successorRow = tx.select().from(humanEscalations)
+            .where(eq(humanEscalations.id, input.supersededById)).limit(1).get();
+          const successor = successorRow ? humanEscalationFromRow(successorRow) : null;
+          if (!successor || successor.workThreadId !== current.workThreadId) {
+            throw new Error("A HumanEscalation successor must exist in the same WorkThread.");
+          }
+          escalation = HumanEscalationSchema.parse({
+            ...current,
+            state: "superseded",
+            supersededById: successor.id,
+            terminalReason: input.reason ?? `Superseded by ${successor.id}.`
+          });
+        }
+
+        tx.update(humanEscalations).set({
+          state: escalation.state,
+          activeDedupeKey: escalation.state === "acknowledged" ? existing.activeDedupeKey : null,
+          escalationJson: JSON.stringify(escalation),
+          updatedAt: transitionedAt
+        }).where(eq(humanEscalations.id, escalation.id)).run();
+        tx.insert(governanceEvents).values({
+          workThreadId: escalation.workThreadId,
+          type: `human_escalation.${escalation.state}`,
+          subjectId: escalation.id,
+          payloadJson: JSON.stringify({
+            class: escalation.class,
+            ...(input.actor ? { actor: input.actor } : {}),
+            ...(input.optionId ? { optionId: input.optionId } : {}),
+            ...(input.reason ? { reason: input.reason } : {}),
+            ...(expiredDueToDeadline ? { rejectedLateTransition: input.toState } : {}),
+            ...(input.supersededById ? { supersededById: input.supersededById } : {})
+          }),
+          createdAt: transitionedAt
+        }).run();
+        return { escalation, changed: true };
+      });
+    },
+
+    async expireHumanEscalations(input: {
+      at: string;
+      workThreadId?: string;
+      runId?: string;
+    }): Promise<{ scanned: number; expired: number }> {
+      const at = OpenTagEventSchema.shape.receivedAt.parse(input.at);
+      const rows = input.workThreadId
+        ? await db.select().from(humanEscalations).where(eq(humanEscalations.workThreadId, input.workThreadId))
+        : await db.select().from(humanEscalations);
+      const candidates = rows.map(humanEscalationFromRow).filter((escalation) =>
+        (escalation.state === "open" || escalation.state === "acknowledged")
+        && (!input.runId || escalation.runId === input.runId)
+        && Boolean(escalation.expiresAt)
+        && Date.parse(escalation.expiresAt!) <= Date.parse(at)
+      );
+      let expired = 0;
+      for (const escalation of candidates) {
+        const result = await this.transitionHumanEscalation({
+          id: escalation.id,
+          toState: "expired",
+          at,
+          reason: "Escalation expired without implicit approval."
+        });
+        if (result.changed) expired += 1;
+      }
+      return { scanned: rows.length, expired };
+    },
+
     async resolveHumanEscalation(input: { escalation: HumanEscalation }): Promise<{ escalation: HumanEscalation; resolved: boolean }> {
       const escalation = HumanEscalationSchema.parse(input.escalation);
       if (escalation.state !== "resolved" || !escalation.resolution) {
@@ -2380,6 +2557,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             throw new Error(`HumanEscalation ${escalation.id} already has a different resolution.`);
           }
           return { escalation: current, resolved: false };
+        }
+        if (current.state === "expired" || current.state === "superseded") {
+          throw new Error(`HumanEscalation ${escalation.id} is already terminal in state ${current.state}.`);
         }
         if (
           current.workThreadId !== escalation.workThreadId
@@ -2409,6 +2589,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async listHumanEscalations(input: { workThreadId: string }): Promise<HumanEscalation[]> {
       const rows = await db.select().from(humanEscalations).where(eq(humanEscalations.workThreadId, input.workThreadId)).orderBy(asc(humanEscalations.createdAt), asc(humanEscalations.id));
       return rows.map(humanEscalationFromRow);
+    },
+
+    async getHumanEscalation(input: { id: string }): Promise<HumanEscalation | null> {
+      const row = await db.select().from(humanEscalations).where(eq(humanEscalations.id, input.id)).limit(1).get();
+      return row ? humanEscalationFromRow(row) : null;
     },
 
     async listGovernanceEvents(input: { workThreadId?: string }): Promise<GovernanceAuditEvent[]> {
@@ -2611,9 +2796,23 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       event: OpenTagEvent;
       decision: RunAdmissionDecision;
       activeRunId?: string;
+      accessProfileSnapshot?: AgentAccessProfileSnapshot;
+      policySnapshotProvenance?: PolicySnapshotProvenance;
     }): Promise<{ followUpRequest: FollowUpRequest; created: boolean }> {
       const event = OpenTagEventSchema.parse(input.event);
       const decision = RunAdmissionDecisionSchema.parse(input.decision);
+      const accessProfileSnapshot = input.accessProfileSnapshot
+        ? AgentAccessProfileSnapshotSchema.parse(input.accessProfileSnapshot)
+        : undefined;
+      const policySnapshotProvenance = input.policySnapshotProvenance
+        ? PolicySnapshotProvenanceSchema.parse(input.policySnapshotProvenance)
+        : undefined;
+      if (Boolean(accessProfileSnapshot) !== Boolean(policySnapshotProvenance)) {
+        throw new Error("Follow-up access and policy snapshots must be captured together.");
+      }
+      if (accessProfileSnapshot && policySnapshotProvenance && accessProfileSnapshot.policySnapshotId !== policySnapshotProvenance.id) {
+        throw new Error("Follow-up access snapshot must reference the captured policy snapshot.");
+      }
       const createdAt = nowIso();
       const conversationKey = conversationKeyFromEvent(event);
       const insertResult = await db
@@ -2625,6 +2824,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           activeRunId: input.activeRunId ?? null,
           eventJson: JSON.stringify(event),
           decisionJson: JSON.stringify(decision),
+          accessProfileSnapshotJson: accessProfileSnapshot ? JSON.stringify(accessProfileSnapshot) : null,
+          policySnapshotProvenanceJson: policySnapshotProvenance ? JSON.stringify(policySnapshotProvenance) : null,
           status: "queued",
           createdRunId: null,
           createdAt,
@@ -2683,6 +2884,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const { run, created } = await this.createRun({
           id: input.runId,
           event: followUp.event,
+          ...(followUp.accessProfileSnapshot ? { accessProfileSnapshot: followUp.accessProfileSnapshot } : {}),
+          ...(followUp.policySnapshotProvenance ? { policySnapshotProvenance: followUp.policySnapshotProvenance } : {}),
           ...(followUp.activeRunId ? { parentRunId: followUp.activeRunId } : {})
         });
         if (!created) {
@@ -3134,12 +3337,26 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async createRun(input: {
       id: string;
       event: OpenTagEvent;
+      accessProfileSnapshot?: AgentAccessProfileSnapshot;
+      policySnapshotProvenance?: PolicySnapshotProvenance;
       parentRunId?: string;
       triggeredByAction?: ActionHint;
       sourceProposalId?: string;
       sourceApplyPlanId?: string;
     }): Promise<CreateRunResult> {
       const event = OpenTagEventSchema.parse(input.event);
+      const accessProfileSnapshot = input.accessProfileSnapshot
+        ? AgentAccessProfileSnapshotSchema.parse(input.accessProfileSnapshot)
+        : undefined;
+      const policySnapshotProvenance = input.policySnapshotProvenance
+        ? PolicySnapshotProvenanceSchema.parse(input.policySnapshotProvenance)
+        : undefined;
+      if (Boolean(accessProfileSnapshot) !== Boolean(policySnapshotProvenance)) {
+        throw new Error("Run access and policy snapshots must be attached together.");
+      }
+      if (accessProfileSnapshot && accessProfileSnapshot.policySnapshotId !== policySnapshotProvenance?.id) {
+        throw new Error("An access profile snapshot must reference the attached policy snapshot provenance.");
+      }
       const triggeredByAction = input.triggeredByAction ? ActionHintSchema.parse(input.triggeredByAction) : undefined;
       const createdAt = nowIso();
       const protocolFields = protocolRunFieldsFromEvent(event, createdAt);
@@ -3180,6 +3397,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         status: "queued",
         eventJson: JSON.stringify(event),
         contextPacketJson: JSON.stringify(protocolFields.contextPacket),
+        accessProfileSnapshotJson: accessProfileSnapshot ? JSON.stringify(accessProfileSnapshot) : null,
+        policySnapshotProvenanceJson: policySnapshotProvenance ? JSON.stringify(policySnapshotProvenance) : null,
         parentRunId: input.parentRunId ?? null,
         triggeredByActionJson: triggeredByAction ? JSON.stringify(triggeredByAction) : null,
         sourceProposalId: input.sourceProposalId ?? null,
@@ -3265,6 +3484,23 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         message: protocolFields.contextPacket.summary,
         createdAt
       });
+      if (accessProfileSnapshot && policySnapshotProvenance) {
+        await appendRunEvent({
+          runId: input.id,
+          type: "agent_access_profile.captured",
+          payload: {
+            accessProfileSnapshotId: accessProfileSnapshot.id,
+            policySnapshotId: policySnapshotProvenance.id,
+            requestedBy: accessProfileSnapshot.requestedBy,
+            agentPrincipal: accessProfileSnapshot.agentPrincipal,
+            projectTargets: accessProfileSnapshot.projectTargets
+          },
+          visibility: "audit",
+          importance: "high",
+          message: "Attributed agent access and policy snapshots captured at admission.",
+          createdAt
+        });
+      }
       if (input.parentRunId) {
         await appendRunEvent({
           runId: input.parentRunId,
@@ -3292,6 +3528,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ...(input.sourceProposalId ? { sourceProposalId: input.sourceProposalId } : {}),
           ...(input.sourceApplyPlanId ? { sourceApplyPlanId: input.sourceApplyPlanId } : {}),
           contextPacket: protocolFields.contextPacket,
+          ...(accessProfileSnapshot ? { accessProfileSnapshot } : {}),
+          ...(policySnapshotProvenance ? { policySnapshotProvenance } : {}),
           createdAt,
           updatedAt: createdAt
         },
@@ -3403,11 +3641,94 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       }
 
       const queuedRows = await db.select().from(runs).where(eq(runs.status, "queued")).orderBy(asc(runs.createdAt));
-      const row = queuedRows.find((candidate) => {
+      let row: typeof runs.$inferSelect | undefined;
+      for (const candidate of queuedRows) {
+        const accessProfile = candidate.accessProfileSnapshotJson
+          ? AgentAccessProfileSnapshotSchema.parse(JSON.parse(candidate.accessProfileSnapshotJson))
+          : undefined;
+        if (
+          accessProfile?.constraints.allowedRunnerIds?.length
+          && !accessProfile.constraints.allowedRunnerIds.includes(input.runnerId)
+        ) {
+          continue;
+        }
+        const accessBlockedReason = accessProfile?.revokedAt && Date.parse(accessProfile.revokedAt) <= now.getTime()
+          ? "The captured agent access profile was revoked before a new attempt could start."
+          : accessProfile?.expiresAt && Date.parse(accessProfile.expiresAt) <= now.getTime()
+            ? "The captured agent access profile expired before a new attempt could start."
+            : null;
+        if (accessBlockedReason) {
+          const blockedAt = now.toISOString();
+          db.transaction((tx) => {
+            const current = tx.select().from(runs).where(eq(runs.id, candidate.id)).limit(1).get();
+            if (!current || current.status !== "queued") return;
+            tx.update(runs).set({ status: "needs_approval", updatedAt: blockedAt }).where(eq(runs.id, current.id)).run();
+            const dedupeKey = `access-profile:${accessProfile!.id}:inactive:v1`;
+            const escalationId = `escalation_${createHash("sha256")
+              .update(`${current.id}\0${dedupeKey}`)
+              .digest("hex")
+              .slice(0, 24)}`;
+            if (current.workThreadId) {
+              const escalation = HumanEscalationSchema.parse({
+                id: escalationId,
+                workThreadId: current.workThreadId,
+                runId: current.id,
+                class: "security",
+                audience: "operator",
+                subjectRef: accessProfile!.id,
+                state: "open",
+                blocking: true,
+                summary: "Run access is no longer valid.",
+                reason: accessBlockedReason,
+                nextAction: { kind: "request_human_decision", targetId: accessProfile!.id },
+                dedupeKey,
+                openedAt: blockedAt
+              });
+              tx.insert(humanEscalations).values({
+                id: escalation.id,
+                workThreadId: escalation.workThreadId,
+                class: escalation.class,
+                state: escalation.state,
+                dedupeKey,
+                activeDedupeKey: `${current.id}:${dedupeKey}`,
+                escalationJson: JSON.stringify(escalation),
+                createdAt: blockedAt,
+                updatedAt: blockedAt
+              }).onConflictDoNothing({ target: humanEscalations.id }).run();
+              tx.insert(governanceEvents).values({
+                workThreadId: current.workThreadId,
+                type: "human_escalation.opened",
+                subjectId: escalation.id,
+                payloadJson: JSON.stringify({ class: escalation.class, blocking: true, dedupeKey, source: "access_profile" }),
+                createdAt: blockedAt
+              }).run();
+            }
+            tx.insert(runEvents).values(runEventValues({
+              runId: current.id,
+              type: "agent_access_profile.blocked",
+              payload: {
+                accessProfileSnapshotId: accessProfile!.id,
+                reason: accessBlockedReason,
+                ...(current.workThreadId
+                  ? { humanEscalationId: escalationId }
+                  : { humanResolutionUnavailableReason: "The run has no durable WorkThread for resolution." })
+              },
+              visibility: "audit",
+              importance: "blocking",
+              message: accessBlockedReason,
+              createdAt: blockedAt
+            })).run();
+          });
+          continue;
+        }
         const event = OpenTagEventSchema.parse(JSON.parse(candidate.eventJson));
         const repoKey = projectTargetRefFromEvent(event);
         if (!repoKey) {
-          return Boolean(db.select().from(runners).where(eq(runners.runnerId, input.runnerId)).limit(1).get());
+          if (db.select().from(runners).where(eq(runners.runnerId, input.runnerId)).limit(1).get()) {
+            row = candidate;
+            break;
+          }
+          continue;
         }
         const binding = db
           .select()
@@ -3422,8 +3743,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           )
           .limit(1)
           .get();
-        return Boolean(binding);
-      });
+        if (binding) {
+          row = candidate;
+          break;
+        }
+      }
       if (!row) {
         await db.update(runners).set({ heartbeatAt: runnerHeartbeatAt }).where(eq(runners.runnerId, input.runnerId));
         return null;
@@ -3723,6 +4047,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async completeRun(input: {
       runId: string;
       result: OpenTagRunResult;
+      humanEscalation?: HumanEscalation;
       runnerId?: string;
       attemptId?: string;
       fencingToken?: string;
@@ -3731,9 +4056,32 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
       const safeIdempotencyKey = safeInput.idempotencyKey;
       const parsedResult = OpenTagRunResultSchema.parse(safeInput.result);
+      const humanEscalation = input.humanEscalation
+        ? HumanEscalationSchema.parse(input.humanEscalation)
+        : undefined;
+      const hasHumanEscalationFields = Boolean(
+        parsedResult.humanEscalation
+        || parsedResult.humanEscalationId
+        || parsedResult.humanResolutionUnavailableReason
+      );
+      if (parsedResult.conclusion !== "needs_human" && hasHumanEscalationFields) {
+        throw new Error("Human escalation fields are only valid for a needs_human result.");
+      }
+      if (parsedResult.humanEscalationId && parsedResult.humanResolutionUnavailableReason) {
+        throw new Error("A needs_human result cannot both link an escalation and report human resolution unavailable.");
+      }
       const updatedAt = nowIso();
       const result = OpenTagRunResultSchema.parse({
         ...parsedResult,
+        ...(parsedResult.conclusion === "needs_human"
+          && !humanEscalation
+          && !parsedResult.humanEscalationId
+          && !parsedResult.humanResolutionUnavailableReason
+          ? {
+              humanResolutionUnavailableReason:
+                "No durable HumanEscalation was supplied at this persistence boundary."
+            }
+          : {}),
         ...(parsedResult.artifacts?.length
           ? {
               artifacts: parsedResult.artifacts.map((artifact, index) => ({
@@ -3761,6 +4109,18 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       if (!runRow) {
         if (input.runnerId) return "not_found";
         throw new Error(`Run not found: ${input.runId}`);
+      }
+      if (humanEscalation) {
+        if (result.conclusion !== "needs_human") {
+          throw new Error("A HumanEscalation may only be attached to a needs_human result.");
+        }
+        if (
+          humanEscalation.runId !== input.runId
+          || humanEscalation.workThreadId !== runRow.workThreadId
+          || result.humanEscalationId !== humanEscalation.id
+        ) {
+          throw new Error("A needs_human result must point to its attached HumanEscalation in the same run and WorkThread.");
+        }
       }
       if (input.runnerId) {
         if (!input.attemptId || !input.fencingToken) return "stale_attempt";
@@ -3915,6 +4275,34 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           })
           .where(eq(runs.id, input.runId))
           .run();
+        if (humanEscalation) {
+          const activeDedupeKey = humanEscalation.dedupeKey
+            ? `${humanEscalation.runId ?? "thread"}:${humanEscalation.dedupeKey}`
+            : null;
+          tx.insert(humanEscalations).values({
+            id: humanEscalation.id,
+            workThreadId: humanEscalation.workThreadId,
+            class: humanEscalation.class,
+            state: humanEscalation.state,
+            dedupeKey: humanEscalation.dedupeKey ?? null,
+            activeDedupeKey,
+            escalationJson: JSON.stringify(humanEscalation),
+            createdAt: humanEscalation.openedAt,
+            updatedAt: humanEscalation.openedAt
+          }).run();
+          tx.insert(governanceEvents).values({
+            workThreadId: humanEscalation.workThreadId,
+            type: "human_escalation.opened",
+            subjectId: humanEscalation.id,
+            payloadJson: JSON.stringify({
+              class: humanEscalation.class,
+              blocking: humanEscalation.blocking,
+              dedupeKey: humanEscalation.dedupeKey ?? null,
+              source: "run_result"
+            }),
+            createdAt: humanEscalation.openedAt
+          }).run();
+        }
         if (attemptId) {
           tx.update(materialActions)
             .set({ status: "unknown", updatedAt })

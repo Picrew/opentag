@@ -1,9 +1,11 @@
 import type {
+  AgentAccessProfileSnapshot,
   CompletionAssessment,
   CompletionContract,
   CompletionWaiver,
   HumanEscalation,
   OpenTagEvent,
+  PolicySnapshotProvenance,
   WorkThread
 } from "@opentag/core";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -156,6 +158,190 @@ describe("completion governance persistence", () => {
     expect(migration).toBeTruthy();
     const waiverMigration = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get("2026-07-21-completion-waivers-v1");
     expect(waiverMigration).toBeTruthy();
+    const phase2Migration = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get("2026-07-25-human-escalation-access-identity-v1");
+    expect(phase2Migration).toBeTruthy();
+    const runColumns = sqlite.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>;
+    expect(runColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "access_profile_snapshot_json",
+      "policy_snapshot_provenance_json"
+    ]));
+    const followUpColumns = sqlite.prepare("PRAGMA table_info(follow_up_requests)").all() as Array<{ name: string }>;
+    expect(followUpColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "access_profile_snapshot_json",
+      "policy_snapshot_provenance_json"
+    ]));
+  });
+
+  it("persists immutable requester, agent, and policy snapshots with the admitted run", async () => {
+    const { repo } = repository();
+    const policySnapshot: PolicySnapshotProvenance = {
+      id: "policy_snapshot_1",
+      source: "repo_binding",
+      sourceRef: "github:acme/demo",
+      rules: [],
+      contentDigest: `sha256:${"a".repeat(64)}`,
+      capturedAt: timestamp
+    };
+    const accessProfileSnapshot: AgentAccessProfileSnapshot = {
+      id: "access_snapshot_1",
+      agentPrincipal: { id: "opentag", kind: "opentag_agent" },
+      requestedBy: { provider: "github", providerUserId: "user-1", handle: "octocat" },
+      projectTargets: ["github:acme/demo"],
+      connectionRefs: [],
+      permissions: [],
+      constraints: { locality: "local_required", allowedRunnerIds: ["runner-local"] },
+      policySnapshotId: policySnapshot.id,
+      capturedAt: timestamp
+    };
+
+    const created = await repo.createRun({
+      id: "run-access-snapshot",
+      event: githubEvent("event-access-snapshot", "delivery-access-snapshot"),
+      accessProfileSnapshot,
+      policySnapshotProvenance: policySnapshot
+    });
+    expect(created.run).toMatchObject({ accessProfileSnapshot, policySnapshotProvenance: policySnapshot });
+    await expect(repo.createRun({
+      id: "run-policy-only-invalid",
+      event: githubEvent("event-policy-only-invalid", "delivery-policy-only-invalid"),
+      policySnapshotProvenance: policySnapshot
+    })).rejects.toThrow(/attached together/u);
+    await expect(repo.createRun({
+      id: "run-access-snapshot-replay",
+      event: githubEvent("event-access-snapshot", "delivery-access-snapshot"),
+      accessProfileSnapshot: { ...accessProfileSnapshot, requestedBy: { provider: "github", providerUserId: "different" } },
+      policySnapshotProvenance: policySnapshot
+    })).resolves.toMatchObject({ created: false, run: { accessProfileSnapshot } });
+  });
+
+  it("blocks new attempts after an access snapshot expires and opens one durable escalation", async () => {
+    const { repo } = repository();
+    await repo.registerRunner({ runnerId: "runner-local", name: "Local runner" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner-local" });
+    const policySnapshot: PolicySnapshotProvenance = {
+      id: "policy_snapshot_expiring",
+      source: "repo_binding",
+      sourceRef: "github:acme/demo",
+      rules: [],
+      contentDigest: `sha256:${"b".repeat(64)}`,
+      capturedAt: timestamp
+    };
+    const accessProfileSnapshot: AgentAccessProfileSnapshot = {
+      id: "access_snapshot_expiring",
+      agentPrincipal: { id: "opentag", kind: "opentag_agent" },
+      requestedBy: { provider: "github", providerUserId: "user-1", handle: "octocat" },
+      projectTargets: ["github:acme/demo"],
+      connectionRefs: [],
+      permissions: [],
+      constraints: { locality: "local_required", allowedRunnerIds: ["runner-local"] },
+      policySnapshotId: policySnapshot.id,
+      capturedAt: timestamp,
+      expiresAt: "2026-07-22T10:00:00.000Z"
+    };
+    const created = await repo.createRun({
+      id: "run-expired-access",
+      event: githubEvent("event-expired-access", "delivery-expired-access"),
+      accessProfileSnapshot,
+      policySnapshotProvenance: policySnapshot
+    });
+
+    await expect(repo.claimNextRun({ runnerId: "runner-local", leaseSeconds: 60 })).resolves.toBeNull();
+    await expect(repo.getRun({ runId: created.run.id })).resolves.toMatchObject({ run: { status: "needs_approval" } });
+    await expect(repo.listHumanEscalations({ workThreadId: created.run.thread!.id! })).resolves.toMatchObject([
+      { class: "security", state: "open", runId: created.run.id, subjectRef: accessProfileSnapshot.id }
+    ]);
+    await expect(repo.claimNextRun({ runnerId: "runner-local", leaseSeconds: 60 })).resolves.toBeNull();
+    await expect(repo.listHumanEscalations({ workThreadId: created.run.thread!.id! })).resolves.toHaveLength(1);
+  });
+
+  it("skips a run for an ineligible polling runner without blocking its eligible runner", async () => {
+    const { repo } = repository();
+    await repo.registerRunner({ runnerId: "runner-local", name: "Local runner" });
+    await repo.registerRunner({ runnerId: "runner-other", name: "Other runner" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner-local" });
+    const policySnapshot: PolicySnapshotProvenance = {
+      id: "policy_snapshot_runner_scope",
+      source: "repo_binding",
+      sourceRef: "github:acme/demo",
+      rules: [],
+      contentDigest: `sha256:${"d".repeat(64)}`,
+      capturedAt: timestamp
+    };
+    const accessProfileSnapshot: AgentAccessProfileSnapshot = {
+      id: "access_snapshot_runner_scope",
+      agentPrincipal: { id: "opentag", kind: "opentag_agent" },
+      requestedBy: { provider: "github", providerUserId: "user-1", handle: "octocat" },
+      projectTargets: ["github:acme/demo"],
+      connectionRefs: [],
+      permissions: [],
+      constraints: { locality: "local_required", allowedRunnerIds: ["runner-local"] },
+      policySnapshotId: policySnapshot.id,
+      capturedAt: timestamp
+    };
+    const created = await repo.createRun({
+      id: "run-runner-scoped-access",
+      event: githubEvent("event-runner-scoped-access", "delivery-runner-scoped-access"),
+      accessProfileSnapshot,
+      policySnapshotProvenance: policySnapshot
+    });
+
+    await expect(repo.claimNextRun({ runnerId: "runner-other", leaseSeconds: 60 })).resolves.toBeNull();
+    await expect(repo.getRun({ runId: created.run.id })).resolves.toMatchObject({ run: { status: "queued" } });
+    await expect(repo.listHumanEscalations({ workThreadId: created.run.thread!.id! })).resolves.toEqual([]);
+    await expect(repo.claimNextRun({ runnerId: "runner-local", leaseSeconds: 60 })).resolves.toMatchObject({
+      run: { id: created.run.id, assignedRunnerId: "runner-local" }
+    });
+  });
+
+  it("carries queued follow-up access identity into promotion and rechecks it before execution", async () => {
+    const { repo } = repository();
+    await repo.registerRunner({ runnerId: "runner-local", name: "Local runner" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner-local" });
+    const policySnapshot: PolicySnapshotProvenance = {
+      id: "policy_snapshot_follow_up",
+      source: "repo_binding",
+      sourceRef: "github:acme/demo",
+      rules: [],
+      contentDigest: `sha256:${"c".repeat(64)}`,
+      capturedAt: timestamp
+    };
+    const accessProfileSnapshot: AgentAccessProfileSnapshot = {
+      id: "access_snapshot_follow_up",
+      agentPrincipal: { id: "opentag", kind: "opentag_agent" },
+      requestedBy: { provider: "github", providerUserId: "user-1", handle: "octocat" },
+      projectTargets: ["github:acme/demo"],
+      connectionRefs: [],
+      permissions: [],
+      constraints: { locality: "local_required", allowedRunnerIds: ["runner-local"] },
+      policySnapshotId: policySnapshot.id,
+      capturedAt: timestamp,
+      expiresAt: "2026-07-22T10:00:00.000Z"
+    };
+    const event = githubEvent("event-follow-up-access", "delivery-follow-up-access");
+    const queued = await repo.createFollowUpRequest({
+      id: "follow-up-access",
+      event,
+      decision: {
+        action: "queue_follow_up",
+        reason: "An active run owns this thread.",
+        reasonCode: "active_run_same_thread",
+        decidedAt: timestamp,
+        activeRunId: "run-parent-follow-up",
+        eventId: event.id
+      },
+      activeRunId: "run-parent-follow-up",
+      accessProfileSnapshot,
+      policySnapshotProvenance: policySnapshot
+    });
+    expect(queued.followUpRequest).toMatchObject({ accessProfileSnapshot, policySnapshotProvenance: policySnapshot });
+
+    const promoted = await repo.createRunFromFollowUpRequest({
+      followUpRequestId: queued.followUpRequest.id,
+      runId: "run-promoted-follow-up-access"
+    });
+    expect(promoted.run).toMatchObject({ accessProfileSnapshot, policySnapshotProvenance: policySnapshot });
+    await expect(repo.claimNextRun({ runnerId: "runner-local", leaseSeconds: 60 })).resolves.toBeNull();
+    await expect(repo.getRun({ runId: promoted.run.id })).resolves.toMatchObject({ run: { status: "needs_approval" } });
   });
 
   it("reuses one durable WorkThread across anchors and attaches created runs", async () => {
@@ -459,5 +645,184 @@ describe("completion governance persistence", () => {
       "human_escalation.opened",
       "human_escalation.resolved"
     ]));
+  });
+
+  it("attributes acknowledgement, validates bounded options, and expires authority-expanding escalations closed", async () => {
+    const { repo } = repository();
+    const thread = (await repo.upsertWorkThread({ thread: workThread({ anchorId: "comment-lifecycle" }) })).thread;
+    const open: HumanEscalation = {
+      id: "escalation-lifecycle",
+      workThreadId: thread.id,
+      class: "approval",
+      audience: "requester",
+      subjectRef: "deployment:production",
+      state: "open",
+      blocking: true,
+      summary: "Production deployment approval is required.",
+      reason: "The action expands authority beyond the current run grant.",
+      options: [
+        { id: "approve", label: "Approve", consequence: "Allows one production deployment attempt." },
+        { id: "deny", label: "Deny", consequence: "Leaves the deployment blocked." }
+      ],
+      dedupeKey: "deployment:production:v1",
+      openedAt: timestamp,
+      expiresAt: "2026-07-21T10:10:00.000Z"
+    };
+    await repo.openHumanEscalation({ escalation: open });
+
+    const acknowledgingActor = { provider: "github" as const, providerUserId: "user-1", handle: "octocat" };
+    await expect(repo.transitionHumanEscalation({
+      id: open.id,
+      toState: "acknowledged",
+      actor: acknowledgingActor,
+      at: "2026-07-21T10:01:00.000Z"
+    })).resolves.toMatchObject({ changed: true, escalation: { state: "acknowledged" } });
+    await expect(repo.transitionHumanEscalation({
+      id: open.id,
+      toState: "acknowledged",
+      actor: acknowledgingActor,
+      at: "2026-07-21T10:01:30.000Z"
+    })).resolves.toMatchObject({ changed: false, escalation: { state: "acknowledged" } });
+    await expect(repo.transitionHumanEscalation({
+      id: open.id,
+      toState: "acknowledged",
+      actor: { provider: "github", providerUserId: "user-2", handle: "maintainer" },
+      at: "2026-07-21T10:01:30.000Z"
+    })).rejects.toThrow(/different acknowledgement/u);
+    await expect(repo.transitionHumanEscalation({
+      id: open.id,
+      toState: "resolved",
+      actor: { provider: "github", providerUserId: "user-1", handle: "octocat" },
+      optionId: "not-offered",
+      at: "2026-07-21T10:02:00.000Z"
+    })).rejects.toThrow(/optionId/u);
+    await expect(repo.transitionHumanEscalation({
+      id: open.id,
+      toState: "expired",
+      at: "2026-07-21T10:05:00.000Z",
+      reason: "Expiry sweep."
+    })).rejects.toThrow(/has not reached expiresAt/u);
+
+    await expect(repo.expireHumanEscalations({ at: "2026-07-21T10:10:00.000Z", workThreadId: thread.id }))
+      .resolves.toMatchObject({ expired: 1 });
+    const [expired] = await repo.listHumanEscalations({ workThreadId: thread.id });
+    expect(expired).toMatchObject({ state: "expired", terminalReason: "Escalation expired without implicit approval." });
+    expect(expired?.resolution).toBeUndefined();
+    expect((await repo.listGovernanceEvents({ workThreadId: thread.id })).map((event) => event.type)).toEqual(expect.arrayContaining([
+      "human_escalation.acknowledged",
+      "human_escalation.expired"
+    ]));
+
+    const lateResolution: HumanEscalation = {
+      ...open,
+      id: "escalation-late-resolution",
+      dedupeKey: "deployment:production:late:v1"
+    };
+    await repo.openHumanEscalation({ escalation: lateResolution });
+    await expect(repo.transitionHumanEscalation({
+      id: lateResolution.id,
+      toState: "resolved",
+      actor: acknowledgingActor,
+      optionId: "approve",
+      reason: "This decision arrived too late.",
+      at: lateResolution.expiresAt!
+    })).resolves.toMatchObject({
+      changed: true,
+      escalation: {
+        state: "expired",
+        terminalReason: "Escalation expired without implicit approval."
+      }
+    });
+    expect((await repo.getHumanEscalation({ id: lateResolution.id }))?.resolution).toBeUndefined();
+  });
+
+  it("atomically links a needs-human run result to its durable escalation", async () => {
+    const { repo } = repository();
+    const created = await repo.createRun({ id: "run-needs-human", event: githubEvent("event-needs-human", "delivery-needs-human") });
+    const workThreadId = created.run.thread?.id;
+    if (!workThreadId) throw new Error("expected work thread");
+    const escalation: HumanEscalation = {
+      id: "escalation-run-needs-human",
+      workThreadId,
+      runId: created.run.id,
+      class: "missing_input",
+      audience: "requester",
+      subjectRef: created.run.id,
+      state: "open",
+      blocking: true,
+      summary: "Choose a target environment.",
+      reason: "The executor cannot infer the deployment target.",
+      nextAction: { kind: "request_human_decision", targetId: created.run.id },
+      dedupeKey: "run-needs-human:target-environment:v1",
+      openedAt: timestamp
+    };
+
+    await expect(repo.completeRun({
+      runId: created.run.id,
+      result: {
+        conclusion: "needs_human",
+        summary: "A deployment target is required.",
+        humanEscalationId: escalation.id
+      },
+      humanEscalation: escalation
+    })).resolves.toBe("completed");
+    await expect(repo.getRun({ runId: created.run.id })).resolves.toMatchObject({
+      run: { result: { conclusion: "needs_human", humanEscalationId: escalation.id } }
+    });
+    await expect(repo.listHumanEscalations({ workThreadId })).resolves.toMatchObject([
+      { id: escalation.id, state: "open", runId: created.run.id }
+    ]);
+    const actor = { provider: "github" as const, providerUserId: "user-1", handle: "octocat" };
+    await expect(repo.transitionHumanEscalation({
+      id: escalation.id,
+      toState: "resolved",
+      actor,
+      reason: "Use the staging environment.",
+      at: "2026-07-21T10:05:00.000Z"
+    })).resolves.toMatchObject({ changed: true, escalation: { state: "resolved" } });
+    await expect(repo.transitionHumanEscalation({
+      id: escalation.id,
+      toState: "resolved",
+      actor,
+      reason: "Use the staging environment.",
+      at: "2026-07-21T10:06:00.000Z"
+    })).resolves.toMatchObject({ changed: false });
+    await expect(repo.transitionHumanEscalation({
+      id: escalation.id,
+      toState: "resolved",
+      actor,
+      reason: "Use production instead.",
+      at: "2026-07-21T10:06:00.000Z"
+    })).rejects.toThrow(/different resolution/u);
+  });
+
+  it("records a stable unavailable reason when a direct persistence caller omits an escalation", async () => {
+    const { repo } = repository();
+    await repo.createRun({
+      id: "run-needs-human-without-route",
+      event: githubEvent("event-needs-human-without-route", "delivery-needs-human-without-route")
+    });
+
+    await expect(repo.completeRun({
+      runId: "run-needs-human-without-route",
+      result: {
+        conclusion: "success",
+        summary: "Invalid result.",
+        humanEscalationId: "escalation_invalid_success"
+      }
+    })).rejects.toThrow(/only valid for a needs_human/u);
+
+    await expect(repo.completeRun({
+      runId: "run-needs-human-without-route",
+      result: { conclusion: "needs_human", summary: "Operator input is required." }
+    })).resolves.toBe("completed");
+    await expect(repo.getRun({ runId: "run-needs-human-without-route" })).resolves.toMatchObject({
+      run: {
+        result: {
+          conclusion: "needs_human",
+          humanResolutionUnavailableReason: "No durable HumanEscalation was supplied at this persistence boundary."
+        }
+      }
+    });
   });
 });
