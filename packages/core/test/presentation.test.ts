@@ -8,6 +8,7 @@ import {
   OpenTagApprovalPromptPresentationSchema,
   OpenTagFinalSummaryPresentationSchema,
   OpenTagPresentationSchema,
+  presentationDeliveryTier,
   renderOpenTagPresentationPlainText
 } from "../src/presentation.js";
 import { sanitizeCredentialLikeValue } from "../src/credential-safety.js";
@@ -387,6 +388,18 @@ describe("OpenTagPresentation", () => {
       nextAction: "Inspect audit logs before retrying."
     });
     expect(JSON.stringify(presentation)).not.toContain("blocks");
+  });
+
+  it("treats structured human waiting as attention-required status", () => {
+    const presentation = createRunStatusPresentation({
+      runId: "run_needs_human",
+      state: "waiting_for_human",
+      message: "Choose a deployment target.",
+      nextAction: "Resolve escalation_1 from this source thread."
+    });
+
+    expect(OpenTagPresentationSchema.parse(presentation)).toEqual(presentation);
+    expect(presentationDeliveryTier(presentation)).toBe("attention_required");
   });
 
   it("creates a provider-neutral doctor summary presentation", () => {

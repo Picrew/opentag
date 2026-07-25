@@ -346,6 +346,64 @@ export const PolicyResolutionSchema = z.object({
   reason: z.string().min(1)
 });
 
+export const PolicySnapshotProvenanceSchema = z
+  .object({
+    id: z.string().min(1),
+    source: z.enum(["repository_free", "repo_binding", "agent_access_profile"]),
+    sourceRef: z.string().min(1).optional(),
+    rules: z.array(PolicyRuleSchema),
+    contentDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+    capturedAt: z.string().datetime()
+  })
+  .strict();
+
+export const AgentPrincipalSchema = z
+  .object({
+    id: z.string().min(1),
+    kind: z.enum(["opentag_agent", "provider_agent", "custom"])
+  })
+  .strict();
+
+export const AgentAccessProfileSnapshotSchema = z
+  .object({
+    id: z.string().min(1),
+    agentPrincipal: AgentPrincipalSchema,
+    requestedBy: ActorIdentitySchema,
+    projectTargets: z.array(z.string().min(1)),
+    connectionRefs: z.array(ConnectionRefSchema),
+    permissions: z.array(PermissionGrantSchema),
+    constraints: z
+      .object({
+        locality: z.enum(["local_required", "private_required", "hosted_allowed"]).optional(),
+        maximumRiskTier: ActionRiskTierSchema.optional(),
+        allowedExecutorIds: z.array(z.string().min(1)).optional(),
+        allowedRunnerIds: z.array(z.string().min(1)).optional()
+      })
+      .strict(),
+    policySnapshotId: z.string().min(1),
+    capturedAt: z.string().datetime(),
+    expiresAt: z.string().datetime().optional(),
+    revokedAt: z.string().datetime().optional()
+  })
+  .strict()
+  .superRefine((snapshot, ctx) => {
+    const capturedAt = Date.parse(snapshot.capturedAt);
+    if (snapshot.expiresAt && Date.parse(snapshot.expiresAt) <= capturedAt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Agent access profile expiresAt must be later than capturedAt.",
+        path: ["expiresAt"]
+      });
+    }
+    if (snapshot.revokedAt && Date.parse(snapshot.revokedAt) < capturedAt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Agent access profile revokedAt cannot precede capturedAt.",
+        path: ["revokedAt"]
+      });
+    }
+  });
+
 export const AdapterMutationMappingSchema = z.object({
   id: z.string().min(1),
   adapter: z.string().min(1),
@@ -445,10 +503,31 @@ export const FollowUpRequestSchema = z.object({
   activeRunId: z.string().min(1).optional(),
   event: z.lazy(() => OpenTagEventSchema),
   decision: RunAdmissionDecisionSchema,
+  accessProfileSnapshot: AgentAccessProfileSnapshotSchema.optional(),
+  policySnapshotProvenance: PolicySnapshotProvenanceSchema.optional(),
   status: FollowUpRequestStatusSchema,
   createdRunId: z.string().min(1).optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime()
+}).superRefine((value, ctx) => {
+  if (Boolean(value.accessProfileSnapshot) !== Boolean(value.policySnapshotProvenance)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Follow-up access and policy snapshots must be captured together.",
+      path: [value.accessProfileSnapshot ? "policySnapshotProvenance" : "accessProfileSnapshot"]
+    });
+  }
+  if (
+    value.accessProfileSnapshot
+    && value.policySnapshotProvenance
+    && value.accessProfileSnapshot.policySnapshotId !== value.policySnapshotProvenance.id
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Follow-up access snapshot must reference the captured policy snapshot.",
+      path: ["accessProfileSnapshot", "policySnapshotId"]
+    });
+  }
 });
 
 export const RunEventVisibilitySchema = z.enum(["human", "audit", "debug"]);
@@ -809,6 +888,42 @@ export const CompletionAssessmentSchema = z
     }
   });
 
+export const HumanEscalationOptionSchema = z
+  .object({
+    id: z.string().min(1),
+    label: z.string().min(1),
+    consequence: z.string().min(1)
+  })
+  .strict();
+
+export const HumanEscalationRequestSchema = z
+  .object({
+    class: z.enum(["approval", "missing_input", "configuration", "verification", "reconciliation", "security"]),
+    audience: z.enum(["requester", "work_item_owner", "repo_owner", "operator", "security"]),
+    subjectRef: z.string().min(1).optional(),
+    blocking: z.boolean().default(true),
+    summary: z.string().min(1),
+    reason: z.string().min(1),
+    options: z.array(HumanEscalationOptionSchema).min(1).optional(),
+    nextAction: ActionHintSchema.optional(),
+    dedupeKey: z.string().min(1).optional(),
+    expiresAt: z.string().datetime().optional()
+  })
+  .strict()
+  .superRefine((request, ctx) => {
+    const optionIds = new Set<string>();
+    request.options?.forEach((option, index) => {
+      if (optionIds.has(option.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Human escalation option ids must be unique.",
+          path: ["options", index, "id"]
+        });
+      }
+      optionIds.add(option.id);
+    });
+  });
+
 export const HumanEscalationSchema = z
   .object({
     id: z.string().min(1),
@@ -822,21 +937,18 @@ export const HumanEscalationSchema = z
     blocking: z.boolean(),
     summary: z.string().min(1),
     reason: z.string().min(1),
-    options: z
-      .array(
-        z
-          .object({
-            id: z.string().min(1),
-            label: z.string().min(1),
-            consequence: z.string().min(1)
-          })
-          .strict()
-      )
-      .optional(),
+    options: z.array(HumanEscalationOptionSchema).min(1).optional(),
     nextAction: ActionHintSchema.optional(),
     dedupeKey: z.string().min(1).optional(),
     openedAt: z.string().datetime(),
     expiresAt: z.string().datetime().optional(),
+    acknowledgement: z
+      .object({
+        actor: ActorIdentitySchema,
+        acknowledgedAt: z.string().datetime()
+      })
+      .strict()
+      .optional(),
     resolution: z
       .object({
         optionId: z.string().min(1).optional(),
@@ -845,7 +957,9 @@ export const HumanEscalationSchema = z
         resolvedAt: z.string().datetime()
       })
       .strict()
-      .optional()
+      .optional(),
+    terminalReason: z.string().min(1).optional(),
+    supersededById: z.string().min(1).optional()
   })
   .strict()
   .superRefine((escalation, ctx) => {
@@ -861,6 +975,88 @@ export const HumanEscalationSchema = z
         code: z.ZodIssueCode.custom,
         message: "Human escalation resolution is only valid for the resolved state.",
         path: ["state"]
+      });
+    }
+    if (escalation.state === "acknowledged" && !escalation.acknowledgement) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "An acknowledged human escalation requires actor attribution.",
+        path: ["acknowledgement"]
+      });
+    }
+    if (escalation.acknowledgement && escalation.state === "open") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "An open human escalation cannot already be acknowledged.",
+        path: ["state"]
+      });
+    }
+    const openedAt = Date.parse(escalation.openedAt);
+    if (escalation.expiresAt && Date.parse(escalation.expiresAt) <= openedAt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Human escalation expiresAt must be later than openedAt.",
+        path: ["expiresAt"]
+      });
+    }
+    if (escalation.state === "expired" && !escalation.expiresAt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "An expired human escalation requires expiresAt.",
+        path: ["expiresAt"]
+      });
+    }
+    if (escalation.state === "superseded" && !escalation.supersededById) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A superseded human escalation requires supersededById.",
+        path: ["supersededById"]
+      });
+    }
+    const optionIds = new Set<string>();
+    escalation.options?.forEach((option, index) => {
+      if (optionIds.has(option.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Human escalation option ids must be unique.",
+          path: ["options", index, "id"]
+        });
+      }
+      optionIds.add(option.id);
+    });
+    if (escalation.resolution?.optionId && !optionIds.has(escalation.resolution.optionId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Human escalation resolution optionId must identify one of the offered options.",
+        path: ["resolution", "optionId"]
+      });
+    }
+    if (escalation.resolution && Date.parse(escalation.resolution.resolvedAt) < openedAt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Human escalation resolvedAt cannot precede openedAt.",
+        path: ["resolution", "resolvedAt"]
+      });
+    }
+    if (escalation.acknowledgement && Date.parse(escalation.acknowledgement.acknowledgedAt) < openedAt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Human escalation acknowledgedAt cannot precede openedAt.",
+        path: ["acknowledgement", "acknowledgedAt"]
+      });
+    }
+    if (escalation.supersededById && escalation.state !== "superseded") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Human escalation supersededById is only valid for the superseded state.",
+        path: ["supersededById"]
+      });
+    }
+    if (escalation.terminalReason && escalation.state !== "expired" && escalation.state !== "superseded") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Human escalation terminalReason is only valid for expired or superseded states.",
+        path: ["terminalReason"]
       });
     }
   });
@@ -983,6 +1179,9 @@ export const OpenTagRunResultSchema = z.object({
   suggestedChanges: z.array(SuggestedChangesSnapshotSchema).optional(),
   approvalDecision: ApprovalDecisionSchema.optional(),
   applyPlan: ApplyPlanSchema.optional(),
+  humanEscalation: HumanEscalationRequestSchema.optional(),
+  humanEscalationId: z.string().min(1).optional(),
+  humanResolutionUnavailableReason: z.string().min(1).optional(),
   verification: z
     .array(
       z.object({
@@ -1005,11 +1204,32 @@ export const OpenTagRunSchema = z.object({
   sourceProposalId: z.string().min(1).optional(),
   sourceApplyPlanId: z.string().min(1).optional(),
   contextPacket: ContextPacketSchema.optional(),
+  accessProfileSnapshot: AgentAccessProfileSnapshotSchema.optional(),
+  policySnapshotProvenance: PolicySnapshotProvenanceSchema.optional(),
   assignedRunnerId: z.string().min(1).optional(),
   executor: z.string().min(1).optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   result: OpenTagRunResultSchema.optional()
+}).superRefine((run, ctx) => {
+  if (Boolean(run.accessProfileSnapshot) !== Boolean(run.policySnapshotProvenance)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Run access and policy snapshots must be attached together.",
+      path: [run.accessProfileSnapshot ? "policySnapshotProvenance" : "accessProfileSnapshot"]
+    });
+  }
+  if (
+    run.accessProfileSnapshot
+    && run.policySnapshotProvenance
+    && run.accessProfileSnapshot.policySnapshotId !== run.policySnapshotProvenance.id
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Run access profile must reference the attached policy snapshot provenance.",
+      path: ["accessProfileSnapshot", "policySnapshotId"]
+    });
+  }
 });
 
 export type ActorIdentity = z.infer<typeof ActorIdentitySchema>;
@@ -1046,6 +1266,9 @@ export type PolicyScope = z.infer<typeof PolicyScopeSchema>;
 export type PolicyEffect = z.infer<typeof PolicyEffectSchema>;
 export type PolicyRule = z.infer<typeof PolicyRuleSchema>;
 export type PolicyResolution = z.infer<typeof PolicyResolutionSchema>;
+export type PolicySnapshotProvenance = z.infer<typeof PolicySnapshotProvenanceSchema>;
+export type AgentPrincipal = z.infer<typeof AgentPrincipalSchema>;
+export type AgentAccessProfileSnapshot = z.infer<typeof AgentAccessProfileSnapshotSchema>;
 export type AdapterMutationMapping = z.infer<typeof AdapterMutationMappingSchema>;
 export type SuccessMetricName = z.infer<typeof SuccessMetricNameSchema>;
 export type CallbackRoute = z.infer<typeof CallbackRouteSchema>;
@@ -1077,6 +1300,8 @@ export type CompletionGateResult = z.infer<typeof CompletionGateResultSchema>;
 export type CompletionWaiver = z.infer<typeof CompletionWaiverSchema>;
 export type CompletionAssessment = z.infer<typeof CompletionAssessmentSchema>;
 export type HumanEscalation = z.infer<typeof HumanEscalationSchema>;
+export type HumanEscalationOption = z.infer<typeof HumanEscalationOptionSchema>;
+export type HumanEscalationRequest = z.infer<typeof HumanEscalationRequestSchema>;
 export type CanonicalMutationDomain = z.infer<typeof CanonicalMutationDomainSchema>;
 export type MutationIntent = z.infer<typeof MutationIntentSchema>;
 export type SuggestedChangesSnapshot = z.infer<typeof SuggestedChangesSnapshotSchema>;

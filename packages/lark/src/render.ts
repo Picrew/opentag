@@ -201,6 +201,13 @@ export function renderLarkRunStatusPresentation(presentation: OpenTagRunStatusPr
   if (presentation.state === "waiting_for_approval") {
     return ["Waiting for your review.", `Run: ${presentation.runId}`, "Review the action receipt in this thread, or use /status here for details."].join("\n");
   }
+  if (presentation.state === "waiting_for_human") {
+    return [
+      presentation.message ?? "Waiting for human input.",
+      `Run: ${presentation.runId}`,
+      presentation.nextAction ?? "Use /status here for details."
+    ].join("\n");
+  }
   if (presentation.state === "running") {
     return [presentation.message ?? "OpenTag is working.", `Run: ${presentation.runId}`, "Use /status here for details."].join("\n");
   }
@@ -213,7 +220,7 @@ export function renderLarkRunStatusPresentation(presentation: OpenTagRunStatusPr
 
 function larkRunStatusHeaderTemplate(state: OpenTagRunStatusPresentation["state"]): LarkCard["header"]["template"] {
   if (state === "received" || state === "queued" || state === "running") return "blue";
-  if (state === "waiting_for_approval") return "yellow";
+  if (state === "waiting_for_approval" || state === "waiting_for_human") return "yellow";
   if (state === "completed") return "green";
   if (state === "failed" || state === "timed_out") return "red";
   if (state === "cancelled" || state === "interrupted") return "grey";
@@ -225,6 +232,7 @@ function larkRunStatusTitle(state: OpenTagRunStatusPresentation["state"]): strin
   if (state === "queued") return "OpenTag queued this";
   if (state === "running") return "OpenTag is working";
   if (state === "waiting_for_approval") return "OpenTag is waiting for review";
+  if (state === "waiting_for_human") return "OpenTag needs human input";
   return `OpenTag ${state}`;
 }
 

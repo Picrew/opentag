@@ -151,7 +151,7 @@ export function evaluateActionPermission(input: {
 }
 
 export type ThreadActionVerb = "approve" | "apply" | "continue" | "reject";
-export type ThreadControlVerb = "status" | "doctor" | "stop";
+export type ThreadControlVerb = "status" | "doctor" | "stop" | "acknowledge" | "resolve";
 
 export type ThreadActionSelection =
   | { kind: "latest" }
@@ -172,6 +172,9 @@ export type ThreadControlCommand = {
   verb: ThreadControlVerb;
   rawText: string;
   runId?: string;
+  escalationId?: string;
+  optionId?: string;
+  reason?: string;
 };
 
 export type SuggestedActionCandidate = {
@@ -345,11 +348,33 @@ export function parseThreadControlCommand(rawText: string): ThreadControlCommand
   }
 
   const stop = text.match(/^\/stop(?:\s+(\S+))?\s*$/i);
-  if (!stop) return null;
+  if (stop) {
+    return {
+      verb: "stop",
+      rawText: text,
+      ...(stop[1] ? { runId: stop[1] } : {})
+    };
+  }
+
+  const acknowledge = text.match(/^\/(?:ack|acknowledge)\s+(\S+)\s*$/i);
+  if (acknowledge) {
+    return { verb: "acknowledge", rawText: text, escalationId: acknowledge[1]! };
+  }
+
+  const resolve = text.match(/^\/resolve\s+(\S+)(?:\s+(.+))?\s*$/i);
+  if (!resolve) return null;
+  const flags = resolve[2]?.trim();
+  const optionThenReason = flags?.match(/^--option\s+(\S+)(?:\s+--reason\s+(.+))?$/i);
+  const reasonThenOption = flags?.match(/^--reason\s+(.+?)(?:\s+--option\s+(\S+))?$/i);
+  if (flags && !optionThenReason && !reasonThenOption) return null;
+  const optionId = optionThenReason?.[1] ?? reasonThenOption?.[2];
+  const reason = optionThenReason?.[2] ?? reasonThenOption?.[1];
   return {
-    verb: "stop",
+    verb: "resolve",
     rawText: text,
-    ...(stop[1] ? { runId: stop[1] } : {})
+    escalationId: resolve[1]!,
+    ...(optionId ? { optionId } : {}),
+    ...(reason?.trim() ? { reason: reason.trim() } : {})
   };
 }
 

@@ -34,7 +34,7 @@ export const OpenTagPresentationActionSchema = z.object({
 export const OpenTagRunStatusPresentationSchema = z.object({
   kind: z.literal("run_status"),
   runId: z.string().min(1),
-  state: z.enum(["received", "queued", "running", "waiting_for_approval", "completed", "failed", "cancelled", "interrupted", "timed_out"]),
+  state: z.enum(["received", "queued", "running", "waiting_for_approval", "waiting_for_human", "completed", "failed", "cancelled", "interrupted", "timed_out"]),
   message: z.string().min(1).optional(),
   nextAction: z.string().min(1).optional(),
   detailVisibility: z.enum(["source_thread", "audit"]).optional()
@@ -151,7 +151,7 @@ export function presentationDeliveryTier(presentation: OpenTagPresentation): Ope
   if (presentation.kind === "approval_prompt" || presentation.kind === "action_receipt") return "attention_required";
   if (presentation.kind === "run_status") {
     if (presentation.detailVisibility === "audit") return "silent";
-    if (presentation.state === "waiting_for_approval" || presentation.state === "failed") return "attention_required";
+    if (["waiting_for_approval", "waiting_for_human", "failed"].includes(presentation.state)) return "attention_required";
     if (["completed", "cancelled", "interrupted", "timed_out"].includes(presentation.state)) return "terminal";
     return "status";
   }

@@ -192,6 +192,7 @@ function slackRunStatusTitle(state: OpenTagRunStatusPresentation["state"]): stri
   if (state === "queued") return "Queued";
   if (state === "running") return "Running";
   if (state === "waiting_for_approval") return "Waiting for approval";
+  if (state === "waiting_for_human") return "Waiting for human input";
   if (state === "completed") return "Completed";
   if (state === "failed") return "Failed";
   if (state === "cancelled") return "Cancelled";
