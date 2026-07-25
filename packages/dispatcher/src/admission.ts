@@ -1,10 +1,16 @@
+import { createHash } from "node:crypto";
 import {
+  AgentAccessProfileSnapshotSchema,
   conversationKeysFromEvent,
   isRepositoryFreePermissionScope,
   projectTargetRefFromEvent,
+  PolicySnapshotProvenanceSchema,
   RunAdmissionDecisionSchema,
   type OpenTagEvent,
   type OpenTagRun,
+  type AgentAccessProfileSnapshot,
+  type PolicyRule,
+  type PolicySnapshotProvenance,
   type RunAdmissionDecision,
   type RunAdmissionReasonCode
 } from "@opentag/core";
@@ -18,7 +24,11 @@ export type AgentAccessProfileCheckInput = {
 };
 
 export type AgentAccessProfileCheckResult =
-  | { allowed: true }
+  | {
+      allowed: true;
+      accessProfileSnapshot?: AgentAccessProfileSnapshot;
+      policySnapshotProvenance?: PolicySnapshotProvenance;
+    }
   | {
       allowed: false;
       reason: string;
@@ -36,6 +46,8 @@ export type AdmitRunResult =
   | {
       outcome: "start";
       decision: RunAdmissionDecision;
+      accessProfileSnapshot: AgentAccessProfileSnapshot;
+      policySnapshotProvenance: PolicySnapshotProvenance;
       binding?: RepoBinding;
     }
   | {
@@ -142,12 +154,13 @@ function admissionDecision(input: {
   reasonCode: RunAdmissionReasonCode;
   event: OpenTagEvent;
   activeRunId?: string;
+  decidedAt: string;
 }): RunAdmissionDecision {
   return RunAdmissionDecisionSchema.parse({
     action: input.action,
     reason: input.reason,
     reasonCode: input.reasonCode,
-    decidedAt: new Date().toISOString(),
+    decidedAt: input.decidedAt,
     ...(input.activeRunId ? { activeRunId: input.activeRunId } : {}),
     eventId: input.event.id
   });
@@ -157,14 +170,127 @@ async function defaultAgentAccessProfileCheck(): Promise<AgentAccessProfileCheck
   return { allowed: true };
 }
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sha256Digest(value: unknown): string {
+  return `sha256:${createHash("sha256").update(stableJson(value)).digest("hex")}`;
+}
+
+function defaultAdmissionSnapshots(input: {
+  event: OpenTagEvent;
+  binding?: RepoBinding;
+  rules: PolicyRule[];
+  capturedAt: string;
+}): { accessProfileSnapshot: AgentAccessProfileSnapshot; policySnapshotProvenance: PolicySnapshotProvenance } {
+  const projectTarget = projectTargetRefFromEvent(input.event);
+  const sourceRef = projectTarget ? `${projectTarget.provider}:${projectTarget.owner}/${projectTarget.repo}` : undefined;
+  const policySource = input.binding ? "repo_binding" as const : "repository_free" as const;
+  const policyContent = {
+    source: policySource,
+    ...(sourceRef ? { sourceRef } : {}),
+    rules: input.rules,
+    ...(input.binding
+      ? {
+          binding: {
+            runnerId: input.binding.runnerId,
+            ...(input.binding.defaultExecutor ? { defaultExecutor: input.binding.defaultExecutor } : {}),
+            allowedActors: [...(input.binding.allowedActors ?? [])].sort()
+          }
+        }
+      : {})
+  };
+  const contentDigest = sha256Digest(policyContent);
+  const policyIdentity = {
+    eventId: input.event.id,
+    contentDigest,
+    capturedAt: input.capturedAt
+  };
+  const policySnapshotProvenance = PolicySnapshotProvenanceSchema.parse({
+    id: `policy_snapshot_${sha256Digest(policyIdentity).slice("sha256:".length, "sha256:".length + 24)}`,
+    source: policySource,
+    ...(sourceRef ? { sourceRef } : {}),
+    rules: input.rules,
+    contentDigest,
+    capturedAt: input.capturedAt
+  });
+  const accessIdentity = {
+    eventId: input.event.id,
+    agentId: input.event.target.agentId,
+    requester: `${input.event.actor.provider}:${input.event.actor.providerUserId}`,
+    policySnapshotId: policySnapshotProvenance.id
+  };
+  const accessProfileSnapshot = AgentAccessProfileSnapshotSchema.parse({
+    id: `access_snapshot_${sha256Digest(accessIdentity).slice("sha256:".length, "sha256:".length + 24)}`,
+    agentPrincipal: {
+      id: input.event.target.agentId,
+      kind: input.event.target.agentId === "opentag" ? "opentag_agent" : "custom"
+    },
+    requestedBy: input.event.actor,
+    projectTargets: sourceRef ? [sourceRef] : [],
+    connectionRefs: [],
+    permissions: input.event.permissions,
+    constraints: {
+      locality: "local_required",
+      maximumRiskTier: "high",
+      ...(input.binding?.defaultExecutor ? { allowedExecutorIds: [input.binding.defaultExecutor] } : {}),
+      ...(input.binding ? { allowedRunnerIds: [input.binding.runnerId] } : {})
+    },
+    policySnapshotId: policySnapshotProvenance.id,
+    capturedAt: input.capturedAt
+  });
+  return { accessProfileSnapshot, policySnapshotProvenance };
+}
+
+function validateAdmissionSnapshots(input: {
+  event: OpenTagEvent;
+  accessProfileSnapshot: AgentAccessProfileSnapshot;
+  policySnapshotProvenance: PolicySnapshotProvenance;
+  now: string;
+}): string | null {
+  const access = AgentAccessProfileSnapshotSchema.parse(input.accessProfileSnapshot);
+  const policy = PolicySnapshotProvenanceSchema.parse(input.policySnapshotProvenance);
+  if (access.policySnapshotId !== policy.id) return "The access profile does not reference the captured policy snapshot.";
+  if (
+    access.requestedBy.provider !== input.event.actor.provider
+    || access.requestedBy.providerUserId !== input.event.actor.providerUserId
+  ) return "The access profile requester does not match the requesting human.";
+  if (access.agentPrincipal.id !== input.event.target.agentId) {
+    return "The access profile agent principal does not match the targeted agent.";
+  }
+  const projectTarget = projectTargetRefFromEvent(input.event);
+  if (projectTarget) {
+    const expected = `${projectTarget.provider}:${projectTarget.owner}/${projectTarget.repo}`;
+    if (!access.projectTargets.includes(expected)) return "The access profile does not include the requested project target.";
+  }
+  if (access.expiresAt && Date.parse(access.expiresAt) <= Date.parse(input.now)) {
+    return "The agent access profile expired before this run could start.";
+  }
+  if (access.revokedAt && Date.parse(access.revokedAt) <= Date.parse(input.now)) {
+    return "The agent access profile was revoked before this run could start.";
+  }
+  return null;
+}
+
 export function createAdmissionRuntime(input: {
   repo: Repository;
   agentAccessProfileCheck?: AgentAccessProfileCheck;
+  now?: () => string;
 }) {
   const agentAccessProfileCheck = input.agentAccessProfileCheck ?? defaultAgentAccessProfileCheck;
+  const now = input.now ?? (() => new Date().toISOString());
 
   return {
     async admitRun(request: AdmitRunInput): Promise<AdmitRunResult> {
+      const admittedAt = now();
       const existingRun = await input.repo.getRunByEventId({ eventId: request.event.id });
       if (existingRun) {
         return {
@@ -174,7 +300,8 @@ export function createAdmissionRuntime(input: {
             reason: "Source event already created a run.",
             reasonCode: "duplicate_source_event",
             event: request.event,
-            activeRunId: existingRun.run.id
+            activeRunId: existingRun.run.id,
+            decidedAt: admittedAt
           }),
           run: existingRun.run,
           idempotentReplay: true
@@ -201,7 +328,8 @@ export function createAdmissionRuntime(input: {
             action: "needs_human_decision",
             reason: "The repository-bearing event did not resolve to a complete repository context.",
             reasonCode: "repo_context_missing",
-            event: request.event
+            event: request.event,
+            decidedAt: admittedAt
           })
         };
       }
@@ -215,7 +343,8 @@ export function createAdmissionRuntime(input: {
               action: "needs_human_decision",
               reason: "No repository binding is configured for this work context.",
               reasonCode: "repo_not_bound",
-              event: request.event
+              event: request.event,
+              decidedAt: admittedAt
             })
           };
         }
@@ -228,23 +357,53 @@ export function createAdmissionRuntime(input: {
               action: "needs_human_decision",
               reason: actorGate.reason,
               reasonCode: actorGate.reasonCode,
-              event: request.event
+              event: request.event,
+              decidedAt: admittedAt
             })
           };
         }
 
-        const accessDecision = await agentAccessProfileCheck({ event: request.event, binding });
-        if (!accessDecision.allowed) {
-          return {
-            outcome: "needs_human_decision",
-            decision: admissionDecision({
-              action: "needs_human_decision",
-              reason: accessDecision.reason,
-              reasonCode: accessDecision.reasonCode ?? "agent_access_profile_denied",
-              event: request.event
-            })
-          };
-        }
+      }
+
+      const capturedAt = admittedAt;
+      const rules = repoKey && typeof input.repo.listRepoPolicyRules === "function"
+        ? await input.repo.listRepoPolicyRules(repoKey)
+        : [];
+      const defaults = defaultAdmissionSnapshots({
+        event: request.event,
+        ...(binding ? { binding } : {}),
+        rules,
+        capturedAt
+      });
+      const checked = binding ? await agentAccessProfileCheck({ event: request.event, binding }) : { allowed: true as const };
+      if (!checked.allowed) {
+        return {
+          outcome: "needs_human_decision",
+          decision: admissionDecision({
+            action: "needs_human_decision",
+            reason: checked.reason,
+            reasonCode: checked.reasonCode ?? "agent_access_profile_denied",
+            event: request.event,
+            decidedAt: admittedAt
+          })
+        };
+      }
+      const snapshots = {
+        accessProfileSnapshot: checked.accessProfileSnapshot ?? defaults.accessProfileSnapshot,
+        policySnapshotProvenance: checked.policySnapshotProvenance ?? defaults.policySnapshotProvenance
+      };
+      const invalidSnapshotReason = validateAdmissionSnapshots({ event: request.event, ...snapshots, now: capturedAt });
+      if (invalidSnapshotReason) {
+        return {
+          outcome: "needs_human_decision",
+          decision: admissionDecision({
+            action: "needs_human_decision",
+            reason: invalidSnapshotReason,
+            reasonCode: "agent_access_profile_denied",
+            event: request.event,
+            decidedAt: admittedAt
+          })
+        };
       }
 
       let activeRun: { run: OpenTagRun; event: OpenTagEvent } | null = null;
@@ -258,13 +417,15 @@ export function createAdmissionRuntime(input: {
           reason: "A run is already active for this thread; queue the new request as follow-up work.",
           reasonCode: isWriteCapable(request.event) ? "active_write_run_same_thread" : "active_run_same_thread",
           event: request.event,
-          activeRunId: activeRun.run.id
+          activeRunId: activeRun.run.id,
+          decidedAt: admittedAt
         });
         const { followUpRequest, created } = await input.repo.createFollowUpRequest({
           id: request.requestId,
           event: request.event,
           decision,
-          activeRunId: activeRun.run.id
+          activeRunId: activeRun.run.id,
+          ...snapshots
         });
         if (created) {
           await input.repo.appendRunEvent({
@@ -289,8 +450,10 @@ export function createAdmissionRuntime(input: {
           action: "start",
           reason: "Source event accepted and ready to create a run.",
           reasonCode: "new_event",
-          event: request.event
+          event: request.event,
+          decidedAt: admittedAt
         }),
+        ...snapshots,
         ...(binding ? { binding } : {})
       };
     }

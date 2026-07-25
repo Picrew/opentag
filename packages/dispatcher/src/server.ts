@@ -8,6 +8,7 @@ import {
   OpenTagApprovalPromptPresentationSchema,
   OpenTagManagedChannelBindingOwnershipSchema,
   MaterialActionReceiptSchema,
+  HumanEscalationSchema,
   VerificationEvidenceSchema,
   capabilityForMutationIntent,
   channelProgressVisibility,
@@ -19,8 +20,10 @@ import {
   redactCredentialLikeData,
   sanitizeCredentialLikeValue,
   projectTargetRefFromEvent,
+  protocolRunFieldsFromEvent,
   suggestedActionCandidatesFromSnapshots,
   type ActorIdentity,
+  type HumanEscalation,
   type ActionReceiptCapability,
   type ActionReceiptContext,
   type AdapterMutationMapping,
@@ -667,6 +670,18 @@ const CompletionWaiverInputSchema = z.object({
   expiresAt: z.string().datetime().optional()
 }).strict();
 
+const HumanEscalationAcknowledgeInputSchema = z.object({
+  actor: ActorIdentitySchema,
+  acknowledgedAt: z.string().datetime().optional()
+}).strict();
+
+const HumanEscalationResolveInputSchema = z.object({
+  actor: ActorIdentitySchema,
+  optionId: z.string().min(1).optional(),
+  reason: z.string().min(1).max(2_000).optional(),
+  resolvedAt: z.string().datetime().optional()
+}).strict();
+
 const PruneSourceDeliveriesSchema = z.object({
   olderThan: z.string().datetime(),
   limit: z.number().int().positive().max(100_000).optional()
@@ -695,6 +710,75 @@ const CompleteRunSchema = AttemptLeaseSchema.extend({
   result: OpenTagRunResultSchema,
   idempotencyKey: z.string().min(1).max(256).optional()
 });
+
+function normalizeNeedsHumanResult(input: {
+  run: OpenTagRun;
+  result: OpenTagRunResult;
+  attemptId: string;
+  openedAt: string;
+}): { result: OpenTagRunResult; escalation?: HumanEscalation } {
+  if (input.result.conclusion !== "needs_human") return { result: input.result };
+  const normalizedResult = { ...input.result };
+  delete normalizedResult.humanEscalationId;
+  delete normalizedResult.humanResolutionUnavailableReason;
+  const workThreadId = input.run.thread?.id;
+  if (!workThreadId) {
+    return {
+      result: OpenTagRunResultSchema.parse({
+        ...normalizedResult,
+        humanResolutionUnavailableReason:
+          "No durable WorkThread is available for an attributable human resolution; retry from a bound source work item."
+      })
+    };
+  }
+  const request = input.result.humanEscalation;
+  if (request?.expiresAt && Date.parse(request.expiresAt) <= Date.parse(input.openedAt)) {
+    return {
+      result: OpenTagRunResultSchema.parse({
+        ...normalizedResult,
+        humanResolutionUnavailableReason: "The requested human resolution expired before the run completion was recorded."
+      })
+    };
+  }
+  const escalationClass = request?.class
+    ?? ((input.result.suggestedChanges?.length ?? 0) > 0 ? "approval" : "missing_input");
+  const subjectRef = request?.subjectRef
+    ?? input.result.suggestedChanges?.[0]?.proposalId
+    ?? input.run.id;
+  const dedupeKey = request?.dedupeKey ?? `run-result:${escalationClass}:${subjectRef}:v1`;
+  const id = `escalation_${createHash("sha256")
+    .update(`${input.run.id}\0${dedupeKey}`)
+    .digest("hex")
+    .slice(0, 24)}`;
+  const nextAction = request?.nextAction
+    ?? (typeof input.result.nextAction === "object" ? input.result.nextAction.hint : undefined)
+    ?? { kind: "request_human_decision" as const, targetId: subjectRef };
+  const escalation = HumanEscalationSchema.parse({
+    id,
+    workThreadId,
+    runId: input.run.id,
+    attemptId: input.attemptId,
+    class: escalationClass,
+    audience: request?.audience ?? "requester",
+    subjectRef,
+    state: "open",
+    blocking: request?.blocking ?? true,
+    summary: request?.summary ?? input.result.summary,
+    reason: request?.reason ?? "The executor reported that human input is required before work can continue.",
+    ...(request?.options ? { options: request.options } : {}),
+    nextAction,
+    dedupeKey,
+    openedAt: input.openedAt,
+    ...(request?.expiresAt ? { expiresAt: request.expiresAt } : {})
+  });
+  return {
+    result: OpenTagRunResultSchema.parse({
+      ...normalizedResult,
+      humanEscalationId: escalation.id
+    }),
+    escalation
+  };
+}
 
 const MarkRunningSchema = AttemptLeaseSchema.extend({
   executor: z.string().min(1),
@@ -3132,6 +3216,80 @@ export function createDispatcherApp(input: {
       ...(input.createdAt ? { createdAt: input.createdAt } : {})
     });
   };
+  async function structureAdmissionHumanDecision(inputValue: {
+    requestId: string;
+    event: OpenTagEvent;
+    decision: import("@opentag/core").RunAdmissionDecision;
+  }): Promise<{ escalation?: HumanEscalation; resolutionUnavailableReason?: string }> {
+    const protocol = protocolRunFieldsFromEvent(inputValue.event, inputValue.decision.decidedAt);
+    if (!protocol.thread) {
+      return {
+        resolutionUnavailableReason:
+          "Admission requires human action, but this event has no durable WorkThread; retry from a bound source work item after correcting the reported reason."
+      };
+    }
+    const workThread = (await repo.upsertWorkThread({
+      thread: protocol.thread,
+      recordedAt: inputValue.decision.decidedAt
+    })).thread;
+    const projectTarget = projectTargetRefFromEvent(inputValue.event);
+    const subjectRef = projectTarget
+      ? `${projectTarget.provider}:${projectTarget.owner}/${projectTarget.repo}`
+      : inputValue.event.id;
+    const securityReason = [
+      "actor_not_allowed_for_write",
+      "actor_not_authorized_for_public_repo",
+      "agent_access_profile_denied",
+      "policy_rejected"
+    ].includes(inputValue.decision.reasonCode);
+    const escalationClass = securityReason ? "security" as const : "configuration" as const;
+    const audience = securityReason ? "repo_owner" as const : "operator" as const;
+    const dedupeKey = `admission:${inputValue.decision.reasonCode}:${subjectRef}:v1`;
+    const escalation = HumanEscalationSchema.parse({
+      id: `escalation_${createHash("sha256")
+        .update(`${workThread.id}\0${dedupeKey}`)
+        .digest("hex")
+        .slice(0, 24)}`,
+      workThreadId: workThread.id,
+      class: escalationClass,
+      audience,
+      subjectRef,
+      state: "open",
+      blocking: true,
+      summary: "Run admission needs human attention.",
+      reason: inputValue.decision.reason,
+      nextAction: { kind: "request_human_decision", targetId: subjectRef },
+      dedupeKey,
+      openedAt: inputValue.decision.decidedAt
+    });
+    const opened = await repo.openHumanEscalation({ escalation });
+    if (opened.created && presentation.shouldDeliverStatusUpdate(inputValue.event.callback.provider)) {
+      const semantic = presentation.runStatusPresentation({
+        runId: inputValue.requestId,
+        state: "waiting_for_human",
+        message: opened.escalation.summary,
+        nextAction: `${opened.escalation.reason} Resolve ${opened.escalation.id} locally, correct the configuration or authority, then retry the source request.`,
+        detailVisibility: "source_thread"
+      });
+      const rendered = presentation.render({
+        provider: inputValue.event.callback.provider,
+        ...larkRenderLocaleRenderOption(inputValue.event),
+        presentation: semantic
+      });
+      await callbackSink.deliver({
+        runId: inputValue.requestId,
+        kind: "final",
+        provider: inputValue.event.callback.provider,
+        uri: inputValue.event.callback.uri,
+        body: rendered.body,
+        ...(inputValue.event.target.agentId ? { agentId: inputValue.event.target.agentId } : {}),
+        ...(inputValue.event.callback.threadKey ? { threadKey: inputValue.event.callback.threadKey } : {}),
+        ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
+        ...(rendered.rich ? { rich: rendered.rich } : {})
+      });
+    }
+    return { escalation: opened.escalation };
+  }
   const sourceThreadControl = createSourceThreadControlHandler({
     repo,
     presentation,
@@ -3139,7 +3297,12 @@ export function createDispatcherApp(input: {
     latestRunTimeoutMs,
     deliverAuditedMessage: (message) => deliverAndAudit({ repo, sink: callbackSink, retry: callbackRetry, message }),
     deliverDirectMessage: (message) => callbackSink.deliver(message),
-    recordControlPlaneEvent
+    recordControlPlaneEvent,
+    onHumanEscalationChanged: async (escalation) => {
+      if (escalation.runId) await completionGovernance.reassessRun(escalation.runId);
+      await deliverCompletionTransition(escalation.workThreadId);
+    },
+    ...(input.completionNow ? { now: input.completionNow } : {})
   });
   queueMicrotask(() => {
     void (async () => {
@@ -4476,7 +4639,12 @@ export function createDispatcherApp(input: {
           projectTarget: projectTarget ? `${projectTarget.provider}:${projectTarget.owner}/${projectTarget.repo}` : null
         }
       });
-      return c.json({ decision: admitted.decision }, 202);
+      const humanDecision = await structureAdmissionHumanDecision({
+        requestId: parsed.runId,
+        event: parsed.event,
+        decision: admitted.decision
+      });
+      return c.json({ decision: admitted.decision, ...humanDecision }, 202);
     }
 
     if (admitted.outcome === "drop_duplicate") {
@@ -4522,7 +4690,12 @@ export function createDispatcherApp(input: {
       return c.json({ decision: admitted.decision, followUpRequest: admitted.followUpRequest }, 202);
     }
 
-    const createdRun = await repo.createRun({ id: parsed.runId, event: parsed.event });
+    const createdRun = await repo.createRun({
+      id: parsed.runId,
+      event: parsed.event,
+      accessProfileSnapshot: admitted.accessProfileSnapshot,
+      policySnapshotProvenance: admitted.policySnapshotProvenance
+    });
     if (!createdRun.created) {
       return c.json(
         {
@@ -5369,12 +5542,22 @@ export function createDispatcherApp(input: {
       ...(idempotencyKey ? { idempotencyKey } : {})
     }, { secrets: [parsed.fencingToken] });
     const safeResult = OpenTagRunResultSchema.parse(safeCompleteFields.result);
+    const completingRun = await repo.getRun({ runId });
+    const needsHuman = completingRun
+      ? normalizeNeedsHumanResult({
+          run: completingRun.run,
+          result: safeResult,
+          attemptId: parsed.attemptId,
+          openedAt: input.completionNow?.() ?? new Date().toISOString()
+        })
+      : { result: safeResult };
     const outcome = await repo.completeRun({
       runId,
       runnerId: c.req.param("runnerId"),
       attemptId: parsed.attemptId,
       fencingToken: parsed.fencingToken,
-      result: safeResult,
+      result: needsHuman.result,
+      ...(needsHuman.escalation ? { humanEscalation: needsHuman.escalation } : {}),
       ...(safeCompleteFields.idempotencyKey ? { idempotencyKey: safeCompleteFields.idempotencyKey } : {})
     });
     if (outcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
@@ -5401,13 +5584,20 @@ export function createDispatcherApp(input: {
     });
     if (
       completedResult.conclusion === "needs_human" &&
-      shouldDeliverRunStatusUpdate(presentation, { provider: stored.event.callback.provider, state: "waiting_for_approval" })
+      completedResult.humanEscalationId &&
+      shouldDeliverRunStatusUpdate(presentation, { provider: stored.event.callback.provider, state: "waiting_for_human" })
     ) {
+      const workThreadId = stored.run.thread?.id;
+      const storedEscalations = workThreadId ? await repo.listHumanEscalations({ workThreadId }) : [];
+      const escalation = needsHuman.escalation
+        ?? storedEscalations.find((item) => item.id === completedResult.humanEscalationId);
       const waitingPresentation = presentation.runStatusPresentation({
         runId,
-        state: "waiting_for_approval",
-        message: "Waiting for approval.",
-        nextAction: "Review the source-thread action receipt, then approve, reject, apply, or continue from the source thread.",
+        state: "waiting_for_human",
+        message: escalation?.summary ?? "Waiting for human input.",
+        nextAction: escalation
+          ? `Resolve ${escalation.id} from this source thread with /resolve ${escalation.id}, or use the local completion escalation command.`
+          : `Resolve ${completedResult.humanEscalationId} from the source thread or local CLI.`,
         detailVisibility: "source_thread"
       });
       const waiting = presentation.render({
@@ -5794,6 +5984,100 @@ export function createDispatcherApp(input: {
     if (!completion) return c.json({ error: "completion_not_available" }, 404);
     if (stored.run.thread?.id) await deliverCompletionTransition(stored.run.thread.id);
     return c.json({ completion });
+  });
+
+  app.get("/v1/runs/:runId/human-escalations", async (c) => {
+    const runId = c.req.param("runId");
+    const stored = await repo.getRun({ runId });
+    if (!stored) return c.json({ error: "run_not_found" }, 404);
+    const workThreadId = stored.run.thread?.id;
+    if (!workThreadId) {
+      return c.json({
+        escalations: [],
+        resolutionUnavailableReason: stored.run.result?.humanResolutionUnavailableReason
+          ?? "This run has no durable WorkThread for an attributable human resolution."
+      });
+    }
+    const expired = await repo.expireHumanEscalations({
+      workThreadId,
+      runId,
+      at: input.completionNow?.() ?? new Date().toISOString()
+    });
+    if (expired.expired > 0) await completionGovernance.reassessRun(runId);
+    const escalations = (await repo.listHumanEscalations({ workThreadId }))
+      .filter((escalation) => escalation.runId === runId);
+    return c.json({ escalations });
+  });
+
+  app.post("/v1/human-escalations/:escalationId/acknowledge", async (c) => {
+    const escalationId = c.req.param("escalationId");
+    const parsed = HumanEscalationAcknowledgeInputSchema.parse(sanitizeCredentialLikeValue(
+      await parseDispatcherBody(c, HumanEscalationAcknowledgeInputSchema)
+    ));
+    try {
+      const result = await repo.transitionHumanEscalation({
+        id: escalationId,
+        toState: "acknowledged",
+        actor: parsed.actor,
+        at: parsed.acknowledgedAt ?? input.completionNow?.() ?? new Date().toISOString()
+      });
+      if (result.escalation.state === "expired") {
+        return c.json({
+          error: "human_escalation_expired",
+          message: "The human escalation expired without implicit approval.",
+          escalation: result.escalation
+        }, 409);
+      }
+      return c.json({ outcome: result.changed ? "acknowledged" : "duplicate", escalation: result.escalation }, result.changed ? 201 : 200);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Invalid human escalation acknowledgement.";
+      const status = message.includes("does not exist") ? 404 : 409;
+      return c.json({ error: status === 404 ? "human_escalation_not_found" : "invalid_human_escalation_transition", message }, status);
+    }
+  });
+
+  app.post("/v1/human-escalations/:escalationId/resolve", async (c) => {
+    const escalationId = c.req.param("escalationId");
+    const parsed = HumanEscalationResolveInputSchema.parse(sanitizeCredentialLikeValue(
+      await parseDispatcherBody(c, HumanEscalationResolveInputSchema)
+    ));
+    try {
+      const result = await repo.transitionHumanEscalation({
+        id: escalationId,
+        toState: "resolved",
+        actor: parsed.actor,
+        ...(parsed.optionId ? { optionId: parsed.optionId } : {}),
+        ...(parsed.reason ? { reason: parsed.reason } : {}),
+        at: parsed.resolvedAt ?? input.completionNow?.() ?? new Date().toISOString()
+      });
+      if (result.escalation.state === "expired") {
+        return c.json({
+          error: "human_escalation_expired",
+          message: "The human escalation expired without implicit approval.",
+          escalation: result.escalation
+        }, 409);
+      }
+      let completion = null;
+      if (result.escalation.runId) {
+        await completionGovernance.reassessRun(result.escalation.runId);
+        await deliverCompletionTransition(result.escalation.workThreadId);
+        completion = await completionGovernance.explainRun(result.escalation.runId);
+      }
+      return c.json({
+        outcome: result.changed ? "resolved" : "duplicate",
+        escalation: result.escalation,
+        ...(completion ? { completion } : {}),
+        resume: {
+          required: true,
+          reason: "Resolution is durable context; OpenTag does not inject it into an executor process that already stopped.",
+          nextAction: "Send a new source-thread task to resume work with this resolution."
+        }
+      }, result.changed ? 201 : 200);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Invalid human escalation resolution.";
+      const status = message.includes("does not exist") ? 404 : 409;
+      return c.json({ error: status === 404 ? "human_escalation_not_found" : "invalid_human_escalation_transition", message }, status);
+    }
   });
 
   app.post("/v1/runs/:runId/completion/waivers", async (c) => {

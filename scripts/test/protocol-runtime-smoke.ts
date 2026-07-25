@@ -97,10 +97,14 @@ try {
       uri: "https://api.github.com/repos/acme/demo/issues/9/comments",
       threadKey: "acme/demo"
     },
-    metadata: { owner: "acme", repo: "demo", issueNumber: 9 }
+    metadata: { repoProvider: "github", owner: "acme", repo: "demo", issueNumber: 9 }
   };
 
   const created = await client.createRun({ runId: "run_smoke_1", event });
+  assert(
+    created.outcome === "run_created",
+    `smoke run should be created, received ${created.outcome}: ${created.decision.reasonCode} (${created.decision.reason})`
+  );
   assert(created.run.contextPacket?.summary === "triage this issue", "created run should include context packet");
   assert(created.run.thread?.workItemReference.externalId === "acme/demo#9", "created run should include work thread");
 

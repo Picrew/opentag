@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  conversationKeysFromCallback,
   conversationKeysFromEvent,
   createDoctorSummaryPresentation,
   createSourceThreadStatusPresentation,
@@ -7,6 +8,7 @@ import {
   projectTargetRefFromEvent,
   type ActorIdentity,
   type FollowUpRequest,
+  type HumanEscalation,
   type OpenTagEvent,
   type OpenTagRun,
   type ProjectTargetRef,
@@ -73,6 +75,8 @@ type SourceThreadControlOptions = {
   deliverAuditedMessage(message: SourceThreadControlCallbackMessage): Promise<unknown>;
   deliverDirectMessage(message: SourceThreadControlCallbackMessage): Promise<unknown>;
   recordControlPlaneEvent: RecordControlPlaneEvent;
+  onHumanEscalationChanged?(escalation: HumanEscalation): Promise<void>;
+  now?: () => string;
 };
 
 function stableHash(value: string): string {
@@ -408,10 +412,97 @@ export function createSourceThreadControlHandler(options: SourceThreadControlOpt
     return jsonResponse({ outcome: "cancelled", run: outcome.run });
   }
 
+  async function handleHumanEscalation(input: {
+    request: SourceThreadControlActionRequest;
+    command: ThreadControlCommand;
+  }): Promise<Response> {
+    const escalationId = input.command.escalationId;
+    if (!escalationId) return jsonResponse({ outcome: "invalid", reason: "escalation_id_required" });
+    const runtime = await sourceThreadRuntimeState(input.request);
+    const escalation = await options.repo.getHumanEscalation({ id: escalationId });
+    const target = escalation?.runId ? await options.repo.getRun({ runId: escalation.runId }) : null;
+    const workThread = escalation && !target
+      ? await options.repo.getWorkThread({ workThreadId: escalation.workThreadId })
+      : null;
+    const workThreadAnchors = workThread
+      ? [workThread.primaryAnchor, ...(workThread.secondaryAnchors ?? [])]
+      : [];
+    const belongsToThread = target
+      ? conversationKeysFromEvent(target.event).some((key) => runtime.conversationKeys.includes(key))
+      : workThreadAnchors.some((anchor) => conversationKeysFromCallback({
+          provider: anchor.provider,
+          uri: anchor.uri,
+          ...(anchor.threadKey ? { threadKey: anchor.threadKey } : {})
+        }).some((key) => runtime.conversationKeys.includes(key)));
+    if (!escalation || !belongsToThread) {
+      await deliverThreadControlReply({
+        request: input.request,
+        command: input.command,
+        body: `Human escalation ${escalationId} was not found in this source thread.`
+      });
+      return jsonResponse({ outcome: "not_found", escalationId });
+    }
+
+    try {
+      const transitioned = await options.repo.transitionHumanEscalation({
+        id: escalation.id,
+        toState: input.command.verb === "acknowledge" ? "acknowledged" : "resolved",
+        actor: input.request.actor,
+        ...(input.command.optionId ? { optionId: input.command.optionId } : {}),
+        ...(input.command.reason ? { reason: input.command.reason } : {}),
+        at: options.now?.() ?? new Date().toISOString()
+      });
+      await options.onHumanEscalationChanged?.(transitioned.escalation);
+      if (transitioned.escalation.state === "expired") {
+        await deliverThreadControlReply({
+          request: input.request,
+          command: input.command,
+          body: `Could not update human escalation ${escalation.id}: it expired without implicit approval.`,
+          ...(target ? { auditRunId: target.run.id } : {})
+        });
+        return jsonResponse({ outcome: "conflict", escalation: transitioned.escalation, message: "Human escalation expired." });
+      }
+      const selected = transitioned.escalation.resolution?.optionId;
+      const selectedOption = selected
+        ? transitioned.escalation.options?.find((option) => option.id === selected)
+        : undefined;
+      const body = input.command.verb === "acknowledge"
+        ? `Acknowledged human escalation ${escalation.id}. It remains blocking until it is resolved or expires.`
+        : [
+            `Resolved human escalation ${escalation.id}${selectedOption ? ` with ${selectedOption.label}` : ""}.`,
+            "The resolution is durably attributed; OpenTag did not inject it into the executor process that already stopped.",
+            "Send a new task in this source thread to resume work with the recorded resolution."
+          ].join("\n");
+      await deliverThreadControlReply({
+        request: input.request,
+        command: input.command,
+        body,
+        ...(target ? { auditRunId: target.run.id } : {})
+      });
+      return jsonResponse({
+        outcome: transitioned.changed ? transitioned.escalation.state : "duplicate",
+        escalation: transitioned.escalation,
+        ...(input.command.verb === "resolve"
+          ? { resume: { required: true, nextAction: "Send a new source-thread task to resume work." } }
+          : {})
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Invalid human escalation transition.";
+      await deliverThreadControlReply({
+        request: input.request,
+        command: input.command,
+        body: `Could not update human escalation ${escalation.id}: ${message}`,
+        ...(target ? { auditRunId: target.run.id } : {})
+      });
+      return jsonResponse({ outcome: "conflict", escalationId: escalation.id, message });
+    }
+  }
+
   return {
     handle(input: { request: SourceThreadControlActionRequest; command: ThreadControlCommand }): Promise<Response> {
       if (input.command.verb === "status") return handleStatus(input);
       if (input.command.verb === "doctor") return handleDoctor(input);
+      if (input.command.verb === "acknowledge" || input.command.verb === "resolve") return handleHumanEscalation(input);
       return handleStop(input);
     }
   };
