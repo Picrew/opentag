@@ -10,4 +10,5 @@ export * from "./presentation.js";
 export * from "./project-target.js";
 export * from "./protocol.js";
 export * from "./request-body.js";
+export * from "./routing.js";
 export * from "./schema.js";
