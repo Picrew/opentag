@@ -2,7 +2,12 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { runCompletionWaiveCommand } from "../src/completion.js";
+import {
+  runCompletionAcknowledgeCommand,
+  runCompletionEscalationsCommand,
+  runCompletionResolveCommand,
+  runCompletionWaiveCommand
+} from "../src/completion.js";
 import { createSetupConfig } from "../src/setup.js";
 
 function configPath(): string {
@@ -158,5 +163,93 @@ describe("completion waiver command", () => {
       scope: "all_gates",
       policyScope: "work_context_owner_container"
     })).rejects.toThrow("--scope must be selected_gates");
+  });
+
+});
+
+describe("completion human escalation commands", () => {
+  const escalation = {
+    id: "escalation_cli_1",
+    workThreadId: "thread_cli_1",
+    runId: "run_cli_1",
+    class: "missing_input",
+    audience: "requester",
+    subjectRef: "deployment-target",
+    state: "open",
+    blocking: true,
+    summary: "Choose a deployment target.",
+    reason: "No target was supplied.",
+    options: [{ id: "staging", label: "Use staging", consequence: "Deploys only to staging." }],
+    openedAt: "2026-07-25T00:00:00.000Z"
+  };
+
+  it("lists and resolves a bounded escalation with pairing authority", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const output: string[] = [];
+    const fetchImpl = async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), init });
+      if (String(url).endsWith("/human-escalations")) return Response.json({ escalations: [escalation] });
+      if (String(url).endsWith("/acknowledge")) {
+        return Response.json({
+          outcome: "acknowledged",
+          escalation: {
+            ...escalation,
+            state: "acknowledged",
+            acknowledgement: {
+              actor: { provider: "github", providerUserId: "owner-1" },
+              acknowledgedAt: "2026-07-25T00:01:00.000Z"
+            }
+          }
+        }, { status: 201 });
+      }
+      return Response.json({
+        outcome: "resolved",
+        escalation: {
+          ...escalation,
+          state: "resolved",
+          resolution: {
+            optionId: "staging",
+            actor: { provider: "github", providerUserId: "owner-1" },
+            reason: "Use the bounded staging target.",
+            resolvedAt: "2026-07-25T00:02:00.000Z"
+          }
+        },
+        resume: {
+          required: true,
+          reason: "Executor stopped.",
+          nextAction: "Send a new source-thread task to resume work."
+        }
+      }, { status: 201 });
+    };
+    const dependencies = { fetchImpl: fetchImpl as typeof fetch, log: (message: string) => output.push(message) };
+    const config = configPath();
+
+    await runCompletionEscalationsCommand({ config, run: "run_cli_1" }, dependencies);
+    await runCompletionAcknowledgeCommand({
+      config,
+      escalation: escalation.id,
+      actorProvider: "github",
+      actorId: "owner-1",
+      acknowledgedAt: "2026-07-25T00:01:00.000Z"
+    }, dependencies);
+    await runCompletionResolveCommand({
+      config,
+      escalation: escalation.id,
+      actorProvider: "github",
+      actorId: "owner-1",
+      option: "staging",
+      reason: "Use the bounded staging target.",
+      resolvedAt: "2026-07-25T00:02:00.000Z"
+    }, dependencies);
+
+    expect(requests.map((request) => request.url)).toEqual([
+      "http://localhost:3030/v1/runs/run_cli_1/human-escalations",
+      "http://localhost:3030/v1/human-escalations/escalation_cli_1/acknowledge",
+      "http://localhost:3030/v1/human-escalations/escalation_cli_1/resolve"
+    ]);
+    expect(requests.every((request) => new Headers(request.init?.headers).get("authorization") === "Bearer pairing_admin_token")).toBe(true);
+    expect(JSON.parse(String(requests[2]?.init?.body))).toMatchObject({ optionId: "staging", reason: "Use the bounded staging target." });
+    expect(output.join("\n")).toContain("Human escalation resolution: resolved");
+    expect(output.join("\n")).toContain("Resume required: yes");
   });
 });
