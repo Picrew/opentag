@@ -15,6 +15,14 @@ import {
   runCompletionWaiveCommand
 } from "./completion.js";
 import { runDoctorCommand } from "./doctor.js";
+import {
+  runFactoryBatchGetCommand,
+  runFactoryBatchSubmitCommand,
+  runFactoryRecipeCreateCommand,
+  runFactoryRecipeGetCommand,
+  runFactoryWorkstreamCreateCommand,
+  runFactoryWorkstreamGetCommand
+} from "./factory.js";
 import { runIngestCommand, runIngestTemplateCommand } from "./ingest.js";
 import { runMaintenancePruneSourceDeliveriesCommand } from "./maintenance.js";
 import { runPairCommand } from "./pair.js";
@@ -171,6 +179,63 @@ program
   .option("--reason <reason>", "Audit reason for cancellation")
   .option("--requested-by <actor>", "Audit actor requesting cancellation")
   .action(runCliAction(runCancelCommand));
+
+const factoryCommand = program.command("factory").description("Operate recipe-driven software factory workstreams");
+
+const factoryRecipeCommand = factoryCommand.command("recipe").description("Create or inspect immutable factory recipes");
+
+factoryRecipeCommand
+  .command("create")
+  .description("Create an immutable factory recipe from a JSON document")
+  .option("--config <path>", "Config file path")
+  .requiredOption("--input <path>", "Recipe JSON file path, or - for stdin")
+  .option("--json", "Print the structured dispatcher response as JSON")
+  .action(runCliAction(runFactoryRecipeCreateCommand));
+
+factoryRecipeCommand
+  .command("get")
+  .description("Get one immutable factory recipe version")
+  .option("--config <path>", "Config file path")
+  .requiredOption("--id <recipeId>", "Factory recipe id")
+  .requiredOption("--version <version>", "Positive recipe version")
+  .option("--json", "Print the structured dispatcher response as JSON")
+  .action(runCliAction(runFactoryRecipeGetCommand));
+
+const factoryWorkstreamCommand = factoryCommand.command("workstream").description("Create or inspect factory workstreams");
+
+factoryWorkstreamCommand
+  .command("create")
+  .description("Create a factory workstream from a JSON document")
+  .option("--config <path>", "Config file path")
+  .requiredOption("--input <path>", "Workstream JSON file path, or - for stdin")
+  .option("--json", "Print the structured dispatcher response as JSON")
+  .action(runCliAction(runFactoryWorkstreamCreateCommand));
+
+factoryWorkstreamCommand
+  .command("get")
+  .description("Get one factory workstream")
+  .option("--config <path>", "Config file path")
+  .requiredOption("--id <workstreamId>", "Factory workstream id")
+  .option("--json", "Print the structured dispatcher response as JSON")
+  .action(runCliAction(runFactoryWorkstreamGetCommand));
+
+const factoryBatchCommand = factoryCommand.command("batch").description("Submit or inspect restart-safe admission batches");
+
+factoryBatchCommand
+  .command("submit")
+  .description("Submit a workstream admission batch from a JSON document")
+  .option("--config <path>", "Config file path")
+  .requiredOption("--input <path>", "Admission batch JSON file path, or - for stdin")
+  .option("--json", "Print the structured dispatcher response as JSON")
+  .action(runCliAction(runFactoryBatchSubmitCommand));
+
+factoryBatchCommand
+  .command("get")
+  .description("Get one durable workstream admission batch receipt")
+  .option("--config <path>", "Config file path")
+  .requiredOption("--id <batchId>", "Admission batch id")
+  .option("--json", "Print the structured dispatcher response as JSON")
+  .action(runCliAction(runFactoryBatchGetCommand));
 
 const completionCommand = program.command("completion").description("Inspect or govern completion state");
 

@@ -21,6 +21,7 @@ Current cases:
 | --- | --- | --- |
 | `protocol-runtime` | No | In-memory GitHub-shaped protocol smoke using dispatcher/client/store paths |
 | `slack-protocol` | No | In-memory Slack-shaped protocol smoke with quiet progress and Block Kit final callback |
+| `factory-conformance` | No | File-backed recipe/workstream/batch loop with restart replay, bounded exceptions, authoritative accepted outcomes, and Echo plus local ACP executor paths |
 | `openclaw-acp` | Yes | Strict OpenClaw hard-cancellation probe plus worktree cwd, scratch cwd, and fresh-session checks through the generic ACP host |
 | `github-webhook-live` | Yes | Real GitHub repository webhook, local CLI stack, current-head required check, merged PR, durable satisfied assessment, and restart-safe final receipt |
 | `github-cli-live` | Yes | Real GitHub issue callback using dispatcher-assisted run creation |
@@ -61,10 +62,13 @@ payloads.
 
 ## Recommended Sequence
 
-1. Run local protocol cases first:
+1. Run local protocol and factory conformance cases first:
 
 ```bash
-corepack pnpm smoke:live -- --case protocol-runtime --case slack-protocol
+corepack pnpm smoke:live -- \
+  --case protocol-runtime \
+  --case slack-protocol \
+  --case factory-conformance
 ```
 
 2. Run one live provider at a time with a report path:
@@ -85,6 +89,41 @@ The live pass is only credible when the source thread has a concise final
 callback, `opentag status --run` shows the Context Packet and Agent Work Ledger,
 artifacts exist, and provider-visible action receipts do not expose raw executor
 logs.
+
+### Factory Conformance
+
+`factory-conformance` wraps `corepack pnpm smoke:factory-conformance`. It uses a
+temporary file-backed database and the same public dispatcher client plus local
+daemon path used by an operator. One immutable recipe admits a quiet ordered
+batch into a WorkThread-only workstream, then the Echo executor and the local
+ACP fixture each complete one accepted work loop.
+
+The case closes and reopens the dispatcher against the same database before it
+replays the batch. It fails unless the replay returns the durable receipt,
+creates no duplicate work, and a changed payload is rejected as an idempotency
+conflict. A separate twelve-item exception batch must retain ten bounded
+exception samples, report two omitted samples, and produce no routine per-item
+source callback. Its accepted-outcome assertions use current
+CompletionAssessments and terminal Attempt executor attribution, not successful
+Run counts. The case first observes two terminal Runs and zero accepted
+outcomes, then submits deterministic current-head/check/merge snapshots through
+the authenticated public evidence-ingestion seam and requires the accepted
+counts to move to two without changing the terminal Run count.
+
+Set `OPENTAG_FACTORY_CONFORMANCE_REPORT` to retain its sanitized evidence:
+
+```bash
+OPENTAG_FACTORY_CONFORMANCE_REPORT=.omx/live-e2e/factory-conformance.json \
+corepack pnpm smoke:factory-conformance
+```
+
+This is deterministic runtime conformance, not a claim that a public source
+provider, model provider, pull request, required check, or merge was exercised;
+the GitHub-shaped evidence is a sanitized conformance input, not a provider API
+observation.
+Use `github-webhook-live` for the real source-control completion loop and
+`builtin-acp` for provider-backed executor readiness. No DAG scheduler or
+operator console is part of this case.
 
 ## Case Notes
 

@@ -35,6 +35,22 @@ For GitHub, GitLab, Linear, or Discord webhook deployments that use an already c
 
 `opentag status --workstream <workstream_id>` shows the workstream state and next action first, followed by recipe budgets, accepted outcomes, and bounded exception detail. Healthy workstreams stay quiet. Add `--json` to receive structured `workstream`, `recipe`, `metrics`, and `evaluation` objects for automation.
 
+The `factory` commands operate the recipe, workstream, and restart-safe admission-batch lifecycle through the configured dispatcher. Create and submit commands accept a complete JSON document from a file or from stdin with `--input -`. Every command supports `--json` for automation:
+
+```bash
+opentag factory recipe create --input recipe.json --json
+opentag factory recipe get --id recipe_release --version 1 --json
+opentag factory workstream create --input workstream.json --json
+opentag factory workstream get --id workstream_release --json
+opentag factory batch submit --input batch.json --json
+opentag factory batch get --id batch_release --json
+
+# The same create/submit input can be piped through stdin.
+cat batch.json | opentag factory batch submit --input - --json
+```
+
+The JSON documents use the public `FactoryRecipeSnapshotInput`, `WorkstreamInput`, and `WorkstreamAdmissionBatchInput` contracts. A workstream contains an explicit bounded set of existing WorkThread members; a batch contains ordered admission items for those members. These commands do not define a task graph or move project-management ownership into OpenTag.
+
 External local runtimes can report lifecycle hooks through the public [Hook Ingest Contract](../../docs/hook-ingest.md): `opentag ingest-template --format manifest` prints the manifest, and `opentag ingest` records audit-visible progress or terminal state through runner-scoped auth.
 
 ## Commands
@@ -47,6 +63,9 @@ opentag service stop
 opentag service status
 opentag service logs
 opentag status
+opentag factory recipe get --id <recipe_id> --version <version>
+opentag factory workstream get --id <workstream_id>
+opentag factory batch get --id <batch_id>
 opentag doctor
 opentag config path
 opentag config show

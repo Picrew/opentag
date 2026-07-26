@@ -2865,8 +2865,13 @@ function authorizeDispatcherRequest(input: {
   return runnerMatches || pairingMatches ? { ok: true } : { ok: false, reason: "invalid_dispatcher_token" };
 }
 
+export function openDispatcherDatabase(databasePath: string): InstanceType<typeof Database> {
+  return new Database(databasePath);
+}
+
 export function createDispatcherApp(input: {
   databasePath: string;
+  sqlite?: InstanceType<typeof Database>;
   callbackSink?: CallbackSink;
   sourceReceiptSink?: SourceReceiptSink;
   pairingToken?: string;
@@ -2891,7 +2896,7 @@ export function createDispatcherApp(input: {
   completionPolicies?: GitHubCompletionPolicy[];
   completionNow?: () => string;
 }) {
-  const sqlite = new Database(input.databasePath);
+  const sqlite = input.sqlite ?? openDispatcherDatabase(input.databasePath);
   migrateSchema(sqlite);
   const repo = createOpenTagRepository(drizzle(sqlite));
   const workstreamBatchLeaseSeconds = 300;

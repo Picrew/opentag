@@ -14,6 +14,7 @@
     "release:publish": "node scripts/release/publish-local.mjs",
     "opentag-dev": "node scripts/dev/install-opentag-dev.mjs",
     "smoke:governance": "node scripts/test/governance-matrix.mjs",
+    "smoke:factory-conformance": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/factory-conformance.ts",
     "smoke:acp-conformance": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/builtin-acp-conformance.ts",
     "smoke:live": "node scripts/test/live-e2e-smoke.mjs",
     "smoke:openclaw-acp-conformance": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/openclaw-acp-conformance.ts",

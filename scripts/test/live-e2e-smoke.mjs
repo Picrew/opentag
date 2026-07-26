@@ -35,6 +35,18 @@ const cases = [
     requiredCommands: ["corepack"]
   },
   {
+    id: "factory-conformance",
+    label: "Restart-safe recipe factory conformance",
+    live: false,
+    command: "corepack pnpm smoke:factory-conformance",
+    requiredCommands: ["corepack", "git", "node"],
+    notes: [
+      "Runs one file-backed recipe/workstream/batch loop through the dispatcher and local daemon.",
+      "Exercises the Echo and deterministic local ACP fixture executor paths without provider credentials.",
+      "Proves durable replay, bounded batch exceptions, and current-assessment accepted-outcome attribution; it is not a provider-live public proof."
+    ]
+  },
+  {
     id: "builtin-acp",
     label: "Live built-in coding-agent ACP conformance",
     live: true,
