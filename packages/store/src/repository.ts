@@ -30,6 +30,7 @@ import {
   grantMatchesAction,
   containsCredentialLikeData,
   FollowUpRequestSchema,
+  FactoryRecipeSnapshotInputSchema,
   FrozenRoutingPolicySchema,
   isCredentialFieldName,
   redactCredentialLikeData,
@@ -49,6 +50,8 @@ import {
   HumanEscalationSchema,
   VerificationEvidenceSchema,
   WorkThreadSchema,
+  WorkstreamAdmissionBatchInputSchema,
+  WorkstreamInputSchema,
   type ApprovalDecision,
   type AgentAccessProfileSnapshot,
   type ActorIdentity,
@@ -65,6 +68,7 @@ import {
   type CompletionContract,
   type CompletionWaiver,
   type FrozenRoutingPolicy,
+  type FactoryRecipeSnapshotInput,
   type HumanEscalation,
   type MutationIntentActionability,
   type OpenTagEvent,
@@ -85,12 +89,14 @@ import {
   type RunnerRegistrationInput,
   type SuggestedChangesSnapshot,
   type VerificationEvidence,
-  type WorkThread
+  type WorkThread,
+  type WorkstreamInput
 } from "@opentag/core";
 import { evaluateRouting } from "@opentag/governance";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, notExists, or, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { alias } from "drizzle-orm/sqlite-core";
+import { canonicalSha256Json } from "./canonical-json.js";
 import {
   applyPlans,
   attempts,
@@ -102,6 +108,9 @@ import {
   completionContracts,
   completionWaivers,
   controlPlaneEvents,
+  factoryRecipeSnapshots,
+  factoryWorkstreamMembers,
+  factoryWorkstreams,
   governanceEvents,
   humanEscalations,
   linearOAuthInstallStates,
@@ -117,7 +126,9 @@ import {
   runs,
   suggestedChanges,
   verificationEvidenceRecords,
-  workThreads
+  workThreads,
+  workstreamAdmissionBatchItems,
+  workstreamAdmissionBatches
 } from "./schema.js";
 
 export type OpenTagRunWithEvent = {
@@ -385,6 +396,8 @@ export type FollowUpRequest = {
   sourceEventId: string;
   conversationKey: string;
   activeRunId?: string;
+  workstreamId?: string;
+  admissionBatchId?: string;
   event: OpenTagEvent;
   decision: RunAdmissionDecision;
   accessProfileSnapshot?: AgentAccessProfileSnapshot;
@@ -428,6 +441,72 @@ export type OpenTagAggregateMetrics = {
   childRunCount: number;
   applyOutcomeCounts: ApplyOutcomeCounts;
   staleIntentCount: number;
+};
+
+export type StoredFactoryRecipeSnapshot = {
+  id: string;
+  version: number;
+  recipe: FactoryRecipeSnapshotInput;
+  contentDigest: string;
+  createdAt: string;
+};
+
+export type StoredFactoryWorkstream = {
+  id: string;
+  recipeId: string;
+  recipeVersion: number;
+  workstream: WorkstreamInput;
+  contentDigest: string;
+  workThreadIds: string[];
+  createdAt: string;
+};
+
+export type WorkstreamAdmissionBatchItem = {
+  itemId: string;
+  ordinal: number;
+  runId: string;
+  workThreadId: string;
+  event: OpenTagEvent;
+  status: "pending" | "processing" | "completed";
+  leaseOwner?: string;
+  leaseExpiresAt?: string;
+  result?: unknown;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+};
+
+export type WorkstreamAdmissionBatch = {
+  id: string;
+  workstreamId: string;
+  requestDigest: string;
+  request: unknown;
+  status: "processing" | "completed";
+  leaseOwner?: string;
+  leaseExpiresAt?: string;
+  result?: unknown;
+  items: WorkstreamAdmissionBatchItem[];
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+};
+
+export type WorkstreamMetrics = {
+  workstreamId: string;
+  workThreadCount: number;
+  acceptedWorkThreadCount: number;
+  runCount: number;
+  queuedRunCount: number;
+  activeRunCount: number;
+  terminalRunCount: number;
+  failedRunCount: number;
+  needsHumanRunCount: number;
+  budgetBlockedRunCount: number;
+  totalAttempts: number;
+  attemptsPerRunExceededCount: number;
+  totalCostUnits: number;
+  attemptsByLocality: { local: number; private: number; hosted: number; unknown: number };
+  exceptionCount: number;
 };
 
 export type AttemptMutationConflict = "stale_attempt";
@@ -518,6 +597,68 @@ function mergeWorkThreadAnchors(current: DurableWorkThread, incoming: WorkThread
 function workThreadFromRow(row: typeof workThreads.$inferSelect): DurableWorkThread {
   const thread = WorkThreadSchema.parse(JSON.parse(row.threadJson));
   return { ...thread, id: row.id };
+}
+
+function factoryRecipeSnapshotFromRow(row: typeof factoryRecipeSnapshots.$inferSelect): StoredFactoryRecipeSnapshot {
+  return {
+    id: row.id,
+    version: row.version,
+    recipe: FactoryRecipeSnapshotInputSchema.parse(JSON.parse(row.recipeJson)),
+    contentDigest: row.contentDigest,
+    createdAt: row.createdAt
+  };
+}
+
+function factoryWorkstreamFromRows(
+  row: typeof factoryWorkstreams.$inferSelect,
+  members: Array<Pick<typeof factoryWorkstreamMembers.$inferSelect, "workThreadId">>
+): StoredFactoryWorkstream {
+  return {
+    id: row.id,
+    recipeId: row.recipeId,
+    recipeVersion: row.recipeVersion,
+    workstream: WorkstreamInputSchema.parse(JSON.parse(row.workstreamJson)),
+    contentDigest: row.contentDigest,
+    workThreadIds: members.map((member) => member.workThreadId).sort(),
+    createdAt: row.createdAt
+  };
+}
+
+function admissionBatchItemFromRow(row: typeof workstreamAdmissionBatchItems.$inferSelect): WorkstreamAdmissionBatchItem {
+  return {
+    itemId: row.itemId,
+    ordinal: row.ordinal,
+    runId: row.runId,
+    workThreadId: row.workThreadId,
+    event: OpenTagEventSchema.parse(JSON.parse(row.eventJson)),
+    status: row.status as WorkstreamAdmissionBatchItem["status"],
+    ...(row.leaseOwner ? { leaseOwner: row.leaseOwner } : {}),
+    ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt } : {}),
+    ...(row.resultJson ? { result: JSON.parse(row.resultJson) as unknown } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    ...(row.completedAt ? { completedAt: row.completedAt } : {})
+  };
+}
+
+function admissionBatchFromRows(
+  row: typeof workstreamAdmissionBatches.$inferSelect,
+  items: Array<typeof workstreamAdmissionBatchItems.$inferSelect>
+): WorkstreamAdmissionBatch {
+  return {
+    id: row.id,
+    workstreamId: row.workstreamId,
+    requestDigest: row.requestDigest,
+    request: JSON.parse(row.requestJson) as unknown,
+    status: row.status as WorkstreamAdmissionBatch["status"],
+    ...(row.leaseOwner ? { leaseOwner: row.leaseOwner } : {}),
+    ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt } : {}),
+    ...(row.resultJson ? { result: JSON.parse(row.resultJson) as unknown } : {}),
+    items: items.sort((left, right) => left.ordinal - right.ordinal).map(admissionBatchItemFromRow),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    ...(row.completedAt ? { completedAt: row.completedAt } : {})
+  };
 }
 
 function completionContractFromRow(row: typeof completionContracts.$inferSelect): CompletionContract {
@@ -647,6 +788,62 @@ function stableActionJson(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+type CurrentAssessmentAuthorityRow = {
+  assessmentId: string;
+  threadId: string;
+  persistedThreadId: string;
+  assessmentJson: string;
+  waiverId: string | null;
+  waiverWorkThreadId: string | null;
+  waiverContractId: string | null;
+  waiverContractVersion: number | null;
+  waiverCycle: number | null;
+  waiverContentDigest: string | null;
+  waiverJson: string | null;
+};
+
+function currentAssessmentIsAccepted(row: CurrentAssessmentAuthorityRow, evaluatedAt: string): boolean {
+  try {
+    const assessment = CompletionAssessmentSchema.parse(JSON.parse(row.assessmentJson));
+    if (
+      assessment.id !== row.assessmentId
+      || assessment.workThreadId !== row.threadId
+      || row.persistedThreadId !== row.threadId
+    ) {
+      return false;
+    }
+    if (assessment.state === "satisfied") return assessment.evidenceBacked;
+    if (assessment.state !== "waived" || !assessment.evidenceBacked || !assessment.waiver) return false;
+
+    const waiver = assessment.waiver;
+    if (
+      !row.waiverJson
+      || row.waiverId !== waiver.id
+      || row.waiverWorkThreadId !== row.threadId
+      || row.waiverContractId !== assessment.contractId
+      || row.waiverContractVersion !== assessment.contractVersion
+      || row.waiverCycle !== assessment.cycle
+      || waiver.waivedAt > evaluatedAt
+      || (waiver.expiresAt !== undefined && waiver.expiresAt <= evaluatedAt)
+      || (waiver.runId !== undefined && waiver.runId !== assessment.triggeredByRunId)
+    ) {
+      return false;
+    }
+    const persistedWaiver = CompletionWaiverSchema.parse(JSON.parse(row.waiverJson));
+    const { id: _id, ...semanticWaiver } = waiver;
+    const expectedDigest = `sha256:${sha256(stableActionJson(semanticWaiver))}`;
+    const waivedGateIds = assessment.gateResults
+      .filter((gate) => gate.state === "waived")
+      .map((gate) => gate.gateId);
+    return row.waiverContentDigest === expectedDigest
+      && JSON.stringify(persistedWaiver) === JSON.stringify(waiver)
+      && waivedGateIds.length > 0
+      && waivedGateIds.every((gateId) => waiver.gateIds.includes(gateId));
+  } catch {
+    return false;
+  }
 }
 
 const SAFE_RECEIPT_METADATA_KEYS = new Set([
@@ -875,6 +1072,8 @@ function followUpRequestFromRow(row: typeof followUpRequests.$inferSelect): Foll
     sourceEventId: row.sourceEventId,
     conversationKey: row.conversationKey,
     ...(row.activeRunId ? { activeRunId: row.activeRunId } : {}),
+    ...(row.workstreamId ? { workstreamId: row.workstreamId } : {}),
+    ...(row.admissionBatchId ? { admissionBatchId: row.admissionBatchId } : {}),
     event: OpenTagEventSchema.parse(JSON.parse(row.eventJson)),
     decision: RunAdmissionDecisionSchema.parse(JSON.parse(row.decisionJson)),
     ...(row.accessProfileSnapshotJson
@@ -1734,6 +1933,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     now: Date;
     snapshot: RoutingDirectorySnapshot;
     event?: OpenTagEvent;
+    allowedLocalities?: Array<"local" | "private" | "hosted">;
   }): RoutingDecision {
     const event = input.event ?? OpenTagEventSchema.parse(JSON.parse(input.runRow.eventJson));
     const accessProfile = input.runRow.accessProfileSnapshotJson
@@ -1820,6 +2020,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ? { allowedExecutorIds: accessProfile.constraints.allowedExecutorIds }
           : {}),
         ...(accessProfile?.constraints.locality ? { locality: accessProfile.constraints.locality } : {}),
+        ...(input.allowedLocalities ? { allowedLocalities: input.allowedLocalities } : {}),
         unresolvedConnectionRefs: Boolean(accessProfile?.connectionRefs.length)
       },
       decidedAt: input.now.toISOString()
@@ -1849,19 +2050,30 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       activeRunId: input.runRow.id,
       eventId: input.event.id
     });
-    await appendRunEvent({
-      runId: input.runRow.id,
-      type: "admission.decided",
-      payload: replayDecision,
-      visibility: "audit",
-      importance: "normal",
-      message: replayDecision.reason,
-      createdAt: input.createdAt
-    });
-    await appendRunEvent({
-      runId: input.runRow.id,
-      type: "run.create_idempotent_replay",
-      payload: {
+    const replayIdentity = {
+      requestedRunId: input.requestedRunId,
+      replayKind: input.replayKind,
+      sourceDeliveryId: input.sourceDeliveryId ?? null,
+      eventId: input.event.id
+    };
+    await db.insert(runEvents).values([
+      {
+        ...runEventValues({
+          runId: input.runRow.id,
+          type: "admission.decided",
+          payload: replayDecision,
+          visibility: "audit",
+          importance: "normal",
+          message: replayDecision.reason,
+          createdAt: input.createdAt
+        }),
+        progressIdempotencyDigest: sha256Json({ kind: "create_run_replay_admission", ...replayIdentity })
+      },
+      {
+        ...runEventValues({
+          runId: input.runRow.id,
+          type: "run.create_idempotent_replay",
+          payload: {
         requestedRunId: input.requestedRunId,
         eventId: input.event.id,
         replayKey:
@@ -1874,11 +2086,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           admissionDecision: replayDecision,
           expectedRunnerId: input.expectedRunnerId
         })
-      },
-      visibility: "audit",
-      importance: "low",
-      createdAt: input.createdAt
-    });
+          },
+          visibility: "audit",
+          importance: "low",
+          createdAt: input.createdAt
+        }),
+        progressIdempotencyDigest: sha256Json({ kind: "create_run_replay", ...replayIdentity })
+      }
+    ]).onConflictDoNothing().run();
     return {
       run: runFromRow(input.runRow),
       created: false,
@@ -2088,6 +2303,327 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
 
   return {
     appendRunEvent,
+
+    async getFactoryRecipeSnapshot(input: { id: string; version: number }): Promise<StoredFactoryRecipeSnapshot | null> {
+      const row = await db.select().from(factoryRecipeSnapshots)
+        .where(and(eq(factoryRecipeSnapshots.id, input.id), eq(factoryRecipeSnapshots.version, input.version))).limit(1).get();
+      return row ? factoryRecipeSnapshotFromRow(row) : null;
+    },
+
+    async createFactoryRecipeSnapshot(input: {
+      id: string;
+      version: number;
+      recipe: FactoryRecipeSnapshotInput;
+      contentDigest?: string;
+      createdAt?: string;
+    }): Promise<{ outcome: "created" | "existing"; recipeSnapshot: StoredFactoryRecipeSnapshot } | { outcome: "conflict"; recipeSnapshot: StoredFactoryRecipeSnapshot }> {
+      const recipe = FactoryRecipeSnapshotInputSchema.parse(input.recipe);
+      if (recipe.id !== input.id || recipe.version !== input.version) throw new Error("FACTORY_RECIPE_IDENTITY_MISMATCH");
+      const recipeJson = JSON.stringify(recipe);
+      const contentDigest = sha256Json(recipe);
+      if (input.contentDigest && input.contentDigest !== contentDigest) throw new Error("FACTORY_RECIPE_CONTENT_DIGEST_MISMATCH");
+      const createdAt = input.createdAt ?? nowIso();
+      return db.transaction((tx) => {
+        const existing = tx.select().from(factoryRecipeSnapshots)
+          .where(and(eq(factoryRecipeSnapshots.id, input.id), eq(factoryRecipeSnapshots.version, input.version))).limit(1).get();
+        if (existing) {
+          return { outcome: existing.contentDigest === contentDigest ? "existing" as const : "conflict" as const, recipeSnapshot: factoryRecipeSnapshotFromRow(existing) };
+        }
+        tx.insert(factoryRecipeSnapshots).values({ id: input.id, version: input.version, recipeJson, contentDigest, createdAt }).run();
+        return { outcome: "created" as const, recipeSnapshot: { id: input.id, version: input.version, recipe, contentDigest, createdAt } };
+      });
+    },
+
+    async getFactoryWorkstream(input: { id: string }): Promise<StoredFactoryWorkstream | null> {
+      const row = await db.select().from(factoryWorkstreams).where(eq(factoryWorkstreams.id, input.id)).limit(1).get();
+      if (!row) return null;
+      const members = await db.select({ workThreadId: factoryWorkstreamMembers.workThreadId }).from(factoryWorkstreamMembers)
+        .where(eq(factoryWorkstreamMembers.workstreamId, input.id)).orderBy(asc(factoryWorkstreamMembers.workThreadId));
+      return factoryWorkstreamFromRows(row, members);
+    },
+
+    async createFactoryWorkstream(input: {
+      id: string;
+      recipeId: string;
+      recipeVersion: number;
+      workstream: Partial<WorkstreamInput> & { name: string };
+      workThreadIds: string[];
+      contentDigest?: string;
+      createdAt?: string;
+    }): Promise<{ outcome: "created" | "existing"; workstream: StoredFactoryWorkstream } | { outcome: "conflict" | "recipe_not_found" | "work_thread_not_found"; workstream?: StoredFactoryWorkstream; workThreadId?: string }> {
+      const normalizedWorkThreadIds = [...new Set(input.workThreadIds)].sort();
+      if (normalizedWorkThreadIds.length === 0) return { outcome: "work_thread_not_found" as const };
+      const candidateWorkstream = input.workstream as Record<string, unknown>;
+      const workstream = WorkstreamInputSchema.parse({
+        ...candidateWorkstream,
+        id: input.id,
+        recipeId: input.recipeId,
+        recipeVersion: input.recipeVersion,
+        members: normalizedWorkThreadIds.map((workThreadId) => ({ kind: "work_thread", workThreadId }))
+      });
+      const workstreamJson = JSON.stringify(workstream);
+      const contentDigest = sha256Json(workstream);
+      if (input.contentDigest && input.contentDigest !== contentDigest) throw new Error("FACTORY_WORKSTREAM_CONTENT_DIGEST_MISMATCH");
+      const createdAt = input.createdAt ?? nowIso();
+      return db.transaction((tx) => {
+        const existing = tx.select().from(factoryWorkstreams).where(eq(factoryWorkstreams.id, input.id)).limit(1).get();
+        if (existing) {
+          const members = tx.select({ workThreadId: factoryWorkstreamMembers.workThreadId }).from(factoryWorkstreamMembers)
+            .where(eq(factoryWorkstreamMembers.workstreamId, input.id)).orderBy(asc(factoryWorkstreamMembers.workThreadId)).all();
+          const stored = factoryWorkstreamFromRows(existing, members);
+          return { outcome: existing.contentDigest === contentDigest ? "existing" as const : "conflict" as const, workstream: stored };
+        }
+        const recipe = tx.select({ id: factoryRecipeSnapshots.id }).from(factoryRecipeSnapshots)
+          .where(and(eq(factoryRecipeSnapshots.id, input.recipeId), eq(factoryRecipeSnapshots.version, input.recipeVersion))).limit(1).get();
+        if (!recipe) return { outcome: "recipe_not_found" as const };
+        for (const workThreadId of normalizedWorkThreadIds) {
+          const thread = tx.select({ id: workThreads.id }).from(workThreads).where(eq(workThreads.id, workThreadId)).limit(1).get();
+          if (!thread) return { outcome: "work_thread_not_found" as const, workThreadId };
+        }
+        tx.insert(factoryWorkstreams).values({ id: input.id, recipeId: input.recipeId, recipeVersion: input.recipeVersion, workstreamJson, contentDigest, createdAt }).run();
+        if (normalizedWorkThreadIds.length > 0) tx.insert(factoryWorkstreamMembers).values(normalizedWorkThreadIds.map((workThreadId) => ({ workstreamId: input.id, workThreadId, createdAt }))).run();
+        return { outcome: "created" as const, workstream: { id: input.id, recipeId: input.recipeId, recipeVersion: input.recipeVersion, workstream, contentDigest, workThreadIds: normalizedWorkThreadIds, createdAt } };
+      });
+    },
+
+    async getWorkstreamAdmissionBatch(input: { id: string }): Promise<WorkstreamAdmissionBatch | null> {
+      const row = await db.select().from(workstreamAdmissionBatches).where(eq(workstreamAdmissionBatches.id, input.id)).limit(1).get();
+      if (!row) return null;
+      const items = await db.select().from(workstreamAdmissionBatchItems).where(eq(workstreamAdmissionBatchItems.batchId, input.id)).orderBy(asc(workstreamAdmissionBatchItems.ordinal));
+      return admissionBatchFromRows(row, items);
+    },
+
+    async beginWorkstreamAdmissionBatch(input: {
+      id: string;
+      workstreamId: string;
+      requestDigest: string;
+      request: unknown;
+      items: Array<{ itemId: string; runId: string; workThreadId: string; event: OpenTagEvent }>;
+      leaseOwner: string;
+      leaseSeconds: number;
+      now?: Date;
+    }): Promise<{ outcome: "acquired" | "in_progress" | "replay" | "conflict" | "workstream_not_found" | "invalid_member"; batch?: WorkstreamAdmissionBatch; workThreadId?: string }> {
+      const now = input.now ?? new Date();
+      const at = now.toISOString();
+      const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000).toISOString();
+      const request = WorkstreamAdmissionBatchInputSchema.parse(input.request);
+      if (request.id !== input.id || request.workstreamId !== input.workstreamId) throw new Error("FACTORY_BATCH_REQUEST_IDENTITY_MISMATCH");
+      const suppliedItems = input.items.map((item) => ({ ...item, event: OpenTagEventSchema.parse(item.event) }));
+      if (canonicalSha256Json(request.items) !== canonicalSha256Json(suppliedItems)) throw new Error("FACTORY_BATCH_REQUEST_ITEMS_MISMATCH");
+      const requestDigest = canonicalSha256Json(request);
+      if (requestDigest !== input.requestDigest) throw new Error("FACTORY_BATCH_REQUEST_DIGEST_MISMATCH");
+      return db.transaction((tx) => {
+        const existing = tx.select().from(workstreamAdmissionBatches).where(eq(workstreamAdmissionBatches.id, input.id)).limit(1).get();
+        if (existing) {
+          const items = tx.select().from(workstreamAdmissionBatchItems).where(eq(workstreamAdmissionBatchItems.batchId, input.id)).orderBy(asc(workstreamAdmissionBatchItems.ordinal)).all();
+          const batch = admissionBatchFromRows(existing, items);
+          if (existing.requestDigest !== requestDigest) return { outcome: "conflict" as const, batch };
+          if (existing.status === "completed") return { outcome: "replay" as const, batch };
+          if (existing.leaseOwner !== input.leaseOwner && existing.leaseExpiresAt && existing.leaseExpiresAt > at) return { outcome: "in_progress" as const, batch };
+          tx.update(workstreamAdmissionBatches).set({ leaseOwner: input.leaseOwner, leaseExpiresAt, updatedAt: at }).where(eq(workstreamAdmissionBatches.id, input.id)).run();
+          return { outcome: "acquired" as const, batch: admissionBatchFromRows({ ...existing, leaseOwner: input.leaseOwner, leaseExpiresAt, updatedAt: at }, items) };
+        }
+        const workstream = tx.select({ id: factoryWorkstreams.id }).from(factoryWorkstreams).where(eq(factoryWorkstreams.id, input.workstreamId)).limit(1).get();
+        if (!workstream) return { outcome: "workstream_not_found" as const };
+        const itemIds = new Set<string>();
+        const runIds = new Set<string>();
+        for (const item of input.items) {
+          if (itemIds.has(item.itemId) || runIds.has(item.runId)) return { outcome: "conflict" as const };
+          itemIds.add(item.itemId); runIds.add(item.runId);
+          const member = tx.select({ workThreadId: factoryWorkstreamMembers.workThreadId }).from(factoryWorkstreamMembers)
+            .where(and(eq(factoryWorkstreamMembers.workstreamId, input.workstreamId), eq(factoryWorkstreamMembers.workThreadId, item.workThreadId))).limit(1).get();
+          if (!member) return { outcome: "invalid_member" as const, workThreadId: item.workThreadId };
+        }
+        tx.insert(workstreamAdmissionBatches).values({ id: input.id, workstreamId: input.workstreamId, requestDigest, requestJson: JSON.stringify(request), status: "processing", leaseOwner: input.leaseOwner, leaseExpiresAt, createdAt: at, updatedAt: at }).run();
+        if (input.items.length > 0) tx.insert(workstreamAdmissionBatchItems).values(input.items.map((item, ordinal) => ({ batchId: input.id, itemId: item.itemId, ordinal, runId: item.runId, workThreadId: item.workThreadId, eventJson: JSON.stringify(OpenTagEventSchema.parse(item.event)), status: "pending", createdAt: at, updatedAt: at }))).run();
+        const row = tx.select().from(workstreamAdmissionBatches).where(eq(workstreamAdmissionBatches.id, input.id)).get()!;
+        const items = tx.select().from(workstreamAdmissionBatchItems).where(eq(workstreamAdmissionBatchItems.batchId, input.id)).orderBy(asc(workstreamAdmissionBatchItems.ordinal)).all();
+        return { outcome: "acquired" as const, batch: admissionBatchFromRows(row, items) };
+      });
+    },
+
+    async claimWorkstreamAdmissionBatchItem(input: { batchId: string; itemId: string; leaseOwner: string; leaseSeconds: number; now?: Date }): Promise<{ outcome: "claimed" | "in_progress" | "completed" | "not_found" | "batch_lease_lost"; item?: WorkstreamAdmissionBatchItem }> {
+      const now = input.now ?? new Date();
+      const at = now.toISOString();
+      const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000).toISOString();
+      return db.transaction((tx) => {
+        const batch = tx.select().from(workstreamAdmissionBatches).where(eq(workstreamAdmissionBatches.id, input.batchId)).limit(1).get();
+        if (!batch) return { outcome: "not_found" as const };
+        if (batch.status === "completed") return { outcome: "completed" as const };
+        if (batch.leaseOwner !== input.leaseOwner || (batch.leaseExpiresAt !== null && batch.leaseExpiresAt <= at)) return { outcome: "batch_lease_lost" as const };
+        const item = tx.select().from(workstreamAdmissionBatchItems).where(and(eq(workstreamAdmissionBatchItems.batchId, input.batchId), eq(workstreamAdmissionBatchItems.itemId, input.itemId))).limit(1).get();
+        if (!item) return { outcome: "not_found" as const };
+        tx.update(workstreamAdmissionBatches).set({ leaseExpiresAt, updatedAt: at })
+          .where(eq(workstreamAdmissionBatches.id, input.batchId)).run();
+        if (item.status === "completed") return { outcome: "completed" as const, item: admissionBatchItemFromRow(item) };
+        if (item.status === "processing" && item.leaseOwner !== input.leaseOwner && item.leaseExpiresAt && item.leaseExpiresAt > at) return { outcome: "in_progress" as const, item: admissionBatchItemFromRow(item) };
+        tx.update(workstreamAdmissionBatchItems).set({ status: "processing", leaseOwner: input.leaseOwner, leaseExpiresAt, updatedAt: at })
+          .where(and(eq(workstreamAdmissionBatchItems.batchId, input.batchId), eq(workstreamAdmissionBatchItems.itemId, input.itemId))).run();
+        return { outcome: "claimed" as const, item: admissionBatchItemFromRow({ ...item, status: "processing", leaseOwner: input.leaseOwner, leaseExpiresAt, updatedAt: at }) };
+      });
+    },
+
+    async renewWorkstreamAdmissionBatchLease(input: {
+      batchId: string;
+      itemId?: string;
+      leaseOwner: string;
+      leaseSeconds: number;
+      now?: Date;
+    }): Promise<{ outcome: "renewed" | "completed" | "stale_lease" | "not_found" }> {
+      const now = input.now ?? new Date();
+      const at = now.toISOString();
+      const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000).toISOString();
+      return db.transaction((tx) => {
+        const batch = tx.select().from(workstreamAdmissionBatches)
+          .where(eq(workstreamAdmissionBatches.id, input.batchId)).limit(1).get();
+        if (!batch) return { outcome: "not_found" as const };
+        if (batch.status === "completed") return { outcome: "completed" as const };
+        if (
+          batch.leaseOwner !== input.leaseOwner
+          || batch.leaseExpiresAt === null
+          || batch.leaseExpiresAt <= at
+        ) {
+          return { outcome: "stale_lease" as const };
+        }
+        if (input.itemId) {
+          const item = tx.select().from(workstreamAdmissionBatchItems).where(and(
+            eq(workstreamAdmissionBatchItems.batchId, input.batchId),
+            eq(workstreamAdmissionBatchItems.itemId, input.itemId)
+          )).limit(1).get();
+          if (!item) return { outcome: "not_found" as const };
+          if (
+            item.status !== "processing"
+            || item.leaseOwner !== input.leaseOwner
+            || item.leaseExpiresAt === null
+            || item.leaseExpiresAt <= at
+          ) {
+            return { outcome: item.status === "completed" ? "completed" as const : "stale_lease" as const };
+          }
+          tx.update(workstreamAdmissionBatchItems).set({ leaseExpiresAt, updatedAt: at }).where(and(
+            eq(workstreamAdmissionBatchItems.batchId, input.batchId),
+            eq(workstreamAdmissionBatchItems.itemId, input.itemId)
+          )).run();
+        }
+        tx.update(workstreamAdmissionBatches).set({ leaseExpiresAt, updatedAt: at })
+          .where(eq(workstreamAdmissionBatches.id, input.batchId)).run();
+        return { outcome: "renewed" as const };
+      });
+    },
+
+    async completeWorkstreamAdmissionBatchItem(input: { batchId: string; itemId: string; leaseOwner: string; result: unknown; now?: Date }): Promise<{ outcome: "completed" | "duplicate" | "stale_lease" | "not_found"; item?: WorkstreamAdmissionBatchItem }> {
+      const at = (input.now ?? new Date()).toISOString();
+      const resultJson = JSON.stringify(input.result);
+      return db.transaction((tx) => {
+        const batch = tx.select().from(workstreamAdmissionBatches).where(eq(workstreamAdmissionBatches.id, input.batchId)).limit(1).get();
+        if (!batch) return { outcome: "not_found" as const };
+        if (batch.status !== "processing" || batch.leaseOwner !== input.leaseOwner || (batch.leaseExpiresAt !== null && batch.leaseExpiresAt <= at)) {
+          return { outcome: "stale_lease" as const };
+        }
+        const item = tx.select().from(workstreamAdmissionBatchItems).where(and(eq(workstreamAdmissionBatchItems.batchId, input.batchId), eq(workstreamAdmissionBatchItems.itemId, input.itemId))).limit(1).get();
+        if (!item) return { outcome: "not_found" as const };
+        if (item.status === "completed") return { outcome: item.resultJson === resultJson ? "duplicate" as const : "stale_lease" as const, item: admissionBatchItemFromRow(item) };
+        if (item.status !== "processing" || item.leaseOwner !== input.leaseOwner || (item.leaseExpiresAt !== null && item.leaseExpiresAt <= at)) return { outcome: "stale_lease" as const, item: admissionBatchItemFromRow(item) };
+        tx.update(workstreamAdmissionBatchItems).set({ status: "completed", resultJson, leaseOwner: null, leaseExpiresAt: null, completedAt: at, updatedAt: at })
+          .where(and(eq(workstreamAdmissionBatchItems.batchId, input.batchId), eq(workstreamAdmissionBatchItems.itemId, input.itemId))).run();
+        return { outcome: "completed" as const, item: admissionBatchItemFromRow({ ...item, status: "completed", resultJson, leaseOwner: null, leaseExpiresAt: null, completedAt: at, updatedAt: at }) };
+      });
+    },
+
+    async finalizeWorkstreamAdmissionBatch(input: { id: string; leaseOwner: string; result: unknown; now?: Date }): Promise<{ outcome: "completed" | "replay" | "incomplete" | "stale_lease" | "not_found"; batch?: WorkstreamAdmissionBatch }> {
+      const at = (input.now ?? new Date()).toISOString();
+      const resultJson = JSON.stringify(input.result);
+      return db.transaction((tx) => {
+        const row = tx.select().from(workstreamAdmissionBatches).where(eq(workstreamAdmissionBatches.id, input.id)).limit(1).get();
+        if (!row) return { outcome: "not_found" as const };
+        const items = tx.select().from(workstreamAdmissionBatchItems).where(eq(workstreamAdmissionBatchItems.batchId, input.id)).orderBy(asc(workstreamAdmissionBatchItems.ordinal)).all();
+        if (row.status === "completed") return { outcome: "replay" as const, batch: admissionBatchFromRows(row, items) };
+        if (row.leaseOwner !== input.leaseOwner || (row.leaseExpiresAt !== null && row.leaseExpiresAt <= at)) return { outcome: "stale_lease" as const, batch: admissionBatchFromRows(row, items) };
+        if (items.some((item) => item.status !== "completed")) return { outcome: "incomplete" as const, batch: admissionBatchFromRows(row, items) };
+        tx.update(workstreamAdmissionBatches).set({ status: "completed", resultJson, leaseOwner: null, leaseExpiresAt: null, completedAt: at, updatedAt: at }).where(eq(workstreamAdmissionBatches.id, input.id)).run();
+        return { outcome: "completed" as const, batch: admissionBatchFromRows({ ...row, status: "completed", resultJson, leaseOwner: null, leaseExpiresAt: null, completedAt: at, updatedAt: at }, items) };
+      });
+    },
+
+    async getWorkstreamMetrics(input: { workstreamId: string }): Promise<WorkstreamMetrics | null> {
+      const workstream = await db.select().from(factoryWorkstreams).where(eq(factoryWorkstreams.id, input.workstreamId)).limit(1).get();
+      if (!workstream) return null;
+      const recipe = await db.select().from(factoryRecipeSnapshots).where(and(eq(factoryRecipeSnapshots.id, workstream.recipeId), eq(factoryRecipeSnapshots.version, workstream.recipeVersion))).limit(1).get();
+      let recipeValue: FactoryRecipeSnapshotInput;
+      try {
+        recipeValue = FactoryRecipeSnapshotInputSchema.parse(recipe ? JSON.parse(recipe.recipeJson) : null);
+      } catch {
+        throw new Error("FACTORY_RECIPE_AUTHORITY_MISSING_OR_INVALID");
+      }
+      const costUnitsPerAttempt = recipeValue.budgets.costUnitsPerAttempt;
+      const memberRows = await db.select({ workThreadId: factoryWorkstreamMembers.workThreadId }).from(factoryWorkstreamMembers).where(eq(factoryWorkstreamMembers.workstreamId, input.workstreamId));
+      const currentAssessmentRows = memberRows.length > 0 ? await db.select({
+        threadId: workThreads.id,
+        assessmentId: completionAssessments.id,
+        persistedThreadId: completionAssessments.workThreadId,
+        assessmentJson: completionAssessments.assessmentJson,
+        waiverId: completionWaivers.id,
+        waiverWorkThreadId: completionWaivers.workThreadId,
+        waiverContractId: completionWaivers.contractId,
+        waiverContractVersion: completionWaivers.contractVersion,
+        waiverCycle: completionWaivers.cycle,
+        waiverContentDigest: completionWaivers.contentDigest,
+        waiverJson: completionWaivers.waiverJson
+      })
+        .from(factoryWorkstreamMembers)
+        .innerJoin(workThreads, eq(workThreads.id, factoryWorkstreamMembers.workThreadId))
+        .innerJoin(completionAssessments, eq(completionAssessments.id, workThreads.currentAssessmentId))
+        .leftJoin(completionWaivers, eq(
+          completionWaivers.id,
+          sql<string | null>`CASE WHEN json_valid(${completionAssessments.assessmentJson}) THEN json_extract(${completionAssessments.assessmentJson}, '$.waiver.id') ELSE NULL END`
+        ))
+        .where(eq(factoryWorkstreamMembers.workstreamId, input.workstreamId)) : [];
+      const evaluatedAt = nowIso();
+      const acceptedWorkThreadCount = currentAssessmentRows.filter((row) =>
+        currentAssessmentIsAccepted(row, evaluatedAt)
+      ).length;
+      const runRows = await db.select().from(runs).where(eq(runs.workstreamId, input.workstreamId));
+      const attemptRows = runRows.length > 0 ? await db.select({
+        runId: attempts.runId,
+        runnerLocality: attempts.runnerLocality
+      }).from(attempts)
+        .innerJoin(runs, eq(runs.id, attempts.runId))
+        .where(eq(runs.workstreamId, input.workstreamId)) : [];
+      const blockedEvents = runRows.length > 0 ? await db.select({
+        runId: runEvents.runId,
+        payloadJson: runEvents.payloadJson
+      }).from(runEvents)
+        .innerJoin(runs, eq(runs.id, runEvents.runId))
+        .where(and(eq(runs.workstreamId, input.workstreamId), eq(runEvents.type, "factory.budget_blocked"))) : [];
+      const currentlyNeedsHuman = new Set(runRows.filter((run) => run.status === "needs_approval").map((run) => run.id));
+      const blockedRunIds = new Set(blockedEvents.filter((row) => currentlyNeedsHuman.has(row.runId)).map((row) => row.runId));
+      const localityCounts = { local: 0, private: 0, hosted: 0, unknown: 0 };
+      const attemptCountByRun = new Map<string, number>();
+      for (const attempt of attemptRows) {
+        attemptCountByRun.set(attempt.runId, (attemptCountByRun.get(attempt.runId) ?? 0) + 1);
+        const locality = attempt.runnerLocality;
+        if (locality === "local" || locality === "private" || locality === "hosted") localityCounts[locality] += 1;
+        else localityCounts.unknown += 1;
+      }
+      const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted", "timed_out"]);
+      return {
+        workstreamId: input.workstreamId,
+        workThreadCount: memberRows.length,
+        acceptedWorkThreadCount,
+        runCount: runRows.length,
+        queuedRunCount: runRows.filter((run) => run.status === "queued").length,
+        activeRunCount: runRows.filter((run) => ["assigned", "running"].includes(run.status)).length,
+        terminalRunCount: runRows.filter((run) => terminal.has(run.status)).length,
+        failedRunCount: runRows.filter((run) => ["failed", "interrupted", "timed_out"].includes(run.status)).length,
+        needsHumanRunCount: runRows.filter((run) => run.status === "needs_approval").length,
+        budgetBlockedRunCount: blockedRunIds.size,
+        totalAttempts: attemptRows.length,
+        attemptsPerRunExceededCount: [...attemptCountByRun.values()]
+          .filter((count) => count > recipeValue.budgets.maxAttemptsPerRun).length,
+        totalCostUnits: attemptRows.length * costUnitsPerAttempt,
+        attemptsByLocality: localityCounts,
+        exceptionCount: runRows.filter((run) => run.status === "needs_approval" || ["failed", "interrupted", "timed_out"].includes(run.status)).length
+      };
+    },
 
     upsertWorkThread: upsertWorkThreadRecord,
 
@@ -3063,6 +3599,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       event: OpenTagEvent;
       decision: RunAdmissionDecision;
       activeRunId?: string;
+      workstreamId?: string;
+      admissionBatchId?: string;
       accessProfileSnapshot?: AgentAccessProfileSnapshot;
       policySnapshotProvenance?: PolicySnapshotProvenance;
       routingPolicy?: FrozenRoutingPolicy;
@@ -3078,6 +3616,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const routingPolicy = input.routingPolicy
         ? FrozenRoutingPolicySchema.parse(input.routingPolicy)
         : undefined;
+      if (input.admissionBatchId && !input.workstreamId) {
+        throw new Error("Follow-up batch attribution requires a workstream.");
+      }
       if (Boolean(accessProfileSnapshot) !== Boolean(policySnapshotProvenance)) {
         throw new Error("Follow-up access and policy snapshots must be captured together.");
       }
@@ -3093,6 +3634,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           sourceEventId: event.id,
           conversationKey,
           activeRunId: input.activeRunId ?? null,
+          workstreamId: input.workstreamId ?? null,
+          admissionBatchId: input.admissionBatchId ?? null,
           eventJson: JSON.stringify(event),
           decisionJson: JSON.stringify(decision),
           accessProfileSnapshotJson: accessProfileSnapshot ? JSON.stringify(accessProfileSnapshot) : null,
@@ -3108,6 +3651,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const existing = await db.select().from(followUpRequests).where(eq(followUpRequests.sourceEventId, event.id)).limit(1).get();
         if (!existing) {
           throw new Error(`Follow-up request already exists for event ${event.id}, but it could not be loaded`);
+        }
+        if (
+          existing.workstreamId !== (input.workstreamId ?? null)
+          || existing.admissionBatchId !== (input.admissionBatchId ?? null)
+        ) {
+          throw new Error("FACTORY_FOLLOW_UP_ATTRIBUTION_CONFLICT");
         }
         return { followUpRequest: followUpRequestFromRow(existing), created: false };
       }
@@ -3159,7 +3708,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ...(followUp.accessProfileSnapshot ? { accessProfileSnapshot: followUp.accessProfileSnapshot } : {}),
           ...(followUp.policySnapshotProvenance ? { policySnapshotProvenance: followUp.policySnapshotProvenance } : {}),
           ...(followUp.routingPolicy ? { routingPolicy: followUp.routingPolicy } : {}),
-          ...(followUp.activeRunId ? { parentRunId: followUp.activeRunId } : {})
+          ...(followUp.activeRunId ? { parentRunId: followUp.activeRunId } : {}),
+          ...(followUp.workstreamId ? { workstreamId: followUp.workstreamId } : {}),
+          ...(followUp.admissionBatchId ? {
+            admissionBatchId: followUp.admissionBatchId,
+            admissionItemRunId: followUp.id
+          } : {})
         });
         if (!created) {
           throw new Error(`Run already exists for follow-up request ${input.followUpRequestId}.`);
@@ -3675,6 +4229,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       triggeredByAction?: ActionHint;
       sourceProposalId?: string;
       sourceApplyPlanId?: string;
+      workstreamId?: string;
+      admissionBatchId?: string;
+      admissionItemRunId?: string;
     }): Promise<CreateRunResult> {
       const event = OpenTagEventSchema.parse(input.event);
       const accessProfileSnapshot = input.accessProfileSnapshot
@@ -3698,6 +4255,24 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const durableThread = protocolFields.thread
         ? (await upsertWorkThreadRecord({ thread: protocolFields.thread, recordedAt: createdAt })).thread
         : undefined;
+      if (input.workstreamId) {
+        if (!durableThread) throw new Error("FACTORY_ATTRIBUTION_REQUIRES_WORK_THREAD");
+        const member = await db.select({ workThreadId: factoryWorkstreamMembers.workThreadId }).from(factoryWorkstreamMembers)
+          .where(and(eq(factoryWorkstreamMembers.workstreamId, input.workstreamId), eq(factoryWorkstreamMembers.workThreadId, durableThread.id))).limit(1).get();
+        if (!member) throw new Error("FACTORY_WORKSTREAM_MEMBERSHIP_MISMATCH");
+      }
+      if (input.admissionBatchId) {
+        if (!input.workstreamId || !durableThread) throw new Error("FACTORY_BATCH_ATTRIBUTION_REQUIRES_WORKSTREAM");
+        const item = await db.select({ runId: workstreamAdmissionBatchItems.runId }).from(workstreamAdmissionBatchItems)
+          .innerJoin(workstreamAdmissionBatches, eq(workstreamAdmissionBatches.id, workstreamAdmissionBatchItems.batchId))
+          .where(and(
+            eq(workstreamAdmissionBatchItems.batchId, input.admissionBatchId),
+            eq(workstreamAdmissionBatchItems.runId, input.admissionItemRunId ?? input.id),
+            eq(workstreamAdmissionBatchItems.workThreadId, durableThread.id),
+            eq(workstreamAdmissionBatches.workstreamId, input.workstreamId)
+          )).limit(1).get();
+        if (!item) throw new Error("FACTORY_ADMISSION_BATCH_ATTRIBUTION_MISMATCH");
+      }
       const repoKey = projectTargetRefFromEvent(event);
       const routingBinding = routingPolicy ? null : await repoBindingForProjectTarget(repoKey);
       const expectedRunnerId = routingPolicy?.runnerIds?.[0] ?? routingBinding?.runnerId ?? null;
@@ -3723,6 +4298,40 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         runnerIds: frozenRunnerIds,
         executorIds: frozenExecutorIds
       });
+      const reconcileReplayFactoryAttribution = (existingRunId: string): void => {
+        if (!input.workstreamId && !input.admissionBatchId) return;
+        db.transaction((tx) => {
+          const current = tx.select().from(runs).where(eq(runs.id, existingRunId)).limit(1).get();
+          if (!current) throw new Error("FACTORY_REPLAY_RUN_NOT_FOUND");
+          if (!durableThread || current.workThreadId !== durableThread.id) throw new Error("FACTORY_REPLAY_WORK_THREAD_MISMATCH");
+          if (current.workstreamId && current.workstreamId !== input.workstreamId) throw new Error("FACTORY_REPLAY_WORKSTREAM_CONFLICT");
+          if (current.admissionBatchId && current.admissionBatchId !== input.admissionBatchId) throw new Error("FACTORY_REPLAY_ADMISSION_BATCH_CONFLICT");
+          const shouldAttachWorkstream = Boolean(input.workstreamId && !current.workstreamId);
+          const shouldAttachBatch = Boolean(input.admissionBatchId && !current.admissionBatchId);
+          if (!shouldAttachWorkstream && !shouldAttachBatch) return;
+          const updated = tx.update(runs).set({
+            ...(shouldAttachWorkstream ? { workstreamId: input.workstreamId! } : {}),
+            ...(shouldAttachBatch ? { admissionBatchId: input.admissionBatchId! } : {}),
+            updatedAt: createdAt
+          }).where(and(
+            eq(runs.id, existingRunId),
+            ...(shouldAttachWorkstream ? [isNull(runs.workstreamId)] : []),
+            ...(shouldAttachBatch ? [isNull(runs.admissionBatchId)] : [])
+          )).run();
+          if (updated.changes !== 1) throw new Error("FACTORY_REPLAY_ATTRIBUTION_CAS_CONFLICT");
+          tx.insert(runEvents).values({
+            ...runEventValues({
+              runId: existingRunId,
+              type: "factory.attribution_attached",
+              payload: { workstreamId: input.workstreamId, admissionBatchId: input.admissionBatchId },
+              visibility: "audit",
+              importance: "normal",
+              createdAt
+            }),
+            progressIdempotencyDigest: sha256Json({ kind: "factory_attribution", workstreamId: input.workstreamId, admissionBatchId: input.admissionBatchId })
+          }).onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] }).run();
+        });
+      };
       const sourceDeliveryId = sourceDeliveryIdFromEvent(event);
       if (sourceDeliveryId) {
         const existingDelivery = await db
@@ -3734,6 +4343,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         if (existingDelivery) {
           const existingByDelivery = await db.select().from(runs).where(eq(runs.id, existingDelivery.runId)).limit(1).get();
           if (existingByDelivery) {
+            reconcileReplayFactoryAttribution(existingByDelivery.id);
             return recordCreateRunReplay({
               runRow: existingByDelivery,
               requestedRunId: input.id,
@@ -3747,9 +4357,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           }
         }
       }
-      const insertResult = await db
-        .insert(runs)
-        .values({
+      const createDecision = RunAdmissionDecisionSchema.parse({
+        action: "start",
+        reason: "Source event accepted and ready to create a run.",
+        reasonCode: "new_event",
+        decidedAt: createdAt,
+        eventId: event.id
+      });
+      const insertResult = db.transaction((tx) => {
+        const inserted = tx.insert(runs).values({
         id: input.id,
         eventId: event.id,
         status: "queued",
@@ -3765,6 +4381,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         repoOwner: repoKey?.owner ?? null,
         repoName: repoKey?.repo ?? null,
         workThreadId: durableThread?.id ?? null,
+        workstreamId: input.workstreamId ?? null,
+        admissionBatchId: input.admissionBatchId ?? null,
         conversationKey: conversationKeyFromEvent(event),
         routingPolicyJson: JSON.stringify(capturedRoutingPolicy),
         routingRunnerIdsJson: frozenRunnerIds === null ? null : JSON.stringify(frozenRunnerIds),
@@ -3772,13 +4390,37 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         routingRejectionsJson: "[]",
         createdAt,
         updatedAt: createdAt
-        })
-        .onConflictDoNothing({ target: runs.eventId });
+        }).onConflictDoNothing({ target: runs.eventId }).run();
+        if (inserted.changes === 0) return inserted;
+        if (sourceDeliveryId) {
+          tx.insert(sourceDeliveries).values({ source: event.source, deliveryId: sourceDeliveryId, runId: input.id, eventId: event.id, createdAt })
+            .onConflictDoNothing({ target: [sourceDeliveries.source, sourceDeliveries.deliveryId] }).run();
+        }
+        const baseEvents: Array<typeof runEvents.$inferInsert> = [
+          runEventValues({ runId: input.id, type: "admission.decided", payload: createDecision, visibility: "audit", importance: "normal", message: createDecision.reason, createdAt }),
+          runEventValues({ runId: input.id, type: "run.created", payload: { eventId: event.id, provenance: runProvenance({ event, projectTarget: repoKey, admissionDecision: createDecision, expectedRunnerId }) }, visibility: "audit", importance: "low", createdAt }),
+          runEventValues({ runId: input.id, type: "context_packet.generated", payload: { contextPacket: protocolFields.contextPacket, ...(durableThread ? { thread: durableThread } : {}) }, visibility: "audit", importance: "normal", message: protocolFields.contextPacket.summary, createdAt })
+        ];
+        if (accessProfileSnapshot && policySnapshotProvenance) {
+          baseEvents.push(runEventValues({
+            runId: input.id,
+            type: "agent_access_profile.captured",
+            payload: { accessProfileSnapshotId: accessProfileSnapshot.id, policySnapshotId: policySnapshotProvenance.id, requestedBy: accessProfileSnapshot.requestedBy, agentPrincipal: accessProfileSnapshot.agentPrincipal, projectTargets: accessProfileSnapshot.projectTargets },
+            visibility: "audit",
+            importance: "high",
+            message: "Attributed agent access and policy snapshots captured at admission.",
+            createdAt
+          }));
+        }
+        tx.insert(runEvents).values(baseEvents).run();
+        return inserted;
+      });
       if (insertResult.changes === 0) {
         const existingBySourceEvent = await db.select().from(runs).where(eq(runs.eventId, event.id)).limit(1).get();
         if (!existingBySourceEvent) {
           throw new Error(`Run already exists for event ${event.id}, but it could not be loaded`);
         }
+        reconcileReplayFactoryAttribution(existingBySourceEvent.id);
         return recordCreateRunReplay({
           runRow: existingBySourceEvent,
           requestedRunId: input.id,
@@ -3787,79 +4429,6 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           expectedRunnerId,
           replayKind: "source_event",
           sourceDeliveryId,
-          createdAt
-        });
-      }
-      const createDecision = RunAdmissionDecisionSchema.parse({
-        action: "start",
-        reason: "Source event accepted and ready to create a run.",
-        reasonCode: "new_event",
-        decidedAt: createdAt,
-        eventId: event.id
-      });
-      if (sourceDeliveryId) {
-        await db
-          .insert(sourceDeliveries)
-          .values({
-            source: event.source,
-            deliveryId: sourceDeliveryId,
-            runId: input.id,
-            eventId: event.id,
-            createdAt
-          })
-          .onConflictDoNothing({ target: [sourceDeliveries.source, sourceDeliveries.deliveryId] });
-      }
-      await appendRunEvent({
-        runId: input.id,
-        type: "admission.decided",
-        payload: createDecision,
-        visibility: "audit",
-        importance: "normal",
-        message: createDecision.reason,
-        createdAt
-      });
-      await appendRunEvent({
-        runId: input.id,
-        type: "run.created",
-        payload: {
-          eventId: event.id,
-          provenance: runProvenance({
-            event,
-            projectTarget: repoKey,
-            admissionDecision: createDecision,
-            expectedRunnerId
-          })
-        },
-        visibility: "audit",
-        importance: "low",
-        createdAt
-      });
-      await appendRunEvent({
-        runId: input.id,
-        type: "context_packet.generated",
-        payload: {
-          contextPacket: protocolFields.contextPacket,
-          ...(durableThread ? { thread: durableThread } : {})
-        },
-        visibility: "audit",
-        importance: "normal",
-        message: protocolFields.contextPacket.summary,
-        createdAt
-      });
-      if (accessProfileSnapshot && policySnapshotProvenance) {
-        await appendRunEvent({
-          runId: input.id,
-          type: "agent_access_profile.captured",
-          payload: {
-            accessProfileSnapshotId: accessProfileSnapshot.id,
-            policySnapshotId: policySnapshotProvenance.id,
-            requestedBy: accessProfileSnapshot.requestedBy,
-            agentPrincipal: accessProfileSnapshot.agentPrincipal,
-            projectTargets: accessProfileSnapshot.projectTargets
-          },
-          visibility: "audit",
-          importance: "high",
-          message: "Attributed agent access and policy snapshots captured at admission.",
           createdAt
         });
       }
@@ -4268,11 +4837,62 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                 directory: snapshot.directory.filter((entry) => candidateRunnerIds.has(entry.runnerId))
               }
             : snapshot;
+          const factoryBudget = candidate.workstreamId
+            ? (() => {
+                const row = tx.select({ recipeJson: factoryRecipeSnapshots.recipeJson }).from(factoryWorkstreams)
+                  .innerJoin(factoryRecipeSnapshots, and(
+                    eq(factoryRecipeSnapshots.id, factoryWorkstreams.recipeId),
+                    eq(factoryRecipeSnapshots.version, factoryWorkstreams.recipeVersion)
+                  )).where(eq(factoryWorkstreams.id, candidate.workstreamId!)).limit(1).get();
+                if (!row) return null;
+                try {
+                  const parsed = FactoryRecipeSnapshotInputSchema.safeParse(JSON.parse(row.recipeJson));
+                  return parsed.success ? parsed.data.budgets : null;
+                } catch {
+                  return null;
+                }
+              })()
+            : undefined;
+          if (candidate.workstreamId && !factoryBudget) {
+            const blockedAt = now.toISOString();
+            const invariantKey = `factory-recipe-authority:${candidate.workstreamId}`;
+            tx.insert(runEvents).values({
+              ...runEventValues({
+                runId: candidate.id,
+                type: "factory.invariant_blocked",
+                payload: { workstreamId: candidate.workstreamId, invariant: "authoritative_recipe_snapshot_missing_or_invalid" },
+                visibility: "audit",
+                importance: "blocking",
+                message: "Factory claim is blocked because its authoritative recipe snapshot is missing or invalid.",
+                createdAt: blockedAt
+              }),
+              progressIdempotencyDigest: sha256Json({ kind: invariantKey, runId: candidate.id })
+            }).onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] }).run();
+            tx.insert(controlPlaneEvents).values({
+              type: "factory.invariant_blocked",
+              severity: "error",
+              subject: candidate.workstreamId,
+              idempotencyKey: `${invariantKey}:${candidate.id}`,
+              payloadJson: JSON.stringify({
+                workstreamId: candidate.workstreamId,
+                runId: candidate.id,
+                invariant: "authoritative_recipe_snapshot_missing_or_invalid"
+              }),
+              createdAt: blockedAt
+            }).onConflictDoNothing({ target: controlPlaneEvents.idempotencyKey }).run();
+            continue;
+          }
+          if (candidate.workstreamId && factoryBudget?.maxConcurrentRuns !== undefined) {
+            const active = tx.select({ count: sql<number>`count(*)` }).from(runs)
+              .where(and(eq(runs.workstreamId, candidate.workstreamId), inArray(runs.status, ["assigned", "running"]))).get()?.count ?? 0;
+            if (active >= factoryBudget.maxConcurrentRuns) continue;
+          }
           const routingDecision = routingDecisionForRun({
             runRow: candidate,
             now,
             snapshot: candidateSnapshot,
-            event: eventForQueuedRun(candidate)
+            event: eventForQueuedRun(candidate),
+            ...(factoryBudget?.allowedLocalities ? { allowedLocalities: factoryBudget.allowedLocalities } : {})
           });
           const latest = latestRoutingEventByRun.get(candidate.id);
           const previous = latest ? RoutingDecisionSchema.safeParse(JSON.parse(latest.payloadJson)) : undefined;
@@ -4297,6 +4917,49 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           const previousAttempt = tx.select({ number: attempts.number }).from(attempts)
             .where(eq(attempts.runId, candidate.id)).orderBy(desc(attempts.number)).limit(1).get();
           const number = (previousAttempt?.number ?? 0) + 1;
+          if (candidate.workstreamId) {
+            const budget = factoryBudget!;
+            const workstreamAttempts = tx.select({ count: sql<number>`count(*)` }).from(attempts)
+              .innerJoin(runs, eq(runs.id, attempts.runId)).where(eq(runs.workstreamId, candidate.workstreamId)).get()?.count ?? 0;
+            const costUnitsPerAttempt = budget.costUnitsPerAttempt ?? 0;
+            const nextCostUnits = (workstreamAttempts + 1) * costUnitsPerAttempt;
+            const runnerLocality = selectedRunner?.locality ?? "unknown";
+            const violation = budget.maxAttemptsPerRun !== undefined && number > budget.maxAttemptsPerRun
+                ? { code: "max_attempts_per_run", observed: number, limit: budget.maxAttemptsPerRun }
+                : budget.maxCostUnits !== undefined && nextCostUnits > budget.maxCostUnits
+                  ? { code: "max_cost_units", observed: nextCostUnits, limit: budget.maxCostUnits }
+                  : null;
+            if (violation) {
+              const blockedAt = now.toISOString();
+              const blocked = tx.update(runs).set({ status: "needs_approval", currentRoutingDecisionId: null, updatedAt: blockedAt })
+                .where(and(eq(runs.id, candidate.id), eq(runs.status, "queued"))).run();
+              if (blocked.changes === 1) {
+                const dedupeDigest = sha256Json({ kind: "factory_budget", workstreamId: candidate.workstreamId, code: violation.code });
+                tx.insert(runEvents).values({
+                  ...runEventValues({
+                    runId: candidate.id,
+                    type: "factory.budget_blocked",
+                    payload: { workstreamId: candidate.workstreamId, violation, runnerId: input.runnerId, runnerLocality },
+                    visibility: "audit",
+                    importance: "blocking",
+                    message: `Factory workstream budget blocked this attempt: ${violation.code}.`,
+                    createdAt: blockedAt
+                  }),
+                  progressIdempotencyDigest: dedupeDigest
+                }).onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] }).run();
+                if (candidate.workThreadId) {
+                  tx.insert(governanceEvents).values({
+                    workThreadId: candidate.workThreadId,
+                    type: "factory.budget_blocked",
+                    subjectId: candidate.id,
+                    payloadJson: JSON.stringify({ workstreamId: candidate.workstreamId, violation }),
+                    createdAt: blockedAt
+                  }).run();
+                }
+              }
+              continue;
+            }
+          }
           const updateResult = tx.update(runs).set({
             status: "assigned",
             assignedRunnerId: input.runnerId,
@@ -4316,6 +4979,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             runId: candidate.id,
             number,
             runnerId: input.runnerId,
+            runnerLocality: selectedRunner?.locality ?? null,
             selectedExecutorId: authoritativeExecutorId,
             routingDecisionId: routingDecision.id,
             fencingToken,
@@ -6155,16 +6819,19 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       type: string;
       severity?: ControlPlaneEventSeverity;
       subject?: string;
+      idempotencyKey?: string;
       payload?: unknown;
       createdAt?: string;
-    }): Promise<void> {
-      await db.insert(controlPlaneEvents).values({
+    }): Promise<"recorded" | "duplicate"> {
+      const inserted = await db.insert(controlPlaneEvents).values({
         type: input.type,
         severity: input.severity ?? "info",
         subject: input.subject ?? null,
+        idempotencyKey: input.idempotencyKey ?? null,
         payloadJson: JSON.stringify(input.payload ?? {}),
         createdAt: input.createdAt ?? nowIso()
-      });
+      }).onConflictDoNothing({ target: controlPlaneEvents.idempotencyKey });
+      return inserted.changes === 1 ? "recorded" : "duplicate";
     },
 
     async listControlPlaneEvents(input: { limit?: number; type?: string; severity?: ControlPlaneEventSeverity } = {}): Promise<ControlPlaneEvent[]> {
@@ -6495,27 +7162,28 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
 
     async getAcceptedCompletionMetrics(): Promise<AcceptedCompletionMetrics> {
       const currentAssessmentRows = await db.select({
-        id: completionAssessments.id,
+        assessmentId: completionAssessments.id,
         threadId: workThreads.id,
         persistedThreadId: completionAssessments.workThreadId,
-        assessmentJson: completionAssessments.assessmentJson
+        assessmentJson: completionAssessments.assessmentJson,
+        waiverId: completionWaivers.id,
+        waiverWorkThreadId: completionWaivers.workThreadId,
+        waiverContractId: completionWaivers.contractId,
+        waiverContractVersion: completionWaivers.contractVersion,
+        waiverCycle: completionWaivers.cycle,
+        waiverContentDigest: completionWaivers.contentDigest,
+        waiverJson: completionWaivers.waiverJson
       }).from(workThreads)
-        .innerJoin(completionAssessments, eq(completionAssessments.id, workThreads.currentAssessmentId));
+        .innerJoin(completionAssessments, eq(completionAssessments.id, workThreads.currentAssessmentId))
+        .leftJoin(completionWaivers, eq(
+          completionWaivers.id,
+          sql<string | null>`CASE WHEN json_valid(${completionAssessments.assessmentJson}) THEN json_extract(${completionAssessments.assessmentJson}, '$.waiver.id') ELSE NULL END`
+        ));
+      const evaluatedAt = nowIso();
       const acceptedAssessmentRefs = currentAssessmentRows.flatMap((assessment) => {
-        try {
-          const parsed = CompletionAssessmentSchema.safeParse(JSON.parse(assessment.assessmentJson));
-          return parsed.success && (
-            parsed.data.state === "waived"
-            || (parsed.data.state === "satisfied" && parsed.data.evidenceBacked)
-          )
-            && parsed.data.id === assessment.id
-            && parsed.data.workThreadId === assessment.threadId
-            && assessment.persistedThreadId === assessment.threadId
-            ? [{ assessmentId: assessment.id, workThreadId: assessment.threadId }]
-            : [];
-        } catch {
-          return [];
-        }
+        return currentAssessmentIsAccepted(assessment, evaluatedAt)
+          ? [{ assessmentId: assessment.assessmentId, workThreadId: assessment.threadId }]
+          : [];
       });
       type AggregateRow = {
         dimension: "total" | "runner" | "executor";
