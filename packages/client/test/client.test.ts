@@ -98,6 +98,180 @@ function completionExplanationFixture() {
 }
 
 describe("@opentag/client", () => {
+  it("uses the additive factory workstream API routes and parses their contracts", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const digest = `sha256:${"a".repeat(64)}`;
+    const recipe = {
+      id: "recipe/1",
+      version: 2,
+      name: "Repository maintenance",
+      budgets: {
+        maxConcurrentRuns: 2,
+        maxAttemptsPerRun: 3,
+        maxCostUnits: 12,
+        costUnitsPerAttempt: 2,
+        allowedLocalities: ["private"]
+      },
+      createdAt: "2026-07-26T00:00:00.000Z",
+      contentDigest: digest
+    } as const;
+    const workstream = {
+      id: "workstream/1",
+      recipeId: recipe.id,
+      recipeVersion: recipe.version,
+      name: "July maintenance",
+      members: [{ kind: "work_thread", workThreadId: "thread_1" }],
+      createdAt: "2026-07-26T00:01:00.000Z",
+      contentDigest: digest
+    } as const;
+    const batch = {
+      id: "batch/1",
+      workstreamId: workstream.id,
+      items: [{ itemId: "item_1", runId: "run_1", workThreadId: "thread_1", event }],
+      createdAt: "2026-07-26T00:02:00.000Z",
+      contentDigest: digest
+    } as const;
+    const result = {
+      batchId: batch.id,
+      workstreamId: workstream.id,
+      inputDigest: digest,
+      results: [{ itemId: "item_1", index: 0, runId: "run_1", status: "created" }],
+      summary: {
+        totalItems: 1,
+        createdCount: 1,
+        idempotentReplayCount: 0,
+        followUpQueuedCount: 0,
+        needsHumanDecisionCount: 0,
+        rejectedCount: 0,
+        exceptionCount: 0,
+        omittedExceptionCount: 0,
+        exceptions: []
+      },
+      completedAt: "2026-07-26T00:03:00.000Z"
+    } as const;
+    const receipt = {
+      batch,
+      status: "completed",
+      items: [{
+        itemId: "item_1",
+        index: 0,
+        runId: "run_1",
+        workThreadId: "thread_1",
+        status: "completed",
+        result: result.results[0]
+      }],
+      result,
+      updatedAt: result.completedAt,
+      completedAt: result.completedAt
+    } as const;
+    const metrics = {
+      workstreamId: workstream.id,
+      workThreadCount: 1,
+      acceptedWorkThreadCount: 1,
+      runCount: 1,
+      queuedRunCount: 0,
+      activeRunCount: 0,
+      needsHumanRunCount: 0,
+      terminalRunCount: 1,
+      failedRunCount: 0,
+      budgetBlockedRunCount: 0,
+      exceptionCount: 0,
+      totalAttempts: 1,
+      attemptsPerRunExceededCount: 0,
+      totalCostUnits: 2,
+      attemptsByLocality: { local: 0, private: 1, hosted: 0, unknown: 0 }
+    } as const;
+    const evaluation = {
+      workstreamId: workstream.id,
+      recipeId: recipe.id,
+      recipeVersion: recipe.version,
+      status: "healthy",
+      inputDigest: digest,
+      evaluatedAt: "2026-07-26T00:04:00.000Z",
+      acceptedWorkThreadCount: 1,
+      violations: []
+    } as const;
+    const responses = [
+      { recipe }, { recipe }, { workstream }, { workstream }, { receipt }, { receipt }, { metrics }, { evaluation }
+    ];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test/",
+      pairingToken: "runner_token",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse(responses.shift());
+      }
+    });
+
+    await expect(client.createFactoryRecipeSnapshot({
+      id: recipe.id,
+      version: recipe.version,
+      name: recipe.name,
+      budgets: recipe.budgets
+    })).resolves.toEqual({ recipe });
+    await expect(client.getFactoryRecipeSnapshot({ id: recipe.id, version: recipe.version })).resolves.toEqual({ recipe });
+    await expect(client.createWorkstream({
+      id: workstream.id,
+      recipeId: workstream.recipeId,
+      recipeVersion: workstream.recipeVersion,
+      name: workstream.name,
+      members: workstream.members
+    })).resolves.toEqual({ workstream });
+    await expect(client.getWorkstream({ id: workstream.id })).resolves.toEqual({ workstream });
+    await expect(client.createWorkstreamAdmissionBatch({
+      id: batch.id,
+      workstreamId: batch.workstreamId,
+      items: batch.items
+    })).resolves.toEqual({ receipt });
+    await expect(client.getWorkstreamAdmissionBatch({ id: batch.id })).resolves.toEqual({ receipt });
+    await expect(client.getWorkstreamMetrics({ id: workstream.id })).resolves.toEqual({ metrics });
+    await expect(client.getWorkstreamEvaluation({ id: workstream.id })).resolves.toEqual({ evaluation });
+
+    expect(requests.map(({ url, init }) => [url, init?.method ?? "GET"])).toEqual([
+      ["http://dispatcher.test/v1/factory-recipes", "POST"],
+      ["http://dispatcher.test/v1/factory-recipes/recipe%2F1/versions/2", "GET"],
+      ["http://dispatcher.test/v1/workstreams", "POST"],
+      ["http://dispatcher.test/v1/workstreams/workstream%2F1", "GET"],
+      ["http://dispatcher.test/v1/workstream-batches", "POST"],
+      ["http://dispatcher.test/v1/workstream-batches/batch%2F1", "GET"],
+      ["http://dispatcher.test/v1/workstreams/workstream%2F1/metrics", "GET"],
+      ["http://dispatcher.test/v1/workstreams/workstream%2F1/evaluation", "GET"]
+    ]);
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+      id: recipe.id,
+      version: recipe.version,
+      name: recipe.name,
+      budgets: recipe.budgets
+    });
+    expect(JSON.parse(String(requests[4]?.init?.body))).toEqual({
+      id: batch.id,
+      workstreamId: batch.workstreamId,
+      items: batch.items
+    });
+  });
+
+  it("preserves factory API response details in HTTP errors", async () => {
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => jsonResponse({ error: "workstream_not_found", id: "missing" }, 404)
+    });
+
+    await expect(client.getWorkstream({ id: "missing" })).rejects.toMatchObject({
+      name: "OpenTagClientHttpError",
+      status: 404,
+      responseBody: JSON.stringify({ error: "workstream_not_found", id: "missing" })
+    });
+  });
+
+  it("rejects malformed factory responses instead of returning untyped data", async () => {
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => jsonResponse({ metrics: { workstreamId: "workstream_1" } })
+    });
+
+    await expect(client.getWorkstreamMetrics({ id: "workstream_1" })).rejects.toMatchObject({ name: "ZodError" });
+  });
+
   it("reports a fenced executor preflight rejection through the runner-scoped route", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const client = createOpenTagClient({
