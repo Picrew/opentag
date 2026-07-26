@@ -198,6 +198,7 @@ OpenTag's CLI path is local-first.
 | `opentag service autostart enable` | Enable background service login autostart |
 | `opentag service autostart disable` | Disable background service login autostart |
 | `opentag status` | Show local config and runtime status; add `--run <run_id>`, `--channel provider:account/conversation`, or `--workstream <id>` for scoped detail |
+| `opentag factory ...` | Create or inspect immutable recipes and WorkThread-only workstreams, then submit or retrieve restart-safe admission batches from JSON |
 | `opentag cancel` | Request cancellation for a run or the active run in a source container |
 | `opentag completion escalations --run <run_id>` | List structured human escalations, audiences, options, expiry, and attribution for a run |
 | `opentag completion acknowledge --escalation <id> ...` | Attribute acknowledgement without resolving the blocking escalation |
