@@ -101,6 +101,30 @@ const cases = [
     ]
   },
   {
+    id: "github-factory-live",
+    label: "Live GitHub recipe-driven factory acceptance",
+    live: true,
+    command: "OPENTAG_GH_LIVE_FACTORY=true scripts/dev/run-github-webhook-live-test.sh",
+    requiredCommands: [
+      "corepack",
+      "curl",
+      "gh",
+      "lsof",
+      "node",
+      "python3",
+      "sqlite3",
+      ...requiredCommandsForBuiltInAcpAgent(githubWebhookExecutor)
+    ],
+    optionalCommands: ["ngrok"],
+    notes: [
+      "Uses a real GitHub issue comment as the external planning source, then admits it through WorkThread ensure, an immutable recipe, a WorkThread-only workstream, and a durable batch.",
+      "Executes locally, creates and merges a real PR, verifies the required check against the current head, and requires provider-verified accepted completion.",
+      "Restarts the stack, replays the exact batch receipt, verifies the source-thread receipt is not duplicated, and proves accepted workstream metrics remain authoritative.",
+      "Set OPENTAG_GH_LIVE_EXECUTOR=phase1-fixture to prove the GitHub/factory/governance chain with the deterministic local ACP worktree writer.",
+      "This case keeps planning external and explicitly excludes a DAG and operator console."
+    ]
+  },
+  {
     id: "github-cli-live",
     label: "Live GitHub dispatcher-assisted local executor smoke",
     live: true,
