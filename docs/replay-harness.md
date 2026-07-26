@@ -88,6 +88,28 @@ preserved, and accepted outcomes come only from the authoritative current
 CompletionAssessment. No provider API is called and the evaluation cannot
 write a CompletionAssessment.
 
+## Phase 4B Runtime Conformance
+
+The Phase 4A replay remains the narrow deterministic store/dispatcher contract.
+Phase 4B adds a process-level conformance case without replacing that coverage:
+
+```bash
+corepack pnpm smoke:factory-conformance
+```
+
+The conformance case opens a real loopback dispatcher over a file-backed
+database, operates the recipe, workstream, and batch APIs, runs two admitted
+items through the local daemon using Echo and a deterministic ACP fixture, then
+reopens the database and proves exact replay without duplicate work. It also
+locks the ten-sample exception bound and current-assessment authority for
+accepted-outcome metrics: successful terminal Runs remain unaccepted until
+deterministic verified evidence advances their current CompletionAssessments.
+
+This case is safe for ordinary CI because it has no provider credentials or
+external writes. It proves the live OpenTag runtime seams, not a public provider
+loop; the GitHub webhook smoke remains the separate external proof. Neither
+case introduces dependency scheduling, a DAG, or an operator console.
+
 ## Product Boundary
 
 Replay fixtures should reinforce OpenTag's boundary:

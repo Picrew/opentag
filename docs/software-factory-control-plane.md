@@ -1417,6 +1417,32 @@ dependency scheduling, adaptive routing, a planning UI, or an operator console.
 Its evaluation output is an immutable observation; it cannot update a live
 CompletionAssessment.
 
+#### Phase 4B implementation boundary
+
+Phase 4B closes the first recipe-driven runtime loop without widening OpenTag
+into a planning or workflow product:
+
+- a minimal CLI operates immutable recipes, WorkThread-only workstreams, and
+  durable admission batches from reviewable JSON inputs;
+- a file-backed conformance case drives the public dispatcher client and local
+  daemon through one recipe-owned batch;
+- two actual executor adapter paths complete admitted work: the in-process Echo
+  executor and a deterministic local ACP fixture;
+- closing and reopening the dispatcher against the same database preserves the
+  batch receipt, resumes or replays safely, and rejects a conflicting digest;
+- batch exceptions remain quiet and bounded to ten retained samples plus an
+  explicit omitted count;
+- factory outcome metrics are accepted only from the current authoritative
+  CompletionAssessment and attributed through the latest terminal fenced
+  Attempt's runner and executor; the conformance receipt records the transition
+  from two terminal Runs and zero accepted outcomes to two evidence-backed
+  accepted outcomes.
+
+The deterministic conformance case is implementation and runtime evidence. It
+does not replace the separate provider-live GitHub loop required below for a
+public factory-control-plane claim. Phase 4B does not add dependency edges, a
+DAG scheduler, mutable workstream planning state, or an operator console.
+
 ## Compatibility and migration
 
 1. Add schemas and tables without changing existing required fields.
