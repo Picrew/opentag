@@ -158,6 +158,8 @@ program
   .option("--config <path>", "Config file path")
   .option("--run <runId>", "Show audit details for one run")
   .option("--channel <provider:account/conversation>", "Show active run and queued follow-ups for one source container")
+  .option("--workstream <workstreamId>", "Show budget and accepted-outcome health for one factory workstream")
+  .option("--json", "Print structured --workstream status as JSON")
   .action(runCliAction(runStatusCommand));
 
 program

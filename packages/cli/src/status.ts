@@ -16,9 +16,13 @@ import {
   type OpenTagEvent,
   type OpenTagRun,
   type AcceptedCompletionMetrics,
+  type FactoryRecipeSnapshot,
   type RunnerDirectoryEntry,
   type RoutingDecision,
-  type PlatformLivenessStrategy
+  type PlatformLivenessStrategy,
+  type Workstream,
+  type WorkstreamEvaluation,
+  type WorkstreamMetrics
 } from "@opentag/core";
 import { DEFAULT_AGENT_SESSION_PROFILE_TEMPLATE } from "@opentag/local-runtime";
 import { formatConfiguredCapabilities } from "./catalogs/capabilities.js";
@@ -42,6 +46,8 @@ export type StatusCommandOptions = {
   config?: string;
   run?: string;
   channel?: string;
+  workstream?: string;
+  json?: boolean;
 };
 
 export type StatusSummary = {
@@ -100,6 +106,16 @@ export type ChannelStatusSummary = {
   conversationId: string;
   runTimeoutPolicy: string;
   status: ChannelRuntimeStatus;
+};
+
+export type WorkstreamStatusSummary = {
+  configPath: string;
+  dispatcherUrl: string;
+  recipe: FactoryRecipeSnapshot;
+  workstream: Workstream;
+  metrics: WorkstreamMetrics;
+  evaluation: WorkstreamEvaluation;
+  alerts: ControlPlaneAlert[];
 };
 
 export function parseChannelRef(ref: string): { provider: string; accountId: string; conversationId: string } {
@@ -291,6 +307,53 @@ export async function getChannelStatusSummary(input: {
     channel: input.channel,
     ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
   });
+}
+
+export async function getWorkstreamStatusSummary(input: {
+  workstreamId: string;
+  configPath?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<WorkstreamStatusSummary> {
+  const configPath = input.configPath ?? defaultConfigPath();
+  const config = readCliConfig(configPath);
+  return workstreamStatusFromConfig({
+    config,
+    configPath,
+    workstreamId: input.workstreamId,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+  });
+}
+
+export async function workstreamStatusFromConfig(input: {
+  config: OpenTagCliConfig;
+  configPath: string;
+  workstreamId: string;
+  fetchImpl?: typeof fetch;
+}): Promise<WorkstreamStatusSummary> {
+  const token = runnerDispatcherToken(input.config.daemon);
+  const client = createOpenTagClient({
+    dispatcherUrl: input.config.daemon.dispatcherUrl,
+    ...(token ? { pairingToken: token } : {}),
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+  });
+  const { workstream } = await client.getWorkstream({ id: input.workstreamId });
+  const [recipe, metrics, evaluation, alerts] = await Promise.all([
+    client.getFactoryRecipeSnapshot({ id: workstream.recipeId, version: workstream.recipeVersion }),
+    client.getWorkstreamMetrics({ id: workstream.id }),
+    client.getWorkstreamEvaluation({ id: workstream.id }),
+    client.listControlPlaneAlerts({ limit: 100 })
+  ]);
+  return {
+    configPath: input.configPath,
+    dispatcherUrl: input.config.daemon.dispatcherUrl,
+    recipe: recipe.recipe,
+    workstream,
+    metrics: metrics.metrics,
+    evaluation: evaluation.evaluation,
+    alerts: alerts.alerts.filter((alert) =>
+      alert.subject === workstream.id || alert.subject === `workstream:${workstream.id}`
+    )
+  };
 }
 
 export async function channelStatusFromConfig(input: {
@@ -900,6 +963,74 @@ export function formatCompletionExplanation(completion: CompletionExplanation): 
   ];
 }
 
+function workstreamNextAction(summary: WorkstreamStatusSummary): string {
+  if (summary.evaluation.status === "blocked") {
+    return "Resolve the blocking budget violations before admitting or claiming more work.";
+  }
+  if (summary.evaluation.status === "attention_required") {
+    return "Review the bounded exception summary and address the affected runs.";
+  }
+  if (summary.metrics.acceptedWorkThreadCount === 0) {
+    return "Wait for governed completion evidence; no work thread has an accepted outcome yet.";
+  }
+  return "No action required; continue monitoring accepted outcomes.";
+}
+
+function formatWorkstreamExceptions(summary: WorkstreamStatusSummary): string[] {
+  const violations = summary.evaluation.violations.slice(0, 5);
+  const alerts = summary.alerts.slice(0, 5);
+  if (violations.length === 0 && alerts.length === 0) return [];
+  return [
+    "Exceptions:",
+    ...violations.map((violation) =>
+      `  budget: ${violation.code} - ${violation.message} (actual=${violation.actual}${violation.limit !== undefined ? `, limit=${violation.limit}` : ""})`
+    ),
+    ...(summary.evaluation.violations.length > violations.length
+      ? [`  budget: ${summary.evaluation.violations.length - violations.length} more violation(s) omitted`]
+      : []),
+    ...alerts.map((alert) => `  alert: ${alert.severity}/${alert.type} - ${alert.reason}; next=${alert.nextAction}`),
+    ...(summary.alerts.length > alerts.length ? [`  alert: ${summary.alerts.length - alerts.length} more alert(s) omitted`] : [])
+  ];
+}
+
+export function formatWorkstreamStatus(summary: WorkstreamStatusSummary): string {
+  const { budgets } = summary.recipe;
+  const metrics = summary.metrics;
+  return [
+    `Workstream: ${summary.workstream.id} (${summary.workstream.name})`,
+    `State: ${summary.evaluation.status}`,
+    `Next action: ${workstreamNextAction(summary)}`,
+    "Accepted Outcomes:",
+    `  work threads: ${metrics.acceptedWorkThreadCount}/${metrics.workThreadCount}`,
+    "Budget:",
+    `  concurrency: ${metrics.activeRunCount}/${budgets.maxConcurrentRuns}; blocked runs=${metrics.budgetBlockedRunCount}`,
+    `  attempts: ${metrics.totalAttempts}; per-run limit=${budgets.maxAttemptsPerRun}; exceeded runs=${metrics.attemptsPerRunExceededCount}`,
+    `  cost units: ${metrics.totalCostUnits}/${budgets.maxCostUnits}; per attempt=${budgets.costUnitsPerAttempt}`,
+    `  allowed localities: ${budgets.allowedLocalities.join(", ")}`,
+    ...formatWorkstreamExceptions(summary),
+    "Details:",
+    `  recipe: ${summary.recipe.id}@${summary.recipe.version} (${summary.recipe.name})`,
+    `  members: ${summary.workstream.members.length}`,
+    `  runs: ${metrics.runCount}; queued=${metrics.queuedRunCount}; active=${metrics.activeRunCount}; needs-human=${metrics.needsHumanRunCount}; terminal=${metrics.terminalRunCount}; failed=${metrics.failedRunCount}`,
+    `  attempts by locality: local=${metrics.attemptsByLocality.local}; private=${metrics.attemptsByLocality.private}; hosted=${metrics.attemptsByLocality.hosted}; unknown=${metrics.attemptsByLocality.unknown}`,
+    `  evaluated: ${summary.evaluation.evaluatedAt}`,
+    `  config: ${summary.configPath}`,
+    `  dispatcher: ${summary.dispatcherUrl}`
+  ].join("\n");
+}
+
+export function workstreamStatusJson(summary: WorkstreamStatusSummary): Record<string, unknown> {
+  return {
+    state: summary.evaluation.status,
+    nextAction: workstreamNextAction(summary),
+    workstream: summary.workstream,
+    recipe: summary.recipe,
+    metrics: summary.metrics,
+    evaluation: summary.evaluation,
+    alerts: summary.alerts
+  };
+}
+
 function projectTargetLabel(input: ChannelRuntimeStatus["binding"]): string | undefined {
   if (!input.repoProvider || !input.owner || !input.repo) return undefined;
   return `${input.repoProvider}:${input.owner}/${input.repo}`;
@@ -948,8 +1079,22 @@ export function formatChannelStatus(summary: ChannelStatusSummary): string {
 }
 
 export async function runStatusCommand(options: StatusCommandOptions): Promise<void> {
+  if (options.json && !options.workstream) {
+    throw new Error("Use --json with --workstream.");
+  }
   if (options.run && options.channel) {
     throw new Error("Use either --run or --channel, not both.");
+  }
+  if (options.workstream && (options.run || options.channel)) {
+    throw new Error("Use only one of --run, --channel, or --workstream.");
+  }
+  if (options.workstream) {
+    const summary = await getWorkstreamStatusSummary({
+      workstreamId: options.workstream,
+      ...(options.config ? { configPath: options.config } : {})
+    });
+    console.log(options.json ? JSON.stringify(workstreamStatusJson(summary), null, 2) : formatWorkstreamStatus(summary));
+    return;
   }
   if (options.run) {
     console.log(formatRunStatus(await getRunStatusSummary({ runId: options.run, ...(options.config ? { configPath: options.config } : {}) })));
