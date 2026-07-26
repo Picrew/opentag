@@ -26,6 +26,7 @@ export type RoutingEvaluationInput = {
   access: {
     allowedRunnerIds?: string[];
     allowedExecutorIds?: string[];
+    allowedLocalities?: RunnerLocality[];
     locality?: RoutingLocalityRequirement;
     unresolvedConnectionRefs: boolean;
   };
@@ -129,6 +130,13 @@ export function evaluateRouting(input: RoutingEvaluationInput): RoutingDecision 
         reasons.push({ code: "runner_locality_mismatch", message: "Runner locality does not satisfy the captured access profile." });
       } else if (runner) {
         reasons.push({ code: "runner_locality_satisfied", message: "Runner locality satisfies the captured access profile." });
+      }
+
+      if (runner && input.access.allowedLocalities !== undefined && !input.access.allowedLocalities.includes(runner.locality)) {
+        eligible = false;
+        reasons.push({ code: "runner_locality_not_allowed_by_factory_recipe", message: "Factory recipe does not allow this runner locality." });
+      } else if (runner && input.access.allowedLocalities !== undefined) {
+        reasons.push({ code: "runner_locality_allowed_by_factory_recipe", message: "Factory recipe allows this runner locality." });
       }
 
       if (input.access.allowedExecutorIds !== undefined && !input.access.allowedExecutorIds.includes(executorId)) {
