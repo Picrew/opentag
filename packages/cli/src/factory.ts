@@ -2,9 +2,11 @@ import { readFile } from "node:fs/promises";
 import { createOpenTagClient, type OpenTagClient } from "@opentag/client";
 import {
   FactoryRecipeSnapshotInputSchema,
+  OpenTagEventSchema,
   WorkstreamAdmissionBatchInputSchema,
   WorkstreamInputSchema,
   type FactoryRecipeSnapshot,
+  type WorkThread,
   type Workstream,
   type WorkstreamAdmissionBatchReceipt
 } from "@opentag/core";
@@ -14,7 +16,13 @@ import {
   type OpenTagCliConfig
 } from "./config.js";
 
-type FactoryAction = "created" | "retrieved" | "submitted";
+type FactoryAction = "created" | "ensured" | "retrieved" | "submitted";
+
+export type FactoryWorkThreadEnsureOptions = {
+  config?: string;
+  input?: string;
+  json?: boolean;
+};
 
 export type FactoryRecipeCreateOptions = {
   config?: string;
@@ -55,6 +63,7 @@ export type FactoryBatchGetOptions = {
 
 type FactoryCommandResult =
   | { recipe: FactoryRecipeSnapshot }
+  | { workThread: WorkThread & { id: string }; created: boolean }
   | { workstream: Workstream }
   | { receipt: WorkstreamAdmissionBatchReceipt };
 
@@ -115,7 +124,7 @@ async function loadJsonInput(inputPath: string | undefined, dependencies: Factor
 function factoryClient(config: OpenTagCliConfig, fetchImpl?: typeof fetch): OpenTagClient {
   const pairingToken = config.daemon.pairingToken?.trim();
   if (!pairingToken) {
-    throw new Error("Factory operations require daemon.pairingToken; a runner token cannot authorize recipe or workstream admission.");
+    throw new Error("Factory operations require daemon.pairingToken; a runner token cannot authorize WorkThread, recipe, or workstream admission.");
   }
   return createOpenTagClient({
     dispatcherUrl: config.daemon.dispatcherUrl,
@@ -133,6 +142,15 @@ export async function createFactoryRecipeFromConfig(input: {
   return factoryClient(input.config, input.fetchImpl).createFactoryRecipeSnapshot(
     FactoryRecipeSnapshotInputSchema.parse(document)
   );
+}
+
+export async function ensureFactoryWorkThreadFromConfig(input: {
+  config: OpenTagCliConfig;
+  inputPath: string;
+  fetchImpl?: typeof fetch;
+} & FactoryInputDependencies): Promise<{ workThread: WorkThread & { id: string }; created: boolean }> {
+  const document = await loadJsonInput(input.inputPath, input);
+  return factoryClient(input.config, input.fetchImpl).ensureWorkThread(OpenTagEventSchema.parse(document));
 }
 
 export async function getFactoryRecipeFromConfig(input: {
@@ -188,6 +206,14 @@ export function formatFactoryCommandOutput(
   options: { action: FactoryAction; json?: boolean }
 ): string {
   if (options.json) return JSON.stringify(result, null, 2);
+  if ("workThread" in result) {
+    return [
+      `Factory work thread ${options.action}: ${result.workThread.id} (${result.created ? "created" : "already existed"})`,
+      `Source: ${result.workThread.workItemReference.provider}`,
+      `External work item: ${result.workThread.workItemReference.externalId}`,
+      `Anchors: ${1 + (result.workThread.secondaryAnchors?.length ?? 0)}`
+    ].join("\n");
+  }
   if ("recipe" in result) {
     return [
       `Factory recipe ${options.action}: ${result.recipe.id} v${result.recipe.version}`,
@@ -239,6 +265,21 @@ export async function runFactoryRecipeCreateCommand(
     ...(dependencies.stdin ? { stdin: dependencies.stdin } : {})
   });
   (dependencies.logger ?? console).log(formatFactoryCommandOutput(result, { action: "created", json: options.json ?? false }));
+}
+
+export async function runFactoryWorkThreadEnsureCommand(
+  options: FactoryWorkThreadEnsureOptions,
+  dependencies: FactoryCommandDependencies = {}
+): Promise<void> {
+  const { config } = commandConfig(options.config);
+  const result = await ensureFactoryWorkThreadFromConfig({
+    config,
+    inputPath: nonEmpty(options.input, "--input"),
+    ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+    ...(dependencies.readText ? { readText: dependencies.readText } : {}),
+    ...(dependencies.stdin ? { stdin: dependencies.stdin } : {})
+  });
+  (dependencies.logger ?? console).log(formatFactoryCommandOutput(result, { action: "ensured", json: options.json ?? false }));
 }
 
 export async function runFactoryRecipeGetCommand(

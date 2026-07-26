@@ -98,6 +98,53 @@ function completionExplanationFixture() {
 }
 
 describe("@opentag/client", () => {
+  it("ensures a durable WorkThread from a normalized event with pairing authorization", async () => {
+    const requests: Array<{ url: string; method: string; headers: Headers; body?: unknown }> = [];
+    const normalizedEvent = {
+      ...event,
+      workItem: {
+        provider: "github",
+        kind: "issue",
+        externalId: "acme/demo#1",
+        uri: "https://github.com/acme/demo/issues/1"
+      }
+    };
+    const workThread = {
+      id: "thread_github_acme/demo#1_comment_1",
+      workItemReference: normalizedEvent.workItem,
+      primaryAnchor: {
+        provider: "github",
+        kind: "github_thread",
+        externalId: normalizedEvent.callback.uri,
+        uri: normalizedEvent.callback.uri,
+        controlPlane: true,
+        canApprove: true
+      }
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pairing_token",
+      fetchImpl: async (url, init) => {
+        requests.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          headers: new Headers(init?.headers),
+          ...(init?.body ? { body: JSON.parse(String(init.body)) } : {})
+        });
+        return jsonResponse({ workThread, created: true }, 201);
+      }
+    });
+
+    await expect(client.ensureWorkThread(normalizedEvent)).resolves.toEqual({ workThread, created: true });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: "http://dispatcher.test/v1/work-threads/ensure",
+      method: "POST",
+      body: normalizedEvent
+    });
+    expect(requests[0]?.headers.get("authorization")).toBe("Bearer pairing_token");
+  });
+
   it("uses the additive factory workstream API routes and parses their contracts", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const digest = `sha256:${"a".repeat(64)}`;

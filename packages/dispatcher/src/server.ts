@@ -50,6 +50,7 @@ import {
   WorkstreamMetricsSchema,
   WorkstreamInputSchema,
   WorkstreamSchema,
+  WorkThreadSchema,
   PolicyRuleSchema,
   PolicyScopeSchema,
   RunnerRegistrationRequestSchema,
@@ -4922,6 +4923,17 @@ export function createDispatcherApp(input: {
     });
     if (!binding) return c.json({ error: "slack_channel_binding_not_found" }, 404);
     return c.json({ binding });
+  });
+
+  app.post("/v1/work-threads/ensure", async (c) => {
+    const event = await parseDispatcherBody(c, OpenTagEventSchema);
+    const thread = protocolRunFieldsFromEvent(event, event.receivedAt).thread;
+    if (!thread) return c.json({ error: "work_thread_required" }, 422);
+    const outcome = await repo.upsertWorkThread({ thread, recordedAt: event.receivedAt });
+    return c.json({
+      workThread: WorkThreadSchema.parse(outcome.thread),
+      created: outcome.created
+    }, outcome.created ? 201 : 200);
   });
 
   app.post("/v1/factory-recipes", async (c) => {

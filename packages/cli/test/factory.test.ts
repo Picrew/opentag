@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createFactoryRecipeFromConfig,
   createFactoryWorkstreamFromConfig,
+  ensureFactoryWorkThreadFromConfig,
   formatFactoryCommandOutput,
   getFactoryBatchFromConfig,
   getFactoryRecipeFromConfig,
@@ -147,6 +148,46 @@ function responseFor(url: string): unknown {
 }
 
 describe("OpenTag factory CLI", () => {
+  it("ensures an external WorkThread from stdin and reports an idempotent replay", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const workThread = {
+      id: "thread_github_acme/demo#1_comment_1",
+      workItemReference: {
+        provider: "github",
+        kind: "issue",
+        externalId: "acme/demo#1",
+        uri: "https://github.com/acme/demo/issues/1"
+      },
+      primaryAnchor: {
+        provider: "github",
+        kind: "github_thread",
+        externalId: event.callback.uri,
+        uri: event.callback.uri,
+        controlPlane: true,
+        canApprove: true
+      }
+    };
+    const normalizedEvent = { ...event, workItem: workThread.workItemReference };
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), init });
+      return Response.json({ workThread, created: false });
+    }) as unknown as typeof fetch;
+
+    const result = await ensureFactoryWorkThreadFromConfig({
+      config: config(),
+      inputPath: "-",
+      stdin: Readable.from([JSON.stringify(normalizedEvent)]),
+      fetchImpl
+    });
+
+    expect(result).toEqual({ workThread, created: false });
+    expect(requests[0]?.url).toBe("https://relay.example/v1/work-threads/ensure");
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(normalizedEvent);
+    expect(formatFactoryCommandOutput(result, { action: "ensured" })).toContain(
+      "Factory work thread ensured: thread_github_acme/demo#1_comment_1 (already existed)"
+    );
+  });
+
   it("creates a recipe from a JSON file with pairing-scoped factory authority", async () => {
     const path = join(tempDir(), "recipe.json");
     writeFileSync(path, JSON.stringify(recipeInput));

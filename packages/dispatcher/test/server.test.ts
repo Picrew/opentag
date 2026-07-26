@@ -615,6 +615,71 @@ describe("dispatcher API", () => {
     expect(JSON.stringify(events)).not.toContain("pair_test");
   });
 
+  it("ensures one durable WorkThread from normalized external events and merges new anchors", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      pairingToken: "pair_test",
+      runnerToken: "runner_test"
+    });
+
+    const runnerScoped = await app.request(
+      "/v1/work-threads/ensure",
+      authorizedJsonRequest(validEvent, "runner_test")
+    );
+    expect(runnerScoped.status).toBe(401);
+    await expect(runnerScoped.json()).resolves.toMatchObject({
+      error: "unauthorized",
+      reason: "invalid_pairing_token"
+    });
+
+    const first = await app.request(
+      "/v1/work-threads/ensure",
+      authorizedJsonRequest(validEvent, "pair_test")
+    );
+    expect(first.status).toBe(201);
+    const firstBody = await first.json() as { workThread: { id: string }; created: boolean };
+    expect(firstBody).toMatchObject({
+      created: true,
+      workThread: {
+        id: expect.any(String),
+        workItemReference: { provider: "github", externalId: "acme/demo#1" }
+      }
+    });
+
+    const replay = await app.request(
+      "/v1/work-threads/ensure",
+      authorizedJsonRequest({
+        ...validEvent,
+        id: "evt_2",
+        sourceEventId: "comment_2",
+        callback: {
+          ...validEvent.callback,
+          uri: "https://api.github.com/repos/acme/demo/issues/1/comments/2",
+          threadKey: "acme/demo#1/comment-2"
+        }
+      }, "pair_test")
+    );
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toMatchObject({
+      created: false,
+      workThread: {
+        id: firstBody.workThread.id,
+        secondaryAnchors: [expect.objectContaining({ externalId: "acme/demo#1/comment-2" })]
+      }
+    });
+  });
+
+  it("rejects normalized events that cannot derive a durable WorkThread", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:", pairingToken: "pair_test" });
+    const response = await app.request(
+      "/v1/work-threads/ensure",
+      authorizedJsonRequest({ ...validEvent, workItem: undefined }, "pair_test")
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual({ error: "work_thread_required" });
+  });
+
   it("allows runner-operator auth to prune source delivery replay keys and audit metrics", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:", pairingToken: "pair_test", runnerToken: "runner_test" });
     const body = {
