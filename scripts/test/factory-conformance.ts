@@ -10,6 +10,7 @@ import { createDispatcherClient, createOpenTagClient } from "../../packages/clie
 import type { OpenTagEvent, WorkstreamAdmissionBatchInput } from "../../packages/core/src/index.js";
 import {
   createDispatcherApp,
+  openDispatcherDatabase,
   type CallbackMessage,
   type GitHubCompletionPolicy,
   type SourceReceipt
@@ -148,8 +149,10 @@ async function startHarness(input: {
   callbackMessages: CallbackMessage[];
   sourceReceipts: SourceReceipt[];
 }): Promise<DispatcherHarness> {
+  const sqlite = openDispatcherDatabase(input.databasePath);
   const app = createDispatcherApp({
     databasePath: input.databasePath,
+    sqlite,
     pairingToken,
     completionPolicies: [completionPolicy],
     callbackSink: {
@@ -196,15 +199,23 @@ async function startHarness(input: {
   });
   const address = server.address();
   assert(address && typeof address !== "string", "Dispatcher must listen on a TCP port.");
+  let closed = false;
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
-    close() {
-      return new Promise<void>((resolvePromise, rejectPromise) => {
-        server.close((error?: Error) => {
-          if (error) rejectPromise(error);
-          else resolvePromise();
+    async close() {
+      if (closed) return;
+      closed = true;
+      try {
+        await new Promise<void>((resolvePromise, rejectPromise) => {
+          server.close((error?: Error) => {
+            if (error) rejectPromise(error);
+            else resolvePromise();
+          });
+          server.closeAllConnections();
         });
-      });
+      } finally {
+        sqlite.close();
+      }
     }
   };
 }
