@@ -1475,7 +1475,7 @@ continues to own prioritization, discussion, and business status. See
 [Live E2E Smoke Harness](./live-e2e-smoke-harness.md#github-factory-acceptance)
 for the command and evidence contract.
 
-Acceptance receipt, 2026-07-27:
+Acceptance receipt, 2026-07-26 UTC (2026-07-27 Asia/Shanghai):
 
 - external source: [`amplifthq/opentag-test` issue #77](https://github.com/amplifthq/opentag-test/issues/77)
   and its durable `@opentag run` comment;

@@ -195,7 +195,7 @@ describe("GitHub factory live acceptance report", () => {
       },
       excludedScope: ["dag", "operator_console"]
     });
-    expect(Object.values(report.assertions)).toEqual(expect.arrayContaining([true]));
+    expect(Object.values(report.assertions).every((value) => value === true)).toBe(true);
     expect(JSON.stringify(report)).not.toContain("fencingToken");
   });
 

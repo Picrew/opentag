@@ -173,7 +173,8 @@ chain. It does not claim model-provider readiness; run `builtin-acp` separately
 for that. GitHub remains the planning and source-control authority. This case
 adds neither a dependency DAG nor an operator console.
 
-The first Phase 5 live acceptance passed on 2026-07-27 against
+The first Phase 5 live acceptance passed on 2026-07-26 UTC
+(2026-07-27 Asia/Shanghai) against
 [`amplifthq/opentag-test` issue #77](https://github.com/amplifthq/opentag-test/issues/77)
 and [pull request #78](https://github.com/amplifthq/opentag-test/pull/78).
 The PR head `3a65b9788bf26c2e26401ba688c176d0c0c3d239` carried the successful
