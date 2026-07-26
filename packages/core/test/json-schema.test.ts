@@ -38,5 +38,13 @@ describe("OpenTagJsonSchemas", () => {
     expect(OpenTagJsonSchemas.RunnerDirectoryEntry).toHaveProperty("definitions.RunnerDirectoryEntry");
     expect(OpenTagJsonSchemas.RoutingDecision).toHaveProperty("definitions.RoutingDecision");
     expect(OpenTagJsonSchemas.AcceptedCompletionMetrics).toHaveProperty("definitions.AcceptedCompletionMetrics");
+    expect(OpenTagJsonSchemas.FactoryRecipeSnapshotInput).toHaveProperty("definitions.FactoryRecipeSnapshotInput");
+    expect(OpenTagJsonSchemas.FactoryRecipeSnapshot).toHaveProperty("definitions.FactoryRecipeSnapshot");
+    expect(OpenTagJsonSchemas.WorkstreamInput).toHaveProperty("definitions.WorkstreamInput");
+    expect(OpenTagJsonSchemas.Workstream).toHaveProperty("definitions.Workstream");
+    expect(OpenTagJsonSchemas.WorkstreamAdmissionBatchInput).toHaveProperty("definitions.WorkstreamAdmissionBatchInput");
+    expect(OpenTagJsonSchemas.WorkstreamAdmissionBatchReceipt).toHaveProperty("definitions.WorkstreamAdmissionBatchReceipt");
+    expect(OpenTagJsonSchemas.WorkstreamMetrics).toHaveProperty("definitions.WorkstreamMetrics");
+    expect(OpenTagJsonSchemas.WorkstreamEvaluation).toHaveProperty("definitions.WorkstreamEvaluation");
   });
 });

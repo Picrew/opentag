@@ -40,6 +40,16 @@ import {
   createAdapterMutationCompilerRegistry,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
+  FactoryRecipeSnapshotSchema,
+  FactoryRecipeSnapshotInputSchema,
+  WorkstreamAdmissionBatchInputSchema,
+  WorkstreamAdmissionBatchItemResultSchema,
+  WorkstreamAdmissionBatchReceiptSchema,
+  WorkstreamAdmissionBatchResultSchema,
+  WorkstreamAdmissionBatchSchema,
+  WorkstreamMetricsSchema,
+  WorkstreamInputSchema,
+  WorkstreamSchema,
   PolicyRuleSchema,
   PolicyScopeSchema,
   RunnerRegistrationRequestSchema,
@@ -52,6 +62,7 @@ import {
   readRequestTextWithLimit,
   shouldDeliverSourceReceipt
 } from "@opentag/core";
+import { evaluateWorkstream } from "@opentag/governance";
 import {
   applyGitHubIssueMutationOperation,
   createGitHubIssueMutationCompiler,
@@ -321,6 +332,7 @@ function createDispatcherRateLimitMiddleware(options: DispatcherRateLimitOptions
   };
 }
 import { createAdmissionRuntime, sourceRepoIsPublic, type AgentAccessProfileCheck } from "./admission.js";
+import { sha256Digest } from "./digest.js";
 import { createDefaultCallbackPresentation, type CallbackPresentation, type LarkRenderLocale } from "./presentation.js";
 import {
   createDispatcherCompletionGovernance,
@@ -2882,6 +2894,45 @@ export function createDispatcherApp(input: {
   const sqlite = new Database(input.databasePath);
   migrateSchema(sqlite);
   const repo = createOpenTagRepository(drizzle(sqlite));
+  const workstreamBatchLeaseSeconds = 300;
+  const workstreamBatchHeartbeatMs = Math.floor(workstreamBatchLeaseSeconds * 1_000 / 3);
+
+  async function withWorkstreamAdmissionLease<T>(lease: {
+    batchId: string;
+    itemId: string;
+    leaseOwner: string;
+  }, task: () => Promise<T>): Promise<T> {
+    let renewalFailure: Error | undefined;
+    let renewalChain = Promise.resolve();
+    const renew = async () => {
+      if (renewalFailure) return;
+      const renewed = await repo.renewWorkstreamAdmissionBatchLease({
+        ...lease,
+        leaseSeconds: workstreamBatchLeaseSeconds
+      });
+      if (renewed.outcome !== "renewed") {
+        throw new Error(
+          `Workstream batch item ${lease.itemId} lease could not be renewed: ${renewed.outcome}.`
+        );
+      }
+    };
+    const scheduleRenewal = () => {
+      renewalChain = renewalChain.then(renew).catch((error: unknown) => {
+        renewalFailure = error instanceof Error ? error : new Error(String(error));
+      });
+    };
+    const heartbeat = globalThis.setInterval(scheduleRenewal, workstreamBatchHeartbeatMs);
+    try {
+      const result = await task();
+      await renewalChain;
+      if (renewalFailure) throw renewalFailure;
+      await renew();
+      return result;
+    } finally {
+      globalThis.clearInterval(heartbeat);
+      await renewalChain;
+    }
+  }
   const completionGovernance = createDispatcherCompletionGovernance({
     repo,
     policies: input.completionPolicies ?? [],
@@ -3229,6 +3280,7 @@ export function createDispatcherApp(input: {
     type: string;
     severity?: "info" | "warn" | "error" | undefined;
     subject?: string | undefined;
+    idempotencyKey?: string | undefined;
     payload?: Record<string, unknown> | undefined;
     createdAt?: string | undefined;
   }) => {
@@ -3236,6 +3288,7 @@ export function createDispatcherApp(input: {
       type: input.type,
       ...(input.severity ? { severity: input.severity } : {}),
       ...(input.subject ? { subject: input.subject } : {}),
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(input.payload ? { payload: input.payload } : {}),
       ...(input.createdAt ? { createdAt: input.createdAt } : {})
     });
@@ -3244,6 +3297,7 @@ export function createDispatcherApp(input: {
     requestId: string;
     event: OpenTagEvent;
     decision: import("@opentag/core").RunAdmissionDecision;
+    deliverSourceCallback?: boolean;
   }): Promise<{ escalation?: HumanEscalation; resolutionUnavailableReason?: string }> {
     const protocol = protocolRunFieldsFromEvent(inputValue.event, inputValue.decision.decidedAt);
     if (!protocol.thread) {
@@ -3287,7 +3341,11 @@ export function createDispatcherApp(input: {
       openedAt: inputValue.decision.decidedAt
     });
     const opened = await repo.openHumanEscalation({ escalation });
-    if (opened.created && presentation.shouldDeliverStatusUpdate(inputValue.event.callback.provider)) {
+    if (
+      inputValue.deliverSourceCallback !== false
+      && opened.created
+      && presentation.shouldDeliverStatusUpdate(inputValue.event.callback.provider)
+    ) {
       const semantic = presentation.runStatusPresentation({
         runId: inputValue.requestId,
         state: "waiting_for_human",
@@ -3313,6 +3371,231 @@ export function createDispatcherApp(input: {
       });
     }
     return { escalation: opened.escalation };
+  }
+
+  type RunAdmissionHttpResult = {
+    body: Record<string, unknown>;
+    status: 200 | 201 | 202 | 403;
+    batchStatus: "created" | "idempotent_replay" | "follow_up_queued" | "needs_human_decision" | "rejected";
+    reasonCode?: string;
+    admittedRunId?: string;
+    followUpRequestId?: string;
+    humanEscalationId?: string;
+  };
+
+  async function admitAndCreateRun(inputValue: {
+    runId: string;
+    event: OpenTagEvent;
+    channelPrincipal?: ChannelPrincipalIdentity;
+    quiet?: boolean;
+    workstreamId?: string;
+    admissionBatchId?: string;
+  }): Promise<RunAdmissionHttpResult> {
+    let ownershipVerified = false;
+    try {
+      ownershipVerified = await managedChannelOwnershipVerified({
+        repo,
+        event: inputValue.event,
+        ...(inputValue.channelPrincipal ? { principal: inputValue.channelPrincipal } : {})
+      });
+    } catch (error) {
+      if (!(error instanceof ChannelBindingCorruptionError)) throw error;
+      await recordControlPlaneEvent({
+        type: "admission.managed_channel_binding_corrupt",
+        severity: "error",
+        subject: inputValue.runId,
+        payload: {
+          runId: inputValue.runId,
+          source: inputValue.event.source,
+          sourceEventId: inputValue.event.sourceEventId
+        }
+      });
+      return {
+        body: { error: "managed_channel_binding_corrupt" },
+        status: 403,
+        batchStatus: "rejected",
+        reasonCode: "managed_channel_binding_corrupt"
+      };
+    }
+    if (!ownershipVerified) {
+      await recordControlPlaneEvent({
+        type: "admission.managed_channel_ownership_unverified",
+        severity: "warn",
+        subject: inputValue.runId,
+        payload: {
+          runId: inputValue.runId,
+          source: inputValue.event.source,
+          sourceEventId: inputValue.event.sourceEventId
+        }
+      });
+      return {
+        body: { error: "managed_channel_ownership_unverified" },
+        status: 403,
+        batchStatus: "rejected",
+        reasonCode: "managed_channel_ownership_unverified"
+      };
+    }
+
+    const admitted = await admission.admitRun({
+      requestId: inputValue.runId,
+      event: inputValue.event,
+      ...(inputValue.workstreamId ? { workstreamId: inputValue.workstreamId } : {}),
+      ...(inputValue.admissionBatchId ? { admissionBatchId: inputValue.admissionBatchId } : {})
+    });
+    if (admitted.outcome === "needs_human_decision") {
+      const projectTarget = projectTargetRefFromEvent(inputValue.event);
+      await recordControlPlaneEvent({
+        type: "admission.needs_human_decision",
+        severity: ["repo_context_missing", "repo_not_bound"].includes(admitted.decision.reasonCode) ? "warn" : "info",
+        subject: inputValue.runId,
+        payload: {
+          runId: inputValue.runId,
+          decision: admitted.decision,
+          source: inputValue.event.source,
+          sourceEventId: inputValue.event.sourceEventId,
+          projectTarget: projectTarget ? `${projectTarget.provider}:${projectTarget.owner}/${projectTarget.repo}` : null
+        }
+      });
+      const humanDecision = await structureAdmissionHumanDecision({
+        requestId: inputValue.runId,
+        event: inputValue.event,
+        decision: admitted.decision,
+        deliverSourceCallback: !inputValue.quiet
+      });
+      return {
+        body: { decision: admitted.decision, ...humanDecision },
+        status: 202,
+        batchStatus: "needs_human_decision",
+        reasonCode: admitted.decision.reasonCode,
+        ...(humanDecision.escalation ? { humanEscalationId: humanDecision.escalation.id } : {})
+      };
+    }
+
+    if (admitted.outcome === "drop_duplicate") {
+      const replay = await repo.createRun({
+        id: inputValue.runId,
+        event: inputValue.event,
+        ...(inputValue.workstreamId ? { workstreamId: inputValue.workstreamId } : {}),
+        ...(inputValue.admissionBatchId ? { admissionBatchId: inputValue.admissionBatchId } : {})
+      });
+      const decision = replay.created ? admitted.decision : replay.replayDecision;
+      return {
+        body: { decision, run: replay.run, idempotentReplay: true },
+        status: 200,
+        batchStatus: "idempotent_replay",
+        admittedRunId: replay.run.id
+      };
+    }
+
+    if (admitted.outcome === "follow_up_queued") {
+      const event = admitted.followUpRequest.event;
+      const activeRunId = admitted.followUpRequest.activeRunId;
+      if (
+        !inputValue.quiet
+        && activeRunId
+        && shouldDeliverRunStatusUpdate(presentation, { provider: event.callback.provider, state: "queued" })
+      ) {
+        const queuedPresentation = presentation.runStatusPresentation({
+          runId: activeRunId,
+          state: "queued",
+          message: `Queued follow-up ${admitted.followUpRequest.id} behind the active run.`,
+          nextAction: "Wait for the active run final reply, send another follow-up to queue more context, or request cancellation with /stop.",
+          detailVisibility: "source_thread"
+        });
+        const queued = presentation.render({
+          provider: event.callback.provider,
+          ...larkRenderLocaleRenderOption(event),
+          presentation: queuedPresentation
+        });
+        await deliverAndAudit({
+          repo,
+          sink: callbackSink,
+          retry: callbackRetry,
+          message: {
+            runId: activeRunId,
+            kind: "progress",
+            provider: event.callback.provider,
+            uri: event.callback.uri,
+            body: queued.body,
+            ...(event.target.agentId ? { agentId: event.target.agentId } : {}),
+            ...(event.callback.threadKey ? { threadKey: event.callback.threadKey } : {}),
+            ...(queued.blocks?.length ? { blocks: queued.blocks } : {}),
+            ...(queued.rich ? { rich: queued.rich } : {}),
+            statusMessageKey: `${activeRunId}:status`
+          }
+        });
+      }
+      return {
+        body: { decision: admitted.decision, followUpRequest: admitted.followUpRequest },
+        status: 202,
+        batchStatus: "follow_up_queued",
+        followUpRequestId: admitted.followUpRequest.id,
+        ...(activeRunId ? { admittedRunId: activeRunId } : {})
+      };
+    }
+
+    const createdRun = await repo.createRun({
+      id: inputValue.runId,
+      event: inputValue.event,
+      accessProfileSnapshot: admitted.accessProfileSnapshot,
+      policySnapshotProvenance: admitted.policySnapshotProvenance,
+      routingPolicy: admitted.routingPolicy,
+      ...(inputValue.workstreamId ? { workstreamId: inputValue.workstreamId } : {}),
+      ...(inputValue.admissionBatchId ? { admissionBatchId: inputValue.admissionBatchId } : {})
+    });
+    if (!createdRun.created) {
+      return {
+        body: { decision: createdRun.replayDecision, run: createdRun.run, idempotentReplay: true },
+        status: 200,
+        batchStatus: "idempotent_replay",
+        admittedRunId: createdRun.run.id
+      };
+    }
+    const { run } = createdRun;
+    if (!inputValue.quiet) {
+      const sourceReceiptDelivery = await deliverSourceReceiptBestEffort({
+        repo,
+        sink: sourceReceiptSink,
+        receipt: {
+          runId: run.id,
+          provider: inputValue.event.callback.provider,
+          state: "received",
+          event: inputValue.event,
+          ...(inputValue.event.target.agentId ? { agentId: inputValue.event.target.agentId } : {})
+        }
+      });
+      if (sourceReceiptDelivery.delivered) scheduleDelayedLarkStatusCard({ run, event: inputValue.event });
+      const shouldDeliverAcknowledgement =
+        presentation.shouldDeliverAcknowledgement(inputValue.event.callback.provider)
+        || (shouldDeliverSourceReceipt(inputValue.event.callback.provider) && !sourceReceiptDelivery.delivered);
+      if (shouldDeliverAcknowledgement) {
+        const acknowledgementPresentation = presentation.acknowledgementPresentation({ runId: run.id });
+        const acknowledgement = presentation.render({
+          provider: inputValue.event.callback.provider,
+          ...larkRenderLocaleRenderOption(inputValue.event),
+          presentation: acknowledgementPresentation
+        });
+        const statusMessageKey = lifecycleStatusMessageKey({ provider: inputValue.event.callback.provider, runId: run.id });
+        await deliverAndAudit({
+          repo,
+          sink: callbackSink,
+          retry: callbackRetry,
+          message: {
+            runId: run.id,
+            kind: "acknowledgement",
+            provider: inputValue.event.callback.provider,
+            uri: inputValue.event.callback.uri,
+            body: acknowledgement.body,
+            ...(inputValue.event.target.agentId ? { agentId: inputValue.event.target.agentId } : {}),
+            ...(inputValue.event.callback.threadKey ? { threadKey: inputValue.event.callback.threadKey } : {}),
+            ...(statusMessageKey ? { statusMessageKey } : {}),
+            ...(acknowledgement.blocks?.length ? { blocks: acknowledgement.blocks } : {}),
+            ...(acknowledgement.rich ? { rich: acknowledgement.rich } : {})
+          }
+        });
+      }
+    }
+    return { body: { decision: admitted.decision, run }, status: 201, batchStatus: "created", admittedRunId: run.id };
   }
   const sourceThreadControl = createSourceThreadControlHandler({
     repo,
@@ -4636,164 +4919,313 @@ export function createDispatcherApp(input: {
     return c.json({ binding });
   });
 
+  app.post("/v1/factory-recipes", async (c) => {
+    const recipe = await parseDispatcherBody(c, FactoryRecipeSnapshotInputSchema);
+    const outcome = await repo.createFactoryRecipeSnapshot({
+      id: recipe.id,
+      version: recipe.version,
+      recipe
+    });
+    if (outcome.outcome === "conflict") return c.json({ error: "factory_recipe_conflict" }, 409);
+    return c.json({ recipe: FactoryRecipeSnapshotSchema.parse({
+      ...outcome.recipeSnapshot.recipe,
+      createdAt: outcome.recipeSnapshot.createdAt,
+      contentDigest: outcome.recipeSnapshot.contentDigest
+    }) }, outcome.outcome === "created" ? 201 : 200);
+  });
+
+  app.get("/v1/factory-recipes/:id/versions/:version", async (c) => {
+    const version = Number(c.req.param("version"));
+    if (!Number.isInteger(version) || version < 1) return c.json({ error: "invalid_factory_recipe_version" }, 400);
+    const stored = await repo.getFactoryRecipeSnapshot({ id: c.req.param("id"), version });
+    if (!stored) return c.json({ error: "factory_recipe_not_found" }, 404);
+    return c.json({ recipe: FactoryRecipeSnapshotSchema.parse({
+      ...stored.recipe,
+      createdAt: stored.createdAt,
+      contentDigest: stored.contentDigest
+    }) });
+  });
+
+  app.post("/v1/workstreams", async (c) => {
+    const workstream = await parseDispatcherBody(c, WorkstreamInputSchema);
+    const outcome = await repo.createFactoryWorkstream({
+      id: workstream.id,
+      recipeId: workstream.recipeId,
+      recipeVersion: workstream.recipeVersion,
+      workstream,
+      workThreadIds: workstream.members.map((member) => member.workThreadId)
+    });
+    if (outcome.outcome === "recipe_not_found") return c.json({ error: "factory_recipe_not_found" }, 404);
+    if (outcome.outcome === "work_thread_not_found") {
+      return c.json({ error: "work_thread_not_found", workThreadId: outcome.workThreadId }, 404);
+    }
+    if (outcome.outcome === "conflict") return c.json({ error: "workstream_conflict" }, 409);
+    const stored = outcome.workstream;
+    if (!stored) throw new Error(`Workstream ${workstream.id} was not returned after ${outcome.outcome}.`);
+    return c.json({ workstream: WorkstreamSchema.parse({
+      ...stored.workstream,
+      createdAt: stored.createdAt,
+      contentDigest: stored.contentDigest
+    }) }, outcome.outcome === "created" ? 201 : 200);
+  });
+
+  app.get("/v1/workstreams/:id", async (c) => {
+    const stored = await repo.getFactoryWorkstream({ id: c.req.param("id") });
+    if (!stored) return c.json({ error: "workstream_not_found" }, 404);
+    return c.json({ workstream: WorkstreamSchema.parse({
+      ...stored.workstream,
+      createdAt: stored.createdAt,
+      contentDigest: stored.contentDigest
+    }) });
+  });
+
+  async function emitWorkstreamBatchSummary(resultValue: z.infer<typeof WorkstreamAdmissionBatchResultSchema>): Promise<void> {
+    await recordControlPlaneEvent({
+      type: "workstream.batch.exceptions",
+      severity: resultValue.summary.exceptionCount > 0 ? "warn" : "info",
+      subject: resultValue.workstreamId,
+      idempotencyKey: `workstream.batch.exceptions:${resultValue.batchId}`,
+      payload: {
+        workstreamId: resultValue.workstreamId,
+        inputDigest: resultValue.inputDigest,
+        summary: resultValue.summary
+      }
+    });
+  }
+
+  function workstreamBatchReceipt(stored: Awaited<ReturnType<typeof repo.getWorkstreamAdmissionBatch>>) {
+    if (!stored) throw new Error("Cannot project a missing workstream admission batch.");
+    return WorkstreamAdmissionBatchReceiptSchema.parse({
+      batch: WorkstreamAdmissionBatchSchema.parse({
+        ...WorkstreamAdmissionBatchInputSchema.parse(stored.request),
+        createdAt: stored.createdAt,
+        contentDigest: stored.requestDigest
+      }),
+      status: stored.status,
+      items: stored.items.map((item) => ({
+        itemId: item.itemId,
+        index: item.ordinal,
+        runId: item.runId,
+        workThreadId: item.workThreadId,
+        status: item.status,
+        ...(item.result ? { result: WorkstreamAdmissionBatchItemResultSchema.parse(item.result) } : {})
+      })),
+      ...(stored.result ? { result: WorkstreamAdmissionBatchResultSchema.parse(stored.result) } : {}),
+      updatedAt: stored.updatedAt,
+      ...(stored.completedAt ? { completedAt: stored.completedAt } : {})
+    });
+  }
+
+  app.post("/v1/workstream-batches", async (c) => {
+    const batch = await parseDispatcherBody(c, WorkstreamAdmissionBatchInputSchema);
+    const inputDigest = sha256Digest(batch);
+    const leaseOwner = `dispatcher_${randomUUID()}`;
+    const existedBeforeAdmission = Boolean(await repo.getWorkstreamAdmissionBatch({ id: batch.id }));
+    const started = await repo.beginWorkstreamAdmissionBatch({
+      id: batch.id,
+      workstreamId: batch.workstreamId,
+      requestDigest: inputDigest,
+      request: batch,
+      items: batch.items,
+      leaseOwner,
+      leaseSeconds: workstreamBatchLeaseSeconds
+    });
+    if (started.outcome === "conflict") return c.json({ error: "workstream_batch_conflict" }, 409);
+    if (started.outcome === "workstream_not_found") return c.json({ error: "workstream_not_found" }, 404);
+    if (started.outcome === "invalid_member") {
+      return c.json({ error: "workstream_member_mismatch", workThreadId: started.workThreadId }, 409);
+    }
+    if (!started.batch) throw new Error(`Workstream batch ${batch.id} did not return its durable state.`);
+    if (started.outcome === "in_progress") {
+      return c.json({ receipt: workstreamBatchReceipt(started.batch) }, 200);
+    }
+    if (started.outcome === "replay") {
+      const durableResult = WorkstreamAdmissionBatchResultSchema.parse(started.batch.result);
+      await emitWorkstreamBatchSummary(durableResult);
+      return c.json({ receipt: workstreamBatchReceipt(started.batch) }, 200);
+    }
+
+    const channelPrincipal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const results: z.infer<typeof WorkstreamAdmissionBatchResultSchema>["results"] = [];
+    for (const durableItem of started.batch.items) {
+      if (durableItem.status === "completed") {
+        results.push(WorkstreamAdmissionBatchItemResultSchema.parse(durableItem.result));
+        continue;
+      }
+      const claimed = await repo.claimWorkstreamAdmissionBatchItem({
+        batchId: batch.id,
+        itemId: durableItem.itemId,
+        leaseOwner,
+        leaseSeconds: workstreamBatchLeaseSeconds
+      });
+      if (claimed.outcome === "completed" && claimed.item?.result) {
+        results.push(WorkstreamAdmissionBatchItemResultSchema.parse(claimed.item.result));
+        continue;
+      }
+      if (claimed.outcome !== "claimed" || !claimed.item) {
+        throw new Error(`Workstream batch item ${durableItem.itemId} could not be claimed: ${claimed.outcome}.`);
+      }
+
+      const item = claimed.item;
+      const eventThreadId = protocolRunFieldsFromEvent(item.event, item.event.receivedAt).thread?.id;
+      const durableThread = await repo.getWorkThread({ workThreadId: item.workThreadId });
+      const itemResult = await withWorkstreamAdmissionLease({
+        batchId: batch.id,
+        itemId: item.itemId,
+        leaseOwner
+      }, async (): Promise<z.infer<typeof WorkstreamAdmissionBatchResultSchema>["results"][number]> => {
+        if (!durableThread || eventThreadId !== item.workThreadId) {
+          return {
+            itemId: item.itemId,
+            index: item.ordinal,
+            runId: item.runId,
+            status: "rejected",
+            statusCode: 409,
+            reasonCode: !durableThread ? "work_thread_not_found" : "event_work_thread_mismatch"
+          };
+        }
+        try {
+          const admissionResult = await admitAndCreateRun({
+            runId: item.runId,
+            event: item.event,
+            quiet: true,
+            workstreamId: batch.workstreamId,
+            admissionBatchId: batch.id,
+            ...(channelPrincipal ? { channelPrincipal } : {})
+          });
+          return {
+            itemId: item.itemId,
+            index: item.ordinal,
+            runId: item.runId,
+            status: admissionResult.batchStatus,
+            statusCode: admissionResult.status,
+            ...(admissionResult.reasonCode ? { reasonCode: admissionResult.reasonCode } : {}),
+            ...(admissionResult.admittedRunId ? { admittedRunId: admissionResult.admittedRunId } : {}),
+            ...(admissionResult.followUpRequestId ? { followUpRequestId: admissionResult.followUpRequestId } : {}),
+            ...(admissionResult.humanEscalationId ? { humanEscalationId: admissionResult.humanEscalationId } : {})
+          };
+        } catch (error) {
+          const reasonCode = error instanceof Error && error.message.startsWith("FACTORY_")
+            ? error.message.toLowerCase()
+            : null;
+          if (!reasonCode) throw error;
+          return {
+            itemId: item.itemId,
+            index: item.ordinal,
+            runId: item.runId,
+            status: "rejected",
+            statusCode: 409,
+            reasonCode
+          };
+        }
+      });
+      const completed = await repo.completeWorkstreamAdmissionBatchItem({
+        batchId: batch.id,
+        itemId: item.itemId,
+        leaseOwner,
+        result: itemResult
+      });
+      if (completed.outcome !== "completed" && completed.outcome !== "duplicate") {
+        throw new Error(`Workstream batch item ${item.itemId} could not be completed: ${completed.outcome}.`);
+      }
+      results.push(itemResult);
+    }
+
+    results.sort((left, right) => left.index - right.index);
+    const exceptions = results.filter((item) => item.status === "needs_human_decision" || item.status === "rejected");
+    const summary = {
+      totalItems: results.length,
+      createdCount: results.filter((item) => item.status === "created").length,
+      idempotentReplayCount: results.filter((item) => item.status === "idempotent_replay").length,
+      followUpQueuedCount: results.filter((item) => item.status === "follow_up_queued").length,
+      needsHumanDecisionCount: results.filter((item) => item.status === "needs_human_decision").length,
+      rejectedCount: results.filter((item) => item.status === "rejected").length,
+      exceptionCount: exceptions.length,
+      exceptions: exceptions.slice(0, 10).map((item) => ({
+        itemId: item.itemId,
+        index: item.index,
+        runId: item.runId,
+        status: item.status as "needs_human_decision" | "rejected",
+        ...(item.reasonCode ? { reasonCode: item.reasonCode } : {})
+      })),
+      omittedExceptionCount: Math.max(0, exceptions.length - 10)
+    };
+    const result = WorkstreamAdmissionBatchResultSchema.parse({
+      batchId: batch.id,
+      workstreamId: batch.workstreamId,
+      inputDigest,
+      results,
+      summary,
+      completedAt: new Date().toISOString()
+    });
+    const finalLease = await repo.renewWorkstreamAdmissionBatchLease({
+      batchId: batch.id,
+      leaseOwner,
+      leaseSeconds: workstreamBatchLeaseSeconds
+    });
+    if (finalLease.outcome !== "renewed") {
+      throw new Error(`Workstream batch ${batch.id} lease could not be renewed before finalization: ${finalLease.outcome}.`);
+    }
+    const finalized = await repo.finalizeWorkstreamAdmissionBatch({ id: batch.id, leaseOwner, result });
+    if (finalized.outcome === "replay" && finalized.batch?.result) {
+      const durableResult = WorkstreamAdmissionBatchResultSchema.parse(finalized.batch.result);
+      await emitWorkstreamBatchSummary(durableResult);
+      return c.json({ receipt: workstreamBatchReceipt(finalized.batch) }, 200);
+    }
+    if (finalized.outcome !== "completed") {
+      throw new Error(`Workstream batch ${batch.id} could not be finalized: ${finalized.outcome}.`);
+    }
+    await emitWorkstreamBatchSummary(result);
+    if (!finalized.batch) throw new Error(`Workstream batch ${batch.id} finalized without durable state.`);
+    return c.json({ receipt: workstreamBatchReceipt(finalized.batch) }, existedBeforeAdmission ? 200 : 201);
+  });
+
+  app.get("/v1/workstream-batches/:id", async (c) => {
+    const batch = await repo.getWorkstreamAdmissionBatch({ id: c.req.param("id") });
+    if (!batch) return c.json({ error: "workstream_batch_not_found" }, 404);
+    return c.json({ receipt: workstreamBatchReceipt(batch) });
+  });
+
+  app.get("/v1/workstreams/:id/metrics", async (c) => {
+    const metrics = await repo.getWorkstreamMetrics({ workstreamId: c.req.param("id") });
+    if (!metrics) return c.json({ error: "workstream_not_found" }, 404);
+    return c.json({ metrics: WorkstreamMetricsSchema.parse(metrics) });
+  });
+
+  app.get("/v1/workstreams/:id/evaluation", async (c) => {
+    const storedWorkstream = await repo.getFactoryWorkstream({ id: c.req.param("id") });
+    if (!storedWorkstream) return c.json({ error: "workstream_not_found" }, 404);
+    const workstream = WorkstreamSchema.parse({
+      ...storedWorkstream.workstream,
+      createdAt: storedWorkstream.createdAt,
+      contentDigest: storedWorkstream.contentDigest
+    });
+    const storedRecipe = await repo.getFactoryRecipeSnapshot({ id: workstream.recipeId, version: workstream.recipeVersion });
+    if (!storedRecipe) return c.json({ error: "factory_recipe_not_found" }, 404);
+    const metrics = await repo.getWorkstreamMetrics({ workstreamId: workstream.id });
+    if (!metrics) return c.json({ error: "workstream_not_found" }, 404);
+    const evaluation = evaluateWorkstream({
+      recipe: FactoryRecipeSnapshotSchema.parse({
+        ...storedRecipe.recipe,
+        createdAt: storedRecipe.createdAt,
+        contentDigest: storedRecipe.contentDigest
+      }),
+      workstream,
+      metrics: WorkstreamMetricsSchema.parse(metrics),
+      evaluatedAt: input.completionNow?.() ?? new Date().toISOString()
+    });
+    return c.json({ evaluation });
+  });
+
   app.post("/v1/runs", async (c) => {
     const parsed = await parseDispatcherBody(c, CreateRunSchema);
     const channelPrincipal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
-    let ownershipVerified = false;
-    try {
-      ownershipVerified = await managedChannelOwnershipVerified({
-        repo,
-        event: parsed.event,
-        ...(channelPrincipal ? { principal: channelPrincipal } : {})
-      });
-    } catch (error) {
-      if (!(error instanceof ChannelBindingCorruptionError)) throw error;
-      await recordControlPlaneEvent({
-        type: "admission.managed_channel_binding_corrupt",
-        severity: "error",
-        subject: parsed.runId,
-        payload: { runId: parsed.runId, source: parsed.event.source, sourceEventId: parsed.event.sourceEventId }
-      });
-      return c.json({ error: "managed_channel_binding_corrupt" }, 403);
-    }
-    if (!ownershipVerified) {
-      await recordControlPlaneEvent({
-        type: "admission.managed_channel_ownership_unverified",
-        severity: "warn",
-        subject: parsed.runId,
-        payload: { runId: parsed.runId, source: parsed.event.source, sourceEventId: parsed.event.sourceEventId }
-      });
-      return c.json({ error: "managed_channel_ownership_unverified" }, 403);
-    }
-    const admitted = await admission.admitRun({ requestId: parsed.runId, event: parsed.event });
-
-    if (admitted.outcome === "needs_human_decision") {
-      const projectTarget = projectTargetRefFromEvent(parsed.event);
-      await recordControlPlaneEvent({
-        type: "admission.needs_human_decision",
-        severity: ["repo_context_missing", "repo_not_bound"].includes(admitted.decision.reasonCode) ? "warn" : "info",
-        subject: parsed.runId,
-        payload: {
-          runId: parsed.runId,
-          decision: admitted.decision,
-          source: parsed.event.source,
-          sourceEventId: parsed.event.sourceEventId,
-          projectTarget: projectTarget ? `${projectTarget.provider}:${projectTarget.owner}/${projectTarget.repo}` : null
-        }
-      });
-      const humanDecision = await structureAdmissionHumanDecision({
-        requestId: parsed.runId,
-        event: parsed.event,
-        decision: admitted.decision
-      });
-      return c.json({ decision: admitted.decision, ...humanDecision }, 202);
-    }
-
-    if (admitted.outcome === "drop_duplicate") {
-      const replay = await repo.createRun({ id: parsed.runId, event: parsed.event });
-      const decision = replay.created ? admitted.decision : replay.replayDecision;
-      return c.json({ decision, run: replay.run, idempotentReplay: true }, 200);
-    }
-
-    if (admitted.outcome === "follow_up_queued") {
-      const event = admitted.followUpRequest.event;
-      const activeRunId = admitted.followUpRequest.activeRunId;
-      if (activeRunId && shouldDeliverRunStatusUpdate(presentation, { provider: event.callback.provider, state: "queued" })) {
-        const queuedPresentation = presentation.runStatusPresentation({
-          runId: activeRunId,
-          state: "queued",
-          message: `Queued follow-up ${admitted.followUpRequest.id} behind the active run.`,
-          nextAction: "Wait for the active run final reply, send another follow-up to queue more context, or request cancellation with /stop.",
-          detailVisibility: "source_thread"
-        });
-        const queued = presentation.render({
-          provider: event.callback.provider,
-          ...larkRenderLocaleRenderOption(event),
-          presentation: queuedPresentation
-        });
-        await deliverAndAudit({
-          repo,
-          sink: callbackSink,
-          retry: callbackRetry,
-          message: {
-            runId: activeRunId,
-            kind: "progress",
-            provider: event.callback.provider,
-            uri: event.callback.uri,
-            body: queued.body,
-            ...(event.target.agentId ? { agentId: event.target.agentId } : {}),
-            ...(event.callback.threadKey ? { threadKey: event.callback.threadKey } : {}),
-            ...(queued.blocks?.length ? { blocks: queued.blocks } : {}),
-            ...(queued.rich ? { rich: queued.rich } : {}),
-            statusMessageKey: `${activeRunId}:status`
-          }
-        });
-      }
-      return c.json({ decision: admitted.decision, followUpRequest: admitted.followUpRequest }, 202);
-    }
-
-    const createdRun = await repo.createRun({
-      id: parsed.runId,
+    const result = await admitAndCreateRun({
+      runId: parsed.runId,
       event: parsed.event,
-      accessProfileSnapshot: admitted.accessProfileSnapshot,
-      policySnapshotProvenance: admitted.policySnapshotProvenance,
-      routingPolicy: admitted.routingPolicy
+      ...(channelPrincipal ? { channelPrincipal } : {})
     });
-    if (!createdRun.created) {
-      return c.json(
-        {
-          decision: createdRun.replayDecision,
-          run: createdRun.run,
-          idempotentReplay: true
-        },
-        200
-      );
-    }
-    const { run } = createdRun;
-    const sourceReceiptDelivery = await deliverSourceReceiptBestEffort({
-      repo,
-      sink: sourceReceiptSink,
-      receipt: {
-        runId: run.id,
-        provider: parsed.event.callback.provider,
-        state: "received",
-        event: parsed.event,
-        ...(parsed.event.target.agentId ? { agentId: parsed.event.target.agentId } : {})
-      }
-    });
-    if (sourceReceiptDelivery.delivered) {
-      scheduleDelayedLarkStatusCard({ run, event: parsed.event });
-    }
-    const shouldDeliverAcknowledgement =
-      presentation.shouldDeliverAcknowledgement(parsed.event.callback.provider) ||
-      (shouldDeliverSourceReceipt(parsed.event.callback.provider) && !sourceReceiptDelivery.delivered);
-    if (shouldDeliverAcknowledgement) {
-      const acknowledgementPresentation = presentation.acknowledgementPresentation({ runId: run.id });
-      const acknowledgement = presentation.render({
-        provider: parsed.event.callback.provider,
-        ...larkRenderLocaleRenderOption(parsed.event),
-        presentation: acknowledgementPresentation
-      });
-      const statusMessageKey = lifecycleStatusMessageKey({ provider: parsed.event.callback.provider, runId: run.id });
-      await deliverAndAudit({
-        repo,
-        sink: callbackSink,
-        retry: callbackRetry,
-        message: {
-          runId: run.id,
-          kind: "acknowledgement",
-          provider: parsed.event.callback.provider,
-          uri: parsed.event.callback.uri,
-          body: acknowledgement.body,
-          ...(parsed.event.target.agentId ? { agentId: parsed.event.target.agentId } : {}),
-          ...(parsed.event.callback.threadKey ? { threadKey: parsed.event.callback.threadKey } : {}),
-          ...(statusMessageKey ? { statusMessageKey } : {}),
-          ...(acknowledgement.blocks?.length ? { blocks: acknowledgement.blocks } : {}),
-          ...(acknowledgement.rich ? { rich: acknowledgement.rich } : {})
-        }
-      });
-    }
-    return c.json({ decision: admitted.decision, run }, 201);
+    return c.json(result.body, result.status);
   });
 
   app.post("/v1/thread-actions", async (c) => {

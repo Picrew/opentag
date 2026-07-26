@@ -4,6 +4,10 @@ Deterministic execution governance for OpenTag work loops.
 
 This package owns the Phase 1 completion predicate and its small command/query orchestration surface. It keeps executor success separate from evidence-backed work completion.
 
+It also owns pure, deterministic routing and factory-workstream evaluation.
+Persistence, batch processing, Attempt leasing, and operator presentation remain
+outside this package.
+
 ## Install
 
 ```bash
@@ -33,6 +37,18 @@ bounded partition so explicitly selected runners remain reachable.
 Routing does not use executor self-reported success or accepted-completion
 metrics to bypass policy. Those metrics are an operator-facing evaluation
 signal until an explicit, reviewable ranking policy is introduced.
+
+## Workstream evaluation
+
+`evaluateWorkstream` evaluates one immutable recipe snapshot, its WorkThread-only
+workstream, and metrics derived from durable Runs, fenced Attempts, and current
+CompletionAssessments. It returns a canonical input digest and one of
+`healthy`, `attention_required`, or `blocked`.
+
+Concurrency, per-Run attempts, fixed abstract cost units, and immutable Attempt
+locality are fail-closed budget signals. Cost units are capacity accounting, not
+currency. The function has no provider calls and cannot update a live
+CompletionAssessment.
 
 ## Responsibilities
 

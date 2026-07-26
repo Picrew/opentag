@@ -13,7 +13,7 @@ pnpm add @opentag/store
 ## Exports
 
 - `migrateSchema`: creates or updates the SQLite schema.
-- `createOpenTagRepository`: repository API for runners, bindings, runs, leases, progress, completion, and audit events.
+- `createOpenTagRepository`: repository API for runners, bindings, runs, leases, progress, completion, factory recipes/workstreams, replay-safe batch receipts, and audit events.
 - Drizzle table definitions from `schema.ts`.
 - Types such as `ClaimedOpenTagRun`, `OpenTagAuditEvent`, `RepoBinding`, `ChannelBinding`, and `SlackChannelBinding`.
 

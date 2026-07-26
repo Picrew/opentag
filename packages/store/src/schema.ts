@@ -22,6 +22,8 @@ export const runs = sqliteTable(
     repoOwner: text("repo_owner"),
     repoName: text("repo_name"),
     workThreadId: text("work_thread_id"),
+    workstreamId: text("workstream_id"),
+    admissionBatchId: text("admission_batch_id"),
     conversationKey: text("conversation_key"),
     leasedAt: text("leased_at"),
     leaseExpiresAt: text("lease_expires_at"),
@@ -43,6 +45,8 @@ export const runs = sqliteTable(
     repoIdx: index("runs_repo_idx").on(table.repoProvider, table.repoOwner, table.repoName),
     workThreadIdx: index("runs_work_thread_idx").on(table.workThreadId),
     workThreadAuthorityIdx: index("runs_work_thread_authority_idx").on(table.workThreadId, table.createdAt, table.id),
+    workstreamIdx: index("runs_workstream_idx").on(table.workstreamId, table.status),
+    admissionBatchIdx: index("runs_admission_batch_idx").on(table.admissionBatchId),
     conversationIdx: index("runs_conversation_idx").on(table.conversationKey)
   })
 );
@@ -54,6 +58,7 @@ export const attempts = sqliteTable(
     runId: text("run_id").notNull(),
     number: integer("number").notNull(),
     runnerId: text("runner_id").notNull(),
+    runnerLocality: text("runner_locality"),
     selectedExecutorId: text("selected_executor_id"),
     routingDecisionId: text("routing_decision_id"),
     fencingToken: text("fencing_token").notNull(),
@@ -80,6 +85,8 @@ export const followUpRequests = sqliteTable(
     sourceEventId: text("source_event_id").notNull(),
     conversationKey: text("conversation_key").notNull(),
     activeRunId: text("active_run_id"),
+    workstreamId: text("workstream_id"),
+    admissionBatchId: text("admission_batch_id"),
     eventJson: text("event_json").notNull(),
     decisionJson: text("decision_json").notNull(),
     accessProfileSnapshotJson: text("access_profile_snapshot_json"),
@@ -141,12 +148,94 @@ export const controlPlaneEvents = sqliteTable(
     type: text("type").notNull(),
     severity: text("severity").notNull(),
     subject: text("subject"),
+    idempotencyKey: text("idempotency_key"),
     payloadJson: text("payload_json").notNull(),
     createdAt: text("created_at").notNull()
   },
   (table) => ({
     typeIdx: index("control_plane_events_type_idx").on(table.type),
-    severityIdx: index("control_plane_events_severity_idx").on(table.severity)
+    severityIdx: index("control_plane_events_severity_idx").on(table.severity),
+    idempotencyIdx: uniqueIndex("control_plane_events_idempotency_key_idx").on(table.idempotencyKey)
+  })
+);
+
+export const factoryRecipeSnapshots = sqliteTable(
+  "factory_recipe_snapshots",
+  {
+    id: text("id").notNull(),
+    version: integer("version").notNull(),
+    recipeJson: text("recipe_json").notNull(),
+    contentDigest: text("content_digest").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({ pk: primaryKey({ columns: [table.id, table.version] }) })
+);
+
+export const factoryWorkstreams = sqliteTable(
+  "factory_workstreams",
+  {
+    id: text("id").primaryKey(),
+    recipeId: text("recipe_id").notNull(),
+    recipeVersion: integer("recipe_version").notNull(),
+    workstreamJson: text("workstream_json").notNull(),
+    contentDigest: text("content_digest").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({ recipeIdx: index("factory_workstreams_recipe_idx").on(table.recipeId, table.recipeVersion) })
+);
+
+export const factoryWorkstreamMembers = sqliteTable(
+  "factory_workstream_members",
+  {
+    workstreamId: text("workstream_id").notNull(),
+    workThreadId: text("work_thread_id").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workstreamId, table.workThreadId] }),
+    threadIdx: index("factory_workstream_members_thread_idx").on(table.workThreadId)
+  })
+);
+
+export const workstreamAdmissionBatches = sqliteTable(
+  "workstream_admission_batches",
+  {
+    id: text("id").primaryKey(),
+    workstreamId: text("workstream_id").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    requestJson: text("request_json").notNull(),
+    status: text("status").notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: text("lease_expires_at"),
+    resultJson: text("result_json"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    completedAt: text("completed_at")
+  },
+  (table) => ({ workstreamStatusIdx: index("workstream_admission_batches_workstream_status_idx").on(table.workstreamId, table.status) })
+);
+
+export const workstreamAdmissionBatchItems = sqliteTable(
+  "workstream_admission_batch_items",
+  {
+    batchId: text("batch_id").notNull(),
+    itemId: text("item_id").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    runId: text("run_id").notNull(),
+    workThreadId: text("work_thread_id").notNull(),
+    eventJson: text("event_json").notNull(),
+    status: text("status").notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: text("lease_expires_at"),
+    resultJson: text("result_json"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    completedAt: text("completed_at")
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.batchId, table.itemId] }),
+    ordinalIdx: uniqueIndex("workstream_admission_batch_items_ordinal_idx").on(table.batchId, table.ordinal),
+    statusIdx: index("workstream_admission_batch_items_status_idx").on(table.batchId, table.status)
   })
 );
 
@@ -698,6 +787,98 @@ function migrateHumanEscalationAccessIdentitySchema(sqlite: Database.Database): 
   })();
 }
 
+function migrateFactoryWorkstreamSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-07-26-factory-workstreams-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    const runColumns = sqlite.prepare("PRAGMA table_info(runs)").all() as { name: string }[];
+    const runColumnNames = new Set(runColumns.map((column) => column.name));
+    if (!runColumnNames.has("workstream_id")) sqlite.exec("ALTER TABLE runs ADD COLUMN workstream_id TEXT");
+    if (!runColumnNames.has("admission_batch_id")) sqlite.exec("ALTER TABLE runs ADD COLUMN admission_batch_id TEXT");
+    const attemptColumns = sqlite.prepare("PRAGMA table_info(attempts)").all() as { name: string }[];
+    if (!attemptColumns.some((column) => column.name === "runner_locality")) {
+      sqlite.exec("ALTER TABLE attempts ADD COLUMN runner_locality TEXT");
+    }
+    const followUpColumns = sqlite.prepare("PRAGMA table_info(follow_up_requests)").all() as { name: string }[];
+    const followUpColumnNames = new Set(followUpColumns.map((column) => column.name));
+    if (!followUpColumnNames.has("workstream_id")) sqlite.exec("ALTER TABLE follow_up_requests ADD COLUMN workstream_id TEXT");
+    if (!followUpColumnNames.has("admission_batch_id")) sqlite.exec("ALTER TABLE follow_up_requests ADD COLUMN admission_batch_id TEXT");
+    sqlite.exec(`
+      CREATE INDEX IF NOT EXISTS runs_workstream_idx ON runs(workstream_id, status);
+      CREATE INDEX IF NOT EXISTS runs_admission_batch_idx ON runs(admission_batch_id);
+
+      CREATE TABLE IF NOT EXISTS factory_recipe_snapshots (
+        id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        recipe_json TEXT NOT NULL,
+        content_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (id, version)
+      );
+      CREATE TABLE IF NOT EXISTS factory_workstreams (
+        id TEXT PRIMARY KEY,
+        recipe_id TEXT NOT NULL,
+        recipe_version INTEGER NOT NULL,
+        workstream_json TEXT NOT NULL,
+        content_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS factory_workstreams_recipe_idx
+        ON factory_workstreams(recipe_id, recipe_version);
+      CREATE TABLE IF NOT EXISTS factory_workstream_members (
+        workstream_id TEXT NOT NULL,
+        work_thread_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (workstream_id, work_thread_id)
+      );
+      CREATE INDEX IF NOT EXISTS factory_workstream_members_thread_idx
+        ON factory_workstream_members(work_thread_id);
+      CREATE TABLE IF NOT EXISTS workstream_admission_batches (
+        id TEXT PRIMARY KEY,
+        workstream_id TEXT NOT NULL,
+        request_digest TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        result_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS workstream_admission_batches_workstream_status_idx
+        ON workstream_admission_batches(workstream_id, status);
+      CREATE TABLE IF NOT EXISTS workstream_admission_batch_items (
+        batch_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        run_id TEXT NOT NULL,
+        work_thread_id TEXT NOT NULL,
+        event_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        result_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        PRIMARY KEY (batch_id, item_id)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS workstream_admission_batch_items_ordinal_idx
+        ON workstream_admission_batch_items(batch_id, ordinal);
+      CREATE INDEX IF NOT EXISTS workstream_admission_batch_items_status_idx
+        ON workstream_admission_batch_items(batch_id, status);
+    `);
+    const controlPlaneColumns = sqlite.prepare("PRAGMA table_info(control_plane_events)").all() as { name: string }[];
+    if (!controlPlaneColumns.some((column) => column.name === "idempotency_key")) {
+      sqlite.exec("ALTER TABLE control_plane_events ADD COLUMN idempotency_key TEXT");
+    }
+    sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS control_plane_events_idempotency_key_idx ON control_plane_events(idempotency_key)");
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(migrationId, new Date().toISOString());
+  })();
+}
+
 export function migrateSchema(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS runs (
@@ -954,6 +1135,8 @@ export function migrateSchema(sqlite: Database.Database): void {
       source_event_id TEXT NOT NULL,
       conversation_key TEXT NOT NULL,
       active_run_id TEXT,
+      workstream_id TEXT,
+      admission_batch_id TEXT,
       event_json TEXT NOT NULL,
       decision_json TEXT NOT NULL,
       access_profile_snapshot_json TEXT,
@@ -1292,4 +1475,5 @@ export function migrateSchema(sqlite: Database.Database): void {
   migrateCompletionGovernanceSchema(sqlite);
   migrateCompletionWaiverSchema(sqlite);
   migrateHumanEscalationAccessIdentitySchema(sqlite);
+  migrateFactoryWorkstreamSchema(sqlite);
 }

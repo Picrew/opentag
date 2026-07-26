@@ -110,6 +110,25 @@ describe("evaluateRouting", () => {
     expect(decision).not.toHaveProperty("selected");
   });
 
+  it("treats factory recipe locality as an additional hard routing constraint", () => {
+    const decision = evaluateRouting({
+      runId: "run_factory_locality",
+      runnerIds: ["runner-hosted", "runner-local"],
+      executorIds: ["codex"],
+      runners: [
+        runner({ runnerId: "runner-hosted", locality: "hosted" }),
+        runner({ runnerId: "runner-local", locality: "local" })
+      ],
+      access: { allowedLocalities: ["local"], unresolvedConnectionRefs: false },
+      decidedAt
+    });
+    expect(decision.selected).toMatchObject({ runnerId: "runner-local" });
+    expect(decision.candidates[0]).toMatchObject({
+      eligible: false,
+      reasons: expect.arrayContaining([expect.objectContaining({ code: "runner_locality_not_allowed_by_factory_recipe" })])
+    });
+  });
+
   it("derives a stable decision id independently of evaluation time", () => {
     const input = {
       runId: "run_stable",

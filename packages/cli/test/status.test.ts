@@ -11,10 +11,14 @@ import {
   formatCompletionExplanation,
   formatRunStatus,
   formatStatus,
+  formatWorkstreamStatus,
   getStatusSummary,
   runStatusCommand,
   runStatusFromConfig,
-  statusFromConfig
+  statusFromConfig,
+  workstreamStatusFromConfig,
+  workstreamStatusJson,
+  type WorkstreamStatusSummary
 } from "../src/status.js";
 
 function tempDir(): string {
@@ -156,6 +160,75 @@ const runEvent: OpenTagEvent = {
   callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
   metadata: { owner: "acme", repo: "demo" }
 };
+
+function workstreamStatusFixture(overrides: {
+  state?: "healthy" | "attention_required" | "blocked";
+  acceptedWorkThreadCount?: number;
+  violations?: WorkstreamStatusSummary["evaluation"]["violations"];
+  alerts?: WorkstreamStatusSummary["alerts"];
+} = {}): WorkstreamStatusSummary {
+  const digest = `sha256:${"a".repeat(64)}`;
+  const workstreamId = "workstream_cli_1";
+  const acceptedWorkThreadCount = overrides.acceptedWorkThreadCount ?? 2;
+  return {
+    configPath: "/tmp/opentag.json",
+    dispatcherUrl: "http://dispatcher.test",
+    recipe: {
+      id: "recipe_cli_1",
+      version: 1,
+      name: "Maintenance",
+      budgets: {
+        maxConcurrentRuns: 2,
+        maxAttemptsPerRun: 3,
+        maxCostUnits: 20,
+        costUnitsPerAttempt: 2,
+        allowedLocalities: ["private"]
+      },
+      createdAt: "2026-07-26T00:00:00.000Z",
+      contentDigest: digest
+    },
+    workstream: {
+      id: workstreamId,
+      recipeId: "recipe_cli_1",
+      recipeVersion: 1,
+      name: "July maintenance",
+      members: [
+        { kind: "work_thread", workThreadId: "thread_1" },
+        { kind: "work_thread", workThreadId: "thread_2" }
+      ],
+      createdAt: "2026-07-26T00:01:00.000Z",
+      contentDigest: digest
+    },
+    metrics: {
+      workstreamId,
+      workThreadCount: 2,
+      acceptedWorkThreadCount,
+      runCount: 2,
+      queuedRunCount: 0,
+      activeRunCount: 0,
+      needsHumanRunCount: 0,
+      terminalRunCount: 2,
+      failedRunCount: 0,
+      budgetBlockedRunCount: 0,
+      exceptionCount: 0,
+      totalAttempts: 2,
+      attemptsPerRunExceededCount: 0,
+      totalCostUnits: 4,
+      attemptsByLocality: { local: 0, private: 2, hosted: 0, unknown: 0 }
+    },
+    evaluation: {
+      workstreamId,
+      recipeId: "recipe_cli_1",
+      recipeVersion: 1,
+      status: overrides.state ?? "healthy",
+      inputDigest: digest,
+      evaluatedAt: "2026-07-26T00:05:00.000Z",
+      acceptedWorkThreadCount,
+      violations: overrides.violations ?? []
+    },
+    alerts: overrides.alerts ?? []
+  };
+}
 
 function completionExplanationFixture(): CompletionExplanation {
   const evaluatedAt = "2026-07-21T10:05:00.000Z";
@@ -1516,9 +1589,176 @@ describe("OpenTag CLI status", () => {
     expect(formatChannelStatus(summary)).toContain("Stop/timeout: cancellation is explicit and is not reported as successful completion; timeout policy: hard timeout after 45 second(s).");
   });
 
+  it("keeps healthy workstream output quiet and orders state before budget detail", () => {
+    const formatted = formatWorkstreamStatus(workstreamStatusFixture());
+
+    expect(formatted.split("\n").slice(0, 3)).toEqual([
+      "Workstream: workstream_cli_1 (July maintenance)",
+      "State: healthy",
+      "Next action: No action required; continue monitoring accepted outcomes."
+    ]);
+    expect(formatted).toContain("Accepted Outcomes:\n  work threads: 2/2\nBudget:");
+    expect(formatted).toContain("cost units: 4/20; per attempt=2");
+    expect(formatted).not.toContain("Exceptions:");
+  });
+
+  it("shows a bounded exception summary for blocked workstreams", () => {
+    const violations = Array.from({ length: 6 }, (_, index) => ({
+      code: "budget_blocked_runs" as const,
+      message: `Blocked run ${index + 1}`,
+      actual: index + 1,
+      limit: 0
+    }));
+    const formatted = formatWorkstreamStatus(workstreamStatusFixture({ state: "blocked", violations }));
+
+    expect(formatted).toContain("State: blocked");
+    expect(formatted).toContain("Next action: Resolve the blocking budget violations");
+    expect(formatted).toContain("Blocked run 5");
+    expect(formatted).not.toContain("Blocked run 6");
+    expect(formatted).toContain("1 more violation(s) omitted");
+  });
+
+  it("calls the workstream status endpoints and returns structured JSON data", async () => {
+    const fixture = workstreamStatusFixture();
+    const requests: string[] = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      requests.push(href);
+      if (href.endsWith("/v1/workstreams/workstream_cli_1")) return Response.json({ workstream: fixture.workstream });
+      if (href.endsWith("/v1/factory-recipes/recipe_cli_1/versions/1")) return Response.json({ recipe: fixture.recipe });
+      if (href.endsWith("/v1/workstreams/workstream_cli_1/metrics")) return Response.json({ metrics: fixture.metrics });
+      if (href.endsWith("/v1/workstreams/workstream_cli_1/evaluation")) return Response.json({ evaluation: fixture.evaluation });
+      if (href.endsWith("/v1/control-plane-alerts?limit=100")) {
+        return Response.json({
+          alerts: [{
+            id: "alert_other",
+            type: "workstream_budget",
+            severity: "warn",
+            eventType: "factory.workstream.budget_blocked",
+            count: 1,
+            threshold: 1,
+            firstSeenAt: "2026-07-26T00:04:00.000Z",
+            lastSeenAt: "2026-07-26T00:04:00.000Z",
+            subject: "another_workstream",
+            reason: "Another workstream needs attention.",
+            nextAction: "Inspect it."
+          }, ...Array.from({ length: 6 }, (_, index) => ({
+            id: `alert_${index + 1}`,
+            type: "workstream_budget",
+            severity: "warn" as const,
+            eventType: "factory.workstream.budget_blocked",
+            count: 1,
+            threshold: 1,
+            firstSeenAt: "2026-07-26T00:04:00.000Z",
+            lastSeenAt: "2026-07-26T00:04:00.000Z",
+            subject: "workstream_cli_1",
+            reason: `Workstream alert ${index + 1}.`,
+            nextAction: "Inspect it."
+          }))]
+        });
+      }
+      return Response.json({ error: "unexpected_url", href }, { status: 500 });
+    }) as unknown as typeof fetch;
+
+    const summary = await workstreamStatusFromConfig({
+      config: config(),
+      configPath: "/tmp/opentag/config.json",
+      workstreamId: fixture.workstream.id,
+      fetchImpl
+    });
+
+    expect(requests).toHaveLength(5);
+    expect(summary.alerts).toHaveLength(6);
+    expect(formatWorkstreamStatus(summary)).toContain("alert: 1 more alert(s) omitted");
+    expect(workstreamStatusJson(summary)).toMatchObject({
+      state: "healthy",
+      workstream: { id: "workstream_cli_1" },
+      metrics: { acceptedWorkThreadCount: 2 },
+      evaluation: { status: "healthy" }
+    });
+  });
+
+  it("prints structured workstream status in command JSON mode", async () => {
+    const fixture = workstreamStatusFixture();
+    const configPath = join(tempDir(), "config.json");
+    writeFileSync(configPath, JSON.stringify(config()), { mode: 0o600 });
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.endsWith("/v1/workstreams/workstream_cli_1")) return Response.json({ workstream: fixture.workstream });
+      if (href.endsWith("/v1/factory-recipes/recipe_cli_1/versions/1")) return Response.json({ recipe: fixture.recipe });
+      if (href.endsWith("/v1/workstreams/workstream_cli_1/metrics")) return Response.json({ metrics: fixture.metrics });
+      if (href.endsWith("/v1/workstreams/workstream_cli_1/evaluation")) return Response.json({ evaluation: fixture.evaluation });
+      if (href.endsWith("/v1/control-plane-alerts?limit=100")) return Response.json({ alerts: [] });
+      return Response.json({ error: "unexpected_url", href }, { status: 500 });
+    }) as unknown as typeof fetch;
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", fetchImpl);
+
+    try {
+      await runStatusCommand({ config: configPath, workstream: fixture.workstream.id, json: true });
+      expect(log).toHaveBeenCalledOnce();
+      expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
+        state: "healthy",
+        workstream: { id: "workstream_cli_1" },
+        metrics: { acceptedWorkThreadCount: 2 },
+        evaluation: { status: "healthy" }
+      });
+    } finally {
+      log.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("explains zero accepted outcomes without changing the healthy evaluation", () => {
+    const summary = workstreamStatusFixture({ acceptedWorkThreadCount: 0 });
+    expect(formatWorkstreamStatus(summary)).toContain(
+      "Next action: Wait for governed completion evidence; no work thread has an accepted outcome yet."
+    );
+    expect(workstreamStatusJson(summary)).toMatchObject({ state: "healthy", metrics: { acceptedWorkThreadCount: 0 } });
+  });
+
+  it("preserves a workstream API 404 instead of rendering fabricated status", async () => {
+    await expect(workstreamStatusFromConfig({
+      config: config(),
+      configPath: "/tmp/opentag/config.json",
+      workstreamId: "missing",
+      fetchImpl: async () => Response.json({ error: "workstream_not_found" }, { status: 404 })
+    })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("does not hide control-plane alert failures from workstream status", async () => {
+    const fixture = workstreamStatusFixture();
+    await expect(workstreamStatusFromConfig({
+      config: config(),
+      configPath: "/tmp/opentag/config.json",
+      workstreamId: fixture.workstream.id,
+      fetchImpl: async (url) => {
+        const href = String(url);
+        if (href.endsWith("/v1/workstreams/workstream_cli_1")) return Response.json({ workstream: fixture.workstream });
+        if (href.endsWith("/v1/factory-recipes/recipe_cli_1/versions/1")) return Response.json({ recipe: fixture.recipe });
+        if (href.endsWith("/v1/workstreams/workstream_cli_1/metrics")) return Response.json({ metrics: fixture.metrics });
+        if (href.endsWith("/v1/workstreams/workstream_cli_1/evaluation")) return Response.json({ evaluation: fixture.evaluation });
+        return Response.json({ error: "alerts_unavailable" }, { status: 503 });
+      }
+    })).rejects.toMatchObject({ status: 503 });
+  });
+
   it("rejects ambiguous run and channel status requests", async () => {
     await expect(runStatusCommand({ run: "run_1", channel: "lark:tenant_1/oc_chat" })).rejects.toThrow(
       "Use either --run or --channel, not both."
     );
+  });
+
+  it("rejects workstream status combined with legacy status selectors", async () => {
+    await expect(runStatusCommand({ run: "run_1", workstream: "workstream_1" })).rejects.toThrow(
+      "Use only one of --run, --channel, or --workstream."
+    );
+    await expect(runStatusCommand({ channel: "lark:tenant_1/oc_chat", workstream: "workstream_1" })).rejects.toThrow(
+      "Use only one of --run, --channel, or --workstream."
+    );
+  });
+
+  it("rejects JSON mode without a workstream selector", async () => {
+    await expect(runStatusCommand({ json: true })).rejects.toThrow("Use --json with --workstream.");
   });
 });

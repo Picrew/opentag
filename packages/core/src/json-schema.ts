@@ -71,6 +71,16 @@ import {
   RunnerDirectoryEntrySchema,
   RunnerRegistrationInputSchema
 } from "./routing.js";
+import {
+  FactoryRecipeSnapshotInputSchema,
+  FactoryRecipeSnapshotSchema,
+  WorkstreamAdmissionBatchInputSchema,
+  WorkstreamAdmissionBatchReceiptSchema,
+  WorkstreamEvaluationSchema,
+  WorkstreamInputSchema,
+  WorkstreamMetricsSchema,
+  WorkstreamSchema
+} from "./factory.js";
 
 export const OpenTagJsonSchemas = {
   OpenTagEvent: zodToJsonSchema(OpenTagEventSchema, "OpenTagEvent"),
@@ -136,5 +146,13 @@ export const OpenTagJsonSchemas = {
   RunnerRegistration: zodToJsonSchema(RunnerRegistrationInputSchema, "RunnerRegistration"),
   RunnerDirectoryEntry: zodToJsonSchema(RunnerDirectoryEntrySchema, "RunnerDirectoryEntry"),
   RoutingDecision: zodToJsonSchema(RoutingDecisionSchema, "RoutingDecision"),
-  AcceptedCompletionMetrics: zodToJsonSchema(AcceptedCompletionMetricsSchema, "AcceptedCompletionMetrics")
+  AcceptedCompletionMetrics: zodToJsonSchema(AcceptedCompletionMetricsSchema, "AcceptedCompletionMetrics"),
+  FactoryRecipeSnapshotInput: zodToJsonSchema(FactoryRecipeSnapshotInputSchema, "FactoryRecipeSnapshotInput"),
+  FactoryRecipeSnapshot: zodToJsonSchema(FactoryRecipeSnapshotSchema, "FactoryRecipeSnapshot"),
+  WorkstreamInput: zodToJsonSchema(WorkstreamInputSchema, "WorkstreamInput"),
+  Workstream: zodToJsonSchema(WorkstreamSchema, "Workstream"),
+  WorkstreamAdmissionBatchInput: zodToJsonSchema(WorkstreamAdmissionBatchInputSchema, "WorkstreamAdmissionBatchInput"),
+  WorkstreamAdmissionBatchReceipt: zodToJsonSchema(WorkstreamAdmissionBatchReceiptSchema, "WorkstreamAdmissionBatchReceipt"),
+  WorkstreamMetrics: zodToJsonSchema(WorkstreamMetricsSchema, "WorkstreamMetrics"),
+  WorkstreamEvaluation: zodToJsonSchema(WorkstreamEvaluationSchema, "WorkstreamEvaluation")
 } as const;

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   AgentAccessProfileSnapshotSchema,
   conversationKeysFromEvent,
@@ -17,6 +16,7 @@ import {
   type RunAdmissionReasonCode
 } from "@opentag/core";
 import { type FollowUpRequest, type RepoBinding, type createOpenTagRepository } from "@opentag/store";
+import { sha256Digest } from "./digest.js";
 
 type Repository = ReturnType<typeof createOpenTagRepository>;
 
@@ -42,6 +42,8 @@ export type AgentAccessProfileCheck = (input: AgentAccessProfileCheckInput) => P
 export type AdmitRunInput = {
   requestId: string;
   event: OpenTagEvent;
+  workstreamId?: string;
+  admissionBatchId?: string;
 };
 
 export type AdmitRunResult =
@@ -196,21 +198,6 @@ function admissionDecision(input: {
 
 async function defaultAgentAccessProfileCheck(): Promise<AgentAccessProfileCheckResult> {
   return { allowed: true };
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-      .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-function sha256Digest(value: unknown): string {
-  return `sha256:${createHash("sha256").update(stableJson(value)).digest("hex")}`;
 }
 
 function defaultAdmissionSnapshots(input: {
@@ -470,6 +457,8 @@ export function createAdmissionRuntime(input: {
           event: request.event,
           decision,
           activeRunId: activeRun.run.id,
+          ...(request.workstreamId ? { workstreamId: request.workstreamId } : {}),
+          ...(request.admissionBatchId ? { admissionBatchId: request.admissionBatchId } : {}),
           ...snapshots,
           routingPolicy
         });

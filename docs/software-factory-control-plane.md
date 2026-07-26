@@ -913,10 +913,20 @@ A recipe must not:
 - bypass normal admission, permission, receipt, evidence, or completion rules;
 - create a general-purpose agent-chat topology in the human thread.
 
-The initial workstream representation should be a recipe-owned grouping of
-`WorkItemReference` or `WorkThread` keys. Dependencies remain in the external
-work system or a recipe adapter. OpenTag should not add a general DAG scheduler
-until at least two real factory recipes require the same dependency semantics.
+The initial workstream representation is a recipe-owned grouping of durable
+`WorkThread` keys. A `WorkItemReference` remains the external identity carried
+by its WorkThread; it is not a second, partially governed membership root.
+Dependencies remain in the external work system or a recipe adapter. OpenTag
+should not add a general DAG scheduler until at least two real factory recipes
+require the same dependency semantics.
+
+Recipe budgets are enforced where work becomes executable. Concurrency,
+per-Run attempt count, fixed abstract cost units per Attempt, and allowed runner
+locality are checked in the same store transaction that changes a Run from
+`queued` to `assigned` and creates its fenced Attempt. Cost units are a stable
+capacity-accounting abstraction, not currency or provider billing. Locality is
+always intersected with the Run's captured access constraints and therefore can
+only narrow placement.
 
 ## Trust, privacy, and data placement
 
@@ -1379,6 +1389,34 @@ Exit gate:
 > and measure accepted outcomes, while Linear/GitHub/Jira remains the planning
 > system of record.
 
+#### Phase 4A implementation boundary
+
+The first Phase 4 delivery is intentionally smaller than the complete phase:
+
+- immutable, versioned recipe snapshots;
+- WorkThread-only workstream membership;
+- durable batch headers and ordered item receipts, persisted before processing;
+- the existing managed-channel, admission, follow-up, permission, receipt,
+  evidence, and completion path for every admitted item;
+- attempt-claim enforcement for workstream concurrency, per-Run attempt count,
+  fixed attempt cost units, and locality;
+- workstream metrics derived from Runs, fenced Attempts, and authoritative
+  current CompletionAssessments;
+- deterministic, side-effect-free evaluation with a canonical input digest;
+- one bounded exception summary per batch instead of routine per-item source
+  thread acknowledgements.
+
+A repeated batch id with the same normalized request digest returns or resumes
+the same durable receipt. Reusing the id with different input is a conflict.
+An item is not reported as admitted until its Run or follow-up outcome has been
+durably recorded. Expired processing leases may be recovered without repeating
+completed items.
+
+Phase 4A does not add provider cost reconciliation, mutable workstream state,
+dependency scheduling, adaptive routing, a planning UI, or an operator console.
+Its evaluation output is an immutable observation; it cannot update a live
+CompletionAssessment.
+
 ## Compatibility and migration
 
 1. Add schemas and tables without changing existing required fields.
@@ -1415,6 +1453,15 @@ Exit gate:
 - No eligible runner results in queue or a decision, never unsafe fallback.
 - Revoked access blocks new attempts.
 - Retry budget is enforced under concurrent evidence and result events.
+- Workstream attempt budgets are checked atomically with Attempt creation, so
+  concurrent claims cannot oversubscribe the configured limit.
+- Recipe locality never widens the captured agent access profile.
+- Batch input and all item identities are durable before the first item is
+  admitted; exact replay resumes, while a conflicting replay is rejected.
+- A recovered batch does not repeat completed items or routine source-thread
+  callbacks, and emits at most one idempotent exception summary.
+- Workstream accepted-outcome metrics use the current authoritative assessment
+  for each member WorkThread rather than Run success or executor self-report.
 - A stopped run does not auto-pass completion or auto-promote paused follow-ups.
 
 ### Adapter contract tests

@@ -10,9 +10,17 @@ import {
   OpenTagRunResultSchema,
   OpenTagRunSchema,
   AcceptedCompletionMetricsSchema,
+  FactoryRecipeSnapshotInputSchema,
+  FactoryRecipeSnapshotSchema,
   RoutingDecisionSchema,
   RunnerDirectoryEntrySchema,
   RunAdmissionDecisionSchema,
+  WorkstreamAdmissionBatchInputSchema,
+  WorkstreamAdmissionBatchReceiptSchema,
+  WorkstreamEvaluationSchema,
+  WorkstreamMetricsSchema,
+  WorkstreamInputSchema,
+  WorkstreamSchema,
   type ActorIdentity,
   type Action,
   type ActionPermissionRequest,
@@ -32,6 +40,8 @@ import {
   type OpenTagRun,
   type OpenTagRunResult,
   type AcceptedCompletionMetrics,
+  type FactoryRecipeSnapshot,
+  type FactoryRecipeSnapshotInput,
   type PolicyRule,
   type ProposalLineage,
   type RoutingDecision,
@@ -41,7 +51,24 @@ import {
   type RunEventImportance,
   type RunEventVisibility,
   type SuggestedChangesSnapshot,
-  type VerificationEvidence
+  type VerificationEvidence,
+  type Workstream,
+  type WorkstreamAdmissionBatchInput,
+  type WorkstreamAdmissionBatchReceipt,
+  type WorkstreamEvaluation,
+  type WorkstreamInput,
+  type WorkstreamMetrics
+} from "@opentag/core";
+
+export type {
+  FactoryRecipeSnapshot,
+  FactoryRecipeSnapshotInput,
+  Workstream,
+  WorkstreamAdmissionBatchInput,
+  WorkstreamAdmissionBatchReceipt,
+  WorkstreamEvaluation,
+  WorkstreamInput,
+  WorkstreamMetrics
 } from "@opentag/core";
 
 export type ClaimedOpenTagRun = {
@@ -474,6 +501,14 @@ export type OpenTagClient = {
   unbindChannel(input: { provider: string; accountId: string; conversationId: string }): Promise<void>;
   bindSlackChannel(input: SlackChannelBindingInput): Promise<void>;
   getSlackChannelBinding(input: { teamId: string; channelId: string }): Promise<{ binding: SlackChannelBindingInput }>;
+  createFactoryRecipeSnapshot(input: FactoryRecipeSnapshotInput): Promise<{ recipe: FactoryRecipeSnapshot }>;
+  getFactoryRecipeSnapshot(input: { id: string; version: number }): Promise<{ recipe: FactoryRecipeSnapshot }>;
+  createWorkstream(input: WorkstreamInput): Promise<{ workstream: Workstream }>;
+  getWorkstream(input: { id: string }): Promise<{ workstream: Workstream }>;
+  createWorkstreamAdmissionBatch(input: WorkstreamAdmissionBatchInput): Promise<{ receipt: WorkstreamAdmissionBatchReceipt }>;
+  getWorkstreamAdmissionBatch(input: { id: string }): Promise<{ receipt: WorkstreamAdmissionBatchReceipt }>;
+  getWorkstreamMetrics(input: { id: string }): Promise<{ metrics: WorkstreamMetrics }>;
+  getWorkstreamEvaluation(input: { id: string }): Promise<{ evaluation: WorkstreamEvaluation }>;
   createRun(input: CreateRunInput): Promise<CreateRunResult>;
   getFollowUpRequest(input: { id: string }): Promise<{ followUpRequest: import("@opentag/core").FollowUpRequest }>;
   createRunFromFollowUpRequest(input: { id: string; runId: string }): Promise<{ followUpRequest: import("@opentag/core").FollowUpRequest; run: OpenTagRun }>;
@@ -898,6 +933,88 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       });
       await assertOk(response, "getSlackChannelBinding");
       return (await response.json()) as { binding: SlackChannelBindingInput };
+    },
+
+    async createFactoryRecipeSnapshot(input) {
+      const recipe = FactoryRecipeSnapshotInputSchema.parse(input);
+      const response = await fetchImpl(`${baseUrl}/v1/factory-recipes`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify(recipe)
+      });
+      await assertOk(response, "createFactoryRecipeSnapshot");
+      const body = (await response.json()) as { recipe?: unknown };
+      return { recipe: FactoryRecipeSnapshotSchema.parse(body.recipe) };
+    },
+
+    async getFactoryRecipeSnapshot(input) {
+      const response = await fetchImpl(
+        `${baseUrl}/v1/factory-recipes/${encodeURIComponent(input.id)}/versions/${input.version}`,
+        { headers: authHeaders(options.pairingToken) }
+      );
+      await assertOk(response, "getFactoryRecipeSnapshot");
+      const body = (await response.json()) as { recipe?: unknown };
+      return { recipe: FactoryRecipeSnapshotSchema.parse(body.recipe) };
+    },
+
+    async createWorkstream(input) {
+      const workstream = WorkstreamInputSchema.parse(input);
+      const response = await fetchImpl(`${baseUrl}/v1/workstreams`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify(workstream)
+      });
+      await assertOk(response, "createWorkstream");
+      const body = (await response.json()) as { workstream?: unknown };
+      return { workstream: WorkstreamSchema.parse(body.workstream) };
+    },
+
+    async getWorkstream(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/workstreams/${encodeURIComponent(input.id)}`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "getWorkstream");
+      const body = (await response.json()) as { workstream?: unknown };
+      return { workstream: WorkstreamSchema.parse(body.workstream) };
+    },
+
+    async createWorkstreamAdmissionBatch(input) {
+      const batch = WorkstreamAdmissionBatchInputSchema.parse(input);
+      const response = await fetchImpl(`${baseUrl}/v1/workstream-batches`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify(batch)
+      });
+      await assertOk(response, "createWorkstreamAdmissionBatch");
+      const body = (await response.json()) as { receipt?: unknown };
+      return { receipt: WorkstreamAdmissionBatchReceiptSchema.parse(body.receipt) };
+    },
+
+    async getWorkstreamAdmissionBatch(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/workstream-batches/${encodeURIComponent(input.id)}`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "getWorkstreamAdmissionBatch");
+      const body = (await response.json()) as { receipt?: unknown };
+      return { receipt: WorkstreamAdmissionBatchReceiptSchema.parse(body.receipt) };
+    },
+
+    async getWorkstreamMetrics(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/workstreams/${encodeURIComponent(input.id)}/metrics`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "getWorkstreamMetrics");
+      const body = (await response.json()) as { metrics?: unknown };
+      return { metrics: WorkstreamMetricsSchema.parse(body.metrics) };
+    },
+
+    async getWorkstreamEvaluation(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/workstreams/${encodeURIComponent(input.id)}/evaluation`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "getWorkstreamEvaluation");
+      const body = (await response.json()) as { evaluation?: unknown };
+      return { evaluation: WorkstreamEvaluationSchema.parse(body.evaluation) };
     },
 
     async createRun(input) {
