@@ -24,6 +24,7 @@ Current cases:
 | `factory-conformance` | No | File-backed recipe/workstream/batch loop with restart replay, bounded exceptions, authoritative accepted outcomes, and Echo plus local ACP executor paths |
 | `openclaw-acp` | Yes | Strict OpenClaw hard-cancellation probe plus worktree cwd, scratch cwd, and fresh-session checks through the generic ACP host |
 | `github-webhook-live` | Yes | Real GitHub repository webhook, local CLI stack, current-head required check, merged PR, durable satisfied assessment, and restart-safe final receipt |
+| `github-factory-live` | Yes | Real external GitHub source thread admitted through a recipe/workstream batch, local execution, PR/check/merge, authoritative accepted metrics, restart replay, and deduplicated source receipt |
 | `github-cli-live` | Yes | Real GitHub issue callback using dispatcher-assisted run creation |
 | `slack-local-live` | Yes | Real Slack callback using dispatcher-assisted run creation |
 | `slack-ui-live` | Yes | Real Slack source-thread mention or button flow through Socket Mode or Events API |
@@ -37,6 +38,8 @@ environment variables, then prints what would run.
 
 ```bash
 corepack pnpm smoke:live -- --case github-webhook-live --dry-run
+OPENTAG_GH_LIVE_EXECUTOR=phase1-fixture \
+corepack pnpm smoke:live -- --case github-factory-live --dry-run
 corepack pnpm smoke:live -- --case slack-ui-live --dry-run --allow-missing
 ```
 
@@ -75,8 +78,8 @@ corepack pnpm smoke:live -- \
 
 ```bash
 corepack pnpm smoke:live -- \
-  --case github-webhook-live \
-  --report .omx/live-e2e/github-webhook-live.json
+  --case github-factory-live \
+  --report .omx/live-e2e/github-factory-live-harness.json
 ```
 
 3. Inspect the provider thread and local status:
@@ -124,6 +127,64 @@ observation.
 Use `github-webhook-live` for the real source-control completion loop and
 `builtin-acp` for provider-backed executor readiness. No DAG scheduler or
 operator console is part of this case.
+
+### GitHub Factory Acceptance
+
+`github-factory-live` sets `OPENTAG_GH_LIVE_FACTORY=true` on the existing real
+GitHub harness. It deliberately creates the GitHub issue and source request
+before installing the temporary OpenTag webhook. The comment therefore remains
+a real, externally durable planning instruction without also creating an
+unattributed direct Run. OpenTag fetches that comment, normalizes it through the
+GitHub adapter, ensures its canonical WorkThread, and submits the same event as
+one item in an immutable recipe-owned workstream batch.
+
+The case then uses the normal runtime and provider path. A local fenced Attempt
+changes an isolated worktree, OpenTag creates a real pull request, a required
+status is recorded for the exact current head, and completion remains pending
+until GitHub reports the merge. The source thread must receive exactly one
+provider-verified completion receipt. The harness restarts against the same
+database, submits the identical batch again, and requires both the durable
+receipt and authoritative workstream metrics to remain byte-equivalent.
+
+The sanitized acceptance report is generated from retained provider and store
+observations. It is rejected instead of written when any required relationship
+is missing or contradictory. Its proof matrix is:
+
+| Claim | Retained authority |
+| --- | --- |
+| External planning source | GitHub issue URL, mention URL, issue/comment/event identifiers |
+| Factory admission | Canonical WorkThread, immutable recipe/workstream digests, durable batch digest and admitted Run identity |
+| Local execution | Run snapshots plus latest fenced Attempt runner, executor, locality, and terminal status |
+| PR and check | GitHub PR identity/state and required status tied to the PR head SHA |
+| Accepted completion | Completion snapshots before evidence, after the check, after merge, and after restart |
+| Accepted metrics | Workstream metrics proving terminal Runs remain `1` while accepted WorkThreads advance `0 -> 1` |
+| Restart recovery | Exact batch receipt replay, byte-equivalent satisfied assessment and metrics, and unchanged source-receipt identity, body digest, and count |
+
+Run the provider/governance proof with the deterministic local ACP writer:
+
+```bash
+OPENTAG_GH_LIVE_EXECUTOR=phase1-fixture \
+OPENTAG_GH_LIVE_REPORT=.omx/live-e2e/github-factory-live.json \
+corepack pnpm smoke:live -- --case github-factory-live
+```
+
+This proves the real GitHub, local runtime, factory admission, and governance
+chain. It does not claim model-provider readiness; run `builtin-acp` separately
+for that. GitHub remains the planning and source-control authority. This case
+adds neither a dependency DAG nor an operator console.
+
+The first Phase 5 live acceptance passed on 2026-07-27 against
+[`amplifthq/opentag-test` issue #77](https://github.com/amplifthq/opentag-test/issues/77)
+and [pull request #78](https://github.com/amplifthq/opentag-test/pull/78).
+The PR head `3a65b9788bf26c2e26401ba688c176d0c0c3d239` carried the successful
+`opentag-phase1-live` status and was merged as
+`3eb6d9a354b6a7140cf396f371aba444cec409d2`. The retained report
+`.omx/live-e2e/github-factory-live-phase5.json` records one terminal local
+Attempt, accepted WorkThreads advancing from zero to one after provider
+evidence, unchanged post-restart metrics, exact batch replay, and one unchanged
+provider-verified source receipt. The GitHub issue deliberately remains open:
+OpenTag accepted the governed delivery outcome but did not mutate the external
+planning system's business status.
 
 ## Case Notes
 
@@ -197,7 +258,8 @@ credential-isolation parts of the full conformance checklist.
 
 ### GitHub Repository Webhook
 
-`github-webhook-live` wraps `scripts/dev/run-github-webhook-live-test.sh`.
+`github-webhook-live` and `github-factory-live` wrap
+`scripts/dev/run-github-webhook-live-test.sh`.
 It requires:
 
 - `gh` authenticated as a user with admin or maintain access to
