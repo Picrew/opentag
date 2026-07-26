@@ -197,7 +197,7 @@ OpenTag's CLI path is local-first.
 | `opentag service uninstall` | Uninstall the OpenTag background service |
 | `opentag service autostart enable` | Enable background service login autostart |
 | `opentag service autostart disable` | Disable background service login autostart |
-| `opentag status` | Show local config and runtime status; add `--run <run_id>` or `--channel provider:account/conversation` for scoped detail |
+| `opentag status` | Show local config and runtime status; add `--run <run_id>`, `--channel provider:account/conversation`, or `--workstream <id>` for scoped detail |
 | `opentag cancel` | Request cancellation for a run or the active run in a source container |
 | `opentag completion escalations --run <run_id>` | List structured human escalations, audiences, options, expiry, and attribution for a run |
 | `opentag completion acknowledge --escalation <id> ...` | Attribute acknowledgement without resolving the blocking escalation |
@@ -280,7 +280,7 @@ Current public release: `v0.7.0`. The coordinated npm package family contains 16
 | [`@opentag/cli`](https://www.npmjs.com/package/@opentag/cli) | Setup and local runtime command line interface |
 | [`@opentag/local-runtime`](https://www.npmjs.com/package/@opentag/local-runtime) | In-process local dispatcher, runner, and platform runtime |
 | [`@opentag/core`](https://www.npmjs.com/package/@opentag/core) | Protocol schemas, types, mention parsing, and JSON Schema exports |
-| [`@opentag/governance`](https://www.npmjs.com/package/@opentag/governance) | Deterministic completion evaluation and governance orchestration |
+| [`@opentag/governance`](https://www.npmjs.com/package/@opentag/governance) | Deterministic completion, routing, and workstream evaluation |
 | [`@opentag/client`](https://www.npmjs.com/package/@opentag/client) | Dispatcher HTTP client |
 | [`@opentag/slack`](https://www.npmjs.com/package/@opentag/slack) | Slack Socket Mode, Events API handling, and thread replies |
 | [`@opentag/github`](https://www.npmjs.com/package/@opentag/github) | GitHub webhook handling, comments, PR helpers, and action application |

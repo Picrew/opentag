@@ -33,6 +33,8 @@ For GitHub, GitLab, Linear, or Discord webhook deployments that use an already c
 
 `opentag status --run <run_id>` shows the local context packet, agent work ledger, produced artifacts, callback delivery, and safe next actions without turning the source thread into an agent log stream.
 
+`opentag status --workstream <workstream_id>` shows the workstream state and next action first, followed by recipe budgets, accepted outcomes, and bounded exception detail. Healthy workstreams stay quiet. Add `--json` to receive structured `workstream`, `recipe`, `metrics`, and `evaluation` objects for automation.
+
 External local runtimes can report lifecycle hooks through the public [Hook Ingest Contract](../../docs/hook-ingest.md): `opentag ingest-template --format manifest` prints the manifest, and `opentag ingest` records audit-visible progress or terminal state through runner-scoped auth.
 
 ## Commands

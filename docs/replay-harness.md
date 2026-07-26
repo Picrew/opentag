@@ -67,6 +67,27 @@ lineage, a single end-to-end completion metric, restart recovery, and concise
 CLI/source-thread explanations. A real provider proof remains a separate live
 gate with configured credentials, signed ingress, and API reconciliation.
 
+## Workstream Evaluation Replay
+
+A Phase 4A workstream replay adds recipe and batch facts without weakening the
+single-Run proof. The normalized input includes:
+
+- one immutable recipe snapshot and its budget digest;
+- a WorkThread-only workstream membership snapshot;
+- a batch id, normalized request digest, ordered stable item ids, and durable
+  per-item receipts;
+- the Run, routing, fenced Attempt, evidence, and CompletionAssessment facts
+  already exercised by the strict completion replay;
+- a fixed evaluation timestamp.
+
+Replay the same input once in a fresh database and once after reopening the
+database. The canonical workstream metrics and evaluation digest must match.
+The test must also prove that an exact batch replay does not repeat completed
+items or callbacks, a conflicting digest is rejected, stale Attempt fencing is
+preserved, and accepted outcomes come only from the authoritative current
+CompletionAssessment. No provider API is called and the evaluation cannot
+write a CompletionAssessment.
+
 ## Product Boundary
 
 Replay fixtures should reinforce OpenTag's boundary:

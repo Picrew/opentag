@@ -45,6 +45,13 @@ export const dispatcher = createDispatcherApp({
 
 The app exposes `/healthz` and `/v1/*` dispatcher endpoints for runners, Project Target bindings, generic channel bindings, Slack compatibility bindings, runs, progress, heartbeats, completion, and audit event lookup.
 
+Factory-mode callers can additionally create immutable recipe snapshots and
+WorkThread-only workstreams, submit replay-safe workstream batches, inspect a
+durable batch receipt, and read workstream metrics/evaluation. Every batch item
+uses the same managed-channel ownership and Run admission path as `/v1/runs`;
+routine per-item source-thread acknowledgements are suppressed in favor of one
+bounded exception summary.
+
 When `pairingToken` is set, every `/v1/*` endpoint requires:
 
 ```text
