@@ -502,6 +502,8 @@ export const FollowUpRequestSchema = z.object({
   sourceEventId: z.string().min(1),
   conversationKey: z.string().min(1),
   activeRunId: z.string().min(1).optional(),
+  workstreamId: z.string().min(1).optional(),
+  admissionBatchId: z.string().min(1).optional(),
   event: z.lazy(() => OpenTagEventSchema),
     decision: RunAdmissionDecisionSchema,
     accessProfileSnapshot: AgentAccessProfileSnapshotSchema.optional(),
@@ -512,6 +514,13 @@ export const FollowUpRequestSchema = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime()
 }).superRefine((value, ctx) => {
+  if (value.admissionBatchId && !value.workstreamId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Follow-up batch attribution requires a workstream.",
+      path: ["admissionBatchId"]
+    });
+  }
   if (Boolean(value.accessProfileSnapshot) !== Boolean(value.policySnapshotProvenance)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
