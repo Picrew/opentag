@@ -32,7 +32,8 @@
     "overrides": {
       "vite": "^6.4.3",
       "axios": "^1.16.0",
-      "esbuild": "0.28.1"
+      "esbuild": "0.28.1",
+      "postcss": "8.5.18"
     }
   }
 }
