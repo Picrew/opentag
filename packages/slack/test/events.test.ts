@@ -75,76 +75,6 @@ describe("Slack thread action metadata", () => {
   });
 });
 
-describe("Slack event_id dedup", () => {
-  function dedupProcessor(input: { runs: string[] }) {
-    return createSlackEventProcessor({
-      async resolveChannelBinding() {
-        return { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" };
-      },
-      async createRun() {
-        input.runs.push("run_created");
-        return { runId: "run_1" };
-      },
-      now: () => "2026-07-16T00:00:00.000Z"
-    });
-  }
-
-  function mentionPayload(eventId: string) {
-    return {
-      type: "event_callback" as const,
-      team_id: "T123",
-      event_id: eventId,
-      authorizations: [{ user_id: "UBOT" }],
-      event: {
-        type: "app_mention" as const,
-        channel: "C123",
-        user: "U456",
-        text: "<@UBOT> fix the bug",
-        ts: "1719187200.000100"
-      }
-    };
-  }
-
-  it("drops a duplicate delivery of the same event_id and runs the handler only once", async () => {
-    const runs: string[] = [];
-    const processor = dedupProcessor({ runs });
-
-    const first = await processor.process(mentionPayload("EvDup1"), { agentId: "opentag" });
-    const second = await processor.process(mentionPayload("EvDup1"), { agentId: "opentag" });
-
-    expect(first.body).toMatchObject({ ok: true });
-    expect(first.body).not.toHaveProperty("ignored", "duplicate_event");
-    expect(second.body).toEqual({ ok: true, ignored: "duplicate_event" });
-    expect(runs).toHaveLength(1);
-  });
-
-  it("processes two different event_ids independently (no false dedup)", async () => {
-    const runs: string[] = [];
-    const processor = dedupProcessor({ runs });
-
-    const first = await processor.process(mentionPayload("EvDup2"), { agentId: "opentag" });
-    const second = await processor.process(mentionPayload("EvDup3"), { agentId: "opentag" });
-
-    expect(first.body).toMatchObject({ ok: true });
-    expect(second.body).toMatchObject({ ok: true });
-    expect(second.body).not.toHaveProperty("ignored", "duplicate_event");
-    expect(runs).toHaveLength(2);
-  });
-
-  it("evicts the oldest event_id after the 1000-entry bound", async () => {
-    const runs: string[] = [];
-    const processor = dedupProcessor({ runs });
-    await processor.process(mentionPayload("EvOldest"), { agentId: "opentag" });
-    for (let index = 0; index < 1000; index += 1) {
-      await processor.process(mentionPayload(`EvFill${index}`), { agentId: "opentag" });
-    }
-
-    const retriedOldest = await processor.process(mentionPayload("EvOldest"), { agentId: "opentag" });
-    expect(retriedOldest.body).not.toHaveProperty("ignored", "duplicate_event");
-    expect(runs).toHaveLength(1002);
-  });
-});
-
 describe("Slack /linear self-service command", () => {
   type Reply = { channelId: string; threadTs: string; text: string; textFormat?: "mrkdwn" };
 
@@ -216,22 +146,6 @@ describe("Slack /linear self-service command", () => {
       expect(replies[0]!.text).toContain("OpenTag project backlog");
     }
   );
-
-  it("deduplicates retried /linear deliveries before a second query or reply", async () => {
-    const replies: Reply[] = [];
-    const runs: string[] = [];
-    const linearCalls: number[] = [];
-    const processor = linearProcessor({ replies, runs, linearCalls });
-
-    const first = await processor.process(mentionEvent("<@UBOT> /linear"), { agentId: "opentag" });
-    const retry = await processor.process(mentionEvent("<@UBOT> /linear"), { agentId: "opentag" });
-
-    expect(first.body).toMatchObject({ ok: true, selfService: "linear" });
-    expect(retry.body).toEqual({ ok: true, ignored: "duplicate_event" });
-    expect(linearCalls).toHaveLength(1);
-    expect(replies).toHaveLength(1);
-    expect(runs).toHaveLength(0);
-  });
 
   it("passes Slack identity context with binding:null and never resolves a Project Target binding", async () => {
     const contexts: unknown[] = [];

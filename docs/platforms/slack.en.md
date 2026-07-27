@@ -255,6 +255,14 @@ OpenTag reads a Linear credential or calls Linear, and there is no global
 project fallback from `platforms.linear.projectId` or
 `OPENTAG_LINEAR_PROJECT_ID`.
 
+In Events API mode, only an exact `@OpenTag /linear` or `@OpenTag linear` query
+uses the bounded asynchronous query lane. The lane is best effort: it is drained
+on graceful shutdown, returns `503` when full, and may lose an acknowledged
+query if the process exits abruptly. Re-run `/linear` in that case. Run
+creation, stop/bind/unbind commands, approvals, and interactive buttons remain
+outside this lane and finish processing before OpenTag returns their HTTP
+response.
+
 For query-only credentials, prefer
 `platforms.linear.connections.default.token`. That credential only powers
 backlog reads and does not create an Agent Run or enable Linear mutations. A

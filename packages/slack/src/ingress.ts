@@ -4,7 +4,13 @@ import { createOpenTagClient } from "@opentag/client";
 import { DEFAULT_MAX_REQUEST_BODY_BYTES, RequestBodyTooLargeError, readRequestTextWithLimit } from "@opentag/core";
 import { Hono } from "hono";
 import { createSlackDispatcherEventProcessorInput, type SlackChannelPrincipalConfig } from "./dispatcher-events.js";
-import { createSlackEventProcessor, type SlackAppRuntimeConfig, type SlackEventProcessorInput, type SlackIngressPayload } from "./events.js";
+import {
+  createSlackEventProcessor,
+  isSlackLinearBacklogQuery,
+  type SlackAppRuntimeConfig,
+  type SlackEventProcessorInput,
+  type SlackIngressPayload
+} from "./events.js";
 
 export type SlackEventsAppInput = {
   slackApps: Array<
@@ -20,8 +26,8 @@ export type SlackEventsAppInput = {
     payload?: Record<string, unknown>;
   }): Promise<void>;
   maxRequestBodyBytes?: number;
-  maxAsyncConcurrency?: number;
-  maxAsyncOutstanding?: number;
+  maxLinearQueryConcurrency?: number;
+  maxLinearQueryOutstanding?: number;
 } & SlackEventProcessorInput;
 
 export type SlackEventsApiIngressConfig = {
@@ -35,16 +41,16 @@ export type SlackEventsApiIngressConfig = {
   bindingAdminUserIds?: string[];
   runTimeoutMs?: number;
   maxRequestBodyBytes?: number;
-  maxAsyncConcurrency?: number;
-  maxAsyncOutstanding?: number;
+  maxLinearQueryConcurrency?: number;
+  maxLinearQueryOutstanding?: number;
   linear?: SlackEventProcessorInput["linear"];
 } & SlackChannelPrincipalConfig;
 
 export type SlackIngressConfig = SlackEventsApiIngressConfig;
 
-
-const DEFAULT_SLACK_ASYNC_CONCURRENCY = 8;
-const DEFAULT_SLACK_ASYNC_MAX_OUTSTANDING = 100;
+const DEFAULT_LINEAR_QUERY_CONCURRENCY = 8;
+const DEFAULT_LINEAR_QUERY_MAX_OUTSTANDING = 100;
+const MAX_COMPLETED_LINEAR_QUERY_EVENT_IDS = 1000;
 
 type AsyncTask = () => Promise<void>;
 
@@ -60,7 +66,15 @@ function createBoundedAsyncExecutor(input: {
   onError(error: unknown): void;
 }) {
   let active = 0;
+  let accepting = true;
   const queue: AsyncTask[] = [];
+  const idleWaiters = new Set<() => void>();
+
+  function resolveIdleWaiters(): void {
+    if (active !== 0 || queue.length !== 0) return;
+    for (const resolve of idleWaiters) resolve();
+    idleWaiters.clear();
+  }
 
   function drain(): void {
     while (active < input.concurrency && queue.length > 0) {
@@ -72,25 +86,31 @@ function createBoundedAsyncExecutor(input: {
         .finally(() => {
           active -= 1;
           drain();
+          resolveIdleWaiters();
         });
     }
   }
 
   return {
     tryEnqueue(task: AsyncTask): boolean {
-      if (active + queue.length >= input.maxOutstanding) return false;
+      if (!accepting || active + queue.length >= input.maxOutstanding) return false;
       queue.push(task);
       drain();
       return true;
+    },
+    closeAndDrain(): Promise<void> {
+      accepting = false;
+      if (active === 0 && queue.length === 0) return Promise.resolve();
+      return new Promise((resolve) => idleWaiters.add(resolve));
     }
   };
 }
 
-function recordSlackAsyncQueueFull(input: {
+function recordSlackLinearQueryQueueFull(input: {
   recordControlPlaneEvent?: SlackEventsAppInput["recordControlPlaneEvent"];
   apiAppId?: string;
-  maxAsyncConcurrency: number;
-  maxAsyncOutstanding: number;
+  maxLinearQueryConcurrency: number;
+  maxLinearQueryOutstanding: number;
 }): void {
   void (async () => {
     try {
@@ -101,9 +121,10 @@ function recordSlackAsyncQueueFull(input: {
         payload: {
           provider: "slack",
           endpoint: "POST /slack/events",
-          reason: "async_queue_full",
-          maxAsyncConcurrency: input.maxAsyncConcurrency,
-          maxAsyncOutstanding: input.maxAsyncOutstanding,
+          lane: "linear_query",
+          reason: "linear_query_queue_full",
+          maxLinearQueryConcurrency: input.maxLinearQueryConcurrency,
+          maxLinearQueryOutstanding: input.maxLinearQueryOutstanding,
           ...(input.apiAppId ? { apiAppId: input.apiAppId } : {})
         }
       });
@@ -116,6 +137,11 @@ function recordSlackAsyncQueueFull(input: {
 export type SlackIngressHandle = {
   url: string;
   server: ReturnType<typeof serve>;
+  close(): Promise<void>;
+};
+
+export type SlackEventsAppRuntime = {
+  app: Hono;
   close(): Promise<void>;
 };
 
@@ -263,27 +289,36 @@ function isSlackIngressPayload(value: unknown): value is SlackIngressPayload {
   return isSlackEventEnvelope(value) || isSlackInteractivePayload(value);
 }
 
-export function createSlackEventsApp(input: SlackEventsAppInput) {
+export function createSlackEventsAppRuntime(input: SlackEventsAppInput): SlackEventsAppRuntime {
   const app = new Hono();
   const processor = createSlackEventProcessor(input);
   const maxRequestBodyBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
-  const maxAsyncConcurrency = positiveInteger(
-    input.maxAsyncConcurrency,
-    DEFAULT_SLACK_ASYNC_CONCURRENCY,
-    "maxAsyncConcurrency"
+  const maxLinearQueryConcurrency = positiveInteger(
+    input.maxLinearQueryConcurrency,
+    DEFAULT_LINEAR_QUERY_CONCURRENCY,
+    "maxLinearQueryConcurrency"
   );
-  const maxAsyncOutstanding = positiveInteger(
-    input.maxAsyncOutstanding,
-    DEFAULT_SLACK_ASYNC_MAX_OUTSTANDING,
-    "maxAsyncOutstanding"
+  const maxLinearQueryOutstanding = positiveInteger(
+    input.maxLinearQueryOutstanding,
+    DEFAULT_LINEAR_QUERY_MAX_OUTSTANDING,
+    "maxLinearQueryOutstanding"
   );
-  const asyncExecutor = createBoundedAsyncExecutor({
-    concurrency: maxAsyncConcurrency,
-    maxOutstanding: maxAsyncOutstanding,
+  const linearQueryExecutor = createBoundedAsyncExecutor({
+    concurrency: maxLinearQueryConcurrency,
+    maxOutstanding: maxLinearQueryOutstanding,
     onError(error) {
-      console.error("[slack] async event processing failed:", error);
+      console.error("[slack] async /linear query processing failed:", error);
     }
   });
+  const pendingLinearQueryEventIds = new Set<string>();
+  const completedLinearQueryEventIds = new Set<string>();
+
+  function rememberCompletedLinearQuery(eventId: string): void {
+    completedLinearQueryEventIds.add(eventId);
+    if (completedLinearQueryEventIds.size <= MAX_COMPLETED_LINEAR_QUERY_EVENT_IDS) return;
+    const oldest = completedLinearQueryEventIds.values().next().value;
+    if (oldest !== undefined) completedLinearQueryEventIds.delete(oldest);
+  }
 
   function parseSlackPayload(rawBody: string, contentType?: string): unknown | null {
     try {
@@ -391,33 +426,46 @@ export function createSlackEventsApp(input: SlackEventsAppInput) {
       });
       return c.json({ error: resolvedSlackApp.error }, 401);
     }
-    if (payload.type === "url_verification") {
-      const result = await processor.process(payload, resolvedSlackApp.slackApp, { signatureVerified: true });
-      if (result.kind === "text") {
-        return c.text(result.body, result.status);
+    if (isSlackLinearBacklogQuery(payload)) {
+      if (pendingLinearQueryEventIds.has(payload.event_id) || completedLinearQueryEventIds.has(payload.event_id)) {
+        return c.json({ ok: true, ignored: "duplicate_linear_query" }, 200);
       }
-      return c.json(result.body, result.status);
-    }
-    // Reserve a bounded async slot before ACKing. Accepted work is processed
-    // out-of-band so slow Linear/dispatcher/Slack calls cannot consume Slack's
-    // three-second acknowledgement window. A full queue returns 503 so Slack
-    // can retry instead of allowing unbounded detached promises to accumulate.
-    const accepted = asyncExecutor.tryEnqueue(async () => {
-      await processor.process(payload, resolvedSlackApp.slackApp, { signatureVerified: true });
-    });
-    if (!accepted) {
-      recordSlackAsyncQueueFull({
+      pendingLinearQueryEventIds.add(payload.event_id);
+      const accepted = linearQueryExecutor.tryEnqueue(async () => {
+        try {
+          await processor.process(payload, resolvedSlackApp.slackApp, { signatureVerified: true });
+          rememberCompletedLinearQuery(payload.event_id);
+        } finally {
+          pendingLinearQueryEventIds.delete(payload.event_id);
+        }
+      });
+      if (!accepted) pendingLinearQueryEventIds.delete(payload.event_id);
+      if (accepted) return c.json({ ok: true }, 200);
+
+      recordSlackLinearQueryQueueFull({
         recordControlPlaneEvent: input.recordControlPlaneEvent,
         ...(payload.api_app_id ? { apiAppId: payload.api_app_id } : {}),
-        maxAsyncConcurrency,
-        maxAsyncOutstanding
+        maxLinearQueryConcurrency,
+        maxLinearQueryOutstanding
       });
-      return c.json({ error: "slack_async_queue_full" }, 503);
+      return c.json({ error: "slack_linear_query_queue_full" }, 503);
     }
-    return c.json({ ok: true }, 200);
+
+    const result = await processor.process(payload, resolvedSlackApp.slackApp, { signatureVerified: true });
+    if (result.kind === "text") return c.text(result.body, result.status);
+    return c.json(result.body, result.status);
   });
 
-  return app;
+  return {
+    app,
+    close() {
+      return linearQueryExecutor.closeAndDrain();
+    }
+  };
+}
+
+export function createSlackEventsApp(input: SlackEventsAppInput) {
+  return createSlackEventsAppRuntime(input).app;
 }
 
 export function startSlackIngress(config: SlackEventsApiIngressConfig): SlackIngressHandle {
@@ -426,32 +474,37 @@ export function startSlackIngress(config: SlackEventsApiIngressConfig): SlackIng
     dispatcherUrl: config.dispatcherUrl,
     ...(config.dispatcherToken ? { pairingToken: config.dispatcherToken } : {})
   });
+  const eventsApp = createSlackEventsAppRuntime({
+    slackApps: [
+      {
+        signingSecret: config.signingSecret,
+        agentId: config.agentId ?? "opentag",
+        ...(config.appId ? { appId: config.appId } : {}),
+        ...(config.callbackUri ? { callbackUri: config.callbackUri } : {})
+      }
+    ],
+    ...(config.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
+    ...(config.maxLinearQueryConcurrency !== undefined
+      ? { maxLinearQueryConcurrency: config.maxLinearQueryConcurrency }
+      : {}),
+    ...(config.maxLinearQueryOutstanding !== undefined
+      ? { maxLinearQueryOutstanding: config.maxLinearQueryOutstanding }
+      : {}),
+    async recordControlPlaneEvent(event) {
+      await dispatcherClient.recordControlPlaneEvent(event);
+    },
+    ...createSlackDispatcherEventProcessorInput(config)
+  });
   const server = serve({
-    fetch: createSlackEventsApp({
-      slackApps: [
-        {
-          signingSecret: config.signingSecret,
-          agentId: config.agentId ?? "opentag",
-          ...(config.appId ? { appId: config.appId } : {}),
-          ...(config.callbackUri ? { callbackUri: config.callbackUri } : {})
-        }
-      ],
-      ...(config.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
-      ...(config.maxAsyncConcurrency !== undefined ? { maxAsyncConcurrency: config.maxAsyncConcurrency } : {}),
-      ...(config.maxAsyncOutstanding !== undefined ? { maxAsyncOutstanding: config.maxAsyncOutstanding } : {}),
-      async recordControlPlaneEvent(event) {
-        await dispatcherClient.recordControlPlaneEvent(event);
-      },
-      ...createSlackDispatcherEventProcessorInput(config)
-    }).fetch,
+    fetch: eventsApp.app.fetch,
     port
   });
 
   return {
     url: `http://localhost:${port}`,
     server,
-    close() {
-      return new Promise((resolve, reject) => {
+    async close() {
+      const serverClosed = new Promise<void>((resolve, reject) => {
         server.close((error?: Error) => {
           if (error) {
             reject(error);
@@ -460,6 +513,7 @@ export function startSlackIngress(config: SlackEventsApiIngressConfig): SlackIng
           resolve();
         });
       });
+      await Promise.all([serverClosed, eventsApp.close()]);
     }
   };
 }

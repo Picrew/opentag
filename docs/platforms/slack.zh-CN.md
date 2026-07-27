@@ -254,6 +254,13 @@ entry 中指定这个 channel 可以查询的 Linear `projectId`。未列入 all
 `platforms.linear.projectId` 和 `OPENTAG_LINEAR_PROJECT_ID` 都不会作为全局
 project fallback。
 
+在 Events API 模式里，只有精确的 `@OpenTag /linear` 或 `@OpenTag linear`
+查询会进入受限的异步 query lane。这个 lane 是 best-effort：正常关闭时会
+drain 已接收查询，队列满时返回 `503`；如果进程突然退出，已经 ACK 的查询
+仍可能丢失，此时可以安全地重新执行 `/linear`。创建 run、stop/bind/unbind、
+审批和交互按钮都不会进入这条内存队列；OpenTag 会等它们处理完成后再返回
+对应的 Events API HTTP 响应。
+
 query-only credential 建议配置在
 `platforms.linear.connections.default.token`。它只能用于 backlog read，
 不会创建 Agent Run，也不会启用 Linear mutation；query-only 配置不需要
