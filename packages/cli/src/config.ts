@@ -353,6 +353,21 @@ const LinearAuthSchema = z.discriminatedUnion("method", [
     .strict()
 ]);
 
+const LinearChannelSchema = z
+  .object({
+    teamId: z.string().trim().min(1),
+    channelId: z.string().trim().min(1),
+    projectId: z.string().trim().min(1),
+    connection: z.string().trim().min(1).optional()
+  })
+  .strict();
+
+const LinearConnectionSchema = z
+  .object({
+    token: SecretStringSchema
+  })
+  .strict();
+
 const LinearPlatformSchema = z
   .object({
     token: SecretStringSchema.optional(),
@@ -360,6 +375,9 @@ const LinearPlatformSchema = z
     webhookSecret: SecretStringSchema.optional(),
     teamId: z.string().min(1).optional(),
     teamKey: z.string().min(1).optional(),
+    projectId: z.string().min(1).optional(),
+    channels: z.array(LinearChannelSchema).optional(),
+    connections: z.record(z.string().trim().min(1), LinearConnectionSchema).optional(),
     graphqlUrl: z.string().url().optional(),
     webhookPath: z.string().min(1).optional(),
     port: OptionalPortSchema,
@@ -375,19 +393,41 @@ const LinearPlatformSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    const seenChannels = new Set<string>();
+    value.channels?.forEach((channel, index) => {
+      const key = `${channel.teamId}\u0000${channel.channelId}`;
+      if (seenChannels.has(key)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["channels", index],
+          message: `Duplicate Linear channel mapping for ${channel.teamId}/${channel.channelId}.`
+        });
+      }
+      seenChannels.add(key);
+    });
+
     if (value.auth?.method === "hosted_oauth_app") return;
-    if (!value.token) {
+
+    const hasConnectionToken = Object.keys(value.connections ?? {}).length > 0;
+    if (value.webhookSecret && !value.token) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["token"],
-        message: "Linear token is required unless auth.method is hosted_oauth_app."
+        message: "Linear webhook/apply configuration requires the top-level Linear token. connections.*.token is query-only."
+      });
+    } else if (!value.token && !hasConnectionToken) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["token"],
+        message: "Linear token or connections.*.token is required unless auth.method is hosted_oauth_app."
       });
     }
-    if (!value.webhookSecret) {
+    if (!value.webhookSecret && !value.projectId && !value.channels?.length) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["webhookSecret"],
-        message: "Linear webhookSecret is required unless auth.method is hosted_oauth_app."
+        message:
+          "Linear webhookSecret is required unless auth.method is hosted_oauth_app or the config is query-only (projectId or channels set)."
       });
     }
   });

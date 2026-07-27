@@ -78,6 +78,46 @@ describe("OpenTag CLI doctor relay checks", () => {
     expect(formatted).toContain("WARN relay token scope: This self-hosted MVP still uses the daemon pairing token for registration and runner calls");
   });
 
+  it("warns when legacy global Linear projectId does not authorize /linear and redacts credentials", () => {
+    const built = relayConfig("https://relay.example");
+    built.platforms.slack = {
+      mode: "events_api",
+      signingSecret: "slack_secret",
+      botToken: "xoxb-secret",
+      teamId: "T123",
+      channelId: "C123"
+    } as never;
+    built.platforms.linear = { token: "lin_supersecret", projectId: "legacy_project" } as never;
+
+    const formatted = formatCliDoctorChecks(appendCliDoctorChecks(built, []));
+    expect(formatted).toContain("WARN Linear /linear channel mapping:");
+    expect(formatted).toContain("platforms.linear.projectId no longer authorizes Slack channels");
+    expect(formatted).not.toContain("lin_supersecret");
+  });
+
+  it("warns once per unsupported Linear connection without exposing its token", () => {
+    const built = relayConfig("https://relay.example");
+    built.platforms.slack = {
+      mode: "events_api",
+      signingSecret: "slack_secret",
+      botToken: "xoxb-secret",
+      teamId: "T123",
+      channelId: "C123"
+    } as never;
+    built.platforms.linear = {
+      connections: { other: { token: "lin_other_secret" } },
+      channels: [
+        { teamId: "T123", channelId: "C1", projectId: "P1", connection: "other" },
+        { teamId: "T123", channelId: "C2", projectId: "P2", connection: "other" }
+      ]
+    } as never;
+
+    const formatted = formatCliDoctorChecks(appendCliDoctorChecks(built, []));
+    expect(formatted.match(/WARN Linear workspace connection:/gu)).toHaveLength(1);
+    expect(formatted).toContain("connection other");
+    expect(formatted).not.toContain("lin_other_secret");
+  });
+
   it("fails legacy public HTTP relay configs", () => {
     const formatted = formatCliDoctorChecks(appendCliDoctorChecks(relayConfig("http://relay.example"), []));
 

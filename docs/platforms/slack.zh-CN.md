@@ -246,6 +246,28 @@ Slack 自服务命令仍然围绕 Project Target：
 
 这些命令不接受本机绝对 checkout 路径。本机路径只应该留在 runner config 和 allowlist 里，不应该写进 Slack 历史。Slack channel 的绑定变更还要求发送者的 Slack user id 出现在 `OPENTAG_SLACK_BINDING_ADMIN_USER_IDS`；否则应从本机配置或 dispatcher API 更新绑定。详细过程和 audit 数据默认留在本机；需要更深排查时用 `opentag status --run <run_id>` 或 `opentag service status`。
 
+只读的 `@OpenTag /linear` 命令使用独立的 channel allowlist，不会把
+repository Project Target binding 当作授权依据。请在
+`platforms.linear.channels` 中加入精确匹配的 `(teamId, channelId)`，并在该
+entry 中指定这个 channel 可以查询的 Linear `projectId`。未列入 allowlist
+的 channel 会在读取 Linear credential 或调用 Linear API 之前被拒绝；
+`platforms.linear.projectId` 和 `OPENTAG_LINEAR_PROJECT_ID` 都不会作为全局
+project fallback。
+
+在 Events API 模式里，只有精确的 `@OpenTag /linear` 或 `@OpenTag linear`
+查询会进入受限的异步 query lane。这个 lane 是 best-effort：正常关闭时会
+最多等待 30 秒 drain 已接收查询，队列满时返回 `503`；超过 drain 上限或
+进程突然退出时，已经 ACK 的查询仍可能丢失，此时可以安全地重新执行
+`/linear`。创建 run、stop/bind/unbind、
+审批和交互按钮都不会进入这条内存队列；OpenTag 会等它们处理完成后再返回
+对应的 Events API HTTP 响应。
+
+query-only credential 建议配置在
+`platforms.linear.connections.default.token`。它只能用于 backlog read，
+不会创建 Agent Run，也不会启用 Linear mutation；query-only 配置不需要
+`webhookSecret`。可选的 `connection` 字段目前只支持 `default`，其他名称会
+fail closed，不会回退到别的 workspace token。
+
 当 OpenTag 发出 suggested actions 时，先看 receipt state。如果显示 **Ready to apply**，可以在 Slack 里点击 **Apply 1**，也可以在线程里手动回复 `apply 1`。两种方式都会应用同一个 source-thread action。
 如果 receipt 显示 **Needs setup**，OpenTag 会显示 **Continue** 或 setup hint，而不是把 **Apply 1** 当成主路径。想让 Slack receipt 直接创建 PR，需要先配置 GitHub repository target。
 

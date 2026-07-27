@@ -664,6 +664,7 @@ webhook path for hosted Linear OAuth App installs.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `OPENTAG_LINEAR_API_KEY` / `OPENTAG_LINEAR_TOKEN` | none | Linear OAuth access token or raw `lin_api_...` API key used for callbacks and direct issue apply; OAuth tokens may include or omit the `Bearer ` prefix |
+| `OPENTAG_LINEAR_PROJECT_ID` | none | Legacy project fallback for older query integrations. It does **not** authorize or route Slack `/linear`; use `platforms.linear.channels` instead. |
 | `OPENTAG_LINEAR_GRAPHQL_URL` | `https://api.linear.app/graphql` | Optional Linear GraphQL endpoint override |
 | `OPENTAG_LINEAR_WEBHOOK_SECRET` | none | Enables dispatcher-mounted Linear webhook ingress and verifies `Linear-Signature` |
 | `OPENTAG_LINEAR_WEBHOOK_PATH` | `/linear/webhooks` | Public Linear webhook path |
@@ -846,6 +847,54 @@ before the daemon can claim and execute runs for it. Binding changes require
 the sender's Slack user id to be listed in
 `OPENTAG_SLACK_BINDING_ADMIN_USER_IDS`, or the channel binding must be updated
 from local config or the dispatcher API.
+
+Slack source-thread queries can list unfinished Linear issues with `/linear`
+(or the bare mention `@OpenTag linear`). The command is deterministic and
+read-only: it does not create an Agent Run, does not modify Linear, and replies
+in the original thread with issue identifiers, titles, states, priorities,
+URLs, the query timestamp, and an explicit truncation notice above 20 results.
+
+Events API delivery keeps this read-only query in its own bounded, best-effort
+lane. OpenTag acknowledges an admitted `/linear` query before the Linear request
+finishes, returns `503` when that query lane is full, suppresses duplicate
+pending or completed query deliveries by Slack `event_id`, and drains admitted
+queries for up to 30 seconds during graceful shutdown. Work still running after
+that bound, or an abrupt process loss, can drop an already acknowledged query;
+users can safely run the read-only command again.
+Run creation, `/stop`, `/bind`, `/unbind`, thread approvals, and interactive
+actions do not use this in-memory lane: their Events API response waits for the
+processor result, so a failure is not converted into a successful ACK.
+
+`platforms.linear.channels` is the required Slack allowlist and project router.
+There is no global/default project for `/linear`: both `teamId` and `channelId`
+must match an entry exactly, and that entry's `projectId` is the only project
+queried. Legacy `platforms.linear.projectId` and `OPENTAG_LINEAR_PROJECT_ID`
+values do not authorize a Slack channel.
+
+```json
+{
+  "platforms": {
+    "linear": {
+      "connections": {
+        "default": { "token": { "kind": "env", "name": "OPENTAG_LINEAR_API_KEY" } }
+      },
+      "channels": [
+        { "teamId": "T123", "channelId": "C123", "projectId": "project-id", "connection": "default" }
+      ]
+    }
+  }
+}
+```
+
+`connections.default.token` is query-only and can never enable Linear apply or
+webhook mutations. A query-only config needs no `webhookSecret`. Mutation and
+webhook paths continue to require the top-level `platforms.linear.token` plus
+their existing explicit configuration. Omitting `connection` selects
+`default`; other connection names are accepted for forward-compatible config
+but fail closed at runtime until multi-workspace querying is implemented.
+For an authorized channel, query token precedence is the live OAuth token
+provider, `connections.default.token`, top-level `platforms.linear.token`,
+`OPENTAG_LINEAR_API_KEY`, then `OPENTAG_LINEAR_TOKEN`.
 
 ## Lark Ingress Environment
 

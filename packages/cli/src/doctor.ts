@@ -3,6 +3,7 @@ import { doctorHasFailures, executorsFromConfig, runDoctor, type DoctorCheck } f
 import { formatConfiguredCapabilities } from "./catalogs/capabilities.js";
 import type { PlatformId } from "./catalogs/platforms.js";
 import { defaultConfigPath, readCliConfig, readRedactedCliConfig, redactedCliConfig } from "./config.js";
+import { linearBacklogConfigDiagnostics } from "./linear-backlog-config.js";
 import { relaySecurityChecksFromConfig } from "./relay-security.js";
 import { formatSecretReadiness } from "./secret-readiness.js";
 
@@ -38,6 +39,11 @@ export function appendCliDoctorChecks(config: ReturnType<typeof readCliConfig>, 
       status: check.status,
       name: check.name,
       message: check.message
+    })),
+    ...linearBacklogConfigDiagnostics(config).map((diagnostic) => ({
+      status: "warn" as const,
+      name: diagnostic.code === "legacy-project-id" ? "Linear /linear channel mapping" : "Linear workspace connection",
+      message: diagnostic.message
     }))
   ];
 }

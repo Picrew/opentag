@@ -163,6 +163,48 @@ describe("Slack dispatcher-backed self-service", () => {
     expect(JSON.stringify(requests[1]?.body)).toContain("timeout policy: hard timeout after 45 second(s).");
   });
 
+  it("posts a reply with textFormat: mrkdwn without re-escaping a hand-built Slack link", async () => {
+    const requests: Array<{ url: string; authorization?: string; body?: unknown }> = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      const headers = init?.headers as Record<string, string> | undefined;
+      requests.push({
+        url: href,
+        ...(headers?.authorization ? { authorization: headers.authorization } : {}),
+        ...(typeof init?.body === "string" ? { body: JSON.parse(init.body) as unknown } : {})
+      });
+      if (href === "https://slack.com/api/chat.postMessage") {
+        return Response.json({ ok: true, ts: "1719187201.000100" });
+      }
+      return Response.json({ error: "unexpected_url" }, { status: 500 });
+    }) as unknown as typeof fetch;
+
+    const processorInput = createSlackDispatcherEventProcessorInput({
+      dispatcherUrl: "http://dispatcher.test",
+      botToken: "xoxb-test",
+      fetchImpl
+    });
+
+    await processorInput.reply!({
+      channelId: "C123",
+      threadTs: "1719187200.000100",
+      text: "<https://x|A>",
+      textFormat: "mrkdwn"
+    });
+
+    expect(requests).toEqual([
+      expect.objectContaining({
+        url: "https://slack.com/api/chat.postMessage",
+        authorization: "Bearer xoxb-test",
+        body: expect.objectContaining({
+          channel: "C123",
+          thread_ts: "1719187200.000100",
+          text: "<https://x|A>"
+        })
+      })
+    ]);
+  });
+
   it("cancels a specific run through the dispatcher", async () => {
     const requests: Array<{ url: string; authorization?: string; body?: unknown }> = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -385,5 +427,18 @@ describe("Slack dispatcher-backed self-service", () => {
         authorization: "Bearer dispatcher_token"
       }
     ]);
+  });
+});
+
+describe("linear handler passthrough", () => {
+  it("copies the configured linear handler into the processor input", () => {
+    const linear = async () => "backlog";
+    const input = createSlackDispatcherEventProcessorInput({ dispatcherUrl: "http://localhost:3030", linear });
+    expect(input.linear).toBe(linear);
+  });
+
+  it("leaves linear undefined when not configured", () => {
+    const input = createSlackDispatcherEventProcessorInput({ dispatcherUrl: "http://localhost:3030" });
+    expect(input.linear).toBeUndefined();
   });
 });

@@ -693,3 +693,185 @@ describe("OpenTag CLI config", () => {
     });
   });
 });
+
+describe("query-only Linear platform config (AMP-153)", () => {
+  it("accepts token + projectId without webhookSecret", () => {
+    const source = config();
+    source.platforms.linear = { token: "lin_api_secret", projectId: "proj_123" } as never;
+    const parsed = parseCliConfig(JSON.parse(JSON.stringify(source)));
+    expect(parsed.platforms.linear?.projectId).toBe("proj_123");
+    expect(parsed.platforms.linear?.webhookSecret).toBeUndefined();
+  });
+
+  it("still rejects a Linear config with neither webhookSecret nor projectId", () => {
+    const source = config();
+    source.platforms.linear = { token: "lin_api_secret" } as never;
+    expect(() => parseCliConfig(JSON.parse(JSON.stringify(source)))).toThrow(/webhookSecret/);
+  });
+
+  it("still rejects a Linear config without a token", () => {
+    const source = config();
+    source.platforms.linear = { projectId: "proj_123" } as never;
+    expect(() => parseCliConfig(JSON.parse(JSON.stringify(source)))).toThrow(/token/);
+  });
+});
+
+describe("Linear backlog channel config", () => {
+  it("parses query-only channels and default connection credentials without a webhook secret", () => {
+    const source = config();
+    const parsed = parseCliConfig({
+      ...source,
+      platforms: {
+        ...source.platforms,
+        linear: {
+          connections: { default: { token: "lin_query_only" } },
+          channels: [{ teamId: " T123 ", channelId: " C123 ", projectId: " project_1 " }]
+        }
+      }
+    });
+
+    expect(parsed.platforms.linear).toMatchObject({
+      connections: { default: { token: "lin_query_only" } },
+      channels: [{ teamId: "T123", channelId: "C123", projectId: "project_1" }]
+    });
+    expect(parsed.platforms.linear?.webhookSecret).toBeUndefined();
+  });
+
+  it("resolves a SecretRef used by connections.default.token", () => {
+    const previous = process.env.OPENTAG_TEST_LINEAR_QUERY_TOKEN;
+    process.env.OPENTAG_TEST_LINEAR_QUERY_TOKEN = "lin_from_env";
+    try {
+      const source = config();
+      const parsed = parseCliConfig({
+        ...source,
+        platforms: {
+          ...source.platforms,
+          linear: {
+            connections: { default: { token: { kind: "env", name: "OPENTAG_TEST_LINEAR_QUERY_TOKEN" } } },
+            channels: [{ teamId: "T123", channelId: "C123", projectId: "project_1" }]
+          }
+        }
+      });
+
+      expect(parsed.platforms.linear?.connections?.default?.token).toBe("lin_from_env");
+    } finally {
+      if (previous === undefined) delete process.env.OPENTAG_TEST_LINEAR_QUERY_TOKEN;
+      else process.env.OPENTAG_TEST_LINEAR_QUERY_TOKEN = previous;
+    }
+  });
+
+  it("rejects a channel mapping without projectId", () => {
+    const source = config();
+    expect(() =>
+      parseCliConfig({
+        ...source,
+        platforms: {
+          ...source.platforms,
+          linear: {
+            token: "lin_query_only",
+            channels: [{ teamId: "T123", channelId: "C123" }]
+          }
+        }
+      })
+    ).toThrow(/projectId/iu);
+  });
+
+  it("rejects duplicate team/channel mappings after trimming", () => {
+    const source = config();
+    expect(() =>
+      parseCliConfig({
+        ...source,
+        platforms: {
+          ...source.platforms,
+          linear: {
+            token: "lin_query_only",
+            channels: [
+              { teamId: "T123", channelId: "C123", projectId: "project_1" },
+              { teamId: " T123 ", channelId: " C123 ", projectId: "project_2" }
+            ]
+          }
+        }
+      })
+    ).toThrow(/Duplicate Linear channel mapping/iu);
+  });
+
+  it("accepts a non-default connection for fail-closed runtime handling", () => {
+    const source = config();
+    const parsed = parseCliConfig({
+      ...source,
+      platforms: {
+        ...source.platforms,
+        linear: {
+          connections: { workspace_two: { token: "lin_workspace_two" } },
+          channels: [{ teamId: "T123", channelId: "C123", projectId: "project_1", connection: "workspace_two" }]
+        }
+      }
+    });
+
+    expect(parsed.platforms.linear?.channels?.[0]?.connection).toBe("workspace_two");
+  });
+
+  it("keeps legacy projectId-only query config parseable", () => {
+    const source = config();
+    const parsed = parseCliConfig({
+      ...source,
+      platforms: { ...source.platforms, linear: { token: "lin_legacy", projectId: "project_legacy" } }
+    });
+
+    expect(parsed.platforms.linear?.projectId).toBe("project_legacy");
+  });
+
+  it("rejects channels config without any static credential or hosted OAuth", () => {
+    const source = config();
+    expect(() =>
+      parseCliConfig({
+        ...source,
+        platforms: {
+          ...source.platforms,
+          linear: { channels: [{ teamId: "T123", channelId: "C123", projectId: "project_1" }] }
+        }
+      })
+    ).toThrow(/token/iu);
+  });
+
+  it("does not allow a query-only connection token to power webhook mutations", () => {
+    const source = config();
+    expect(() =>
+      parseCliConfig({
+        ...source,
+        platforms: {
+          ...source.platforms,
+          linear: {
+            connections: { default: { token: "lin_query_only" } },
+            webhookSecret: "linear_webhook_secret",
+            projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" }
+          }
+        }
+      })
+    ).toThrow(/query-only/iu);
+  });
+
+  it.each(["teamId", "channelId", "projectId", "connection"] as const)("rejects a blank %s", (field) => {
+    const source = config();
+    const channel = { teamId: "T123", channelId: "C123", projectId: "project_1", connection: "default" };
+    channel[field] = "   ";
+    expect(() =>
+      parseCliConfig({
+        ...source,
+        platforms: { ...source.platforms, linear: { token: "lin_query_only", channels: [channel] } }
+      })
+    ).toThrow();
+  });
+
+  it("redacts nested connection tokens", () => {
+    const source = config();
+    source.platforms.linear = {
+      connections: { default: { token: "lin_nested_secret" } },
+      channels: [{ teamId: "T123", channelId: "C123", projectId: "project_1" }]
+    };
+
+    const text = JSON.stringify(redactedCliConfig(source));
+    expect(text).toContain("[REDACTED]");
+    expect(text).not.toContain("lin_nested_secret");
+  });
+});

@@ -247,6 +247,30 @@ Slack self-service commands stay Project Target based:
 
 These commands do not accept absolute local checkout paths. Local paths belong in runner config and allowlists, not in Slack history. Channel binding changes also require the sender's Slack user id to be listed in `OPENTAG_SLACK_BINDING_ADMIN_USER_IDS`; otherwise update bindings from local config or the dispatcher API. Detailed process and audit data stay local; use `opentag status --run <run_id>` or `opentag service status` for deeper inspection.
 
+The read-only `@OpenTag /linear` command uses a separate channel allowlist;
+it does not use the repository Project Target binding as authorization. Add an
+exact `(teamId, channelId)` entry under `platforms.linear.channels`, with the
+Linear `projectId` that channel may query. An unlisted channel is denied before
+OpenTag reads a Linear credential or calls Linear, and there is no global
+project fallback from `platforms.linear.projectId` or
+`OPENTAG_LINEAR_PROJECT_ID`.
+
+In Events API mode, only an exact `@OpenTag /linear` or `@OpenTag linear` query
+uses the bounded asynchronous query lane. The lane is best effort: it is drained
+for up to 30 seconds on graceful shutdown, returns `503` when full, and may lose
+an acknowledged query after that drain bound or if the process exits abruptly.
+Re-run `/linear` in that case. Run
+creation, stop/bind/unbind commands, approvals, and interactive buttons remain
+outside this lane and finish processing before OpenTag returns their HTTP
+response.
+
+For query-only credentials, prefer
+`platforms.linear.connections.default.token`. That credential only powers
+backlog reads and does not create an Agent Run or enable Linear mutations. A
+query-only setup does not need `webhookSecret`. The optional `connection` field
+currently supports only `default`; other names fail closed instead of falling
+back to another workspace token.
+
 When OpenTag posts suggested actions, follow the receipt state. If it says **Ready to apply**, click **Apply 1** in Slack or type `apply 1` in the thread. Both paths apply the same source-thread action.
 If the receipt says **Needs setup**, OpenTag will show **Continue** or a setup hint instead of presenting **Apply 1** as the primary path. Configure GitHub as a repository target before expecting Slack receipts to create PRs directly.
 

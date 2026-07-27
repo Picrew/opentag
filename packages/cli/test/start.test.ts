@@ -497,6 +497,33 @@ describe("OpenTag CLI start wiring", () => {
     });
   });
 
+  it("does not forward the Linear token to the dispatcher for a query-only Linear config", () => {
+    const built = linearConfig();
+    built.platforms.linear = { token: "lin_api_qo", projectId: "proj_qo" } as never;
+
+    expect(dispatcherRuntimeInputFromCliConfig(built)).not.toHaveProperty("linearToken");
+  });
+
+  it("does not forward a top-level token used only by channel-routed /linear queries", () => {
+    const built = slackConfig();
+    built.platforms.linear = {
+      token: "lin_query_only",
+      channels: [{ teamId: "T123", channelId: "C123", projectId: "proj_qo" }]
+    } as never;
+
+    expect(dispatcherRuntimeInputFromCliConfig(built)).not.toHaveProperty("linearToken");
+  });
+
+  it("does not forward connections.default query credentials to the dispatcher", () => {
+    const built = slackConfig();
+    built.platforms.linear = {
+      connections: { default: { token: "lin_query_only" } },
+      channels: [{ teamId: "T123", channelId: "C123", projectId: "proj_qo" }]
+    } as never;
+
+    expect(dispatcherRuntimeInputFromCliConfig(built)).not.toHaveProperty("linearToken");
+  });
+
   it("refreshes and persists Linear OAuth app tokens before they expire", async () => {
     const built = linearOAuthConfig();
     const configPath = join(tempDir(), "config.json");
@@ -583,6 +610,93 @@ describe("OpenTag CLI start wiring", () => {
     });
 
     expect(capturedTokenProvider).toEqual(expect.any(Function));
+  });
+
+  it("keeps query-only Linear OAuth refresh out of the dispatcher while preserving it for Slack /linear", async () => {
+    const built = slackConfig();
+    built.platforms.linear = {
+      token: "access_old",
+      auth: {
+        method: "oauth_app",
+        actor: "app",
+        clientId: "linear_client_id",
+        refreshToken: "refresh_old",
+        accessTokenExpiresAt: "2026-07-07T00:04:00.000Z"
+      },
+      channels: [{ teamId: "T123", channelId: "C123", projectId: "proj_query_only" }]
+    } as never;
+    let dispatcherInput: Parameters<NonNullable<StartRuntimeDependencies["startDispatcher"]>>[0] | undefined;
+    let linearHandler: ReturnType<typeof slackIngressConfigFromCliConfig>["linear"];
+    let refreshCalls = 0;
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async assertStartPortsAvailable() {},
+        startDispatcher(input) {
+          dispatcherInput = input;
+          return {
+            url: "http://localhost:3030",
+            server: {} as ReturnType<typeof import("@hono/node-server").serve>,
+            async close() {}
+          };
+        },
+        async waitForDispatcher() {},
+        async bootstrapDispatcher() {},
+        startSlackIngress(input) {
+          linearHandler = input.linear;
+          return {
+            url: "http://127.0.0.1:3040",
+            server: {} as ReturnType<typeof import("@hono/node-server").serve>,
+            async close() {}
+          };
+        },
+        async serveDaemon() {},
+        logger: { log() {} },
+        now: () => new Date("2026-07-07T00:00:00.000Z"),
+        readConfig() {
+          return built;
+        },
+        writeConfig() {},
+        async refreshLinearOAuthToken() {
+          refreshCalls += 1;
+          return { accessToken: "access_new", refreshToken: "refresh_new", expiresIn: 86_400 };
+        }
+      }
+    });
+
+    expect(dispatcherInput).not.toHaveProperty("linearToken");
+    expect(dispatcherInput).not.toHaveProperty("linearTokenProvider");
+    expect(linearHandler).toEqual(expect.any(Function));
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer access_new");
+      return new Response(
+        JSON.stringify({
+          data: {
+            project: { name: "opentag" },
+            issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } }
+          }
+        }),
+        { status: 200 }
+      );
+    });
+    try {
+      const reply = await linearHandler?.({
+        teamId: "T123",
+        channelId: "C123",
+        threadTs: "1.0",
+        userId: "U123",
+        binding: null
+      });
+      expect(typeof reply === "string" ? reply : reply?.text).toContain("0 open");
+      expect(refreshCalls).toBe(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("derives dispatcher input for Telegram from saved setup config", () => {
@@ -1395,5 +1509,37 @@ describe("OpenTag CLI start wiring", () => {
     expect(shouldRethrowAbortReason({ shutdownRequested: true, reason: new Error("AbortError") })).toBe(false);
     expect(shouldRethrowAbortReason({ shutdownRequested: false, reason: new Error("daemon crashed") })).toBe(true);
     expect(shouldRethrowAbortReason({ shutdownRequested: false, reason: "stopped" })).toBe(false);
+  });
+});
+
+describe("slack linear backlog wiring (AMP-153)", () => {
+  it("attaches a linear handler to the Socket Mode ingress config", () => {
+    const built = slackSocketModeConfig();
+    const ingressConfig = slackSocketModeIngressConfigFromCliConfig(built, { env: {} });
+    expect(typeof ingressConfig.linear).toBe("function");
+  });
+
+  it("attaches a linear handler to the Events API ingress config", () => {
+    const built = slackConfig();
+    const ingressConfig = slackIngressConfigFromCliConfig(built, { env: {} });
+    expect(typeof ingressConfig.linear).toBe("function");
+  });
+
+  it("still attaches a linear handler when a linearTokenProvider is threaded through Socket Mode config", () => {
+    const built = slackSocketModeConfig();
+    const ingressConfig = slackSocketModeIngressConfigFromCliConfig(built, {
+      env: {},
+      linearTokenProvider: async () => "fresh_token"
+    });
+    expect(typeof ingressConfig.linear).toBe("function");
+  });
+
+  it("still attaches a linear handler when a linearTokenProvider is threaded through Events API config", () => {
+    const built = slackConfig();
+    const ingressConfig = slackIngressConfigFromCliConfig(built, {
+      env: {},
+      linearTokenProvider: async () => "fresh_token"
+    });
+    expect(typeof ingressConfig.linear).toBe("function");
   });
 });

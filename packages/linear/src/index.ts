@@ -1,5 +1,6 @@
 export * from "./agent.js";
 export * from "./apply.js";
+export * from "./backlog.js";
 export * from "./discovery.js";
 export * from "./graphql.js";
 export * from "./ingress.js";

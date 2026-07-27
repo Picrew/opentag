@@ -16,6 +16,7 @@ export type SlackDispatcherEventConfig = {
   bindingAdminUserIds?: string[];
   runTimeoutMs?: number;
   fetchImpl?: typeof fetch;
+  linear?: SlackEventProcessorInput["linear"];
 } & SlackChannelPrincipalConfig;
 
 function assertSlackChannelPrincipalConfig(config: {
@@ -272,6 +273,7 @@ export function createSlackDispatcherEventProcessorInput(config: SlackDispatcher
         return doctorUnavailable({ teamId: input.teamId, channelId: input.channelId, binding: input.binding, error });
       }
     },
+    ...(config.linear ? { linear: config.linear } : {}),
     now: () => new Date().toISOString()
   };
   if (config.botToken) {
@@ -287,6 +289,7 @@ export function createSlackDispatcherEventProcessorInput(config: SlackDispatcher
             channelId: input.channelId,
             threadTs: input.threadTs,
             text: input.text,
+            ...(input.textFormat ? { textFormat: input.textFormat } : {}),
             ...(input.blocks?.length ? { blocks: input.blocks } : {})
           })
         )
