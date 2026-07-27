@@ -240,7 +240,7 @@ function githubFactTemplates(input: {
   };
   const provenance = (kind: string) => ({
     adapter: "@opentag/github",
-    adapterVersion: "0.7.0",
+    adapterVersion: "0.8.0",
     payloadDigest: factDigest(semanticDigest, kind),
     providerDeliveryId: input.snapshot.deliveryId
   });

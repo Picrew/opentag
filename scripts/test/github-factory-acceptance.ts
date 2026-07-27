@@ -6,11 +6,34 @@ import { OpenTagEventSchema, type OpenTagEvent } from "../../packages/core/src/i
 import { normalizeGitHubIssueComment, type GitHubIssueCommentInput } from "../../packages/github/src/index.js";
 
 type JsonObject = Record<string, unknown>;
+const TRUSTED_NPM_REGISTRY_ORIGIN = "https://registry.npmjs.org";
+
+export type GitHubFactoryRegistryRuntimeArtifact = {
+  expectedVersion: string;
+  package: "@opentag/cli";
+  version: string;
+  registry: string;
+  resolved: string;
+  integrity: string;
+  sourceNormalizer: {
+    package: "@opentag/github";
+    version: string;
+    resolved: string;
+    integrity: string;
+  };
+  eventSchema: {
+    package: "@opentag/core";
+    version: string;
+    resolved: string;
+    integrity: string;
+  };
+};
 
 export type GitHubFactoryAcceptanceEvidence = {
   recordedAt: string;
   repository: string;
   runtimeSource: "source_checkout" | "registry_install";
+  runtimeArtifact?: GitHubFactoryRegistryRuntimeArtifact;
   source: {
     issueUrl: string;
     mentionUrl: string;
@@ -135,6 +158,11 @@ function string(value: unknown, label: string): string {
   return value;
 }
 
+function isSha512Integrity(value: string): boolean {
+  const match = /^sha512-([A-Za-z0-9+/]+={0,2})$/u.exec(value);
+  return Boolean(match?.[1] && Buffer.from(match[1], "base64").byteLength === 64);
+}
+
 function number(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${label} must be a finite number.`);
   return value;
@@ -201,6 +229,78 @@ function invariant(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`GitHub factory acceptance failed: ${message}`);
 }
 
+function validateRegistryRuntimeArtifact(
+  runtimeSource: GitHubFactoryAcceptanceEvidence["runtimeSource"],
+  artifact: GitHubFactoryRegistryRuntimeArtifact | undefined
+): void {
+  if (runtimeSource === "source_checkout") {
+    invariant(!artifact, "source-checkout proof must not claim registry runtime artifact identity");
+    return;
+  }
+
+  invariant(artifact, "registry runtime artifact identity is missing");
+  invariant(artifact.package === "@opentag/cli", `registry runtime package is ${artifact.package}`);
+  invariant(artifact.expectedVersion.length > 0, "expected registry CLI version is missing");
+  invariant(
+    artifact.version === artifact.expectedVersion,
+    `registry CLI version ${artifact.version} does not match expected version ${artifact.expectedVersion}`
+  );
+  invariant(isSha512Integrity(artifact.integrity), "registry CLI integrity is missing or invalid");
+  invariant(artifact.sourceNormalizer.package === "@opentag/github", "registry source normalizer package is invalid");
+  invariant(
+    artifact.sourceNormalizer.version === artifact.expectedVersion,
+    `registry source normalizer version ${artifact.sourceNormalizer.version} does not match expected version ${artifact.expectedVersion}`
+  );
+  invariant(
+    isSha512Integrity(artifact.sourceNormalizer.integrity),
+    "registry source normalizer integrity is missing or invalid"
+  );
+  invariant(artifact.eventSchema.package === "@opentag/core", "registry event schema package is invalid");
+  invariant(
+    artifact.eventSchema.version === artifact.expectedVersion,
+    `registry event schema version ${artifact.eventSchema.version} does not match expected version ${artifact.expectedVersion}`
+  );
+  invariant(
+    isSha512Integrity(artifact.eventSchema.integrity),
+    "registry event schema integrity is missing or invalid"
+  );
+
+  let resolved: URL;
+  let normalizerResolved: URL;
+  let eventSchemaResolved: URL;
+  try {
+    resolved = new URL(artifact.resolved);
+    normalizerResolved = new URL(artifact.sourceNormalizer.resolved);
+    eventSchemaResolved = new URL(artifact.eventSchema.resolved);
+  } catch {
+    throw new Error("GitHub factory acceptance failed: registry artifact resolution is not a valid URL.");
+  }
+  invariant(resolved.protocol === "https:", "registry CLI artifact was not resolved over HTTPS");
+  invariant(normalizerResolved.protocol === "https:", "registry source normalizer was not resolved over HTTPS");
+  invariant(eventSchemaResolved.protocol === "https:", "registry event schema was not resolved over HTTPS");
+  invariant(artifact.registry === TRUSTED_NPM_REGISTRY_ORIGIN, "registry CLI did not use the trusted npm registry");
+  invariant(resolved.origin === TRUSTED_NPM_REGISTRY_ORIGIN, "registry CLI artifact did not use the trusted npm registry");
+  invariant(
+    normalizerResolved.origin === TRUSTED_NPM_REGISTRY_ORIGIN,
+    "registry source normalizer did not use the trusted npm registry"
+  );
+  invariant(
+    eventSchemaResolved.origin === TRUSTED_NPM_REGISTRY_ORIGIN,
+    "registry event schema did not use the trusted npm registry"
+  );
+  invariant(artifact.registry === resolved.origin, "registry CLI origin does not match its resolved artifact URL");
+  for (const [label, url] of [
+    ["registry CLI artifact", resolved],
+    ["registry source normalizer", normalizerResolved],
+    ["registry event schema", eventSchemaResolved]
+  ] as const) {
+    invariant(
+      !url.username && !url.password && !url.search && !url.hash,
+      `${label} URL contains credentials, query parameters, or fragments`
+    );
+  }
+}
+
 export function normalizeGitHubFactorySourceEvent(input: GitHubIssueCommentInput): OpenTagEvent {
   const event = normalizeGitHubIssueComment(input);
   if (!event) throw new Error("GitHub factory source comment does not contain a valid @opentag command.");
@@ -210,6 +310,7 @@ export function normalizeGitHubFactorySourceEvent(input: GitHubIssueCommentInput
 export function buildGitHubFactoryAcceptanceReport(
   evidence: GitHubFactoryAcceptanceEvidence
 ): GitHubFactoryAcceptanceReport {
+  validateRegistryRuntimeArtifact(evidence.runtimeSource, evidence.runtimeArtifact);
   const admission = receiptAdmission(evidence.factory.batch.initialReceipt);
   const replayAdmission = receiptAdmission(evidence.factory.batch.replayedReceipt);
   const initialCompletion = completionState(evidence.completion.afterExecutorSuccess);
@@ -278,6 +379,7 @@ export function buildGitHubFactoryAcceptanceReport(
     recordedAt: evidence.recordedAt,
     repository: evidence.repository,
     runtimeSource: evidence.runtimeSource,
+    ...(evidence.runtimeArtifact ? { runtimeArtifact: evidence.runtimeArtifact } : {}),
     source: evidence.source,
     factory: {
       workThreadId: evidence.factory.workThreadId,

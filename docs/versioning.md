@@ -32,7 +32,7 @@ Private runnable apps are not published:
 
 ## Pre-1.0 Policy
 
-The current public release is `0.7.0`. The public API is still settling, so all releases remain in the `0.x` line until the package contracts are stable enough for `1.0.0`.
+The source package family is prepared at `0.8.0`; npm dist-tags remain authoritative for the currently published channel versions. The public API is still settling, so all releases remain in the `0.x` line until the package contracts are stable enough for `1.0.0`.
 
 The first npm release was published as the coordinated `0.1.0` package family.
 The `0.2.0` release added the published CLI, local runtime package, and Lark and Telegram packages.
@@ -43,6 +43,7 @@ The `0.4.0` release adds GitLab source-thread ingestion, note callbacks, and mer
 The `0.5.0` release adds Discord, Linear, and Microsoft Teams adapters, ACP-first agent execution, durable Attempt leases and fencing, governed material-action receipts and reconciliation, and the corresponding Client/Runner migration.
 The `0.6.0` release moves all built-in coding agents onto Generic ACP, adds Cursor, OpenCode, and OpenClaw executor profiles, requires Node.js 22 for the CLI/Local Runtime/Runner, and hardens ACP isolation, cancellation conformance, Slack summaries, and the coordinated release gate.
 The `0.7.0` release completes the Phase 1 completion-governance vertical slice with durable work threads and contracts, deterministic evidence-backed assessments, GitHub PR/check/merge evidence ingestion, replay-safe reassessment, CLI explanations and bounded waivers, and a 16-package publication set that includes `@opentag/governance`.
+The `0.8.0` release completes the first provider-live recipe-driven factory loop with access identity, bounded human escalation, explainable multi-runner routing, immutable recipes and WorkThread-only workstreams, restart-safe batch admission, authoritative accepted-outcome metrics, and a real GitHub issue-to-merge-to-receipt proof while keeping planning external.
 
 For each npm release:
 
@@ -105,11 +106,13 @@ After `1.0.0`, follow SemVer:
 9. Confirm the exact version and `next` dist-tag for every package from the npm
    registry.
 10. Install `@opentag/cli@<version>` from the registry in a clean directory.
-11. Run CLI version/help, setup, doctor, start, and at least one real-platform
-    ingest-to-receipt smoke from that registry installation.
+11. Run CLI version/help, setup, doctor, and start from that registry
+    installation, then repeat the GitHub factory acceptance loop through
+    external source, batch admission, local execution, PR, required check,
+    merge, completion, restart, source receipt, and workstream metrics.
 12. Promote the same package versions to `latest` by changing dist-tags only.
 13. Confirm `latest` and `next` for the complete package family.
-14. Create and push the matching annotated git tag, for example `v0.7.0`, from
+14. Create and push the matching annotated git tag, for example `v0.8.0`, from
     the exact publication commit.
 15. Create the matching GitHub Release with the changelog notes and verify its
     tag target.

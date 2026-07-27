@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   buildGitHubFactoryAcceptanceReport,
@@ -6,6 +7,10 @@ import {
 } from "../../../scripts/test/github-factory-acceptance.js";
 
 const digest = `sha256:${"a".repeat(64)}`;
+
+function integrity(value: string): string {
+  return `sha512-${createHash("sha512").update(value).digest("base64")}`;
+}
 
 function completion(state: string, requiredChecks: string, merge: string) {
   return {
@@ -150,6 +155,29 @@ function evidence(): GitHubFactoryAcceptanceEvidence {
   };
 }
 
+function registryRuntimeArtifact() {
+  return {
+    expectedVersion: "0.8.0",
+    package: "@opentag/cli" as const,
+    version: "0.8.0",
+    registry: "https://registry.npmjs.org",
+    resolved: "https://registry.npmjs.org/@opentag/cli/-/cli-0.8.0.tgz",
+    integrity: integrity("cli-0.8.0"),
+    sourceNormalizer: {
+      package: "@opentag/github" as const,
+      version: "0.8.0",
+      resolved: "https://registry.npmjs.org/@opentag/github/-/github-0.8.0.tgz",
+      integrity: integrity("github-0.8.0")
+    },
+    eventSchema: {
+      package: "@opentag/core" as const,
+      version: "0.8.0",
+      resolved: "https://registry.npmjs.org/@opentag/core/-/core-0.8.0.tgz",
+      integrity: integrity("core-0.8.0")
+    }
+  };
+}
+
 describe("GitHub factory live acceptance report", () => {
   it("normalizes one real-source-shaped issue comment into a factory admission event", () => {
     const event = normalizeGitHubFactorySourceEvent({
@@ -197,6 +225,62 @@ describe("GitHub factory live acceptance report", () => {
     });
     expect(Object.values(report.assertions).every((value) => value === true)).toBe(true);
     expect(JSON.stringify(report)).not.toContain("fencingToken");
+  });
+
+  it("requires registry artifact identity for a registry-installed proof", () => {
+    const input = evidence();
+    input.runtimeSource = "registry_install";
+
+    expect(() => buildGitHubFactoryAcceptanceReport(input)).toThrow(/registry runtime artifact identity is missing/u);
+  });
+
+  it("retains a version- and integrity-bound registry artifact receipt", () => {
+    const input = evidence();
+    input.runtimeSource = "registry_install";
+    input.runtimeArtifact = registryRuntimeArtifact();
+
+    expect(buildGitHubFactoryAcceptanceReport(input)).toMatchObject({
+      runtimeSource: "registry_install",
+      runtimeArtifact: registryRuntimeArtifact()
+    });
+  });
+
+  it("rejects stale or incomplete registry artifact identity", () => {
+    const stale = evidence();
+    stale.runtimeSource = "registry_install";
+    stale.runtimeArtifact = {
+      ...registryRuntimeArtifact(),
+      version: "0.7.0"
+    };
+    expect(() => buildGitHubFactoryAcceptanceReport(stale)).toThrow(/does not match expected version/u);
+
+    const missingIntegrity = evidence();
+    missingIntegrity.runtimeSource = "registry_install";
+    missingIntegrity.runtimeArtifact = {
+      ...registryRuntimeArtifact(),
+      integrity: ""
+    };
+    expect(() => buildGitHubFactoryAcceptanceReport(missingIntegrity)).toThrow(/CLI integrity is missing/u);
+
+    const staleCore = evidence();
+    staleCore.runtimeSource = "registry_install";
+    staleCore.runtimeArtifact = {
+      ...registryRuntimeArtifact(),
+      eventSchema: {
+        ...registryRuntimeArtifact().eventSchema,
+        version: "0.7.0"
+      }
+    };
+    expect(() => buildGitHubFactoryAcceptanceReport(staleCore)).toThrow(/event schema version/u);
+
+    const untrustedRegistry = evidence();
+    untrustedRegistry.runtimeSource = "registry_install";
+    untrustedRegistry.runtimeArtifact = {
+      ...registryRuntimeArtifact(),
+      registry: "https://packages.example.test",
+      resolved: "https://packages.example.test/@opentag/cli/-/cli-0.8.0.tgz"
+    };
+    expect(() => buildGitHubFactoryAcceptanceReport(untrustedRegistry)).toThrow(/trusted npm registry/u);
   });
 
   it("rejects a required check that is not bound to the pull request head", () => {

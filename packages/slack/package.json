@@ -1,6 +1,6 @@
 {
   "name": "@opentag/slack",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Slack app mention normalization and callback helpers for OpenTag.",
   "type": "module",
   "engines": {

@@ -7,6 +7,41 @@ function repoFile(path: string): string {
 }
 
 describe("platform setup docs contract", () => {
+  it("keeps the 0.8.0 release procedure explicit and concurrency-safe", () => {
+    const releaseGuide = repoFile("docs/npm-release.md");
+    const liveGuide = repoFile("docs/live-e2e-smoke-harness.md");
+
+    expect(liveGuide).toContain("npm install --no-audit --no-fund @opentag/cli@0.8.0");
+    expect(liveGuide).toContain('smoke_root="$(mktemp -d)"\n(\n  set -euo pipefail');
+    expect(releaseGuide).toContain("refs/heads/release-lock/npm-dist-tags");
+    expect(releaseGuide).toContain("npm-dist-tags.lock-sha");
+    expect(releaseGuide).toContain("release-commit-sha");
+    expect(releaseGuide).toContain("lock_nonce=\"$(openssl rand -hex 16)\"");
+    expect(releaseGuide).toContain("parents[]=$release_commit");
+    expect(releaseGuide).toContain(".parents[0].sha");
+    expect(releaseGuide).toContain('= "$lock_commit"');
+    expect(releaseGuide).toContain('current_latest="$(jq -er');
+    expect(releaseGuide).toContain('current_next="$(jq -er');
+    expect(releaseGuide).toContain('test "$current_next" = "0.8.0"');
+    expect(releaseGuide.match(/test "\$\("\$smoke_root\/node_modules\/\.bin\/opentag" --version\)" = "0\.8\.0"/gu))
+      .toHaveLength(2);
+    expect(releaseGuide).toContain('smoke_root="$(mktemp -d)"\n(\n  set -euo pipefail');
+    expect(releaseGuide).toContain(
+      'Also verify every package and its canary tag before promotion:\n\n```bash\n(\n  set -euo pipefail'
+    );
+    expect(releaseGuide).toContain('git tag -a v0.8.0 "$release_commit" -m "OpenTag v0.8.0"');
+    expect(releaseGuide).toContain("git show-ref --verify --quiet refs/tags/v0.8.0");
+    expect(releaseGuide).toContain("git cat-file -t refs/tags/v0.8.0");
+    expect(releaseGuide).toContain('git rev-parse \'v0.8.0^{}\'');
+    expect(releaseGuide).toContain('git/tags/$release_tag_object');
+    expect(releaseGuide).toContain("gh api --paginate 'repos/amplifthq/opentag/releases?per_page=100'");
+    expect(releaseGuide).toContain('case "$existing_release_state" in');
+    expect(releaseGuide).toContain("$'v0.8.0\\tfalse\\tfalse\\ttrue'");
+    expect(releaseGuide).toContain("'.draft'");
+    expect(releaseGuide).toContain("'.prerelease'");
+    expect(releaseGuide).toContain('.published_at | select(type == "string" and length > 0)');
+  });
+
   it("keeps the agent-readable install guide aligned with OpenTag source-thread boundaries", () => {
     const guide = repoFile("docs/agent-install.md");
     const readme = repoFile("README.md");

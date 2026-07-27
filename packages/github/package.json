@@ -1,6 +1,6 @@
 {
   "name": "@opentag/github",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "GitHub event normalization and callback rendering for OpenTag.",
   "type": "module",
   "engines": {
