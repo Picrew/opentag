@@ -35,6 +35,10 @@ Helpful env:
                                      verifies restart-safe completion.
   OPENTAG_GH_LIVE_REQUIRED_CHECK  required commit-status context, default
                                      opentag-phase1-live
+  OPENTAG_GH_LIVE_FACTORY         true/false, default false. Routes one real
+                                     GitHub issue comment through WorkThread
+                                     ensure, recipe, workstream, and durable
+                                     batch admission before local execution.
   OPENTAG_GH_LIVE_REPORT          optional structured evidence JSON path
   OPENTAG_GH_LIVE_CLI_BIN         optional installed `opentag` executable;
                                      defaults to the source CLI through tsx
@@ -70,6 +74,7 @@ fi
 : "${OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN:=false}"
 : "${OPENTAG_GH_LIVE_STRICT_COMPLETION:=true}"
 : "${OPENTAG_GH_LIVE_REQUIRED_CHECK:=opentag-phase1-live}"
+: "${OPENTAG_GH_LIVE_FACTORY:=false}"
 
 cd "$ROOT_DIR"
 
@@ -87,6 +92,17 @@ PR_NUMBER=""
 PR_HEAD_SHA=""
 COMPLETION_PAYLOAD=""
 REPORT_PATH=""
+MENTION_URL=""
+COMMENT_ID=""
+EVENT_ID=""
+EVENT_PATH=""
+WORK_THREAD_ID=""
+RECIPE_ID=""
+WORKSTREAM_ID=""
+BATCH_ID=""
+BATCH_INPUT_DIGEST=""
+INITIAL_BATCH_RECEIPT_PATH=""
+REPLAYED_BATCH_RECEIPT_PATH=""
 
 bool_true() {
   case "${1:-}" in
@@ -174,7 +190,12 @@ if [[ "$PERMISSION" != "ADMIN" && "$PERMISSION" != "MAINTAIN" ]]; then
 fi
 GITHUB_TOKEN="$(gh auth token)"
 export GITHUB_TOKEN
-export OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN OPENTAG_GH_LIVE_STRICT_COMPLETION OPENTAG_GH_LIVE_REQUIRED_CHECK
+export OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN OPENTAG_GH_LIVE_STRICT_COMPLETION OPENTAG_GH_LIVE_REQUIRED_CHECK OPENTAG_GH_LIVE_FACTORY
+
+if bool_true "$OPENTAG_GH_LIVE_FACTORY" && ! bool_true "$OPENTAG_GH_LIVE_STRICT_COMPLETION"; then
+  echo "Factory acceptance requires OPENTAG_GH_LIVE_STRICT_COMPLETION=true." >&2
+  exit 1
+fi
 
 if bool_true "$OPENTAG_GH_LIVE_STRICT_COMPLETION"; then
   if [[ "$OPENTAG_GH_LIVE_EXECUTOR" == "echo" ]]; then
@@ -339,6 +360,27 @@ summary = {
 }
 print("Run metrics:", json.dumps(summary, sort_keys=True))
 PY
+}
+
+run_cli() {
+  if [[ -n "${OPENTAG_GH_LIVE_CLI_BIN:-}" ]]; then
+    "$OPENTAG_GH_LIVE_CLI_BIN" "$@"
+  else
+    NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../packages/cli/src/index.ts "$@"
+  fi
+}
+
+run_factory_acceptance_tool() {
+  NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/github-factory-acceptance.ts "$@"
+}
+
+capture_workstream_metrics() {
+  local output_path="$1"
+  curl -fsS \
+    -H "authorization: Bearer $OPENTAG_PAIRING_TOKEN" \
+    -o "$output_path" \
+    "http://localhost:${OPENTAG_DISPATCHER_PORT}/v1/workstreams/${WORKSTREAM_ID}/metrics"
+  chmod 600 "$output_path"
 }
 
 completion_payload() {
@@ -624,6 +666,64 @@ fi
 PUBLIC_URL="${PUBLIC_URL%/}"
 public_ingress_probe "$PUBLIC_URL"
 
+if bool_true "$OPENTAG_GH_LIVE_FACTORY"; then
+  ISSUE_URL="$(gh issue create --repo "${OWNER}/${REPO}" \
+    --title "OpenTag GitHub factory live acceptance" \
+    --body "External planning source for one recipe-driven OpenTag factory acceptance loop. OpenTag will retain governance authority without creating an internal DAG or operator console.")"
+  ISSUE_NUMBER="${ISSUE_URL##*/}"
+  echo "Created external planning issue: $ISSUE_URL"
+
+  MENTION_BODY="@opentag run ${OPENTAG_GH_LIVE_COMMAND}"
+  echo "Posting the external source-thread request before installing the temporary OpenTag webhook..."
+  MENTION_URL="$(gh issue comment "$ISSUE_NUMBER" --repo "${OWNER}/${REPO}" --body "$MENTION_BODY")"
+  COMMENT_ID="${MENTION_URL##*issuecomment-}"
+  if [[ -z "$COMMENT_ID" || "$COMMENT_ID" == "$MENTION_URL" ]]; then
+    echo "Could not derive the GitHub comment id from: $MENTION_URL" >&2
+    exit 1
+  fi
+  echo "Source mention: $MENTION_URL"
+
+  SOURCE_COMMENT_PATH="$TMP_ROOT/source-comment.json"
+  SOURCE_EVENT_INPUT_PATH="$TMP_ROOT/source-event-input.json"
+  EVENT_PATH="$TMP_ROOT/source-event.json"
+  gh api "repos/${OWNER}/${REPO}/issues/comments/${COMMENT_ID}" >"$SOURCE_COMMENT_PATH"
+  REPOSITORY_PRIVATE="$(gh api "repos/${OWNER}/${REPO}" --jq '.private')"
+  python3 - "$SOURCE_COMMENT_PATH" "$SOURCE_EVENT_INPUT_PATH" "$ISSUE_URL" "$ISSUE_NUMBER" "$OWNER" "$REPO" "$REPOSITORY_PRIVATE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+comment_path, output_path, issue_url, issue_number, owner, repo, private = sys.argv[1:]
+comment = json.loads(Path(comment_path).read_text(encoding="utf-8"))
+payload = {
+    "id": str(comment["id"]),
+    "commentBody": comment["body"],
+    "commentUrl": comment["html_url"],
+    "apiCommentsUrl": f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments",
+    "issueUrl": issue_url,
+    "issueNumber": int(issue_number),
+    "owner": owner,
+    "repo": repo,
+    "actorId": int(comment["user"]["id"]),
+    "actorLogin": comment["user"]["login"],
+    "authorAssociation": comment.get("author_association"),
+    "actorWriteAccess": True,
+    "private": private.lower() == "true",
+    "receivedAt": comment["created_at"],
+}
+Path(output_path).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+Path(output_path).chmod(0o600)
+PY
+  run_factory_acceptance_tool event "$SOURCE_EVENT_INPUT_PATH" "$EVENT_PATH"
+  EVENT_ID="$(python3 - "$EVENT_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["id"])
+PY
+)"
+fi
+
 echo "Creating temporary GitHub repository webhook for ${OWNER}/${REPO}"
 HOOK_ID="$(
   python3 - <<PY | gh api "repos/${OWNER}/${REPO}/hooks" --method POST --input - --jq '.id'
@@ -643,36 +743,136 @@ PY
 )"
 echo "Temporary webhook id: $HOOK_ID"
 
-ISSUE_URL="$(gh issue create --repo "${OWNER}/${REPO}" \
-  --title "OpenTag GitHub webhook live test" \
-  --body "Temporary issue for validating OpenTag repository webhook -> local agent -> GitHub source-thread action receipts.")"
-ISSUE_NUMBER="${ISSUE_URL##*/}"
-echo "Created issue: $ISSUE_URL"
-
-WAIT_STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-MENTION_BODY="@opentag run ${OPENTAG_GH_LIVE_COMMAND}"
-echo "Posting mention comment through GitHub..."
-MENTION_URL="$(gh issue comment "$ISSUE_NUMBER" --repo "${OWNER}/${REPO}" --body "$MENTION_BODY")"
-echo "Mention comment: $MENTION_URL"
-
 RUN_ID=""
-ISSUE_SQL="$(sql_escape "$ISSUE_NUMBER")"
-STARTED_SQL="$(sql_escape "$WAIT_STARTED_AT")"
-deadline=$((SECONDS + OPENTAG_GH_LIVE_TIMEOUT_SECONDS))
-while (( SECONDS < deadline )); do
-  RUN_ID="$(
-    sqlite_one "select id from runs where json_extract(event_json, '$.source') = 'github' and json_extract(event_json, '$.metadata.issueNumber') = $ISSUE_SQL and created_at >= '$STARTED_SQL' order by created_at desc limit 1;"
-  )"
-  if [[ -n "$RUN_ID" ]]; then
-    break
+if bool_true "$OPENTAG_GH_LIVE_FACTORY"; then
+  WORK_THREAD_RESPONSE_PATH="$TMP_ROOT/work-thread.json"
+  RECIPE_INPUT_PATH="$TMP_ROOT/recipe-input.json"
+  RECIPE_RESPONSE_PATH="$TMP_ROOT/recipe.json"
+  WORKSTREAM_INPUT_PATH="$TMP_ROOT/workstream-input.json"
+  WORKSTREAM_RESPONSE_PATH="$TMP_ROOT/workstream.json"
+  BATCH_INPUT_PATH="$TMP_ROOT/batch-input.json"
+  INITIAL_BATCH_RECEIPT_PATH="$TMP_ROOT/batch-initial.json"
+  RECIPE_ID="recipe_github_live_${COMMENT_ID}"
+  WORKSTREAM_ID="workstream_github_live_${COMMENT_ID}"
+  BATCH_ID="batch_github_live_${COMMENT_ID}"
+  RUN_ID="run_github_live_${COMMENT_ID}"
+
+  run_cli factory work-thread ensure --config "$CONFIG_PATH" --input "$EVENT_PATH" --json >"$WORK_THREAD_RESPONSE_PATH"
+  WORK_THREAD_ID="$(python3 - "$WORK_THREAD_RESPONSE_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["workThread"]["id"])
+PY
+)"
+
+  python3 - \
+    "$EVENT_PATH" "$RECIPE_INPUT_PATH" "$WORKSTREAM_INPUT_PATH" "$BATCH_INPUT_PATH" \
+    "$RECIPE_ID" "$WORKSTREAM_ID" "$BATCH_ID" "$RUN_ID" "$WORK_THREAD_ID" "$COMMENT_ID" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+(
+    event_path,
+    recipe_path,
+    workstream_path,
+    batch_path,
+    recipe_id,
+    workstream_id,
+    batch_id,
+    run_id,
+    work_thread_id,
+    comment_id,
+) = sys.argv[1:]
+event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+documents = {
+    recipe_path: {
+        "id": recipe_id,
+        "version": 1,
+        "name": "GitHub provider-live factory acceptance",
+        "budgets": {
+            "maxConcurrentRuns": 1,
+            "maxAttemptsPerRun": 3,
+            "maxCostUnits": 3,
+            "costUnitsPerAttempt": 1,
+            "allowedLocalities": ["local"],
+        },
+    },
+    workstream_path: {
+        "id": workstream_id,
+        "recipeId": recipe_id,
+        "recipeVersion": 1,
+        "name": "GitHub source thread factory acceptance",
+        "members": [{"kind": "work_thread", "workThreadId": work_thread_id}],
+    },
+    batch_path: {
+        "id": batch_id,
+        "workstreamId": workstream_id,
+        "items": [{
+            "itemId": f"item_github_live_{comment_id}",
+            "runId": run_id,
+            "workThreadId": work_thread_id,
+            "event": event,
+        }],
+    },
+}
+for path, document in documents.items():
+    target = Path(path)
+    target.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    target.chmod(0o600)
+PY
+
+  run_cli factory recipe create --config "$CONFIG_PATH" --input "$RECIPE_INPUT_PATH" --json >"$RECIPE_RESPONSE_PATH"
+  run_cli factory workstream create --config "$CONFIG_PATH" --input "$WORKSTREAM_INPUT_PATH" --json >"$WORKSTREAM_RESPONSE_PATH"
+  run_cli factory batch submit --config "$CONFIG_PATH" --input "$BATCH_INPUT_PATH" --json >"$INITIAL_BATCH_RECEIPT_PATH"
+  BATCH_INPUT_DIGEST="$(python3 - "$INITIAL_BATCH_RECEIPT_PATH" "$RUN_ID" <<'PY'
+import json
+import sys
+from pathlib import Path
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+receipt = payload["receipt"]
+result = receipt.get("result", {})
+items = result.get("results", [])
+if receipt.get("status") != "completed" or len(items) != 1:
+    raise SystemExit("Factory admission did not produce one completed result.")
+if items[0].get("status") != "created" or items[0].get("admittedRunId") != sys.argv[2]:
+    raise SystemExit(f"Factory admission did not create the intended Run: {items[0]}")
+print(receipt["batch"]["contentDigest"])
+PY
+)"
+  echo "Factory batch $BATCH_ID admitted attributed Run $RUN_ID for WorkThread $WORK_THREAD_ID."
+else
+  ISSUE_URL="$(gh issue create --repo "${OWNER}/${REPO}" \
+    --title "OpenTag GitHub webhook live test" \
+    --body "Temporary issue for validating OpenTag repository webhook -> local agent -> GitHub source-thread action receipts.")"
+  ISSUE_NUMBER="${ISSUE_URL##*/}"
+  echo "Created issue: $ISSUE_URL"
+
+  WAIT_STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  MENTION_BODY="@opentag run ${OPENTAG_GH_LIVE_COMMAND}"
+  echo "Posting mention comment through GitHub..."
+  MENTION_URL="$(gh issue comment "$ISSUE_NUMBER" --repo "${OWNER}/${REPO}" --body "$MENTION_BODY")"
+  echo "Mention comment: $MENTION_URL"
+
+  ISSUE_SQL="$(sql_escape "$ISSUE_NUMBER")"
+  STARTED_SQL="$(sql_escape "$WAIT_STARTED_AT")"
+  deadline=$((SECONDS + OPENTAG_GH_LIVE_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    RUN_ID="$(
+      sqlite_one "select id from runs where json_extract(event_json, '$.source') = 'github' and json_extract(event_json, '$.metadata.issueNumber') = $ISSUE_SQL and created_at >= '$STARTED_SQL' order by created_at desc limit 1;"
+    )"
+    if [[ -n "$RUN_ID" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  if [[ -z "$RUN_ID" ]]; then
+    echo "Timed out waiting for GitHub webhook-created run." >&2
+    exit 1
   fi
-  sleep 2
-done
-if [[ -z "$RUN_ID" ]]; then
-  echo "Timed out waiting for GitHub webhook-created run." >&2
-  exit 1
+  echo "Detected GitHub webhook-created run: $RUN_ID"
 fi
-echo "Detected GitHub webhook-created run: $RUN_ID"
 
 last_status=""
 deadline=$((SECONDS + OPENTAG_GH_LIVE_TIMEOUT_SECONDS))
@@ -696,6 +896,10 @@ if [[ "$status" != "succeeded" ]]; then
   exit 1
 fi
 print_metrics "$RUN_ID"
+if bool_true "$OPENTAG_GH_LIVE_FACTORY"; then
+  METRICS_BEFORE_PROVIDER_PATH="$TMP_ROOT/workstream-metrics-before-provider.json"
+  capture_workstream_metrics "$METRICS_BEFORE_PROVIDER_PATH"
+fi
 
 if bool_true "$OPENTAG_GH_LIVE_STRICT_COMPLETION"; then
   echo "Verifying executor success does not satisfy completion before provider evidence is complete..."
@@ -737,8 +941,11 @@ PY
     --method POST \
     -f state=success \
     -f context="$OPENTAG_GH_LIVE_REQUIRED_CHECK" \
-    -f description="OpenTag Phase 1 live completion acceptance" \
+    -f description="OpenTag provider-live completion acceptance" \
     -f target_url="$PR_URL" >/dev/null
+
+  REQUIRED_CHECKS_PATH="$TMP_ROOT/required-checks.json"
+  gh api "repos/${OWNER}/${REPO}/commits/${PR_HEAD_SHA}/status" >"$REQUIRED_CHECKS_PATH"
 
   wait_for_completion "$RUN_ID" "pending,unsatisfied" "required_checks" "passed"
   CHECKED_COMPLETION_PATH="$TMP_ROOT/completion-after-check.json"
@@ -756,6 +963,14 @@ PY
     >"$PR_INFO_PATH"
   wait_for_issue_comment "provider-verified completion requirements are satisfied"
   RECEIPTS_BEFORE_RESTART="$(completion_receipt_count)"
+  SOURCE_COMMENTS_PATH="$TMP_ROOT/source-comments-before-restart.json"
+  SOURCE_ISSUE_PATH="$TMP_ROOT/source-issue-after-completion.json"
+  gh api "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments?per_page=100" >"$SOURCE_COMMENTS_PATH"
+  gh api "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}" >"$SOURCE_ISSUE_PATH"
+  if bool_true "$OPENTAG_GH_LIVE_FACTORY"; then
+    METRICS_AFTER_MERGE_PATH="$TMP_ROOT/workstream-metrics-after-merge.json"
+    capture_workstream_metrics "$METRICS_AFTER_MERGE_PATH"
+  fi
 
   echo "Restarting the CLI stack to verify durable satisfied completion and callback deduplication..."
   stop_cli_stack
@@ -777,17 +992,200 @@ PY
     echo "Restart emitted a duplicate provider-verified completion receipt ($RECEIPTS_BEFORE_RESTART -> $RECEIPTS_AFTER_RESTART)." >&2
     exit 1
   fi
+  SOURCE_COMMENTS_AFTER_RESTART_PATH="$TMP_ROOT/source-comments-after-restart.json"
+  gh api "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments?per_page=100" >"$SOURCE_COMMENTS_AFTER_RESTART_PATH"
+  if bool_true "$OPENTAG_GH_LIVE_FACTORY"; then
+    METRICS_AFTER_RESTART_PATH="$TMP_ROOT/workstream-metrics-after-restart.json"
+    REPLAYED_BATCH_RECEIPT_PATH="$TMP_ROOT/batch-after-restart.json"
+    capture_workstream_metrics "$METRICS_AFTER_RESTART_PATH"
+    run_cli factory batch submit --config "$CONFIG_PATH" --input "$BATCH_INPUT_PATH" --json >"$REPLAYED_BATCH_RECEIPT_PATH"
+  fi
 
-  REPORT_PATH="${OPENTAG_GH_LIVE_REPORT:-$ROOT_DIR/.omx/live-e2e/github-completion-governance-$(date -u +%Y%m%dT%H%M%SZ).json}"
+  if bool_true "$OPENTAG_GH_LIVE_FACTORY"; then
+    REPORT_PATH="${OPENTAG_GH_LIVE_REPORT:-$ROOT_DIR/.omx/live-e2e/github-factory-live-$(date -u +%Y%m%dT%H%M%SZ).json}"
+  else
+    REPORT_PATH="${OPENTAG_GH_LIVE_REPORT:-$ROOT_DIR/.omx/live-e2e/github-completion-governance-$(date -u +%Y%m%dT%H%M%SZ).json}"
+  fi
+  if [[ "$REPORT_PATH" != /* ]]; then
+    REPORT_PATH="$ROOT_DIR/$REPORT_PATH"
+  fi
   mkdir -p "$(dirname "$REPORT_PATH")"
   ASSESSMENT_COUNT="$(sqlite_one "select count(*) from completion_assessments where work_thread_id = (select work_thread_id from runs where id = '$(sql_escape "$RUN_ID")');")"
   RUNTIME_SOURCE="source_checkout"
   if [[ -n "${OPENTAG_GH_LIVE_CLI_BIN:-}" ]]; then
     RUNTIME_SOURCE="registry_install"
   fi
-  python3 - \
-    "$REPORT_PATH" "$INITIAL_COMPLETION_PATH" "$CHECKED_COMPLETION_PATH" "$FINAL_COMPLETION_PATH" "$RESTARTED_COMPLETION_PATH" "$PR_INFO_PATH" \
-    "$OWNER/$REPO" "$ISSUE_URL" "$RUN_ID" "$OPENTAG_GH_LIVE_REQUIRED_CHECK" "$ASSESSMENT_COUNT" "$RECEIPTS_AFTER_RESTART" "$RUNTIME_SOURCE" <<'PY'
+  if bool_true "$OPENTAG_GH_LIVE_FACTORY"; then
+    RUN_EVIDENCE_PATH="$TMP_ROOT/run-evidence.json"
+    ATTEMPT_EVIDENCE_PATH="$TMP_ROOT/attempt-evidence.json"
+    EVIDENCE_INPUT_PATH="$TMP_ROOT/github-factory-evidence.json"
+    sqlite3 -json -cmd ".timeout 5000" "$DATABASE_PATH" \
+      "select id, status, work_thread_id as workThreadId, workstream_id as workstreamId, admission_batch_id as admissionBatchId, context_packet_json is not null as contextPacketCaptured, access_profile_snapshot_json is not null as accessProfileCaptured, policy_snapshot_provenance_json is not null as policyProvenanceCaptured from runs where id = '$(sql_escape "$RUN_ID")';" \
+      >"$RUN_EVIDENCE_PATH"
+    sqlite3 -json -cmd ".timeout 5000" "$DATABASE_PATH" \
+      "select a.id, a.runner_id as runnerId, coalesce(a.selected_executor_id, r.executor) as executorId, a.runner_locality as locality, a.status, length(a.fencing_token) > 0 as hasFencingToken from attempts a join runs r on r.id = a.run_id where a.run_id = '$(sql_escape "$RUN_ID")' order by a.number desc limit 1;" \
+      >"$ATTEMPT_EVIDENCE_PATH"
+    python3 - \
+      "$EVIDENCE_INPUT_PATH" "$INITIAL_COMPLETION_PATH" "$CHECKED_COMPLETION_PATH" "$FINAL_COMPLETION_PATH" "$RESTARTED_COMPLETION_PATH" \
+      "$PR_INFO_PATH" "$REQUIRED_CHECKS_PATH" "$RECIPE_RESPONSE_PATH" "$WORKSTREAM_RESPONSE_PATH" \
+      "$INITIAL_BATCH_RECEIPT_PATH" "$REPLAYED_BATCH_RECEIPT_PATH" "$RUN_EVIDENCE_PATH" "$ATTEMPT_EVIDENCE_PATH" \
+      "$METRICS_BEFORE_PROVIDER_PATH" "$METRICS_AFTER_MERGE_PATH" "$METRICS_AFTER_RESTART_PATH" "$SOURCE_COMMENTS_PATH" "$SOURCE_COMMENTS_AFTER_RESTART_PATH" "$SOURCE_ISSUE_PATH" \
+      "$OWNER/$REPO" "$ISSUE_URL" "$MENTION_URL" "$ISSUE_NUMBER" "$COMMENT_ID" "$EVENT_ID" "$WORK_THREAD_ID" \
+      "$RECIPE_ID" "$WORKSTREAM_ID" "$BATCH_ID" "$BATCH_INPUT_DIGEST" "$ASSESSMENT_COUNT" \
+      "$RECEIPTS_BEFORE_RESTART" "$RECEIPTS_AFTER_RESTART" "$RUNTIME_SOURCE" "$OPENTAG_GH_LIVE_REQUIRED_CHECK" <<'PY'
+import hashlib
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+(
+    evidence_path,
+    initial_path,
+    checked_path,
+    final_path,
+    restarted_path,
+    pr_path,
+    required_checks_path,
+    recipe_path,
+    workstream_path,
+    initial_batch_path,
+    replayed_batch_path,
+    run_path,
+    attempt_path,
+    metrics_before_path,
+    metrics_merged_path,
+    metrics_restarted_path,
+    comments_before_restart_path,
+    comments_after_restart_path,
+    source_issue_path,
+    repository,
+    issue_url,
+    mention_url,
+    issue_number,
+    comment_id,
+    event_id,
+    work_thread_id,
+    recipe_id,
+    workstream_id,
+    batch_id,
+    batch_input_digest,
+    assessment_count,
+    receipts_before_restart,
+    receipts_after_restart,
+    runtime_source,
+    required_check_context,
+) = sys.argv[1:]
+
+def read(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+run_rows = read(run_path)
+attempt_rows = read(attempt_path)
+if len(run_rows) != 1 or len(attempt_rows) != 1:
+    raise SystemExit("Factory acceptance requires exactly one durable Run and latest Attempt.")
+run = run_rows[0]
+run["contextPacketCaptured"] = bool(run["contextPacketCaptured"])
+run["accessProfileCaptured"] = bool(run["accessProfileCaptured"])
+run["policyProvenanceCaptured"] = bool(run["policyProvenanceCaptured"])
+attempt = attempt_rows[0]
+attempt["hasFencingToken"] = bool(attempt["hasFencingToken"])
+
+combined_status = read(required_checks_path)
+statuses = [item for item in combined_status.get("statuses", []) if item.get("context") == required_check_context]
+if len(statuses) != 1:
+    raise SystemExit(f"Expected exactly one retained required status for {required_check_context}; observed {len(statuses)}.")
+required_check = statuses[0]
+required_check_head = combined_status.get("sha")
+
+phrase = "provider-verified completion requirements are satisfied"
+
+def receipt_observation(path, expected_count, phase):
+    receipts = [comment for comment in read(path) if phrase in (comment.get("body") or "")]
+    if len(receipts) != int(expected_count):
+        raise SystemExit(f"Retained source comments {phase} do not match the observed completion receipt count.")
+    if not receipts:
+        raise SystemExit(f"No provider-verified source-thread completion receipt was retained {phase}.")
+    receipt = receipts[-1]
+    body = receipt["body"]
+    return {
+        "id": str(receipt["id"]),
+        "url": receipt["html_url"],
+        "bodyDigest": f"sha256:{hashlib.sha256(body.encode('utf-8')).hexdigest()}",
+    }
+
+receipt_before_restart = receipt_observation(
+    comments_before_restart_path, receipts_before_restart, "before restart"
+)
+receipt_after_restart = receipt_observation(
+    comments_after_restart_path, receipts_after_restart, "after restart"
+)
+
+recipe = read(recipe_path)["recipe"]
+workstream = read(workstream_path)["workstream"]
+source_issue = read(source_issue_path)
+evidence = {
+    "recordedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "repository": repository,
+    "runtimeSource": runtime_source,
+    "source": {
+        "issueUrl": issue_url,
+        "mentionUrl": mention_url,
+        "issueNumber": int(issue_number),
+        "issueState": source_issue["state"].upper(),
+        "commentId": comment_id,
+        "eventId": event_id,
+    },
+    "factory": {
+        "workThreadId": work_thread_id,
+        "recipe": {"id": recipe_id, "version": 1, "contentDigest": recipe["contentDigest"]},
+        "workstream": {"id": workstream_id, "contentDigest": workstream["contentDigest"]},
+        "batch": {
+            "id": batch_id,
+            "inputDigest": batch_input_digest,
+            "initialReceipt": read(initial_batch_path),
+            "replayedReceipt": read(replayed_batch_path),
+        },
+    },
+    "run": run,
+    "attempt": attempt,
+    "pullRequest": read(pr_path),
+    "requiredCheck": {
+        "context": required_check["context"],
+        "headSha": required_check_head,
+        "state": required_check["state"],
+        **({"targetUrl": required_check["target_url"]} if required_check.get("target_url") else {}),
+    },
+    "completion": {
+        "afterExecutorSuccess": read(initial_path)["completion"],
+        "afterRequiredCheck": read(checked_path)["completion"],
+        "afterMerge": read(final_path)["completion"],
+        "afterRestart": read(restarted_path)["completion"],
+    },
+    "metrics": {
+        "beforeProviderEvidence": read(metrics_before_path),
+        "afterMerge": read(metrics_merged_path),
+        "afterRestart": read(metrics_restarted_path),
+    },
+    "assessmentCount": int(assessment_count),
+    "sourceReceipt": {
+        "matchedPhrase": phrase,
+        "beforeRestart": receipt_before_restart,
+        "afterRestart": receipt_after_restart,
+        "countBeforeRestart": int(receipts_before_restart),
+        "countAfterRestart": int(receipts_after_restart),
+    },
+}
+target = Path(evidence_path)
+target.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+target.chmod(0o600)
+PY
+    run_factory_acceptance_tool report "$EVIDENCE_INPUT_PATH" "$REPORT_PATH"
+    echo "Structured GitHub factory acceptance evidence: $REPORT_PATH"
+  else
+    python3 - \
+      "$REPORT_PATH" "$INITIAL_COMPLETION_PATH" "$CHECKED_COMPLETION_PATH" "$FINAL_COMPLETION_PATH" "$RESTARTED_COMPLETION_PATH" "$PR_INFO_PATH" \
+      "$OWNER/$REPO" "$ISSUE_URL" "$RUN_ID" "$OPENTAG_GH_LIVE_REQUIRED_CHECK" "$ASSESSMENT_COUNT" "$RECEIPTS_AFTER_RESTART" "$RUNTIME_SOURCE" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
@@ -830,18 +1228,12 @@ report = {
     },
     "assessmentCount": int(assessment_count),
     "providerVerifiedReceiptCount": int(receipt_count),
-    "assertions": {
-        "executorSuccessDidNotSatisfyCompletion": True,
-        "requiredCheckBoundToCurrentHead": True,
-        "requiredCheckDidNotBypassMerge": True,
-        "mergeSatisfiedContract": True,
-        "restartPreservedSatisfiedAssessment": True,
-        "restartDidNotDuplicateFinalReceipt": True,
-    },
 }
 Path(report_path).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+Path(report_path).chmod(0o600)
 PY
-  echo "Structured Phase 1 live evidence: $REPORT_PATH"
+    echo "Structured completion-governance evidence: $REPORT_PATH"
+  fi
 else
 echo "Recent issue comments after final receipt:"
 gh api "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments?sort=created&direction=desc&per_page=4" \

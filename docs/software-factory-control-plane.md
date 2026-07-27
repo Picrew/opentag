@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft architecture proposal, updated 2026-07-25.
+Active architecture and phased delivery record, updated 2026-07-27.
 
 This document defines the proposed product and architecture direction for
 OpenTag as an open control plane for governed software factories. It builds on
@@ -1442,6 +1442,57 @@ The deterministic conformance case is implementation and runtime evidence. It
 does not replace the separate provider-live GitHub loop required below for a
 public factory-control-plane claim. Phase 4B does not add dependency edges, a
 DAG scheduler, mutable workstream planning state, or an operator console.
+
+#### Phase 5 implementation boundary — provider-live factory acceptance
+
+Phase 5 proves one externally planned factory loop without expanding OpenTag
+into a backlog or workflow product:
+
+- a real GitHub issue and issue comment remain the canonical work request and
+  source conversation;
+- a pairing-authorized ensure command derives and persists the canonical
+  WorkThread from the normalized external event without creating a seed Run;
+- an immutable recipe and WorkThread-only workstream admit that event through
+  one durable batch;
+- the normal local daemon claims a fenced Attempt, writes an isolated worktree,
+  and creates a real pull request;
+- GitHub provides the current-head required-check and merge facts; executor
+  success alone cannot satisfy completion;
+- accepted-outcome metrics advance only from the authoritative current
+  CompletionAssessment for the WorkThread;
+- closing and reopening the stack preserves satisfied completion, exact batch
+  replay, accepted metrics, and source-thread receipt deduplication.
+
+The acceptance report is fail-closed: it is derived from retained GitHub
+objects, durable Run/Attempt rows, batch receipts, assessment snapshots, and
+workstream metrics. A stale check head, premature accepted metric, changed
+restart receipt, missing execution snapshot, or duplicate final callback makes
+the case fail rather than producing a positive assertion.
+
+Phase 5 adds no dependency edges, DAG scheduler, mutable planning state, or
+operator console. Recipe JSON identifies governance and budget policy; GitHub
+continues to own prioritization, discussion, and business status. See
+[Live E2E Smoke Harness](./live-e2e-smoke-harness.md#github-factory-acceptance)
+for the command and evidence contract.
+
+Acceptance receipt, 2026-07-26 UTC (2026-07-27 Asia/Shanghai):
+
+- external source: [`amplifthq/opentag-test` issue #77](https://github.com/amplifthq/opentag-test/issues/77)
+  and its durable `@opentag run` comment;
+- governed change: [pull request #78](https://github.com/amplifthq/opentag-test/pull/78),
+  required status bound to head `3a65b9788bf26c2e26401ba688c176d0c0c3d239`,
+  merged as `3eb6d9a354b6a7140cf396f371aba444cec409d2`;
+- runtime authority: one factory-attributed succeeded Run and one succeeded
+  fenced local ACP Attempt;
+- completion authority: terminal Runs remained one while accepted WorkThreads
+  advanced `0 -> 1` only after provider-verified merge evidence;
+- recovery authority: restart preserved the satisfied assessment and metrics,
+  returned the exact durable batch receipt, and did not duplicate the single
+  final source-thread completion receipt.
+
+The source issue remains open. That is intentional evidence that accepted
+OpenTag completion does not silently overwrite the external planning system's
+business status.
 
 ## Compatibility and migration
 

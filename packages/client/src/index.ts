@@ -21,6 +21,7 @@ import {
   WorkstreamMetricsSchema,
   WorkstreamInputSchema,
   WorkstreamSchema,
+  WorkThreadSchema,
   type ActorIdentity,
   type Action,
   type ActionPermissionRequest,
@@ -57,7 +58,8 @@ import {
   type WorkstreamAdmissionBatchReceipt,
   type WorkstreamEvaluation,
   type WorkstreamInput,
-  type WorkstreamMetrics
+  type WorkstreamMetrics,
+  type WorkThread
 } from "@opentag/core";
 
 export type {
@@ -301,6 +303,13 @@ export type CreateRunInput = {
   event: OpenTagEvent;
 };
 
+export type EnsuredWorkThread = WorkThread & { id: string };
+
+export type EnsureWorkThreadResult = {
+  workThread: EnsuredWorkThread;
+  created: boolean;
+};
+
 export type CreateRunResult =
   | {
       outcome: "run_created";
@@ -501,6 +510,7 @@ export type OpenTagClient = {
   unbindChannel(input: { provider: string; accountId: string; conversationId: string }): Promise<void>;
   bindSlackChannel(input: SlackChannelBindingInput): Promise<void>;
   getSlackChannelBinding(input: { teamId: string; channelId: string }): Promise<{ binding: SlackChannelBindingInput }>;
+  ensureWorkThread(input: OpenTagEvent): Promise<EnsureWorkThreadResult>;
   createFactoryRecipeSnapshot(input: FactoryRecipeSnapshotInput): Promise<{ recipe: FactoryRecipeSnapshot }>;
   getFactoryRecipeSnapshot(input: { id: string; version: number }): Promise<{ recipe: FactoryRecipeSnapshot }>;
   createWorkstream(input: WorkstreamInput): Promise<{ workstream: Workstream }>;
@@ -933,6 +943,22 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       });
       await assertOk(response, "getSlackChannelBinding");
       return (await response.json()) as { binding: SlackChannelBindingInput };
+    },
+
+    async ensureWorkThread(input) {
+      const event = OpenTagEventSchema.parse(input);
+      const response = await fetchImpl(`${baseUrl}/v1/work-threads/ensure`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify(event)
+      });
+      await assertOk(response, "ensureWorkThread");
+      const body = (await response.json()) as { workThread?: unknown; created?: unknown };
+      const workThread = WorkThreadSchema.parse(body.workThread);
+      if (!workThread.id || typeof body.created !== "boolean") {
+        throw new Error("ensureWorkThread returned an invalid response.");
+      }
+      return { workThread: { ...workThread, id: workThread.id }, created: body.created };
     },
 
     async createFactoryRecipeSnapshot(input) {

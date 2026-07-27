@@ -20,6 +20,7 @@ import {
   runFactoryBatchSubmitCommand,
   runFactoryRecipeCreateCommand,
   runFactoryRecipeGetCommand,
+  runFactoryWorkThreadEnsureCommand,
   runFactoryWorkstreamCreateCommand,
   runFactoryWorkstreamGetCommand
 } from "./factory.js";
@@ -181,6 +182,16 @@ program
   .action(runCliAction(runCancelCommand));
 
 const factoryCommand = program.command("factory").description("Operate recipe-driven software factory workstreams");
+
+const factoryWorkThreadCommand = factoryCommand.command("work-thread").description("Ensure external work threads are available to factory workstreams");
+
+factoryWorkThreadCommand
+  .command("ensure")
+  .description("Ensure a durable WorkThread from a normalized OpenTag event")
+  .option("--config <path>", "Config file path")
+  .requiredOption("--input <path>", "Normalized OpenTag event JSON file path, or - for stdin")
+  .option("--json", "Print the structured dispatcher response as JSON")
+  .action(runCliAction(runFactoryWorkThreadEnsureCommand));
 
 const factoryRecipeCommand = factoryCommand.command("recipe").description("Create or inspect immutable factory recipes");
 
