@@ -159,6 +159,7 @@ is missing or contradictory. Its proof matrix is:
 | Accepted completion | Completion snapshots before evidence, after the check, after merge, and after restart |
 | Accepted metrics | Workstream metrics proving terminal Runs remain `1` while accepted WorkThreads advance `0 -> 1` |
 | Restart recovery | Exact batch receipt replay, byte-equivalent satisfied assessment and metrics, and unchanged source-receipt identity, body digest, and count |
+| Registry artifact, when selected | Installed CLI, GitHub normalizer, and Core event-schema package versions, trusted public npm resolution, and npm lockfile sha512 integrity receipts |
 
 Run the provider/governance proof with the deterministic local ACP writer:
 
@@ -293,10 +294,30 @@ path with `OPENTAG_GH_LIVE_REPORT`. Set
 `OPENTAG_GH_LIVE_STRICT_COMPLETION=false` only when intentionally exercising
 the older optional `apply 1` compatibility flow.
 
-After publishing a candidate to npm `next`, install `@opentag/cli@0.7.0` into a
-fresh directory and set `OPENTAG_GH_LIVE_CLI_BIN` to that installation's
-`node_modules/.bin/opentag`. The same strict case then proves the immutable
-registry artifacts rather than the source checkout.
+After publishing a candidate to npm `next`, install `@opentag/cli@0.8.0` into a
+fresh directory by running the exact install from inside that directory:
+
+```bash
+smoke_root="$(mktemp -d)"
+(
+  set -euo pipefail
+
+  cd "$smoke_root"
+  npm init --yes >/dev/null
+  npm install --no-audit --no-fund @opentag/cli@0.8.0
+)
+```
+
+Then set `OPENTAG_GH_LIVE_CLI_BIN` to that installation's
+`node_modules/.bin/opentag` and
+`OPENTAG_GH_LIVE_EXPECTED_CLI_VERSION=0.8.0`. The harness verifies the
+executable, package manifests, exact package-lock install paths, trusted public
+npm resolution, and integrity receipts before starting, then normalizes and
+validates the source comment through the installed `@opentag/github` and
+`@opentag/core` dependencies. npm verifies tarball bytes against SRI during
+installation; the harness retains the npm-generated lockfile receipts and does
+not independently download and hash the tarballs. The same strict case thus
+proves the immutable registry artifacts rather than workspace product code.
 
 ### Slack UI
 

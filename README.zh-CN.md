@@ -265,7 +265,7 @@ opentag-dev setup
 
 ## 软件包
 
-当前公开发布版本：`v0.7.0`。OpenTag 在 `@opentag` scope 下协调发布 16 个公开软件包。
+当前源码包版本：`v0.8.0`；npm dist-tag 是各发布通道当前公开版本的权威来源。OpenTag 在 `@opentag` scope 下协调发布 16 个公开软件包。
 
 | 包 | 用途 |
 | --- | --- |

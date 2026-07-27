@@ -47,6 +47,9 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Check deterministic factory conformance
+        run: pnpm smoke:factory-conformance
+
       - name: Check publication set consistency
         run: pnpm release:publication-set
 

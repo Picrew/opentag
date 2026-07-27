@@ -274,7 +274,7 @@ opentag-dev setup
 
 ## Packages
 
-Current public release: `v0.7.0`. The coordinated npm package family contains 16 public packages under the `@opentag` scope.
+Package source version: `v0.8.0`. npm dist-tags are authoritative for the currently published channel versions. The coordinated package family contains 16 public packages under the `@opentag` scope.
 
 | Package | Purpose |
 | --- | --- |

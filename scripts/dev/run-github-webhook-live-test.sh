@@ -42,6 +42,10 @@ Helpful env:
   OPENTAG_GH_LIVE_REPORT          optional structured evidence JSON path
   OPENTAG_GH_LIVE_CLI_BIN         optional installed `opentag` executable;
                                      defaults to the source CLI through tsx
+  OPENTAG_GH_LIVE_EXPECTED_CLI_VERSION
+                                     required with OPENTAG_GH_LIVE_CLI_BIN;
+                                     binds the executable and npm lockfile
+                                     integrity to the retained report
   OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN
                                      true/false, default false. Keeps GitHub
                                      callbacks working but verifies Needs setup
@@ -103,6 +107,7 @@ BATCH_ID=""
 BATCH_INPUT_DIGEST=""
 INITIAL_BATCH_RECEIPT_PATH=""
 REPLAYED_BATCH_RECEIPT_PATH=""
+RUNTIME_ARTIFACT_PATH=""
 
 bool_true() {
   case "${1:-}" in
@@ -374,6 +379,10 @@ run_factory_acceptance_tool() {
   NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/github-factory-acceptance.ts "$@"
 }
 
+run_registry_artifact_tool() {
+  corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/github-registry-artifact.ts "$@"
+}
+
 capture_workstream_metrics() {
   local output_path="$1"
   curl -fsS \
@@ -632,6 +641,19 @@ PY
 ensure_port_free "$OPENTAG_DISPATCHER_PORT" "dispatcher"
 ensure_port_free "$OPENTAG_GITHUB_PORT" "GitHub ingress"
 
+if [[ -n "${OPENTAG_GH_LIVE_CLI_BIN:-}" ]]; then
+  if [[ -z "${OPENTAG_GH_LIVE_EXPECTED_CLI_VERSION:-}" ]]; then
+    echo "OPENTAG_GH_LIVE_EXPECTED_CLI_VERSION is required with OPENTAG_GH_LIVE_CLI_BIN." >&2
+    exit 1
+  fi
+  RUNTIME_ARTIFACT_PATH="$TMP_ROOT/registry-runtime-artifact.json"
+  run_registry_artifact_tool inspect \
+    "$OPENTAG_GH_LIVE_CLI_BIN" \
+    "$OPENTAG_GH_LIVE_EXPECTED_CLI_VERSION" \
+    "$RUNTIME_ARTIFACT_PATH"
+  echo "Verified registry CLI package version and npm lockfile integrity."
+fi
+
 start_cli_stack
 
 PUBLIC_URL="${OPENTAG_GH_PUBLIC_URL:-}"
@@ -714,7 +736,11 @@ payload = {
 Path(output_path).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 Path(output_path).chmod(0o600)
 PY
-  run_factory_acceptance_tool event "$SOURCE_EVENT_INPUT_PATH" "$EVENT_PATH"
+  if [[ -n "$RUNTIME_ARTIFACT_PATH" ]]; then
+    run_registry_artifact_tool event "$RUNTIME_ARTIFACT_PATH" "$SOURCE_EVENT_INPUT_PATH" "$EVENT_PATH"
+  else
+    run_factory_acceptance_tool event "$SOURCE_EVENT_INPUT_PATH" "$EVENT_PATH"
+  fi
   EVENT_ID="$(python3 - "$EVENT_PATH" <<'PY'
 import json
 import sys
@@ -1032,7 +1058,7 @@ PY
       "$METRICS_BEFORE_PROVIDER_PATH" "$METRICS_AFTER_MERGE_PATH" "$METRICS_AFTER_RESTART_PATH" "$SOURCE_COMMENTS_PATH" "$SOURCE_COMMENTS_AFTER_RESTART_PATH" "$SOURCE_ISSUE_PATH" \
       "$OWNER/$REPO" "$ISSUE_URL" "$MENTION_URL" "$ISSUE_NUMBER" "$COMMENT_ID" "$EVENT_ID" "$WORK_THREAD_ID" \
       "$RECIPE_ID" "$WORKSTREAM_ID" "$BATCH_ID" "$BATCH_INPUT_DIGEST" "$ASSESSMENT_COUNT" \
-      "$RECEIPTS_BEFORE_RESTART" "$RECEIPTS_AFTER_RESTART" "$RUNTIME_SOURCE" "$OPENTAG_GH_LIVE_REQUIRED_CHECK" <<'PY'
+      "$RECEIPTS_BEFORE_RESTART" "$RECEIPTS_AFTER_RESTART" "$RUNTIME_SOURCE" "$RUNTIME_ARTIFACT_PATH" "$OPENTAG_GH_LIVE_REQUIRED_CHECK" <<'PY'
 import hashlib
 import json
 import sys
@@ -1074,6 +1100,7 @@ from pathlib import Path
     receipts_before_restart,
     receipts_after_restart,
     runtime_source,
+    runtime_artifact_path,
     required_check_context,
 ) = sys.argv[1:]
 
@@ -1176,6 +1203,10 @@ evidence = {
         "countAfterRestart": int(receipts_after_restart),
     },
 }
+if runtime_source == "registry_install":
+    if not runtime_artifact_path:
+        raise SystemExit("Registry-installed factory acceptance is missing runtime artifact evidence.")
+    evidence["runtimeArtifact"] = read(runtime_artifact_path)["runtimeArtifact"]
 target = Path(evidence_path)
 target.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 target.chmod(0o600)
@@ -1185,7 +1216,7 @@ PY
   else
     python3 - \
       "$REPORT_PATH" "$INITIAL_COMPLETION_PATH" "$CHECKED_COMPLETION_PATH" "$FINAL_COMPLETION_PATH" "$RESTARTED_COMPLETION_PATH" "$PR_INFO_PATH" \
-      "$OWNER/$REPO" "$ISSUE_URL" "$RUN_ID" "$OPENTAG_GH_LIVE_REQUIRED_CHECK" "$ASSESSMENT_COUNT" "$RECEIPTS_AFTER_RESTART" "$RUNTIME_SOURCE" <<'PY'
+      "$OWNER/$REPO" "$ISSUE_URL" "$RUN_ID" "$OPENTAG_GH_LIVE_REQUIRED_CHECK" "$ASSESSMENT_COUNT" "$RECEIPTS_AFTER_RESTART" "$RUNTIME_SOURCE" "$RUNTIME_ARTIFACT_PATH" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
@@ -1205,6 +1236,7 @@ from pathlib import Path
     assessment_count,
     receipt_count,
     runtime_source,
+    runtime_artifact_path,
 ) = sys.argv[1:]
 
 def read(path):
@@ -1229,6 +1261,10 @@ report = {
     "assessmentCount": int(assessment_count),
     "providerVerifiedReceiptCount": int(receipt_count),
 }
+if runtime_source == "registry_install":
+    if not runtime_artifact_path:
+        raise SystemExit("Registry-installed completion acceptance is missing runtime artifact evidence.")
+    report["runtimeArtifact"] = read(runtime_artifact_path)["runtimeArtifact"]
 Path(report_path).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 Path(report_path).chmod(0o600)
 PY

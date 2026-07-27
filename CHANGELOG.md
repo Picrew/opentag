@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+No changes yet.
+
+## v0.8.0 - 2026-07-27
+
+OpenTag 0.8.0 completes the first provider-live, recipe-driven software-factory
+control loop on top of external planning systems. It adds access identity,
+bounded human escalation, deterministic runner placement, immutable factory
+recipes and WorkThread-only workstreams, restart-safe batch admission,
+authoritative accepted-outcome metrics, and a real GitHub-backed acceptance
+path. OpenTag still does not own backlog state, dependency DAGs, or an operator
+console; source systems own planning, Git owns changes, and provider evidence
+must satisfy completion gates.
+
 ### Added
 
 - Additive agent access-profile and policy-provenance snapshots that preserve
@@ -10,6 +23,25 @@
 - Structured human-escalation acknowledgement and resolution through the
   source thread, dispatcher API, TypeScript client, and CLI, including bounded
   options, audience, expiry, deduplication, and attributed audit events.
+- Explainable multi-runner routing contracts, deterministic governance
+  evaluation, durable routing snapshots, pairing-authenticated APIs, CLI status,
+  locality constraints, and frozen fallback decisions.
+- Immutable factory recipe snapshots, WorkThread-only workstreams, bounded
+  budgets, ordered durable admission batches, restart-safe lease recovery,
+  bounded exception summaries, workstream evaluation, and client/CLI control
+  surfaces.
+- Accepted-outcome metrics attributed only through the current authoritative
+  CompletionAssessment and the latest terminal fenced Attempt, including
+  runner and executor breakdowns without per-Run queries.
+- An idempotent WorkThread ensure command that derives canonical governance
+  identity from a normalized external event without creating a seed Run.
+- A deterministic factory conformance path covering Echo and local ACP executor
+  adapters, exact restart replay, conflicting digest rejection, bounded
+  exception handling, and authoritative metrics.
+- A real GitHub factory acceptance path from an external issue comment through
+  admission, local execution, pull request, current-head required status,
+  provider merge, accepted completion, source-thread receipt, restart recovery,
+  and workstream metrics.
 
 ### Changed
 
@@ -23,6 +55,56 @@
 - Human resolution is persisted as follow-up context; OpenTag no longer implies
   that a stopped executor can receive live input. Conflicting acknowledgement
   or resolution replays are rejected instead of rewriting history.
+- Attempt creation now enforces the immutable routing decision, selected runner,
+  executor placement, access profile, locality, attempt budget, concurrency
+  budget, and fencing authority in the same durable control path.
+- Factory batches persist every item before admission, process items in stable
+  order, keep routine per-item callbacks quiet, and return the exact durable
+  receipt for an idempotent replay after restart.
+- Workstream status now leads with state and next action, then accepted outcomes,
+  budget use, bounded exceptions, and historical run detail.
+- GitHub completion evidence remains bound to the current pull-request head;
+  executor success and a successful check cannot bypass the merge gate.
+- Provider compatibility checks, ACP readiness behavior, and the published
+  dependency graph were hardened, including updated Hono server and protobuf
+  runtime dependencies.
+- Registry-installed factory acceptance now fails closed unless the selected
+  CLI reports the target version and the clean npm lockfile binds the CLI,
+  installed GitHub source normalizer, and installed Core event schema to the
+  trusted public npm origin and sha512 integrity receipts; source normalization
+  and validation also run through those installed packages rather than workspace
+  product code.
+- npm `latest` promotion now preserves one non-overwritable pre-promotion
+  rollback snapshot across every partial-promotion retry, holds an atomic
+  cross-operator release lock, and aborts before replacing drifted registry tags.
+
+### Fixed
+
+- Completion-waiver time tests now use a stable clock boundary.
+- Human-escalation acknowledgement and resolution reject concurrent or
+  conflicting attempts without rewriting durable history.
+- Workstream metrics reject malformed, waived-without-authority, stale, or
+  cross-WorkThread assessments and retain latest-run authority at scale.
+- The factory acceptance report now rejects replaced assessments or edited,
+  replaced, or duplicated source receipts across restart.
+
+### Security
+
+- Expired or revoked access profiles fail closed before Attempt creation and
+  can open a durable security escalation for the governed WorkThread.
+- Runner and executor fallback cannot widen captured access or recipe locality.
+- Pairing credentials authorize factory administration; runner credentials
+  cannot invoke WorkThread, recipe, workstream, or batch control operations.
+
+### Release validation note
+
+The source-checkout provider-live proof completed against a real GitHub issue,
+pull request, current-head required status, merge, final source receipt, and
+restart recovery. Before promotion from npm `next` to `latest`, the exact
+registry-installed `@opentag/cli@0.8.0` candidate must repeat that factory loop
+and the coordinated registry, ACP, governance, privacy, package-audit, and live
+provider gates. This changelog does not claim those immutable registry artifacts
+have passed before publication.
 
 ## v0.7.0 - 2026-07-22
 
