@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as slackEvents from "../src/events.js";
 import {
   computeSlackSignature,
   createSlackEventsApp,
@@ -12,6 +13,7 @@ describe("Slack Events API delivery lanes", () => {
   const currentClock = () => Number(currentTimestamp) * 1000;
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -325,6 +327,29 @@ describe("Slack Events API delivery lanes", () => {
     expect(linear).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a /linear delivery retryable when the processor returns a non-2xx result", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const process = vi.fn(async () => ({
+      kind: "json" as const,
+      status: 400 as const,
+      body: { error: "invalid_event_payload" }
+    }));
+    vi.spyOn(slackEvents, "createSlackEventProcessor").mockReturnValue({ process });
+    const app = createSlackEventsApp(baseInput());
+    const rawBody = eventBody("EvLinearNon2xx1", "/linear");
+
+    expect((await deliver(app, rawBody)).status).toBe(200);
+    await vi.waitFor(() =>
+      expect(consoleError).toHaveBeenCalledWith(
+        "[slack] async /linear query processing failed:",
+        expect.objectContaining({ message: "Slack /linear query processing returned HTTP 400." })
+      )
+    );
+
+    expect((await deliver(app, rawBody)).status).toBe(200);
+    await vi.waitFor(() => expect(process).toHaveBeenCalledTimes(2));
+  });
+
   it("drains active and queued /linear queries when the app runtime closes", async () => {
     const releases: Array<() => void> = [];
     const started: string[] = [];
@@ -357,6 +382,38 @@ describe("Slack Events API delivery lanes", () => {
 
     await closePromise;
     expect(closeSettled).toBe(true);
+  });
+
+  it("bounds graceful close when /linear query work never becomes idle", async () => {
+    const queryGate = deferred();
+    const linear = vi.fn(async () => {
+      await queryGate.promise;
+      return "Linear backlog";
+    });
+    const runtime = createSlackEventsAppRuntime({ ...baseInput(), linear, async reply() {} });
+
+    expect((await deliver(runtime.app, eventBody("EvLinearDrainTimeout1", "/linear"))).status).toBe(200);
+    await vi.waitFor(() => expect(linear).toHaveBeenCalledOnce());
+
+    vi.useFakeTimers();
+    let closeSettled = false;
+    const closePromise = runtime.close().finally(() => {
+      closeSettled = true;
+    });
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(closeSettled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await closePromise;
+    expect(closeSettled).toBe(true);
+
+    queryGate.resolve();
+    await vi.runAllTicks();
+  });
+
+  it("resolves graceful close immediately when the /linear query lane is already idle", async () => {
+    const runtime = createSlackEventsAppRuntime(baseInput());
+
+    await expect(runtime.close()).resolves.toBeUndefined();
   });
 
   it("still returns 400 synchronously for malformed JSON without invoking the processor", async () => {

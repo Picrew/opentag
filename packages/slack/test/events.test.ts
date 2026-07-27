@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createSlackEventProcessor, type SlackThreadActionInput } from "../src/events.js";
+import {
+  createSlackEventProcessor,
+  isSlackLinearBacklogQuery,
+  type SlackEventEnvelope,
+  type SlackThreadActionInput
+} from "../src/events.js";
 
 function repoFreeProcessor(submitted: SlackThreadActionInput[]) {
   return createSlackEventProcessor({
@@ -128,6 +133,29 @@ describe("Slack /linear self-service command", () => {
       }
     };
   }
+
+  it.each([
+    ["team_id", (payload: SlackEventEnvelope) => delete payload.team_id],
+    ["event_id", (payload: SlackEventEnvelope) => delete payload.event_id],
+    ["event.user", (payload: SlackEventEnvelope) => payload.event && delete payload.event.user],
+    ["event.text", (payload: SlackEventEnvelope) => payload.event && delete payload.event.text],
+    ["event.ts", (payload: SlackEventEnvelope) => payload.event && delete payload.event.ts],
+    ["event.channel", (payload: SlackEventEnvelope) => payload.event && delete payload.event.channel]
+  ])("consistently rejects /linear payloads missing %s before routing or processing", async (_field, omitField) => {
+    const replies: Reply[] = [];
+    const runs: string[] = [];
+    const linearCalls: number[] = [];
+    const payload: SlackEventEnvelope = mentionEvent("<@UBOT> /linear");
+    omitField(payload);
+
+    expect(isSlackLinearBacklogQuery(payload)).toBe(false);
+    await expect(
+      linearProcessor({ replies, runs, linearCalls }).process(payload, { agentId: "opentag" })
+    ).resolves.toMatchObject({ status: 400, body: { error: "invalid_event_payload" } });
+    expect(linearCalls).toHaveLength(0);
+    expect(replies).toHaveLength(0);
+    expect(runs).toHaveLength(0);
+  });
 
   it.each(["<@UBOT> linear", "<@UBOT> /linear", "<@UBOT> LINEAR", "<@UBOT>  /Linear  "])(
     "replies with the backlog and does not create a run for %j",

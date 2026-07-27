@@ -50,6 +50,7 @@ export type SlackIngressConfig = SlackEventsApiIngressConfig;
 
 const DEFAULT_LINEAR_QUERY_CONCURRENCY = 8;
 const DEFAULT_LINEAR_QUERY_MAX_OUTSTANDING = 100;
+const DEFAULT_LINEAR_QUERY_DRAIN_TIMEOUT_MS = 30_000;
 const MAX_COMPLETED_LINEAR_QUERY_EVENT_IDS = 1000;
 
 type AsyncTask = () => Promise<void>;
@@ -63,6 +64,7 @@ function positiveInteger(value: number | undefined, fallback: number, name: stri
 function createBoundedAsyncExecutor(input: {
   concurrency: number;
   maxOutstanding: number;
+  drainTimeoutMs: number;
   onError(error: unknown): void;
 }) {
   let active = 0;
@@ -101,7 +103,16 @@ function createBoundedAsyncExecutor(input: {
     closeAndDrain(): Promise<void> {
       accepting = false;
       if (active === 0 && queue.length === 0) return Promise.resolve();
-      return new Promise((resolve) => idleWaiters.add(resolve));
+      return new Promise((resolve) => {
+        let timeout: ReturnType<typeof setTimeout>;
+        const resolveWaiter = () => {
+          clearTimeout(timeout);
+          idleWaiters.delete(resolveWaiter);
+          resolve();
+        };
+        idleWaiters.add(resolveWaiter);
+        timeout = setTimeout(resolveWaiter, input.drainTimeoutMs);
+      });
     }
   };
 }
@@ -306,6 +317,7 @@ export function createSlackEventsAppRuntime(input: SlackEventsAppInput): SlackEv
   const linearQueryExecutor = createBoundedAsyncExecutor({
     concurrency: maxLinearQueryConcurrency,
     maxOutstanding: maxLinearQueryOutstanding,
+    drainTimeoutMs: DEFAULT_LINEAR_QUERY_DRAIN_TIMEOUT_MS,
     onError(error) {
       console.error("[slack] async /linear query processing failed:", error);
     }
@@ -433,7 +445,10 @@ export function createSlackEventsAppRuntime(input: SlackEventsAppInput): SlackEv
       pendingLinearQueryEventIds.add(payload.event_id);
       const accepted = linearQueryExecutor.tryEnqueue(async () => {
         try {
-          await processor.process(payload, resolvedSlackApp.slackApp, { signatureVerified: true });
+          const result = await processor.process(payload, resolvedSlackApp.slackApp, { signatureVerified: true });
+          if (result.status < 200 || result.status >= 300) {
+            throw new Error(`Slack /linear query processing returned HTTP ${result.status}.`);
+          }
           rememberCompletedLinearQuery(payload.event_id);
         } finally {
           pendingLinearQueryEventIds.delete(payload.event_id);

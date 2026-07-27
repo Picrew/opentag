@@ -256,8 +256,9 @@ project fallback。
 
 在 Events API 模式里，只有精确的 `@OpenTag /linear` 或 `@OpenTag linear`
 查询会进入受限的异步 query lane。这个 lane 是 best-effort：正常关闭时会
-drain 已接收查询，队列满时返回 `503`；如果进程突然退出，已经 ACK 的查询
-仍可能丢失，此时可以安全地重新执行 `/linear`。创建 run、stop/bind/unbind、
+最多等待 30 秒 drain 已接收查询，队列满时返回 `503`；超过 drain 上限或
+进程突然退出时，已经 ACK 的查询仍可能丢失，此时可以安全地重新执行
+`/linear`。创建 run、stop/bind/unbind、
 审批和交互按钮都不会进入这条内存队列；OpenTag 会等它们处理完成后再返回
 对应的 Events API HTTP 响应。
 

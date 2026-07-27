@@ -203,12 +203,11 @@ function parseLinearCommand(command: string | null): { ok: true } | { ok: false 
   return null;
 }
 
-type SlackLinearBacklogQueryPayload = SlackEventEnvelope & {
+type WellFormedSlackEventPayload = SlackEventEnvelope & {
   type: "event_callback";
   team_id: string;
   event_id: string;
   event: NonNullable<SlackEventEnvelope["event"]> & {
-    type: "app_mention";
     user: string;
     text: string;
     ts: string;
@@ -216,18 +215,24 @@ type SlackLinearBacklogQueryPayload = SlackEventEnvelope & {
   };
 };
 
+function isWellFormedSlackEventPayload(payload: SlackIngressPayload): payload is WellFormedSlackEventPayload {
+  if (payload.type !== "event_callback" || !payload.event) return false;
+  return Boolean(
+    payload.team_id &&
+      payload.event_id &&
+      payload.event.user &&
+      payload.event.text &&
+      payload.event.ts &&
+      payload.event.channel
+  );
+}
+
+type SlackLinearBacklogQueryPayload = WellFormedSlackEventPayload & {
+  event: WellFormedSlackEventPayload["event"] & { type: "app_mention" };
+};
+
 export function isSlackLinearBacklogQuery(payload: SlackIngressPayload): payload is SlackLinearBacklogQueryPayload {
-  if (payload.type !== "event_callback" || payload.event?.type !== "app_mention") return false;
-  if (
-    !payload.team_id ||
-    !payload.event_id ||
-    !payload.event.user ||
-    !payload.event.text ||
-    !payload.event.ts ||
-    !payload.event.channel
-  ) {
-    return false;
-  }
+  if (!isWellFormedSlackEventPayload(payload) || payload.event.type !== "app_mention") return false;
   const command = stripSlackAppMention(payload.event.text, payload.authorizations?.[0]?.user_id);
   return parseLinearCommand(command)?.ok === true;
 }
@@ -451,7 +456,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
       if (payload.event.type === "message" && (payload.event.subtype || payload.event.bot_id)) {
         return json({ ok: true });
       }
-      if (!payload.team_id || !payload.event.channel || !payload.event.user || !payload.event.text || !payload.event.ts || !payload.event_id) {
+      if (!isWellFormedSlackEventPayload(payload)) {
         return json({ error: "invalid_event_payload" }, 400);
       }
       const rawThreadActionText =

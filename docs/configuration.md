@@ -848,8 +848,9 @@ Events API delivery keeps this read-only query in its own bounded, best-effort
 lane. OpenTag acknowledges an admitted `/linear` query before the Linear request
 finishes, returns `503` when that query lane is full, suppresses duplicate
 pending or completed query deliveries by Slack `event_id`, and drains admitted
-queries during graceful shutdown. An abrupt process loss can still drop an
-already acknowledged query; users can safely run the read-only command again.
+queries for up to 30 seconds during graceful shutdown. Work still running after
+that bound, or an abrupt process loss, can drop an already acknowledged query;
+users can safely run the read-only command again.
 Run creation, `/stop`, `/bind`, `/unbind`, thread approvals, and interactive
 actions do not use this in-memory lane: their Events API response waits for the
 processor result, so a failure is not converted into a successful ACK.
