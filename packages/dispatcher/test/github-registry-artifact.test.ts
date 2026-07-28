@@ -6,6 +6,7 @@ import { mkdtemp } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
   inspectRegistryCliArtifact,
+  inspectRegistryCliPackageSet,
   normalizeRegistryGitHubFactorySourceEvent
 } from "../../../scripts/test/github-registry-artifact.js";
 
@@ -20,11 +21,15 @@ async function createRegistryInstall(
   const cliRoot = join(root, "node_modules", "@opentag", "cli");
   const githubRoot = join(root, "node_modules", "@opentag", "github");
   const coreRoot = join(root, "node_modules", "@opentag", "core");
+  const slackRoot = join(root, "node_modules", "@opentag", "slack");
+  const linearRoot = join(root, "node_modules", "@opentag", "linear");
   const binRoot = join(root, "node_modules", ".bin");
   await Promise.all([
     mkdir(join(cliRoot, "dist"), { recursive: true }),
     mkdir(join(githubRoot, "dist"), { recursive: true }),
     mkdir(join(coreRoot, "dist"), { recursive: true }),
+    mkdir(join(slackRoot, "dist"), { recursive: true }),
+    mkdir(join(linearRoot, "dist"), { recursive: true }),
     mkdir(binRoot, { recursive: true })
   ]);
 
@@ -33,7 +38,12 @@ async function createRegistryInstall(
     version,
     type: "module",
     bin: { opentag: "./dist/index.js" },
-    dependencies: { "@opentag/core": version, "@opentag/github": version }
+    dependencies: {
+      "@opentag/core": version,
+      "@opentag/github": version,
+      "@opentag/linear": version,
+      "@opentag/slack": version
+    }
   }));
   await writeFile(
     join(cliRoot, "dist", "index.js"),
@@ -65,6 +75,20 @@ async function createRegistryInstall(
     "export const OpenTagEventSchema = { parse: (value) => ({ ...value, marker: `${value.marker}+registry-core` }) };\n"
   );
 
+  for (const [packageRoot, packageName] of [
+    [slackRoot, "@opentag/slack"],
+    [linearRoot, "@opentag/linear"]
+  ] as const) {
+    await writeFile(join(packageRoot, "package.json"), JSON.stringify({
+      name: packageName,
+      version,
+      type: "module",
+      main: "./dist/index.js",
+      exports: { ".": "./dist/index.js" }
+    }));
+    await writeFile(join(packageRoot, "dist", "index.js"), "export const registryFixture = true;\n");
+  }
+
   await symlink("../@opentag/cli/dist/index.js", join(binRoot, "opentag"));
   await writeFile(join(root, "package-lock.json"), JSON.stringify({
     name: "registry-fixture",
@@ -83,6 +107,16 @@ async function createRegistryInstall(
       [`${lockPackageRoot}/@opentag/core`]: {
         version,
         resolved: `${registryOrigin}/@opentag/core/-/core-${version}.tgz`,
+        integrity
+      },
+      [`${lockPackageRoot}/@opentag/slack`]: {
+        version,
+        resolved: `${registryOrigin}/@opentag/slack/-/slack-${version}.tgz`,
+        integrity
+      },
+      [`${lockPackageRoot}/@opentag/linear`]: {
+        version,
+        resolved: `${registryOrigin}/@opentag/linear/-/linear-${version}.tgz`,
         integrity
       }
     }
@@ -127,6 +161,31 @@ describe("GitHub registry artifact acceptance", () => {
 
     await expect(normalizeRegistryGitHubFactorySourceEvent(inspection, { id: "100" }))
       .resolves.toMatchObject({ id: "registry_100", marker: "registry-github+registry-core" });
+  });
+
+  it("binds an arbitrary installed OpenTag provider set to the same registry version and lockfile", async () => {
+    const fixture = await createRegistryInstall("0.9.0");
+
+    const inspection = await inspectRegistryCliPackageSet({
+      cliBin: fixture.cliBin,
+      expectedVersion: "0.9.0",
+      packageNames: ["@opentag/slack", "@opentag/linear", "@opentag/core"]
+    });
+
+    expect(inspection).toMatchObject({
+      expectedVersion: "0.9.0",
+      executable: {
+        package: "@opentag/cli",
+        version: "0.9.0",
+        registry: "https://registry.npmjs.org",
+        integrity
+      },
+      packages: {
+        "@opentag/slack": { version: "0.9.0", integrity },
+        "@opentag/linear": { version: "0.9.0", integrity },
+        "@opentag/core": { version: "0.9.0", integrity }
+      }
+    });
   });
 
   it("fails closed for a stale installed candidate", async () => {
