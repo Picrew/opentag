@@ -4,6 +4,73 @@
 
 No changes yet.
 
+## v0.9.0 - 2026-07-28
+
+OpenTag 0.9.0 adds a read-only Linear project-backlog query to the Slack source
+thread without turning Linear into an internal planning system or silently
+starting agent work. Authorized channels can request `@OpenTag /linear`, receive
+an ordered backlog summary in the same thread, and safely retry a failed or
+interrupted query. Existing run creation, approval, binding, and mutation paths
+retain their prior delivery semantics.
+
+### Added
+
+- A public `@opentag/linear` backlog query that fetches every unfinished issue
+  page within fixed time and page bounds, validates the Linear response, and
+  orders the complete result by workflow state, priority, and issue identifier.
+- Slack parsing and rendering for the exact `@OpenTag /linear` and
+  `@OpenTag linear` commands, including project name, issue state and priority,
+  safe links, query time, and an explicit display limit.
+- Additive CLI configuration, startup, and doctor support for exact
+  `(teamId, channelId) -> projectId` query authorization and a query-only
+  `platforms.linear.connections.default.token` credential.
+
+### Changed
+
+- Only read-only `/linear` queries use a dedicated bounded asynchronous Slack
+  Events API lane. Run creation, stop, bind/unbind, approvals, and interactive
+  actions remain synchronous so a processing failure is not acknowledged as a
+  successful control-plane delivery.
+- Linear backlog queries read the live OAuth token when available, complete
+  pagination before applying the global display order, and fail closed when the
+  mapped project is missing, inaccessible, over the page bound, or over the
+  request deadline.
+
+### Fixed
+
+- Slack-controlled and Linear-controlled text and URLs are escaped before
+  rendering so issue content cannot inject Slack mrkdwn or malformed links.
+- A failed non-2xx `/linear` processing attempt no longer enters completed-event
+  deduplication and remains safe to retry.
+- Graceful Slack ingress shutdown drains the query lane when possible but
+  resolves after a 30-second maximum wait instead of blocking indefinitely.
+
+### Security
+
+- Slack `/linear` authorization requires an exact team and channel match before
+  OpenTag reads a Linear credential or calls the provider; legacy global project
+  settings do not authorize a channel.
+- Query-only Linear credentials are kept out of mutation dispatcher wiring, and
+  unsupported named connections fail closed instead of falling back to another
+  workspace token.
+
+### Compatibility and migration
+
+- The release is additive and introduces no breaking TypeScript or HTTP
+  contract. Existing Linear webhook, callback, and issue-creation paths remain
+  available and continue to require their mutation-capable configuration.
+- To enable `/linear`, add an exact entry under `platforms.linear.channels` and
+  configure the `default` query connection. `platforms.linear.projectId` and
+  `OPENTAG_LINEAR_PROJECT_ID` are not channel authorization fallbacks.
+
+### Release validation note
+
+Before promotion from npm `next` to `latest`, the exact registry-installed
+`@opentag/cli@0.9.0` candidate must pass the coordinated package checks and the
+real GitHub factory acceptance loop. The Slack-to-Linear query path must also be
+validated with provider-backed credentials or left explicitly unclaimed; source
+tests alone do not prove live Slack or Linear delivery.
+
 ## v0.8.0 - 2026-07-27
 
 OpenTag 0.8.0 completes the first provider-live, recipe-driven software-factory

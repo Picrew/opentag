@@ -265,7 +265,7 @@ opentag-dev setup
 
 ## 软件包
 
-当前源码包版本：`v0.8.0`；npm dist-tag 是各发布通道当前公开版本的权威来源。OpenTag 在 `@opentag` scope 下协调发布 16 个公开软件包。
+当前源码包版本：`v0.9.0`；npm dist-tag 是各发布通道当前公开版本的权威来源。OpenTag 在 `@opentag` scope 下协调发布 16 个公开软件包。
 
 | 包 | 用途 |
 | --- | --- |
@@ -277,7 +277,7 @@ opentag-dev setup
 | [`@opentag/slack`](https://www.npmjs.com/package/@opentag/slack) | Slack Socket Mode、Events API 和回复 |
 | [`@opentag/github`](https://www.npmjs.com/package/@opentag/github) | GitHub webhook、评论、PR helper 和 action apply |
 | [`@opentag/gitlab`](https://www.npmjs.com/package/@opentag/gitlab) | GitLab webhook、note 回复、MR helper 和 action apply |
-| [`@opentag/linear`](https://www.npmjs.com/package/@opentag/linear) | Linear webhook、issue comment 回复和 issue action apply |
+| [`@opentag/linear`](https://www.npmjs.com/package/@opentag/linear) | Linear webhook、只读 project backlog 查询、issue comment 回复和 issue action apply |
 | [`@opentag/lark`](https://www.npmjs.com/package/@opentag/lark) | Lark / 飞书入口、Personal Agent 注册和回复 |
 | [`@opentag/telegram`](https://www.npmjs.com/package/@opentag/telegram) | Telegram polling/webhook 规范化、bot 回复和 source-thread controls |
 | [`@opentag/discord`](https://www.npmjs.com/package/@opentag/discord) | Discord Gateway/webhook slash-command interactions 和频道回复 |

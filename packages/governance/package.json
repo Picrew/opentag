@@ -1,6 +1,6 @@
 {
   "name": "@opentag/governance",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Deterministic execution governance for OpenTag work loops.",
   "type": "module",
   "engines": {

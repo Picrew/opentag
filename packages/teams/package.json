@@ -1,6 +1,6 @@
 {
   "name": "@opentag/teams",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Microsoft Teams activity normalization and callback rendering for OpenTag.",
   "type": "module",
   "engines": { "node": ">=20" },

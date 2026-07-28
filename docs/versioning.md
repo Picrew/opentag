@@ -32,7 +32,7 @@ Private runnable apps are not published:
 
 ## Pre-1.0 Policy
 
-The source package family is prepared at `0.8.0`; npm dist-tags remain authoritative for the currently published channel versions. The public API is still settling, so all releases remain in the `0.x` line until the package contracts are stable enough for `1.0.0`.
+The source package family is prepared at `0.9.0`; npm dist-tags remain authoritative for the currently published channel versions. The public API is still settling, so all releases remain in the `0.x` line until the package contracts are stable enough for `1.0.0`.
 
 The first npm release was published as the coordinated `0.1.0` package family.
 The `0.2.0` release added the published CLI, local runtime package, and Lark and Telegram packages.
@@ -44,6 +44,7 @@ The `0.5.0` release adds Discord, Linear, and Microsoft Teams adapters, ACP-firs
 The `0.6.0` release moves all built-in coding agents onto Generic ACP, adds Cursor, OpenCode, and OpenClaw executor profiles, requires Node.js 22 for the CLI/Local Runtime/Runner, and hardens ACP isolation, cancellation conformance, Slack summaries, and the coordinated release gate.
 The `0.7.0` release completes the Phase 1 completion-governance vertical slice with durable work threads and contracts, deterministic evidence-backed assessments, GitHub PR/check/merge evidence ingestion, replay-safe reassessment, CLI explanations and bounded waivers, and a 16-package publication set that includes `@opentag/governance`.
 The `0.8.0` release completes the first provider-live recipe-driven factory loop with access identity, bounded human escalation, explainable multi-runner routing, immutable recipes and WorkThread-only workstreams, restart-safe batch admission, authoritative accepted-outcome metrics, and a real GitHub issue-to-merge-to-receipt proof while keeping planning external.
+The `0.9.0` release adds an authorized, read-only Slack-to-Linear project backlog query with bounded pagination, deterministic ordering, live OAuth token use, exact channel authorization, a query-only credential boundary, and an isolated best-effort Events API lane that does not change control or mutation delivery semantics.
 
 For each npm release:
 
@@ -112,7 +113,7 @@ After `1.0.0`, follow SemVer:
     merge, completion, restart, source receipt, and workstream metrics.
 12. Promote the same package versions to `latest` by changing dist-tags only.
 13. Confirm `latest` and `next` for the complete package family.
-14. Create and push the matching annotated git tag, for example `v0.8.0`, from
+14. Create and push the matching annotated git tag, for example `v0.9.0`, from
     the exact publication commit.
 15. Create the matching GitHub Release with the changelog notes and verify its
     tag target.
