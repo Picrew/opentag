@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   inspectRegistryCliArtifact,
   inspectRegistryCliPackageSet,
+  inspectRegistryInstalledDependency,
   normalizeRegistryGitHubFactorySourceEvent
 } from "../../../scripts/test/github-registry-artifact.js";
 
@@ -23,6 +24,7 @@ async function createRegistryInstall(
   const coreRoot = join(root, "node_modules", "@opentag", "core");
   const slackRoot = join(root, "node_modules", "@opentag", "slack");
   const linearRoot = join(root, "node_modules", "@opentag", "linear");
+  const sqliteRoot = join(root, "node_modules", "better-sqlite3");
   const binRoot = join(root, "node_modules", ".bin");
   await Promise.all([
     mkdir(join(cliRoot, "dist"), { recursive: true }),
@@ -30,6 +32,7 @@ async function createRegistryInstall(
     mkdir(join(coreRoot, "dist"), { recursive: true }),
     mkdir(join(slackRoot, "dist"), { recursive: true }),
     mkdir(join(linearRoot, "dist"), { recursive: true }),
+    mkdir(join(sqliteRoot, "lib"), { recursive: true }),
     mkdir(binRoot, { recursive: true })
   ]);
 
@@ -89,6 +92,13 @@ async function createRegistryInstall(
     await writeFile(join(packageRoot, "dist", "index.js"), "export const registryFixture = true;\n");
   }
 
+  await writeFile(join(sqliteRoot, "package.json"), JSON.stringify({
+    name: "better-sqlite3",
+    version: "11.10.0",
+    main: "./lib/index.js"
+  }));
+  await writeFile(join(sqliteRoot, "lib", "index.js"), "module.exports = {};\n");
+
   await symlink("../@opentag/cli/dist/index.js", join(binRoot, "opentag"));
   await writeFile(join(root, "package-lock.json"), JSON.stringify({
     name: "registry-fixture",
@@ -117,6 +127,11 @@ async function createRegistryInstall(
       [`${lockPackageRoot}/@opentag/linear`]: {
         version,
         resolved: `${registryOrigin}/@opentag/linear/-/linear-${version}.tgz`,
+        integrity
+      },
+      [`${lockPackageRoot}/better-sqlite3`]: {
+        version: "11.10.0",
+        resolved: `${registryOrigin}/better-sqlite3/-/better-sqlite3-11.10.0.tgz`,
         integrity
       }
     }
@@ -169,7 +184,11 @@ describe("GitHub registry artifact acceptance", () => {
     const inspection = await inspectRegistryCliPackageSet({
       cliBin: fixture.cliBin,
       expectedVersion: "0.9.0",
-      packageNames: ["@opentag/slack", "@opentag/linear", "@opentag/core"]
+      packageNames: ["@opentag/slack", "@opentag/linear", "@opentag/core"],
+      executableEnv: {
+        ...process.env,
+        NODE_OPTIONS: `--require=${join(fixture.root, "must-not-load.cjs")}`
+      }
     });
 
     expect(inspection).toMatchObject({
@@ -186,6 +205,35 @@ describe("GitHub registry artifact acceptance", () => {
         "@opentag/core": { version: "0.9.0", integrity }
       }
     });
+  });
+
+  it("verifies a transitive native dependency before its lifecycle scripts run", async () => {
+    const fixture = await createRegistryInstall("0.9.0");
+
+    await expect(
+      inspectRegistryInstalledDependency({
+        cliBin: fixture.cliBin,
+        packageName: "better-sqlite3",
+        expectedVersion: "11.10.0"
+      })
+    ).resolves.toMatchObject({
+      package: "better-sqlite3",
+      version: "11.10.0",
+      registry: "https://registry.npmjs.org",
+      integrity
+    });
+  });
+
+  it("fails closed when a native dependency does not match the expected version", async () => {
+    const fixture = await createRegistryInstall("0.9.0");
+
+    await expect(
+      inspectRegistryInstalledDependency({
+        cliBin: fixture.cliBin,
+        packageName: "better-sqlite3",
+        expectedVersion: "11.9.0"
+      })
+    ).rejects.toThrow(/better-sqlite3 is 11\.10\.0; expected 11\.9\.0/u);
   });
 
   it("fails closed for a stale installed candidate", async () => {

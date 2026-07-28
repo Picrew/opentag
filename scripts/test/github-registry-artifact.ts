@@ -196,12 +196,12 @@ async function inspectInstalledPackage(
   };
 }
 
-function executableVersion(cliBin: string): Promise<string> {
+function executableVersion(cliBin: string, env?: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolvePromise, reject) => {
     execFile(cliBin, ["--version"], {
       encoding: "utf8",
       timeout: 10_000,
-      env: { ...process.env, NODE_OPTIONS: "" }
+      env: { ...(env ?? process.env), NODE_OPTIONS: "" }
     }, (error, stdout) => {
       if (error) {
         reject(new Error(`Installed OpenTag CLI --version failed: ${error.message}`));
@@ -216,6 +216,7 @@ export async function inspectRegistryCliPackageSet(input: {
   cliBin: string;
   expectedVersion: string;
   packageNames: string[];
+  executableEnv?: NodeJS.ProcessEnv;
 }): Promise<RegistryCliPackageSetInspection> {
   const expectedVersion = string(input.expectedVersion, "expected registry CLI version");
   const cliBin = await realpath(resolve(input.cliBin));
@@ -226,7 +227,7 @@ export async function inspectRegistryCliPackageSet(input: {
   if (expectedEntrypoint !== cliBin) {
     throw new Error("Installed OpenTag executable does not match the @opentag/cli bin entry.");
   }
-  const reportedVersion = await executableVersion(cliBin);
+  const reportedVersion = await executableVersion(cliBin, input.executableEnv);
   if (reportedVersion !== expectedVersion) {
     throw new Error(`Installed OpenTag executable reports ${reportedVersion}; expected ${expectedVersion}.`);
   }
@@ -258,6 +259,40 @@ export async function inspectRegistryCliPackageSet(input: {
       integrity: cli.integrity
     },
     packages
+  };
+}
+
+export async function inspectRegistryInstalledDependency(input: {
+  cliBin: string;
+  packageName: string;
+  expectedVersion?: string;
+}): Promise<RegistryPackageReceipt> {
+  const packageName = string(input.packageName, "registry dependency package name");
+  const segments = packageNameSegments(packageName);
+  if (
+    segments.length === 0 ||
+    segments.length > 2 ||
+    segments.some((segment) => segment === "." || segment === ".." || !/^[A-Za-z0-9._-]+$/u.test(segment))
+  ) {
+    throw new Error(`Invalid registry dependency package name: ${packageName}`);
+  }
+  const cliBin = await realpath(resolve(input.cliBin));
+  const cliRoot = await findPackageRoot(cliBin, "@opentag/cli");
+  const packageRoot = await resolveInstalledDependencyRoot(cliRoot, packageName);
+  const manifest = object(await readJson(join(packageRoot, "package.json")), `${packageName} package manifest`) as PackageJson;
+  const version = string(manifest.version, `${packageName} package version`);
+  const expectedVersion =
+    input.expectedVersion === undefined
+      ? version
+      : string(input.expectedVersion, `expected ${packageName} package version`);
+  const entrypoint = await packageImportEntrypoint(packageRoot, packageName);
+  const inspected = await inspectInstalledPackage(entrypoint, packageName, expectedVersion);
+  return {
+    package: packageName,
+    version: inspected.version,
+    registry: inspected.registry,
+    resolved: inspected.resolved,
+    integrity: inspected.integrity
   };
 }
 
