@@ -274,7 +274,7 @@ opentag-dev setup
 
 ## Packages
 
-Package source version: `v0.8.0`. npm dist-tags are authoritative for the currently published channel versions. The coordinated package family contains 16 public packages under the `@opentag` scope.
+Package source version: `v0.9.0`. npm dist-tags are authoritative for the currently published channel versions. The coordinated package family contains 16 public packages under the `@opentag` scope.
 
 | Package | Purpose |
 | --- | --- |
@@ -286,7 +286,7 @@ Package source version: `v0.8.0`. npm dist-tags are authoritative for the curren
 | [`@opentag/slack`](https://www.npmjs.com/package/@opentag/slack) | Slack Socket Mode, Events API handling, and thread replies |
 | [`@opentag/github`](https://www.npmjs.com/package/@opentag/github) | GitHub webhook handling, comments, PR helpers, and action application |
 | [`@opentag/gitlab`](https://www.npmjs.com/package/@opentag/gitlab) | GitLab webhook handling, note replies, merge request helpers, and action application |
-| [`@opentag/linear`](https://www.npmjs.com/package/@opentag/linear) | Linear webhook handling, issue comments, and issue action application |
+| [`@opentag/linear`](https://www.npmjs.com/package/@opentag/linear) | Linear webhook handling, read-only project backlog queries, issue comments, and issue action application |
 | [`@opentag/lark`](https://www.npmjs.com/package/@opentag/lark) | Lark / Feishu ingress, Personal Agent registration, and replies |
 | [`@opentag/telegram`](https://www.npmjs.com/package/@opentag/telegram) | Telegram polling/webhook normalization, bot replies, and source-thread controls |
 | [`@opentag/discord`](https://www.npmjs.com/package/@opentag/discord) | Discord Gateway/webhook slash-command interactions and channel replies |

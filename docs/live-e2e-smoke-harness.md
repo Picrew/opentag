@@ -294,7 +294,7 @@ path with `OPENTAG_GH_LIVE_REPORT`. Set
 `OPENTAG_GH_LIVE_STRICT_COMPLETION=false` only when intentionally exercising
 the older optional `apply 1` compatibility flow.
 
-After publishing a candidate to npm `next`, install `@opentag/cli@0.8.0` into a
+After publishing a candidate to npm `next`, install `@opentag/cli@0.9.0` into a
 fresh directory by running the exact install from inside that directory:
 
 ```bash
@@ -304,13 +304,13 @@ smoke_root="$(mktemp -d)"
 
   cd "$smoke_root"
   npm init --yes >/dev/null
-  npm install --no-audit --no-fund @opentag/cli@0.8.0
+  npm install --no-audit --no-fund @opentag/cli@0.9.0
 )
 ```
 
 Then set `OPENTAG_GH_LIVE_CLI_BIN` to that installation's
 `node_modules/.bin/opentag` and
-`OPENTAG_GH_LIVE_EXPECTED_CLI_VERSION=0.8.0`. The harness verifies the
+`OPENTAG_GH_LIVE_EXPECTED_CLI_VERSION=0.9.0`. The harness verifies the
 executable, package manifests, exact package-lock install paths, trusted public
 npm resolution, and integrity receipts before starting, then normalizes and
 validates the source comment through the installed `@opentag/github` and
