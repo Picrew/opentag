@@ -26,6 +26,7 @@ Current cases:
 | `github-webhook-live` | Yes | Real GitHub repository webhook, local CLI stack, current-head required check, merged PR, durable satisfied assessment, and restart-safe final receipt |
 | `github-factory-live` | Yes | Real external GitHub source thread admitted through a recipe/workstream batch, local execution, PR/check/merge, authoritative accepted metrics, restart replay, and deduplicated source receipt |
 | `github-cli-live` | Yes | Real GitHub issue callback using dispatcher-assisted run creation |
+| `slack-linear-registry-live` | Yes | Registry-installed CLI receives a real Slack `/linear` mention through Socket Mode, queries the exact mapped Linear project read-only, and posts a verified thread reply |
 | `slack-local-live` | Yes | Real Slack callback using dispatcher-assisted run creation |
 | `slack-ui-live` | Yes | Real Slack source-thread mention or button flow through Socket Mode or Events API |
 | `lark-patch-live` | Yes | Real Lark reply plus final card patch through `lark-cli` |
@@ -41,6 +42,7 @@ corepack pnpm smoke:live -- --case github-webhook-live --dry-run
 OPENTAG_GH_LIVE_EXECUTOR=phase1-fixture \
 corepack pnpm smoke:live -- --case github-factory-live --dry-run
 corepack pnpm smoke:live -- --case slack-ui-live --dry-run --allow-missing
+corepack pnpm smoke:live -- --case slack-linear-registry-live --dry-run
 ```
 
 `--allow-missing` turns missing credentials or commands into `SKIPPED` instead
@@ -92,6 +94,67 @@ The live pass is only credible when the source thread has a concise final
 callback, `opentag status --run` shows the Context Packet and Agent Work Ledger,
 artifacts exist, and provider-visible action receipts do not expose raw executor
 logs.
+
+### Slack /linear Registry Acceptance
+
+`slack-linear-registry-live` is the release-artifact acceptance for the
+read-only Slack-to-Linear query path. The wrapper loads `.env.slack-test` and
+`.env.linear` by default. When running from an isolated worktree, point
+`OPENTAG_SLACK_LINEAR_SLACK_ENV_FILE` and
+`OPENTAG_SLACK_LINEAR_LINEAR_ENV_FILE` at the authorized files without copying
+credentials into the worktree.
+
+The case installs the exact version selected by
+`OPENTAG_SLACK_LINEAR_EXPECTED_CLI_VERSION` (default `0.9.0`) into a temporary
+npm root. It rejects the artifact unless the executable plus
+`@opentag/slack`, `@opentag/linear`, and `@opentag/core` all resolve from the
+trusted public npm registry at that version with sha512 receipts in the npm
+lockfile. The source checkout only supplies the acceptance harness; the
+OpenTag runtime under test is the registry install.
+
+Installation is deliberately two-phase. The first `npm install` disables
+lifecycle scripts while the harness validates registry and SHA-512 receipts for
+the OpenTag packages and `better-sqlite3`. Only then does it rebuild the verified
+native dependency required by the registry CLI's SQLite store. The final report
+records that ordering and the native dependency receipt.
+
+After Slack `auth.test`, channel-access validation, and Linear project
+discovery, the harness writes a mode-0600 temporary config whose credentials
+are env SecretRefs. The config contains only the exact Slack team/channel to
+Linear project mapping and `connections.default.token`; it deliberately has no
+top-level Linear mutation token or webhook secret. A loopback GraphQL audit
+proxy forwards the real backlog queries, records pagination counts, and rejects
+every mutation before it can reach Linear. Provider-live acceptance is pinned
+to the canonical `https://api.linear.app/graphql` endpoint; endpoint overrides,
+alternate hosts, and mock providers fail closed. Both npm installation and the
+registry CLI run with explicit allowlisted environments, so ambient npm
+credentials, Node preload hooks, and unrelated provider credentials do not
+cross into the artifact under test. The proxy adds a random, non-secret marker
+to the returned project name without changing Linear; the Slack reply must carry
+that marker, binding the provider read and reply to this registry runtime.
+
+When the stack prints the bot mention, send exactly one human message in the
+configured channel:
+
+```text
+@OpenTag /linear
+```
+
+The case passes only after Socket Mode observes one unambiguous human provider
+event, the real Linear endpoint answers `OpenTagProjectBacklog` queries after
+that source timestamp, and Slack history shows one successful timestamped bot
+reply in the same thread after every audited query completed. It then observes
+the thread for the fixed 10-second duplicate-reply window to reject duplicate
+replies. It rejects processing or reply errors in the registry CLI log, then
+requires shutdown to be handled gracefully, with a normal zero exit rather
+than direct signal termination. The retained mode-0600
+report contains package receipts, causal timing, provider-path booleans,
+counts, and SHA-256 fingerprints; it omits tokens, project names, issue titles,
+raw Slack messages, and the raw correlation marker. It records the query-only
+configuration and mutation-blocking proxy separately from the token's unknown
+provider scope. `OPENTAG_SLACK_LINEAR_REPORT` selects the report path, and
+`OPENTAG_SLACK_LINEAR_PROXY_PAGE_SIZE` (default `2`) makes pagination observable
+when the mapped project has enough unfinished issues.
 
 ### Factory Conformance
 

@@ -137,6 +137,19 @@ const cases = [
     ]
   },
   {
+    id: "slack-linear-registry-live",
+    label: "Registry-installed live Slack /linear acceptance",
+    live: true,
+    command: "scripts/dev/run-slack-linear-backlog-live-test.sh",
+    requiredCommands: ["corepack", "node", "npm"],
+    notes: [
+      "Loads .env.slack-test and .env.linear by default; override the two OPENTAG_SLACK_LINEAR_*_ENV_FILE paths for an isolated worktree.",
+      "Installs the exact expected @opentag/cli release from npm, verifies CLI/Slack/Linear/Core lockfile sha512 receipts, and runs the installed CLI in Slack Socket Mode.",
+      "Requires one real human Slack message containing exactly @OpenTag /linear, then verifies the provider-delivered source event, real Linear GraphQL reads, and provider-visible Slack thread reply.",
+      "The Linear audit proxy fails closed on mutations; retained evidence is mode 0600 and contains hashes/counts instead of credentials, Linear issue titles, or raw Slack messages."
+    ]
+  },
+  {
     id: "slack-local-live",
     label: "Live Slack dispatcher-assisted local executor smoke",
     live: true,
