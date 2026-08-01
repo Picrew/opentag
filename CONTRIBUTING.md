@@ -54,10 +54,16 @@ git diff origin/main...HEAD --check
 ## Pull request guidelines
 
 - Keep PRs small and focused on one change.
+- Link the issue, source thread, or design document that explains the change when one exists.
 - Include a clear summary and the validation you ran.
 - Prefer adding or updating tests when behavior changes.
+- Call out authorization, privacy, provider side effects, compatibility, migration, and release risks explicitly.
 - Do not commit generated local state such as SQLite databases, temporary worktrees, or `.tsbuildinfo` files.
 - Do not commit secrets. Keep `.env`, Slack tokens, GitHub tokens, private keys, and webhook secrets out of git.
+
+Pull requests to `main` must pass the required CI check, receive a code-owner approval, and resolve review conversations before merge. New commits invalidate stale approvals. Force pushes and branch deletion are blocked on `main`.
+
+Security vulnerabilities must not be reported in a public issue. Follow [SECURITY.md](SECURITY.md) to report them privately.
 
 ## Configuration
 
