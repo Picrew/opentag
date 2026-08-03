@@ -37,6 +37,7 @@ import {
   type SuggestedChangesSnapshot,
   type SuggestedActionCandidate,
   type ThreadActionCommand,
+  type WorkLoopView,
   createAdapterMutationCompilerRegistry,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
@@ -107,7 +108,7 @@ import {
 } from "@opentag/linear";
 import type { SlackBlock } from "@opentag/slack";
 import { ChannelBindingCorruptionError, createOpenTagRepository, migrateSchema } from "@opentag/store";
-import type { LinearRelayInstallation, LinearRelayInstallationAuth } from "@opentag/store";
+import type { DurableWorkThread, LinearRelayInstallation, LinearRelayInstallationAuth } from "@opentag/store";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { Hono } from "hono";
@@ -6483,6 +6484,50 @@ export function createDispatcherApp(input: {
     const stored = await repo.getRun({ runId: c.req.param("runId") });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     return c.json(stored);
+  });
+
+  app.get("/v1/work-threads/:workThreadId/completion", async (c) => {
+    const workThreadId = c.req.param("workThreadId");
+    const workThread = await repo.getWorkThread({ workThreadId });
+    if (!workThread) return c.json({ error: "work_thread_not_found" }, 404);
+    const completion = await completionGovernance.explainWorkThread(workThreadId);
+    if (!completion) return c.json({ error: "completion_not_available" }, 404);
+    return c.json({ workThread, completion });
+  });
+
+  app.get("/v1/work-loops", async (c) => {
+    const attention = c.req.query("attention");
+    if (attention !== "required") {
+      return c.json({ error: "invalid_attention_filter", message: "Use attention=required." }, 400);
+    }
+    const requestedLimit = Number(c.req.query("limit") ?? "25");
+    if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 100) {
+      return c.json({ error: "invalid_limit", message: "limit must be an integer from 1 to 100." }, 400);
+    }
+    const scanLimit = Math.min(500, Math.max(100, requestedLimit * 5));
+    const threads = await repo.listWorkThreads({ limit: scanLimit });
+    const workLoops: Array<{ workThread: DurableWorkThread; completion: WorkLoopView }> = [];
+    for (const workThread of threads) {
+      if (workLoops.length >= requestedLimit) break;
+      const [completion, runs] = await Promise.all([
+        completionGovernance.getWorkLoop(workThread.id),
+        repo.listRunsForWorkThread({ workThreadId: workThread.id })
+      ]);
+      if (!completion) continue;
+      const latestRun = runs.at(-1)?.run;
+      if (latestRun && (latestRun.status === "queued" || latestRun.status === "assigned" || latestRun.status === "running")) {
+        continue;
+      }
+      if (
+        completion.completion === "satisfied"
+        || completion.completion === "waived"
+        || completion.nextAction.hint.kind === "none"
+      ) {
+        continue;
+      }
+      workLoops.push({ workThread, completion });
+    }
+    return c.json({ attention: "required", workLoops, scanned: threads.length, scanLimitReached: threads.length === scanLimit });
   });
 
   app.get("/v1/runs/:runId/completion", async (c) => {

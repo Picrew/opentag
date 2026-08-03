@@ -245,6 +245,41 @@ describe("dispatcher completion governance", () => {
     expect(setup.delivered.at(-1)?.body).toContain("verified repository evidence");
   });
 
+  it("exposes WorkThread completion and a bounded work-loop attention view", async () => {
+    const setup = await startRun({ runId: "run_work_loop_status", completionPolicies: [strictPolicy] });
+    expect((await completeRun({ setup, runId: "run_work_loop_status", conclusion: "success" })).status).toBe(200);
+    const stored = await (await setup.app.request("/v1/runs/run_work_loop_status")).json() as {
+      run: { thread?: { id?: string } };
+    };
+    const workThreadId = stored.run.thread?.id;
+    expect(workThreadId).toBeTruthy();
+
+    const byThread = await setup.app.request(`/v1/work-threads/${encodeURIComponent(workThreadId!)}/completion`);
+    expect(byThread.status).toBe(200);
+    await expect(byThread.json()).resolves.toMatchObject({
+      workThread: { id: workThreadId },
+      completion: {
+        workThreadId,
+        completion: "pending",
+        nextAction: { hint: { kind: "refresh_completion_evidence", targetId: "required_checks" } }
+      }
+    });
+
+    const attention = await setup.app.request("/v1/work-loops?attention=required&limit=10");
+    expect(attention.status).toBe(200);
+    await expect(attention.json()).resolves.toMatchObject({
+      attention: "required",
+      workLoops: [{
+        workThread: { id: workThreadId },
+        completion: { completion: "pending", nextAction: { hint: { kind: "refresh_completion_evidence" } } }
+      }],
+      scanned: 1,
+      scanLimitReached: false
+    });
+    expect((await setup.app.request("/v1/work-loops?attention=required&limit=0")).status).toBe(400);
+    expect((await setup.app.request("/v1/work-loops")).status).toBe(400);
+  });
+
   it("preserves executor-success semantics for repositories without a strict policy", async () => {
     const setup = await startRun({ runId: "run_compat" });
     const response = await completeRun({ setup, runId: "run_compat", conclusion: "success" });

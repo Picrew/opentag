@@ -2632,6 +2632,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return row ? workThreadFromRow(row) : null;
     },
 
+    async listWorkThreads(input: { limit?: number } = {}): Promise<DurableWorkThread[]> {
+      const limit = Math.min(500, Math.max(1, Math.trunc(input.limit ?? 100)));
+      const rows = await db
+        .select()
+        .from(workThreads)
+        .orderBy(desc(workThreads.updatedAt), asc(workThreads.id))
+        .limit(limit);
+      return rows.map(workThreadFromRow);
+    },
+
     async attachRunToWorkThread(input: { runId: string; workThreadId: string }): Promise<boolean> {
       return db.transaction((tx) => {
         const thread = tx.select({ id: workThreads.id }).from(workThreads).where(eq(workThreads.id, input.workThreadId)).limit(1).get();

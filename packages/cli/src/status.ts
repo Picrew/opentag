@@ -4,7 +4,9 @@ import {
   type ChannelRuntimeStatus,
   type CompletionExplanation,
   type ControlPlaneAlert,
-  type RunMetrics
+  type EnsuredWorkThread,
+  type RunMetrics,
+  type WorkLoopAttentionItem
 } from "@opentag/client";
 import {
   createSourceThreadStatusPresentation,
@@ -47,6 +49,8 @@ export type StatusCommandOptions = {
   run?: string;
   channel?: string;
   workstream?: string;
+  workThread?: string;
+  attention?: boolean;
   json?: boolean;
 };
 
@@ -116,6 +120,21 @@ export type WorkstreamStatusSummary = {
   metrics: WorkstreamMetrics;
   evaluation: WorkstreamEvaluation;
   alerts: ControlPlaneAlert[];
+};
+
+export type WorkThreadStatusSummary = {
+  configPath: string;
+  dispatcherUrl: string;
+  workThread: EnsuredWorkThread;
+  completion: CompletionExplanation;
+};
+
+export type WorkLoopAttentionStatusSummary = {
+  configPath: string;
+  dispatcherUrl: string;
+  workLoops: WorkLoopAttentionItem[];
+  scanned: number;
+  scanLimitReached: boolean;
 };
 
 export function parseChannelRef(ref: string): { provider: string; accountId: string; conversationId: string } {
@@ -322,6 +341,78 @@ export async function getWorkstreamStatusSummary(input: {
     workstreamId: input.workstreamId,
     ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
   });
+}
+
+export async function getWorkThreadStatusSummary(input: {
+  workThreadId: string;
+  configPath?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<WorkThreadStatusSummary> {
+  const configPath = input.configPath ?? defaultConfigPath();
+  const config = readCliConfig(configPath);
+  return workThreadStatusFromConfig({
+    config,
+    configPath,
+    workThreadId: input.workThreadId,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+  });
+}
+
+export async function getWorkLoopAttentionStatusSummary(input: {
+  configPath?: string;
+  fetchImpl?: typeof fetch;
+  limit?: number;
+} = {}): Promise<WorkLoopAttentionStatusSummary> {
+  const configPath = input.configPath ?? defaultConfigPath();
+  const config = readCliConfig(configPath);
+  return workLoopAttentionStatusFromConfig({
+    config,
+    configPath,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    ...(input.limit ? { limit: input.limit } : {})
+  });
+}
+
+function governanceStatusClient(input: {
+  config: OpenTagCliConfig;
+  fetchImpl?: typeof fetch;
+}) {
+  const token = input.config.daemon.pairingToken ?? runnerDispatcherToken(input.config.daemon);
+  return createOpenTagClient({
+    dispatcherUrl: input.config.daemon.dispatcherUrl,
+    ...(token ? { pairingToken: token } : {}),
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+  });
+}
+
+export async function workThreadStatusFromConfig(input: {
+  config: OpenTagCliConfig;
+  configPath: string;
+  workThreadId: string;
+  fetchImpl?: typeof fetch;
+}): Promise<WorkThreadStatusSummary> {
+  const result = await governanceStatusClient(input).getWorkThreadCompletion({ workThreadId: input.workThreadId });
+  return {
+    configPath: input.configPath,
+    dispatcherUrl: input.config.daemon.dispatcherUrl,
+    ...result
+  };
+}
+
+export async function workLoopAttentionStatusFromConfig(input: {
+  config: OpenTagCliConfig;
+  configPath: string;
+  fetchImpl?: typeof fetch;
+  limit?: number;
+}): Promise<WorkLoopAttentionStatusSummary> {
+  const result = await governanceStatusClient(input).listWorkLoopsRequiringAttention({ limit: input.limit ?? 25 });
+  return {
+    configPath: input.configPath,
+    dispatcherUrl: input.config.daemon.dispatcherUrl,
+    workLoops: result.workLoops,
+    scanned: result.scanned,
+    scanLimitReached: result.scanLimitReached
+  };
 }
 
 export async function workstreamStatusFromConfig(input: {
@@ -963,6 +1054,65 @@ export function formatCompletionExplanation(completion: CompletionExplanation): 
   ];
 }
 
+function workLoopCauseLabel(cause: WorkLoopAttentionItem["completion"]["nextAction"]["causes"][number]): string {
+  if (cause.kind === "completion_gate") {
+    return `gate:${cause.gateId}/${cause.state}/${cause.reasonCode}`;
+  }
+  if (cause.kind === "human_escalation") {
+    return `escalation:${cause.escalationId}/${cause.class}/${cause.audience}`;
+  }
+  if (cause.kind === "material_action") {
+    return `action:${cause.actionId}/${cause.outcome}`;
+  }
+  return `run:${cause.runId}/${cause.conclusion}`;
+}
+
+function workThreadReference(workThread: EnsuredWorkThread): string {
+  const reference = workThread.workItemReference;
+  return `${reference.provider}:${reference.kind}:${reference.externalId}`;
+}
+
+export function formatWorkThreadStatus(summary: WorkThreadStatusSummary): string {
+  return [
+    `Config: ${summary.configPath}`,
+    `Dispatcher: ${summary.dispatcherUrl}`,
+    `WorkThread: ${summary.workThread.id}`,
+    `Work item: ${workThreadReference(summary.workThread)}`,
+    `Control anchor: ${summary.workThread.primaryAnchor.provider}:${summary.workThread.primaryAnchor.kind}:${summary.workThread.primaryAnchor.externalId}`,
+    ...formatCompletionExplanation(summary.completion),
+    `  Action hint: ${summary.completion.nextAction.hint.kind}${summary.completion.nextAction.hint.targetId ? ` target=${summary.completion.nextAction.hint.targetId}` : ""}`,
+    `  Causes: ${summary.completion.nextAction.causes.length ? summary.completion.nextAction.causes.map(workLoopCauseLabel).join(", ") : "none"}`
+  ].join("\n");
+}
+
+export function workThreadStatusJson(summary: WorkThreadStatusSummary): Record<string, unknown> {
+  return { workThread: summary.workThread, completion: summary.completion };
+}
+
+export function formatWorkLoopAttentionStatus(summary: WorkLoopAttentionStatusSummary): string {
+  return [
+    `Work loops requiring attention: ${summary.workLoops.length} (scanned ${summary.scanned})`,
+    ...summary.workLoops.flatMap((item) => [
+      `  ${item.workThread.id}: ${item.completion.completion}/${item.completion.execution} ${workThreadReference(item.workThread)}`,
+      `    Next: ${item.completion.nextAction.summary}`,
+      `    Hint: ${item.completion.nextAction.hint.kind}${item.completion.nextAction.hint.targetId ? ` target=${item.completion.nextAction.hint.targetId}` : ""}`,
+      `    Causes: ${item.completion.nextAction.causes.map(workLoopCauseLabel).join(", ") || "none"}`
+    ]),
+    ...(summary.scanLimitReached ? ["  More WorkThreads may exist beyond the bounded scan; narrow by --work-thread when you have an id."] : []),
+    `Config: ${summary.configPath}`,
+    `Dispatcher: ${summary.dispatcherUrl}`
+  ].join("\n");
+}
+
+export function workLoopAttentionStatusJson(summary: WorkLoopAttentionStatusSummary): Record<string, unknown> {
+  return {
+    attention: "required",
+    workLoops: summary.workLoops,
+    scanned: summary.scanned,
+    scanLimitReached: summary.scanLimitReached
+  };
+}
+
 function workstreamNextAction(summary: WorkstreamStatusSummary): string {
   if (summary.evaluation.status === "blocked") {
     return "Resolve the blocking budget violations before admitting or claiming more work.";
@@ -1079,14 +1229,13 @@ export function formatChannelStatus(summary: ChannelStatusSummary): string {
 }
 
 export async function runStatusCommand(options: StatusCommandOptions): Promise<void> {
-  if (options.json && !options.workstream) {
-    throw new Error("Use --json with --workstream.");
+  const selectors = [options.run, options.channel, options.workstream, options.workThread, options.attention ? "attention" : undefined]
+    .filter(Boolean);
+  if (selectors.length > 1) {
+    throw new Error("Use only one of --run, --channel, --workstream, --work-thread, or --attention.");
   }
-  if (options.run && options.channel) {
-    throw new Error("Use either --run or --channel, not both.");
-  }
-  if (options.workstream && (options.run || options.channel)) {
-    throw new Error("Use only one of --run, --channel, or --workstream.");
+  if (options.json && !options.workstream && !options.workThread && !options.attention) {
+    throw new Error("Use --json with --workstream, --work-thread, or --attention.");
   }
   if (options.workstream) {
     const summary = await getWorkstreamStatusSummary({
@@ -1094,6 +1243,23 @@ export async function runStatusCommand(options: StatusCommandOptions): Promise<v
       ...(options.config ? { configPath: options.config } : {})
     });
     console.log(options.json ? JSON.stringify(workstreamStatusJson(summary), null, 2) : formatWorkstreamStatus(summary));
+    return;
+  }
+  if (options.workThread) {
+    const summary = await getWorkThreadStatusSummary({
+      workThreadId: options.workThread,
+      ...(options.config ? { configPath: options.config } : {})
+    });
+    console.log(options.json ? JSON.stringify(workThreadStatusJson(summary), null, 2) : formatWorkThreadStatus(summary));
+    return;
+  }
+  if (options.attention) {
+    const summary = await getWorkLoopAttentionStatusSummary({
+      ...(options.config ? { configPath: options.config } : {})
+    });
+    console.log(options.json
+      ? JSON.stringify(workLoopAttentionStatusJson(summary), null, 2)
+      : formatWorkLoopAttentionStatus(summary));
     return;
   }
   if (options.run) {

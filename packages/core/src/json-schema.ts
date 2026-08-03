@@ -47,6 +47,7 @@ import {
   WorkItemReferenceSchema,
   WorkLoopCauseSchema,
   WorkLoopNextActionSchema,
+  WorkLoopViewSchema,
   WorkThreadSchema
 } from "./schema.js";
 import {
@@ -115,6 +116,7 @@ export const OpenTagJsonSchemas = {
   HumanEscalation: zodToJsonSchema(HumanEscalationSchema, "HumanEscalation"),
   WorkLoopCause: zodToJsonSchema(WorkLoopCauseSchema, "WorkLoopCause"),
   WorkLoopNextAction: zodToJsonSchema(WorkLoopNextActionSchema, "WorkLoopNextAction"),
+  WorkLoopView: zodToJsonSchema(WorkLoopViewSchema, "WorkLoopView"),
   ContextPacket: zodToJsonSchema(ContextPacketSchema, "ContextPacket"),
   OpenTagIntegrationManifest: zodToJsonSchema(OpenTagIntegrationManifestSchema, "OpenTagIntegrationManifest"),
   OpenTagActorRef: zodToJsonSchema(OpenTagActorRefSchema, "OpenTagActorRef"),

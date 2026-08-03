@@ -1120,6 +1120,25 @@ export const WorkLoopNextActionSchema = z.object({
   causes: z.array(WorkLoopCauseSchema)
 }).strict();
 
+export const WorkLoopViewSchema = z.object({
+  workThreadId: z.string().min(1),
+  execution: z.enum(["idle", "running", "succeeded", "failed", "cancelled", "interrupted", "timed_out", "needs_human"]),
+  completion: CompletionStateSchema,
+  evidenceBacked: z.boolean(),
+  contract: z.object({
+    id: z.string().min(1),
+    version: z.number().int().positive(),
+    cycle: z.number().int().positive(),
+    mode: z.enum(["execution_compat", "governed"])
+  }).strict(),
+  currentAssessment: CompletionAssessmentSchema,
+  targetBindings: z.array(ResolvedCompletionTargetSchema),
+  missingGateIds: z.array(z.string().min(1)),
+  failedGateIds: z.array(z.string().min(1)),
+  blockedGateIds: z.array(z.string().min(1)),
+  nextAction: WorkLoopNextActionSchema
+}).strict();
+
 export const CanonicalMutationDomainSchema = z.enum([
   "status",
   "assignee",
@@ -1362,6 +1381,7 @@ export type HumanEscalation = z.infer<typeof HumanEscalationSchema>;
 export type HumanEscalationOption = z.infer<typeof HumanEscalationOptionSchema>;
 export type WorkLoopCause = z.infer<typeof WorkLoopCauseSchema>;
 export type WorkLoopNextAction = z.infer<typeof WorkLoopNextActionSchema>;
+export type WorkLoopView = z.infer<typeof WorkLoopViewSchema>;
 export type HumanEscalationRequest = z.infer<typeof HumanEscalationRequestSchema>;
 export type CanonicalMutationDomain = z.infer<typeof CanonicalMutationDomainSchema>;
 export type MutationIntent = z.infer<typeof MutationIntentSchema>;

@@ -691,6 +691,29 @@ export function createDispatcherCompletionGovernance(input: {
     }
   }
 
+  async function buildCompletionExplanation(workThreadId: string): Promise<CompletionExplanation | null> {
+    const contractSnapshot = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
+    if (!contractSnapshot) return null;
+    await reassess(workThreadId, `explain-work-thread:${workThreadId}`);
+    const [completion, assessmentHistory, storedEvidence, escalations] = await Promise.all([
+      governance.read({ type: "get_work_loop", workThreadId }) as Promise<WorkLoopView>,
+      input.repo.listCompletionAssessments({ workThreadId }),
+      input.repo.listVerificationEvidence({ workThreadId }),
+      input.repo.listHumanEscalations({ workThreadId })
+    ]);
+    return {
+      ...completion,
+      contractSnapshot,
+      assessmentHistory,
+      evidence: storedEvidence
+        .map(completionFactFromStoredEvidence)
+        .filter((fact): fact is CompletionEvidenceFact => Boolean(fact)),
+      openHumanEscalations: escalations.filter((escalation) =>
+        escalation.state === "open" || escalation.state === "acknowledged"
+      )
+    };
+  }
+
   async function ingestGitHubSnapshotSetWithCorrelationIndex(
     snapshots: GitHubVerifiedPullRequestSnapshot[],
     correlationIndex: CurrentWorkThreadCorrelationIndex
@@ -957,30 +980,15 @@ export function createDispatcherCompletionGovernance(input: {
       return (await reassess(workThreadId, `read-work-loop:${workThreadId}`)).view;
     },
 
+    async explainWorkThread(workThreadId: string): Promise<CompletionExplanation | null> {
+      return buildCompletionExplanation(workThreadId);
+    },
+
     async explainRun(runId: string): Promise<CompletionExplanation | null> {
       const stored = await input.repo.getRun({ runId });
       const workThreadId = stored?.run.thread?.id;
       if (!workThreadId) return null;
-      const contractSnapshot = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
-      if (!contractSnapshot) return null;
-      await reassess(workThreadId, `explain-run:${runId}`);
-      const [completion, assessmentHistory, storedEvidence, escalations] = await Promise.all([
-        governance.read({ type: "get_work_loop", workThreadId }) as Promise<WorkLoopView>,
-        input.repo.listCompletionAssessments({ workThreadId }),
-        input.repo.listVerificationEvidence({ workThreadId }),
-        input.repo.listHumanEscalations({ workThreadId })
-      ]);
-      return {
-        ...completion,
-        contractSnapshot,
-        assessmentHistory,
-        evidence: storedEvidence
-          .map(completionFactFromStoredEvidence)
-          .filter((fact): fact is CompletionEvidenceFact => Boolean(fact)),
-        openHumanEscalations: escalations.filter((escalation) =>
-          escalation.state === "open" || escalation.state === "acknowledged"
-        )
-      };
+      return buildCompletionExplanation(workThreadId);
     },
 
     async getSourceThreadTransition(workThreadId: string): Promise<CompletionSourceThreadTransition | null> {

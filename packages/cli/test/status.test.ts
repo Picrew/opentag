@@ -9,13 +9,19 @@ import {
   channelStatusFromConfig,
   formatChannelStatus,
   formatCompletionExplanation,
+  formatWorkLoopAttentionStatus,
   formatRunStatus,
   formatStatus,
+  formatWorkThreadStatus,
   formatWorkstreamStatus,
   getStatusSummary,
   runStatusCommand,
   runStatusFromConfig,
   statusFromConfig,
+  workLoopAttentionStatusFromConfig,
+  workLoopAttentionStatusJson,
+  workThreadStatusFromConfig,
+  workThreadStatusJson,
   workstreamStatusFromConfig,
   workstreamStatusJson,
   type WorkstreamStatusSummary
@@ -342,6 +348,43 @@ function completionExplanationFixture(): CompletionExplanation {
       dedupeKey: "verification:required_checks:primary_change",
       openedAt: evaluatedAt
     }]
+  };
+}
+
+function governedWorkThreadFixture() {
+  return {
+    id: "thread-cli-1",
+    workItemReference: {
+      provider: "github",
+      kind: "issue",
+      externalId: "acme/demo#1",
+      uri: "https://github.com/acme/demo/issues/1"
+    },
+    primaryAnchor: {
+      provider: "github",
+      kind: "github_thread",
+      externalId: "https://api.github.com/repos/acme/demo/issues/1/comments",
+      uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+      controlPlane: true,
+      canApprove: true
+    }
+  };
+}
+
+function workLoopViewFixture() {
+  const completion = completionExplanationFixture();
+  return {
+    workThreadId: completion.workThreadId,
+    execution: completion.execution,
+    completion: completion.completion,
+    evidenceBacked: completion.evidenceBacked,
+    contract: completion.contract,
+    currentAssessment: completion.currentAssessment,
+    targetBindings: completion.targetBindings,
+    missingGateIds: completion.missingGateIds,
+    failedGateIds: completion.failedGateIds,
+    blockedGateIds: completion.blockedGateIds,
+    nextAction: completion.nextAction
   };
 }
 
@@ -1752,22 +1795,110 @@ describe("OpenTag CLI status", () => {
     })).rejects.toMatchObject({ status: 503 });
   });
 
+  it("uses native WorkThread and next-action primitives for detail and attention status", async () => {
+    const completion = completionExplanationFixture();
+    const workThread = governedWorkThreadFixture();
+    const view = workLoopViewFixture();
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.endsWith("/v1/work-threads/thread-cli-1/completion")) {
+        return Response.json({ workThread, completion });
+      }
+      if (href.endsWith("/v1/work-loops?attention=required&limit=25")) {
+        return Response.json({
+          attention: "required",
+          workLoops: [{ workThread, completion: view }],
+          scanned: 3,
+          scanLimitReached: false
+        });
+      }
+      return Response.json({ error: "unexpected_url", href }, { status: 500 });
+    }) as unknown as typeof fetch;
+    const configured = config();
+    const detail = await workThreadStatusFromConfig({
+      config: configured,
+      configPath: "/tmp/opentag/config.json",
+      workThreadId: workThread.id,
+      fetchImpl
+    });
+    const attention = await workLoopAttentionStatusFromConfig({
+      config: configured,
+      configPath: "/tmp/opentag/config.json",
+      fetchImpl
+    });
+
+    expect(formatWorkThreadStatus(detail)).toContain("WorkThread: thread-cli-1");
+    expect(formatWorkThreadStatus(detail)).toContain("Action hint: request_human_decision target=escalation-cli-1");
+    expect(workThreadStatusJson(detail)).toMatchObject({
+      workThread: { id: "thread-cli-1" },
+      completion: { nextAction: { hint: { kind: "request_human_decision" } } }
+    });
+    expect(formatWorkLoopAttentionStatus(attention)).toContain("Work loops requiring attention: 1 (scanned 3)");
+    expect(formatWorkLoopAttentionStatus(attention)).toContain("gate:required_checks/unknown/verification_assurance_insufficient");
+    expect(workLoopAttentionStatusJson(attention)).toMatchObject({
+      attention: "required",
+      workLoops: [{ workThread: { id: "thread-cli-1" } }],
+      scanned: 3
+    });
+  });
+
+  it("prints structured WorkThread and attention status in command JSON mode", async () => {
+    const completion = completionExplanationFixture();
+    const workThread = governedWorkThreadFixture();
+    const view = workLoopViewFixture();
+    const configPath = join(tempDir(), "config.json");
+    writeFileSync(configPath, JSON.stringify(config()), { mode: 0o600 });
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.endsWith("/v1/work-threads/thread-cli-1/completion")) {
+        return Response.json({ workThread, completion });
+      }
+      if (href.endsWith("/v1/work-loops?attention=required&limit=25")) {
+        return Response.json({
+          attention: "required",
+          workLoops: [{ workThread, completion: view }],
+          scanned: 1,
+          scanLimitReached: false
+        });
+      }
+      return Response.json({ error: "unexpected_url", href }, { status: 500 });
+    }) as unknown as typeof fetch;
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", fetchImpl);
+
+    try {
+      await runStatusCommand({ config: configPath, workThread: workThread.id, json: true });
+      await runStatusCommand({ config: configPath, attention: true, json: true });
+      expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({ workThread: { id: workThread.id } });
+      expect(JSON.parse(String(log.mock.calls[1]?.[0]))).toMatchObject({
+        attention: "required",
+        workLoops: [{ workThread: { id: workThread.id } }]
+      });
+    } finally {
+      log.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("rejects ambiguous run and channel status requests", async () => {
     await expect(runStatusCommand({ run: "run_1", channel: "lark:tenant_1/oc_chat" })).rejects.toThrow(
-      "Use either --run or --channel, not both."
+      "Use only one of --run, --channel, --workstream, --work-thread, or --attention."
     );
   });
 
   it("rejects workstream status combined with legacy status selectors", async () => {
     await expect(runStatusCommand({ run: "run_1", workstream: "workstream_1" })).rejects.toThrow(
-      "Use only one of --run, --channel, or --workstream."
+      "Use only one of --run, --channel, --workstream, --work-thread, or --attention."
     );
     await expect(runStatusCommand({ channel: "lark:tenant_1/oc_chat", workstream: "workstream_1" })).rejects.toThrow(
-      "Use only one of --run, --channel, or --workstream."
+      "Use only one of --run, --channel, --workstream, --work-thread, or --attention."
+    );
+    await expect(runStatusCommand({ workThread: "thread_1", attention: true })).rejects.toThrow(
+      "Use only one of --run, --channel, --workstream, --work-thread, or --attention."
     );
   });
 
   it("rejects JSON mode without a workstream selector", async () => {
-    await expect(runStatusCommand({ json: true })).rejects.toThrow("Use --json with --workstream.");
+    await expect(runStatusCommand({ json: true })).rejects.toThrow("Use --json with --workstream, --work-thread, or --attention.");
   });
 });
