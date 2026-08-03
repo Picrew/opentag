@@ -653,7 +653,7 @@ export function createDispatcherCompletionGovernance(input: {
           state: "open",
           blocking: true,
           summary: "Completion verification needs human attention.",
-          reason: result.view.nextAction,
+          reason: result.view.nextAction.summary,
           nextAction: { kind: "request_human_decision", targetId: assessment.workThreadId },
           dedupeKey,
           openedAt: assessment.assessedAt

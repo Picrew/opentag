@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AgentAccessProfileSnapshotSchema,
+  ActionHintSchema,
   ActionPermissionRequestSchema,
   ApprovalDecisionSchema,
   ApplyPlanSchema,
@@ -528,6 +529,15 @@ describe("Agent Work Protocol schemas", () => {
 
     expect(typeof structured.nextAction).toBe("object");
     expect(legacy.nextAction).toBe("Review the branch.");
+
+    for (const kind of [
+      "refresh_completion_evidence",
+      "reconcile_material_action",
+      "resume_work_thread",
+      "reassess_completion"
+    ]) {
+      expect(ActionHintSchema.parse({ kind, targetId: "thread-1" })).toEqual({ kind, targetId: "thread-1" });
+    }
   });
 
   it("models timed out runs as a distinct terminal outcome", () => {

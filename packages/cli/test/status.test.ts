@@ -308,7 +308,16 @@ function completionExplanationFixture(): CompletionExplanation {
     missingGateIds: [],
     failedGateIds: [],
     blockedGateIds: ["required_checks"],
-    nextAction: "Ask the repository owner to restore verified check evidence.",
+    nextAction: {
+      summary: "Ask the repository owner to restore verified check evidence.",
+      hint: { kind: "request_human_decision", targetId: "escalation-cli-1" },
+      causes: [{
+        kind: "completion_gate",
+        gateId: "required_checks",
+        state: "unknown",
+        reasonCode: "verification_assurance_insufficient"
+      }]
+    },
     contractSnapshot: contract,
     assessmentHistory: [assessment],
     evidence: [{

@@ -6,8 +6,12 @@ import type {
   MaterialActionReceipt,
   OpenTagRunResult,
   ResolvedCompletionTarget,
+  WorkLoopCause,
+  WorkLoopNextAction,
   WorkThread
 } from "@opentag/core";
+
+export type { WorkLoopCause, WorkLoopNextAction } from "@opentag/core";
 
 export type CompletionArtifact = {
   id: string;
@@ -86,7 +90,7 @@ export type WorkLoopView = {
   missingGateIds: string[];
   failedGateIds: string[];
   blockedGateIds: string[];
-  nextAction: string;
+  nextAction: WorkLoopNextAction;
 };
 
 export type IngestRunResultCommand = {

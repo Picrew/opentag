@@ -959,7 +959,7 @@ export function formatCompletionExplanation(completion: CompletionExplanation): 
           `    ${escalation.id}: ${escalation.class}/${escalation.state} - ${escalation.summary}`
         )
       : ["    none"]),
-    `  Next action: ${completion.nextAction}`
+    `  Next action: ${completion.nextAction.summary}`
   ];
 }
 

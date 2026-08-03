@@ -45,6 +45,8 @@ import {
   SuccessMetricNameSchema,
   VerificationEvidenceSchema,
   WorkItemReferenceSchema,
+  WorkLoopCauseSchema,
+  WorkLoopNextActionSchema,
   WorkThreadSchema
 } from "./schema.js";
 import {
@@ -111,6 +113,8 @@ export const OpenTagJsonSchemas = {
   CompletionWaiver: zodToJsonSchema(CompletionWaiverSchema, "CompletionWaiver"),
   CompletionAssessment: zodToJsonSchema(CompletionAssessmentSchema, "CompletionAssessment"),
   HumanEscalation: zodToJsonSchema(HumanEscalationSchema, "HumanEscalation"),
+  WorkLoopCause: zodToJsonSchema(WorkLoopCauseSchema, "WorkLoopCause"),
+  WorkLoopNextAction: zodToJsonSchema(WorkLoopNextActionSchema, "WorkLoopNextAction"),
   ContextPacket: zodToJsonSchema(ContextPacketSchema, "ContextPacket"),
   OpenTagIntegrationManifest: zodToJsonSchema(OpenTagIntegrationManifestSchema, "OpenTagIntegrationManifest"),
   OpenTagActorRef: zodToJsonSchema(OpenTagActorRefSchema, "OpenTagActorRef"),

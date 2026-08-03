@@ -87,7 +87,7 @@ function completionExplanationFixture() {
       missingGateIds: [],
       failedGateIds: [],
       blockedGateIds: [],
-      nextAction: "No action required.",
+      nextAction: { summary: "No action required.", hint: { kind: "none" as const }, causes: [] },
       contractSnapshot: contract,
       assessmentHistory: [assessment],
       evidence: [],

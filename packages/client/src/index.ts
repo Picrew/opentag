@@ -21,6 +21,7 @@ import {
   WorkstreamMetricsSchema,
   WorkstreamInputSchema,
   WorkstreamSchema,
+  WorkLoopNextActionSchema,
   WorkThreadSchema,
   type ActorIdentity,
   type Action,
@@ -59,6 +60,7 @@ import {
   type WorkstreamEvaluation,
   type WorkstreamInput,
   type WorkstreamMetrics,
+  type WorkLoopNextAction,
   type WorkThread
 } from "@opentag/core";
 
@@ -106,7 +108,7 @@ export type CompletionExplanation = {
   missingGateIds: string[];
   failedGateIds: string[];
   blockedGateIds: string[];
-  nextAction: string;
+  nextAction: WorkLoopNextAction;
   contractSnapshot: CompletionContract;
   assessmentHistory: CompletionAssessment[];
   evidence: CompletionEvidenceSummary[];
@@ -635,6 +637,7 @@ function parseCompletionExplanation(value: unknown): CompletionExplanation {
   return {
     ...completion,
     contractSnapshot: CompletionContractSchema.parse(completion.contractSnapshot),
+    nextAction: WorkLoopNextActionSchema.parse(completion.nextAction),
     currentAssessment: CompletionAssessmentSchema.parse(completion.currentAssessment),
     assessmentHistory: completion.assessmentHistory.map((assessment) => CompletionAssessmentSchema.parse(assessment)),
     openHumanEscalations: completion.openHumanEscalations.map((escalation) => HumanEscalationSchema.parse(escalation))

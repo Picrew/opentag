@@ -594,6 +594,10 @@ export const ActionHintSchema = z.object({
     "link_to_work_item",
     "request_review",
     "create_pull_request",
+    "refresh_completion_evidence",
+    "reconcile_material_action",
+    "resume_work_thread",
+    "reassess_completion",
     "none"
   ]),
   targetId: z.string().min(1).optional(),
@@ -1083,6 +1087,39 @@ export const HumanEscalationSchema = z
     }
   });
 
+export const WorkLoopCauseSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("completion_gate"),
+    gateId: z.string().min(1),
+    state: CompletionGateResultStateSchema,
+    reasonCode: CompletionReasonCodeSchema
+  }).strict(),
+  z.object({
+    kind: z.literal("human_escalation"),
+    escalationId: z.string().min(1),
+    class: z.enum(["approval", "missing_input", "configuration", "verification", "reconciliation", "security"]),
+    audience: z.enum(["requester", "work_item_owner", "repo_owner", "operator", "security"]),
+    blocking: z.boolean()
+  }).strict(),
+  z.object({
+    kind: z.literal("material_action"),
+    actionId: z.string().min(1),
+    outcome: z.enum(["failed", "unknown"]),
+    receiptIds: z.array(z.string().min(1))
+  }).strict(),
+  z.object({
+    kind: z.literal("run"),
+    runId: z.string().min(1),
+    conclusion: z.enum(["success", "failure", "cancelled", "interrupted", "timed_out", "needs_human"])
+  }).strict()
+]);
+
+export const WorkLoopNextActionSchema = z.object({
+  summary: z.string().min(1),
+  hint: ActionHintSchema,
+  causes: z.array(WorkLoopCauseSchema)
+}).strict();
+
 export const CanonicalMutationDomainSchema = z.enum([
   "status",
   "assignee",
@@ -1323,6 +1360,8 @@ export type CompletionWaiver = z.infer<typeof CompletionWaiverSchema>;
 export type CompletionAssessment = z.infer<typeof CompletionAssessmentSchema>;
 export type HumanEscalation = z.infer<typeof HumanEscalationSchema>;
 export type HumanEscalationOption = z.infer<typeof HumanEscalationOptionSchema>;
+export type WorkLoopCause = z.infer<typeof WorkLoopCauseSchema>;
+export type WorkLoopNextAction = z.infer<typeof WorkLoopNextActionSchema>;
 export type HumanEscalationRequest = z.infer<typeof HumanEscalationRequestSchema>;
 export type CanonicalMutationDomain = z.infer<typeof CanonicalMutationDomainSchema>;
 export type MutationIntent = z.infer<typeof MutationIntentSchema>;

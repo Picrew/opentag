@@ -2976,7 +2976,7 @@ export function createDispatcherApp(input: {
       runId: transition.runId,
       state: projection.state,
       message: projection.message,
-      nextAction: transition.completion.nextAction,
+      nextAction: transition.completion.nextAction.summary,
       detailVisibility: "source_thread"
     });
     const rendered = presentation.render({
@@ -6147,7 +6147,7 @@ export function createDispatcherApp(input: {
           runId,
           state: "running",
           message: "Execution succeeded; work completion is waiting for verified repository evidence.",
-          nextAction: completionResult.view.nextAction,
+          nextAction: completionResult.view.nextAction.summary,
           detailVisibility: "source_thread"
         })
       : strictExecutionNotComplete
@@ -6161,7 +6161,7 @@ export function createDispatcherApp(input: {
                   ? "interrupted"
                   : "timed_out",
             message: `Execution ${completedResult.conclusion}; work is not complete.`,
-            nextAction: completionResult.view.nextAction,
+            nextAction: completionResult.view.nextAction.summary,
             detailVisibility: "source_thread"
           })
       : presentation.finalPresentation({
