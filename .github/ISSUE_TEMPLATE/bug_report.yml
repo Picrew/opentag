@@ -79,6 +79,5 @@ body:
     attributes:
       label: Sanitized evidence
       description: Add relevant logs, receipts, screenshots, or stack traces after removing secrets and private data.
-      render: shell
     validations:
       required: false
