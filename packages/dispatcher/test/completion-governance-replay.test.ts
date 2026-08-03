@@ -43,6 +43,16 @@ type CompletionReplayFixture = {
     primaryAnchorExternalId: string;
     pullRequestResourceRef: string;
     requiredEvidenceKinds: string[];
+    pendingNextAction: {
+      kind: "refresh_completion_evidence";
+      targetId: string;
+      causeGateIds: string[];
+      causeReasonCodes: string[];
+    };
+    finalNextAction: {
+      kind: "none";
+      causeCount: number;
+    };
     finalBodyContains: string;
   };
 };
@@ -198,8 +208,20 @@ describe("GitHub completion governance replay", () => {
       expect(pending.completion).toMatchObject({
         completion: "pending",
         currentAssessment: { state: "pending", sequence: 1 },
-        assessmentHistory: [{ state: "pending", sequence: 1 }]
+        assessmentHistory: [{ state: "pending", sequence: 1 }],
+        nextAction: {
+          hint: {
+            kind: fixture.expected.pendingNextAction.kind,
+            targetId: fixture.expected.pendingNextAction.targetId
+          }
+        }
       });
+      expect(pending.completion.nextAction.causes.flatMap((cause) =>
+        cause.kind === "completion_gate" ? [cause.gateId] : []
+      )).toEqual(fixture.expected.pendingNextAction.causeGateIds);
+      expect(pending.completion.nextAction.causes.flatMap((cause) =>
+        cause.kind === "completion_gate" ? [cause.reasonCode] : []
+      )).toEqual(fixture.expected.pendingNextAction.causeReasonCodes);
       const pendingAssessmentId = pending.completion.currentAssessment.id;
 
       const callbacksBeforeEvidence = delivered.length;
@@ -252,8 +274,10 @@ describe("GitHub completion governance replay", () => {
           { id: pendingAssessmentId, state: "pending", sequence: 1 },
           { state: "satisfied", sequence: 2, supersedesAssessmentId: pendingAssessmentId }
         ],
-        openHumanEscalations: []
+        openHumanEscalations: [],
+        nextAction: { hint: { kind: fixture.expected.finalNextAction.kind } }
       });
+      expect(satisfied.completion.nextAction.causes).toHaveLength(fixture.expected.finalNextAction.causeCount);
       expect(satisfied.completion.evidence.map((item) => item.kind)).toEqual(
         expect.arrayContaining(fixture.expected.requiredEvidenceKinds)
       );

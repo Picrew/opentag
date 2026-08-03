@@ -3,7 +3,7 @@
 Use this matrix when you need to prove OpenTag's governed source-thread loop is
 not only a happy-path demo. It groups repeatable tests around failure
 boundaries, source-thread controls, recovery behavior, artifact quality, replay
-parity, completion governance, and privacy redaction.
+parity, completion governance, governed WorkLoop actions, and privacy redaction.
 
 Run every local matrix case:
 
@@ -28,7 +28,8 @@ corepack pnpm smoke:governance -- --list
 | `apply-failure-ux` | PR/MR apply cleanup and failure paths are explicit: missing branches disable apply before writes, create failures fall back to child runs, repeated replies do not duplicate external writes, and provider tokens/headers stay out of callbacks. |
 | `replay-parity` | GitHub, Slack, GitLab, and Lark live-shaped fixtures replay in memory with the same receipt, artifact, ledger, callback, and executor-capability strategy. |
 | `completion-governance` | One sanitized GitHub fixture proves admission, Context Packet generation, durable WorkThread identity, fencing, executor success pending verification, current-head checks, merge, superseding assessment lineage, concise source-thread projection, CLI explanation, restart recovery, and the end-to-end completion metric. |
-| `privacy-redaction` | Replay fixtures plus existing `.omx/live-e2e` and `.omx/governance-matrix` reports are scanned for token-like values, private keys, webhook secrets, Slack bot tokens, GitHub/GitLab tokens, full Lark message IDs, and local absolute paths. |
+| `work-loop-actions` | Completion gates, human escalations, material-action receipts, and run outcomes produce structured causes and ActionHint primitives; WorkThread status and bounded attention expose one canonical WorkLoop view; the golden loop moves from evidence refresh to no action. |
+| `privacy-redaction` | Replay fixtures, public governance documentation, installed public-package manifests/README files during `release:check`, and existing `.omx/live-e2e` and `.omx/governance-matrix` reports are scanned for token-like values, private keys, webhook secrets, Slack bot tokens, GitHub/GitLab tokens, full Lark message IDs, and local absolute paths. |
 
 Run the privacy scan directly when reviewing live artifacts:
 
@@ -36,6 +37,9 @@ Run the privacy scan directly when reviewing live artifacts:
 corepack pnpm smoke:privacy -- \
   --allow-missing \
   --path packages/dispatcher/test/fixtures/replay \
+  --path docs/governance-validation-matrix.md \
+  --path docs/replay-harness.md \
+  --path docs/npm-release.md \
   --path .omx/live-e2e \
   --path .omx/governance-matrix
 ```
@@ -62,8 +66,10 @@ These fixtures should preserve the live run shape, not the raw provider payload:
 It deliberately keeps the executor result separate from authoritative GitHub
 evidence: process success first produces a pending assessment, then a sanitized
 current-head snapshot for required checks and merge produces a new satisfied
-assessment. Replaying that same delivery must not append another assessment or
-source-thread callback.
+assessment. The pending view must name `refresh_completion_evidence` and its
+gate causes; the satisfied view must end at `none` with no residual causes.
+Replaying that same delivery must not append another assessment or source-thread
+callback.
 
 ## Boundary
 

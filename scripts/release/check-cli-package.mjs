@@ -214,6 +214,17 @@ function checkInstalledTeamsAuthDependencies(installDir) {
   run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });
 }
 
+function checkInstalledPublicPackagePrivacy(installDir) {
+  const privacyScanner = path.join(repoRoot, "scripts", "test", "privacy-redaction-scan.mjs");
+  const packageRoots = packagePlan.map(({ packageJson }) =>
+    path.join(installDir, "node_modules", ...packageJson.name.split("/"))
+  );
+  run(process.execPath, [
+    privacyScanner,
+    ...packageRoots.flatMap((packageRoot) => ["--path", packageRoot])
+  ]);
+}
+
 const tempRoot = mkdtempSync(path.join(tmpdir(), "opentag-release-check-"));
 const packDir = path.join(tempRoot, "packs");
 const installDir = path.join(tempRoot, "install");
@@ -250,6 +261,9 @@ try {
 
   console.log("Checking installed Teams authentication dependencies...");
   checkInstalledTeamsAuthDependencies(installDir);
+
+  console.log("Scanning installed public package manifests and documentation for private data...");
+  checkInstalledPublicPackagePrivacy(installDir);
 
   console.log("");
   console.log("OpenTag CLI package check passed.");
