@@ -176,7 +176,7 @@ describe("evaluateWorkstreamContinuation", () => {
     expect(evaluateWorkstreamContinuation({
       ...input,
       evaluation: { ...input.evaluation, status: "attention_required", violations: [] }
-    })).toMatchObject({ action: "needs_human", reasonCode: "workstream_attention_required" });
+    })).toMatchObject({ action: "eligible", reasonCode: "eligible" });
     expect(evaluateWorkstreamContinuation({
       ...input,
       workLoop: {

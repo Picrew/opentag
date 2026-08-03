@@ -63,7 +63,9 @@ decision also checks the canonical Workstream evaluation, active Run ids,
 trigger replay/staleness, and the current WorkLoop action. It returns
 `eligible`, `wait`, `needs_human`, or `terminal` with a stable reason code and,
 when delayed, `notBefore`. It does not create Runs, schedule timers, or call a
-provider.
+provider. A blocked Workstream fails closed; `attention_required` remains an
+operator signal while the current WorkLoop action decides whether the specific
+WorkThread is resumable.
 
 ## Responsibilities
 

@@ -19,6 +19,7 @@ import {
   CompletionWaiverSchema,
   ContextPacketSchema,
   conversationKeyFromEvent,
+  conversationKeysFromEvent,
   defaultRunEventMetadata,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
@@ -177,6 +178,25 @@ export class ChannelBindingCorruptionError extends Error {
   override readonly name = "ChannelBindingCorruptionError";
 }
 
+export type ManagedChannelPrincipalIdentity = {
+  provider: string;
+  applicationId: string;
+  botId?: string;
+};
+
+export type ManagedChannelAuthorityFailureReason =
+  | "managed_channel_authority_unavailable"
+  | "managed_channel_authority_changed"
+  | "managed_channel_principal_required";
+
+export class ManagedChannelAuthorityError extends Error {
+  override readonly name = "ManagedChannelAuthorityError";
+
+  constructor(readonly reasonCode: ManagedChannelAuthorityFailureReason) {
+    super(reasonCode);
+  }
+}
+
 export type ClaimedOpenTagRun = OpenTagRunWithEvent & {
   attemptId: string;
   attemptNumber: number;
@@ -275,6 +295,28 @@ export type ChannelBinding = {
   | { repoProvider: string; owner: string; repo: string }
   | { repoProvider?: never; owner?: never; repo?: never }
 );
+
+export function managedChannelBindingAuthorityDigest(input: Pick<
+  ChannelBinding,
+  "provider" | "accountId" | "conversationId" | "ownership"
+>): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify({
+    provider: input.provider,
+    accountId: input.accountId,
+    conversationId: input.conversationId,
+    ownership: input.ownership ?? null
+  })).digest("hex")}`;
+}
+
+function principalOwnsManagedChannelBinding(
+  principal: ManagedChannelPrincipalIdentity | undefined,
+  binding: ChannelBinding
+): boolean {
+  if (!binding.ownership) return true;
+  return principal?.provider === binding.provider
+    && principal.applicationId === binding.ownership.applicationId
+    && (!binding.ownership.botId || principal.botId === binding.ownership.botId);
+}
 
 export type SlackChannelBinding = {
   teamId: string;
@@ -788,6 +830,19 @@ function stableActionJson(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function isAutomaticWorkstreamContinuationActionJson(value: string | null): boolean {
+  if (!value) return false;
+  try {
+    const action = ActionHintSchema.safeParse(JSON.parse(value));
+    return action.success
+      && action.data.kind === "resume_work_thread"
+      && action.data.metadata?.["workstreamContinuation"] === true;
+  } catch {
+    // An unreadable action cannot safely prove that a queued Run is unrelated.
+    return true;
+  }
 }
 
 type CurrentAssessmentAuthorityRow = {
@@ -2342,6 +2397,28 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return factoryWorkstreamFromRows(row, members);
     },
 
+    async listFactoryWorkstreamsForWorkThread(input: {
+      workThreadId: string;
+      limit?: number;
+    }): Promise<StoredFactoryWorkstream[]> {
+      const limit = Math.min(101, Math.max(1, Math.trunc(input.limit ?? 101)));
+      const rows = await db.select({ workstream: factoryWorkstreams })
+        .from(factoryWorkstreamMembers)
+        .innerJoin(factoryWorkstreams, eq(factoryWorkstreams.id, factoryWorkstreamMembers.workstreamId))
+        .where(eq(factoryWorkstreamMembers.workThreadId, input.workThreadId))
+        .orderBy(asc(factoryWorkstreams.id))
+        .limit(limit);
+      const stored: StoredFactoryWorkstream[] = [];
+      for (const { workstream } of rows) {
+        const members = await db.select({ workThreadId: factoryWorkstreamMembers.workThreadId })
+          .from(factoryWorkstreamMembers)
+          .where(eq(factoryWorkstreamMembers.workstreamId, workstream.id))
+          .orderBy(asc(factoryWorkstreamMembers.workThreadId));
+        stored.push(factoryWorkstreamFromRows(workstream, members));
+      }
+      return stored;
+    },
+
     async createFactoryWorkstream(input: {
       id: string;
       recipeId: string;
@@ -3192,6 +3269,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       toState: "acknowledged" | "resolved" | "expired" | "superseded";
       at: string;
       actor?: ActorIdentity;
+      channelPrincipal?: ManagedChannelPrincipalIdentity;
       optionId?: string;
       reason?: string;
       supersededById?: string;
@@ -3201,6 +3279,32 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const existing = tx.select().from(humanEscalations).where(eq(humanEscalations.id, input.id)).limit(1).get();
         if (!existing) throw new Error(`HumanEscalation ${input.id} does not exist.`);
         const current = humanEscalationFromRow(existing);
+        if (
+          (input.toState === "acknowledged" || input.toState === "resolved")
+          && current.sourceAuthority
+        ) {
+          const authority = current.sourceAuthority;
+          const bindingRow = tx
+            .select()
+            .from(channelBindings)
+            .where(and(
+              eq(channelBindings.provider, authority.provider),
+              eq(channelBindings.accountId, authority.accountId),
+              eq(channelBindings.conversationId, authority.conversationId)
+            ))
+            .limit(1)
+            .get();
+          if (!bindingRow) {
+            throw new ManagedChannelAuthorityError("managed_channel_authority_unavailable");
+          }
+          const binding = channelBindingFromRow(bindingRow);
+          if (managedChannelBindingAuthorityDigest(binding) !== authority.bindingDigest) {
+            throw new ManagedChannelAuthorityError("managed_channel_authority_changed");
+          }
+          if (!principalOwnsManagedChannelBinding(input.channelPrincipal, binding)) {
+            throw new ManagedChannelAuthorityError("managed_channel_principal_required");
+          }
+        }
         const expiredDueToDeadline = Boolean(
           (input.toState === "acknowledged" || input.toState === "resolved")
           && current.expiresAt
@@ -3429,12 +3533,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const rows = await db
         .select()
         .from(runs)
-        .where(and(eq(runs.conversationKey, input.conversationKey), inArray(runs.status, ["assigned", "running", "needs_approval"])))
+        .where(and(eq(runs.conversationKey, input.conversationKey), inArray(runs.status, ["queued", "assigned", "running", "needs_approval"])))
         .orderBy(asc(runs.createdAt));
       // A permission wait keeps its attempt attached so the runtime can heartbeat
       // and resume it. A completed needs_human run clears the attempt and must not
       // block later work in the same conversation.
-      const row = rows.find((candidate) => candidate.status !== "needs_approval" || candidate.currentAttemptId !== null);
+      const row = rows.find((candidate) =>
+        candidate.status === "queued"
+          ? isAutomaticWorkstreamContinuationActionJson(candidate.triggeredByActionJson)
+          : candidate.status !== "needs_approval" || candidate.currentAttemptId !== null
+      );
       if (!row) return null;
       return {
         run: runFromRow(row),
@@ -3715,6 +3823,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const { run, created } = await this.createRun({
           id: input.runId,
           event: followUp.event,
+          rejectIfAutomaticContinuationActive: true,
           ...(followUp.accessProfileSnapshot ? { accessProfileSnapshot: followUp.accessProfileSnapshot } : {}),
           ...(followUp.policySnapshotProvenance ? { policySnapshotProvenance: followUp.policySnapshotProvenance } : {}),
           ...(followUp.routingPolicy ? { routingPolicy: followUp.routingPolicy } : {}),
@@ -4242,6 +4351,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       workstreamId?: string;
       admissionBatchId?: string;
       admissionItemRunId?: string;
+      rejectIfActiveConversation?: boolean;
+      rejectIfAutomaticContinuationActive?: boolean;
     }): Promise<CreateRunResult> {
       const event = OpenTagEventSchema.parse(input.event);
       const accessProfileSnapshot = input.accessProfileSnapshot
@@ -4375,6 +4486,20 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         eventId: event.id
       });
       const insertResult = db.transaction((tx) => {
+        if (input.rejectIfActiveConversation || input.rejectIfAutomaticContinuationActive) {
+          const activeCandidates = tx.select({ id: runs.id, triggeredByActionJson: runs.triggeredByActionJson })
+            .from(runs).where(and(
+            inArray(runs.conversationKey, conversationKeysFromEvent(event)),
+            or(
+              inArray(runs.status, ["queued", "assigned", "running"]),
+              and(eq(runs.status, "needs_approval"), isNotNull(runs.currentAttemptId))
+            )
+          )).orderBy(asc(runs.createdAt), asc(runs.id)).all();
+          const active = input.rejectIfActiveConversation
+            ? activeCandidates[0]
+            : activeCandidates.find((candidate) => isAutomaticWorkstreamContinuationActionJson(candidate.triggeredByActionJson));
+          if (active) throw new Error(`ACTIVE_CONVERSATION_RACE:${active.id}`);
+        }
         const inserted = tx.insert(runs).values({
         id: input.id,
         eventId: event.id,

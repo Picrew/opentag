@@ -465,6 +465,7 @@ export const WorkThreadSchema = z.object({
 
 export const RunAdmissionActionSchema = z.enum([
   "start",
+  "wait",
   "drop_duplicate",
   "queue_follow_up",
   "attach_to_active_run",
@@ -945,6 +946,24 @@ export const HumanEscalationSchema = z
     workThreadId: z.string().min(1),
     runId: z.string().min(1).optional(),
     attemptId: z.string().min(1).optional(),
+    sourceAuthority: z
+      .object({
+        provider: z.string().min(1),
+        accountId: z.string().min(1),
+        conversationId: z.string().min(1),
+        ownership: z
+          .object({
+            mode: z.literal("managed"),
+            exclusive: z.literal(true),
+            applicationId: z.string().trim().min(1).max(255).regex(/^[^\u0000-\u001f\u007f]+$/u),
+            botId: z.string().trim().min(1).max(255).regex(/^[^\u0000-\u001f\u007f]+$/u).optional()
+          })
+          .strict()
+          .optional(),
+        bindingDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/)
+      })
+      .strict()
+      .optional(),
     class: z.enum(["approval", "missing_input", "configuration", "verification", "reconciliation", "security"]),
     audience: z.enum(["requester", "work_item_owner", "repo_owner", "operator", "security"]),
     subjectRef: z.string().min(1),

@@ -151,9 +151,6 @@ export function evaluateWorkstreamContinuation(
   const policy = input.recipe.continuation;
   if (!policy || policy.mode === "manual") return decision("wait", "manual_policy");
   if (input.evaluation.status === "blocked") return decision("wait", "workstream_blocked");
-  if (input.evaluation.status === "attention_required") {
-    return decision("needs_human", "workstream_attention_required");
-  }
   if (!policy.triggers.includes(input.trigger.kind)) return decision("wait", "trigger_not_enabled");
   if (input.continuations.some((continuation) => continuation.triggerId === input.trigger.id)) {
     return decision("wait", "trigger_already_consumed");

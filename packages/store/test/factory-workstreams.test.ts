@@ -108,6 +108,33 @@ describe("factory workstream persistence", () => {
     await expect(repo.createFactoryWorkstream({ id: "workstream", recipeId: "recipe", recipeVersion: 1, workstream: { id: "workstream", name: "changed" }, workThreadIds: ["missing"] })).resolves.toMatchObject({ outcome: "conflict" });
   });
 
+  it("lists the bounded Workstream authority for a WorkThread", async () => {
+    const { repo, workThreadId } = await setupFactory();
+
+    await expect(repo.listFactoryWorkstreamsForWorkThread({ workThreadId })).resolves.toMatchObject([
+      {
+        id: "workstream",
+        recipeId: "recipe",
+        recipeVersion: 1,
+        workstream: { id: "workstream", name: "one" },
+        workThreadIds: [workThreadId]
+      }
+    ]);
+    await expect(repo.listFactoryWorkstreamsForWorkThread({ workThreadId: "missing" })).resolves.toEqual([]);
+  });
+
+  it("atomically rejects an automatic continuation while the conversation has an active run", async () => {
+    const { repo } = await setupFactory();
+
+    await expect(repo.createRun({
+      id: "automatic-continuation",
+      event: event("automatic-continuation"),
+      workstreamId: "workstream",
+      rejectIfActiveConversation: true
+    })).rejects.toThrow("ACTIVE_CONVERSATION_RACE:seed-run");
+    await expect(repo.getRun({ runId: "automatic-continuation" })).resolves.toBeNull();
+  });
+
   it("resumes expired batches, fences items, and replays completed results", async () => {
     const { repo, workThreadId } = await setupFactory();
     const items = [{ itemId: "item", runId: "run", workThreadId, event: event("batch") }];

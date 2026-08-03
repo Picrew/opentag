@@ -331,6 +331,51 @@ describe("Admission Runtime", () => {
     expect(appendRunEvent).not.toHaveBeenCalled();
   });
 
+  it("waits without creating a follow-up when automatic continuation finds an active run", async () => {
+    const appendRunEvent = vi.fn(async () => undefined);
+    const createFollowUpRequest = vi.fn();
+    const admission = createAdmissionRuntime({
+      repo: {
+        getRunByEventId: async () => null,
+        getRepoBinding: async () => ({
+          provider: "github",
+          owner: "acme",
+          repo: "demo",
+          runnerId: "runner_1"
+        }),
+        findActiveRunForConversation: async () => ({
+          run: {
+            id: "run_active",
+            eventId: "evt_active",
+            status: "running",
+            createdAt: "2026-06-24T00:00:00.000Z",
+            updatedAt: "2026-06-24T00:00:00.000Z"
+          },
+          event
+        }),
+        createFollowUpRequest,
+        appendRunEvent
+      } as never
+    });
+
+    const result = await admission.admitRun({
+      requestId: "automatic_continuation_1",
+      event,
+      activeRunPolicy: "wait"
+    });
+
+    expect(result).toMatchObject({
+      outcome: "wait_active_run",
+      decision: {
+        action: "wait",
+        reasonCode: "active_run_same_thread",
+        activeRunId: "run_active"
+      }
+    });
+    expect(createFollowUpRequest).not.toHaveBeenCalled();
+    expect(appendRunEvent).not.toHaveBeenCalled();
+  });
+
   it("queues issue-scoped GitHub follow-ups against legacy repo-scoped active runs", async () => {
     const checkedConversationKeys: string[] = [];
     const issueScopedEvent = {

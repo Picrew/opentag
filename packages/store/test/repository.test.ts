@@ -3,7 +3,12 @@ import type { CompletionAssessment, WorkThread } from "@opentag/core";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
-import { ChannelBindingCorruptionError, createOpenTagRepository } from "../src/repository.js";
+import {
+  ChannelBindingCorruptionError,
+  ManagedChannelAuthorityError,
+  createOpenTagRepository,
+  managedChannelBindingAuthorityDigest
+} from "../src/repository.js";
 import { migrateSchema } from "../src/schema.js";
 
 function githubIssueContext(issueNumber: number) {
@@ -4379,6 +4384,63 @@ describe("repository-optional channel bindings", () => {
     })).resolves.toBe(false);
     await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" }))
       .resolves.toMatchObject({ repo: "replacement", ownership: { applicationId: "A999" } });
+  });
+
+  it("rechecks managed authority inside the human-escalation transition transaction", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    const original = {
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      ownership: { mode: "managed" as const, exclusive: true as const, applicationId: "A123", botId: "U123" }
+    };
+    await repo.upsertChannelBinding(original);
+    const thread = (await repo.upsertWorkThread({ thread: completionWorkThread() })).thread;
+    await repo.openHumanEscalation({
+      escalation: {
+        id: "escalation-managed-authority-race",
+        workThreadId: thread.id,
+        sourceAuthority: {
+          provider: original.provider,
+          accountId: original.accountId,
+          conversationId: original.conversationId,
+          ownership: original.ownership,
+          bindingDigest: managedChannelBindingAuthorityDigest(original)
+        },
+        class: "security",
+        audience: "operator",
+        subjectRef: "slack:T123/C456",
+        state: "open",
+        blocking: true,
+        summary: "Managed source authority changed.",
+        reason: "The current managed source owner must authorize this transition.",
+        openedAt: completionTimestamp
+      }
+    });
+
+    // This models a caller that read and authorized the old binding before the
+    // binding rotation committed. The repository must not trust that stale preflight.
+    await expect(repo.getChannelBinding(original)).resolves.toMatchObject({
+      ownership: { applicationId: "A123", botId: "U123" }
+    });
+    await repo.upsertChannelBinding({
+      ...original,
+      ownership: { mode: "managed", exclusive: true, applicationId: "A999", botId: "U999" },
+      allowManagedOwnershipOverride: true
+    });
+
+    await expect(repo.transitionHumanEscalation({
+      id: "escalation-managed-authority-race",
+      toState: "resolved",
+      actor: { provider: "slack", providerUserId: "human-1", handle: "alice" },
+      channelPrincipal: { provider: "slack", applicationId: "A123", botId: "U123" },
+      reason: "The stale owner attempted to resolve after rotation.",
+      at: "2026-07-21T10:01:00.000Z"
+    })).rejects.toEqual(new ManagedChannelAuthorityError("managed_channel_authority_changed"));
+    await expect(repo.getHumanEscalation({ id: "escalation-managed-authority-race" }))
+      .resolves.toMatchObject({ state: "open" });
   });
 
   it("fails closed when persisted managed ownership is malformed", async () => {
