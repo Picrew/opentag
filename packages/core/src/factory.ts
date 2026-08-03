@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { RunnerLocalitySchema } from "./routing.js";
-import { OpenTagEventSchema } from "./schema.js";
+import { OpenTagEventSchema, WorkLoopNextActionSchema, WorkLoopViewSchema } from "./schema.js";
 
 const Sha256DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const NonNegativeIntegerSchema = z.number().int().nonnegative();
@@ -33,11 +33,53 @@ export const FactoryRecipeBudgetSchema = z.object({
   }
 });
 
+export const WorkstreamContinuationTriggerSchema = z.enum([
+  "completion_evidence_changed",
+  "human_escalation_resolved",
+  "retryable_run_failure"
+]);
+
+const UniqueContinuationTriggersSchema = z.array(WorkstreamContinuationTriggerSchema).min(1).max(3)
+  .superRefine((triggers, ctx) => {
+    triggers.forEach((trigger, index) => {
+      if (triggers.indexOf(trigger) !== index) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Continuation triggers must be unique.",
+          path: [index]
+        });
+      }
+    });
+  });
+
+export const WorkstreamContinuationPolicySchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("manual") }).strict(),
+  z.object({
+    mode: z.literal("evidence_driven"),
+    triggers: UniqueContinuationTriggersSchema,
+    maxContinuationsPerWorkThread: z.number().int().min(1).max(100),
+    minIntervalSeconds: z.number().int().min(0).max(86_400),
+    backoff: z.object({
+      initialSeconds: z.number().int().min(1).max(86_400),
+      maxSeconds: z.number().int().min(1).max(604_800)
+    }).strict().superRefine((backoff, ctx) => {
+      if (backoff.maxSeconds < backoff.initialSeconds) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Continuation maxSeconds cannot be less than initialSeconds.",
+          path: ["maxSeconds"]
+        });
+      }
+    })
+  }).strict()
+]);
+
 export const FactoryRecipeSnapshotInputSchema = z.object({
   id: z.string().min(1),
   version: z.number().int().positive(),
   name: z.string().min(1),
   completionProfileId: z.string().min(1).optional(),
+  continuation: WorkstreamContinuationPolicySchema.optional(),
   budgets: FactoryRecipeBudgetSchema
 }).strict();
 
@@ -406,6 +448,81 @@ export const WorkstreamEvaluationSchema = z.object({
   violations: z.array(WorkstreamBudgetViolationSchema)
 }).strict();
 
+export const WorkstreamContinuationTriggerEventSchema = z.object({
+  id: z.string().min(1),
+  kind: WorkstreamContinuationTriggerSchema,
+  occurredAt: z.string().datetime()
+}).strict();
+
+export const WorkstreamContinuationRecordSchema = z.object({
+  workstreamId: z.string().min(1),
+  workThreadId: z.string().min(1),
+  runId: z.string().min(1),
+  triggerId: z.string().min(1),
+  startedAt: z.string().datetime(),
+  conclusion: z.enum(["success", "failure", "cancelled", "interrupted", "timed_out", "needs_human"]).optional()
+}).strict();
+
+export const WorkstreamContinuationDecisionInputSchema = z.object({
+  recipe: FactoryRecipeSnapshotSchema,
+  workstream: WorkstreamSchema,
+  evaluation: WorkstreamEvaluationSchema,
+  workLoop: WorkLoopViewSchema,
+  trigger: WorkstreamContinuationTriggerEventSchema,
+  activeRunIds: z.array(z.string().min(1)).max(100).superRefine((runIds, ctx) => {
+    runIds.forEach((runId, index) => {
+      if (runIds.indexOf(runId) !== index) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Active continuation run ids must be unique.", path: [index] });
+      }
+    });
+  }),
+  continuations: z.array(WorkstreamContinuationRecordSchema).max(1_000).superRefine((continuations, ctx) => {
+    const runIds = new Set<string>();
+    const triggerIds = new Set<string>();
+    continuations.forEach((continuation, index) => {
+      if (runIds.has(continuation.runId)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Continuation run ids must be unique.", path: [index, "runId"] });
+      }
+      runIds.add(continuation.runId);
+      if (triggerIds.has(continuation.triggerId)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Continuation trigger ids must be unique.", path: [index, "triggerId"] });
+      }
+      triggerIds.add(continuation.triggerId);
+    });
+  }),
+  evaluatedAt: z.string().datetime()
+}).strict();
+
+export const WorkstreamContinuationReasonCodeSchema = z.enum([
+  "eligible",
+  "terminal_work_loop",
+  "active_run",
+  "human_decision_required",
+  "manual_policy",
+  "workstream_blocked",
+  "workstream_attention_required",
+  "trigger_not_enabled",
+  "trigger_already_consumed",
+  "stale_trigger",
+  "action_not_resumable",
+  "continuation_limit_reached",
+  "cadence_not_elapsed",
+  "backoff_not_elapsed"
+]);
+
+export const WorkstreamContinuationDecisionSchema = z.object({
+  workstreamId: z.string().min(1),
+  workThreadId: z.string().min(1),
+  trigger: WorkstreamContinuationTriggerEventSchema,
+  action: z.enum(["eligible", "wait", "needs_human", "terminal"]),
+  reasonCode: WorkstreamContinuationReasonCodeSchema,
+  nextAction: WorkLoopNextActionSchema,
+  automaticContinuationCount: NonNegativeIntegerSchema,
+  notBefore: z.string().datetime().optional(),
+  inputDigest: Sha256DigestSchema,
+  evaluatedAt: z.string().datetime()
+}).strict();
+
 export type FactoryRecipeBudget = z.infer<typeof FactoryRecipeBudgetSchema>;
 export type FactoryRecipeSnapshotInput = z.infer<typeof FactoryRecipeSnapshotInputSchema>;
 export type FactoryRecipeSnapshot = z.infer<typeof FactoryRecipeSnapshotSchema>;
@@ -425,3 +542,10 @@ export type WorkstreamMetrics = z.infer<typeof WorkstreamMetricsSchema>;
 export type WorkstreamBudgetViolation = z.infer<typeof WorkstreamBudgetViolationSchema>;
 export type WorkstreamEvaluationInput = z.infer<typeof WorkstreamEvaluationInputSchema>;
 export type WorkstreamEvaluation = z.infer<typeof WorkstreamEvaluationSchema>;
+export type WorkstreamContinuationTrigger = z.infer<typeof WorkstreamContinuationTriggerSchema>;
+export type WorkstreamContinuationPolicy = z.infer<typeof WorkstreamContinuationPolicySchema>;
+export type WorkstreamContinuationTriggerEvent = z.infer<typeof WorkstreamContinuationTriggerEventSchema>;
+export type WorkstreamContinuationRecord = z.infer<typeof WorkstreamContinuationRecordSchema>;
+export type WorkstreamContinuationDecisionInput = z.infer<typeof WorkstreamContinuationDecisionInputSchema>;
+export type WorkstreamContinuationReasonCode = z.infer<typeof WorkstreamContinuationReasonCodeSchema>;
+export type WorkstreamContinuationDecision = z.infer<typeof WorkstreamContinuationDecisionSchema>;

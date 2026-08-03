@@ -50,6 +50,21 @@ locality are fail-closed budget signals. Cost units are capacity accounting, not
 currency. The function has no provider calls and cannot update a live
 CompletionAssessment.
 
+## Workstream continuation
+
+`evaluateWorkstreamContinuation` is the pure decision boundary between a
+WorkLoop that says `resume_work_thread` and any runtime that may create a new
+Run. Automatic continuation is disabled when a recipe omits `continuation` or
+declares `mode: manual`.
+
+An evidence-driven policy selects explicit trigger kinds, a per-WorkThread
+continuation limit, a minimum interval, and bounded exponential backoff. The
+decision also checks the canonical Workstream evaluation, active Run ids,
+trigger replay/staleness, and the current WorkLoop action. It returns
+`eligible`, `wait`, `needs_human`, or `terminal` with a stable reason code and,
+when delayed, `notBefore`. It does not create Runs, schedule timers, or call a
+provider.
+
 ## Responsibilities
 
 - Evaluate finite completion gates against immutable artifacts, normalized evidence, material-action receipts, and bounded waivers.

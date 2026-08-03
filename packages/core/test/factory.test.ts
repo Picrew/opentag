@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   FactoryRecipeBudgetSchema,
   FactoryRecipeSnapshotInputSchema,
+  WorkstreamContinuationPolicySchema,
   WorkstreamAdmissionBatchInputSchema,
   WorkstreamAdmissionBatchReceiptSchema,
   WorkstreamAdmissionBatchResultSchema,
@@ -38,6 +39,33 @@ describe("factory contracts", () => {
     expect(() => FactoryRecipeBudgetSchema.parse({ ...budgets, maxCostUnits: 4, costUnitsPerAttempt: 5 })).toThrow(/cannot exceed/u);
     expect(() => FactoryRecipeBudgetSchema.parse({ ...budgets, allowedLocalities: ["local", "local"] })).toThrow(/unique/u);
     expect(() => FactoryRecipeBudgetSchema.parse({ ...budgets, unknown: true })).toThrow();
+  });
+
+  it("keeps automatic continuation explicit, bounded, and versioned with the recipe", () => {
+    const policy = {
+      mode: "evidence_driven" as const,
+      triggers: ["completion_evidence_changed", "human_escalation_resolved"] as const,
+      maxContinuationsPerWorkThread: 3,
+      minIntervalSeconds: 60,
+      backoff: { initialSeconds: 30, maxSeconds: 300 }
+    };
+    expect(FactoryRecipeSnapshotInputSchema.parse({
+      id: "recipe_continuation",
+      version: 2,
+      name: "Governed continuation",
+      continuation: policy,
+      budgets
+    }).continuation).toEqual(policy);
+    expect(WorkstreamContinuationPolicySchema.parse({ mode: "manual" })).toEqual({ mode: "manual" });
+    expect(() => WorkstreamContinuationPolicySchema.parse({
+      ...policy,
+      triggers: ["completion_evidence_changed", "completion_evidence_changed"]
+    })).toThrow(/unique/u);
+    expect(() => WorkstreamContinuationPolicySchema.parse({
+      ...policy,
+      backoff: { initialSeconds: 60, maxSeconds: 30 }
+    })).toThrow(/cannot be less/u);
+    expect(() => WorkstreamContinuationPolicySchema.parse({ mode: "manual", triggers: policy.triggers })).toThrow();
   });
 
   it("accepts only unique WorkThread members", () => {

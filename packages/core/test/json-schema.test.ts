@@ -40,6 +40,9 @@ describe("OpenTagJsonSchemas", () => {
     expect(OpenTagJsonSchemas.AcceptedCompletionMetrics).toHaveProperty("definitions.AcceptedCompletionMetrics");
     expect(OpenTagJsonSchemas.FactoryRecipeSnapshotInput).toHaveProperty("definitions.FactoryRecipeSnapshotInput");
     expect(OpenTagJsonSchemas.FactoryRecipeSnapshot).toHaveProperty("definitions.FactoryRecipeSnapshot");
+    expect(OpenTagJsonSchemas.WorkstreamContinuationPolicy).toHaveProperty("definitions.WorkstreamContinuationPolicy");
+    expect(OpenTagJsonSchemas.WorkstreamContinuationDecisionInput).toHaveProperty("definitions.WorkstreamContinuationDecisionInput");
+    expect(OpenTagJsonSchemas.WorkstreamContinuationDecision).toHaveProperty("definitions.WorkstreamContinuationDecision");
     expect(OpenTagJsonSchemas.WorkstreamInput).toHaveProperty("definitions.WorkstreamInput");
     expect(OpenTagJsonSchemas.Workstream).toHaveProperty("definitions.Workstream");
     expect(OpenTagJsonSchemas.WorkstreamAdmissionBatchInput).toHaveProperty("definitions.WorkstreamAdmissionBatchInput");
