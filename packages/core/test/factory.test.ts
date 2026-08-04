@@ -119,6 +119,7 @@ describe("factory contracts", () => {
       createdCount: 0,
       idempotentReplayCount: 0,
       followUpQueuedCount: 0,
+      waitActiveRunCount: 0,
       needsHumanDecisionCount: 12,
       rejectedCount: 0,
       exceptionCount: 12,
@@ -168,6 +169,7 @@ describe("factory contracts", () => {
       createdCount: 1,
       idempotentReplayCount: 0,
       followUpQueuedCount: 0,
+      waitActiveRunCount: 0,
       needsHumanDecisionCount: 0,
       rejectedCount: 0,
       exceptionCount: 0,
@@ -244,6 +246,44 @@ describe("factory contracts", () => {
         summary: { ...summary, createdCount: 0, rejectedCount: 1, exceptionCount: 1, omittedExceptionCount: 1 }
       }
     }).success).toBe(false);
+  });
+
+  it("preserves wait-active-run as a non-exceptional durable batch outcome", () => {
+    const result = WorkstreamAdmissionBatchResultSchema.parse({
+      batchId: "batch_wait",
+      workstreamId: "workstream_1",
+      inputDigest: `sha256:${"b".repeat(64)}`,
+      results: [{
+        itemId: "item_wait",
+        index: 0,
+        runId: "run_wait",
+        status: "wait_active_run",
+        statusCode: 202,
+        reasonCode: "active_run_same_thread",
+        admittedRunId: "run_active"
+      }],
+      summary: {
+        totalItems: 1,
+        createdCount: 0,
+        idempotentReplayCount: 0,
+        followUpQueuedCount: 0,
+        waitActiveRunCount: 1,
+        needsHumanDecisionCount: 0,
+        rejectedCount: 0,
+        exceptionCount: 0,
+        exceptions: [],
+        omittedExceptionCount: 0
+      },
+      completedAt: "2026-07-26T00:01:00.000Z"
+    });
+
+    expect(result.results[0]?.status).toBe("wait_active_run");
+    expect(result.summary).toMatchObject({
+      waitActiveRunCount: 1,
+      rejectedCount: 0,
+      exceptionCount: 0,
+      exceptions: []
+    });
   });
 
   it("validates WorkThread authority, run breakdown, cost, and locality dimensions", () => {

@@ -111,6 +111,7 @@ import {
 } from "@opentag/linear";
 import type { SlackBlock } from "@opentag/slack";
 import {
+  ActiveConversationRaceError,
   ChannelBindingCorruptionError,
   ManagedChannelAuthorityError,
   createOpenTagRepository,
@@ -343,6 +344,7 @@ function createDispatcherRateLimitMiddleware(options: DispatcherRateLimitOptions
   };
 }
 import { createAdmissionRuntime, sourceRepoIsPublic, type AgentAccessProfileCheck } from "./admission.js";
+import { continuationResumePresentation } from "./continuation-presentation.js";
 import { sha256Digest } from "./digest.js";
 import { createDefaultCallbackPresentation, type CallbackPresentation, type LarkRenderLocale } from "./presentation.js";
 import {
@@ -3444,7 +3446,7 @@ export function createDispatcherApp(input: {
   type RunAdmissionHttpResult = {
     body: Record<string, unknown>;
     status: 200 | 201 | 202 | 403 | 409;
-    batchStatus: "created" | "idempotent_replay" | "follow_up_queued" | "needs_human_decision" | "rejected";
+    batchStatus: "created" | "idempotent_replay" | "follow_up_queued" | "wait_active_run" | "needs_human_decision" | "rejected";
     reasonCode?: string;
     admittedRunId?: string;
     followUpRequestId?: string;
@@ -3609,7 +3611,7 @@ export function createDispatcherApp(input: {
       return {
         body: { decision: admitted.decision },
         status: 202,
-        batchStatus: "rejected",
+        batchStatus: "wait_active_run",
         reasonCode: admitted.decision.reasonCode,
         ...(admitted.decision.activeRunId ? { admittedRunId: admitted.decision.activeRunId } : {})
       };
@@ -3628,15 +3630,14 @@ export function createDispatcherApp(input: {
         rejectIfAutomaticContinuationActive: true
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.startsWith("ACTIVE_CONVERSATION_RACE:")) throw error;
+      if (!(error instanceof ActiveConversationRaceError)) throw error;
       if (!inputValue.activeRaceRetry) {
         return admitAndCreateRun({ ...inputValue, activeRaceRetry: true });
       }
       return {
         body: {
           error: "active_conversation_race",
-          activeRunId: message.slice("ACTIVE_CONVERSATION_RACE:".length)
+          activeRunId: error.activeRunId
         },
         status: 409,
         batchStatus: "rejected",
@@ -3755,91 +3756,6 @@ export function createDispatcherApp(input: {
     };
   }
 
-  function continuationResumePresentation(continuation: WorkstreamContinuationDispatch): {
-    required: boolean;
-    reason: string;
-    nextAction: string;
-  } {
-    if ((continuation.outcome === "created" || continuation.outcome === "replayed") && continuation.run) {
-      return {
-        required: false,
-        reason: "Resolution is durable context and the Workstream continuation policy admitted a new Run.",
-        nextAction: `Follow Run ${continuation.run.id} for execution evidence.`
-      };
-    }
-    if (continuation.outcome === "deferred") {
-      const deferredUntil = continuation.notBefore ? ` until ${continuation.notBefore}` : "";
-      return {
-        required: true,
-        reason: continuation.activeRunId
-          ? `Automatic continuation is deferred because Run ${continuation.activeRunId} is active.`
-          : `Automatic continuation is deferred by its cadence or retry policy${deferredUntil}.`,
-        nextAction: continuation.activeRunId
-          ? "Follow the active Run and wait for its terminal evidence before resuming."
-          : `Wait for the governed continuation window${deferredUntil}; do not create a duplicate task.`
-      };
-    }
-    if (continuation.outcome === "needs_human") {
-      return {
-        required: true,
-        reason: "Automatic continuation requires an additional governed human decision.",
-        nextAction: continuation.escalation
-          ? `Resolve human escalation ${continuation.escalation.id}.`
-          : "Inspect the WorkThread attention state and resolve the required decision."
-      };
-    }
-    if (continuation.outcome === "ambiguous") {
-      return {
-        required: true,
-        reason: `Automatic continuation is ambiguous (${continuation.reasonCode ?? "multiple_authorities"}).`,
-        nextAction: "Select or repair the authoritative Workstream before resuming; do not create a duplicate task."
-      };
-    }
-    if (continuation.outcome === "rejected") {
-      return {
-        required: true,
-        reason: `Automatic continuation was rejected by its authority boundary (${continuation.reasonCode ?? "authority_rejected"}).`,
-        nextAction: "Inspect the Workstream recipe, channel ownership, and control-plane evidence before resuming."
-      };
-    }
-    if (continuation.outcome === "error") {
-      return {
-        required: true,
-        reason: "Automatic continuation evaluation failed; this is not an ordinary policy ineligibility.",
-        nextAction: "Inspect the continuation failure in control-plane evidence before retrying or creating another task."
-      };
-    }
-    if (continuation.outcome === "not_eligible" && continuation.reasonCode !== "manual_policy") {
-      const nextActions: Record<string, string> = {
-        terminal_work_loop: "Follow the terminal WorkThread evidence; create new work only for a genuinely new objective.",
-        workstream_blocked: "Resolve the Workstream budget or constraint before asking it to continue.",
-        stale_trigger: "Follow the current WorkThread state; the stale trigger must not start duplicate work.",
-        trigger_already_consumed: "Follow the existing continuation Run or terminal evidence for this trigger.",
-        trigger_not_enabled: "Use a trigger enabled by the recorded Workstream recipe, or update that governed policy.",
-        action_not_resumable: "Complete the canonical WorkLoop next action before requesting another Run.",
-        completion_not_available: "Wait for durable WorkLoop completion evidence before requesting continuation."
-      };
-      return {
-        required: true,
-        reason: `The Workstream continuation policy did not admit another Run (${continuation.reasonCode ?? "not_eligible"}).`,
-        nextAction: nextActions[continuation.reasonCode ?? ""]
-          ?? "Inspect the recorded Workstream decision and follow its canonical next action; do not create a duplicate task."
-      };
-    }
-    if (continuation.outcome === "not_configured") {
-      return {
-        required: true,
-        reason: "The recorded resolution has no Workstream continuation policy.",
-        nextAction: "Configure a governed Workstream continuation policy before requesting automatic continuation."
-      };
-    }
-    return {
-      required: true,
-      reason: `The Workstream continuation policy did not admit another Run (${continuation.reasonCode ?? "not_eligible"}).`,
-      nextAction: "Send a new source-thread task if you want to resume manually with the recorded resolution."
-    };
-  }
-
   async function dispatchWorkstreamContinuation(inputValue: {
     workThreadId: string;
     trigger: WorkstreamContinuationTriggerEvent;
@@ -3879,9 +3795,10 @@ export function createDispatcherApp(input: {
         || (run.status === "needs_approval" && !run.result)
       )
       .map(({ run }) => run.id);
-    const evaluatedAt = Date.parse(trigger.occurredAt) > Date.now()
+    const now = input.completionNow?.() ?? new Date().toISOString();
+    const evaluatedAt = Date.parse(trigger.occurredAt) > Date.parse(now)
       ? trigger.occurredAt
-      : new Date().toISOString();
+      : now;
     const decisions: WorkstreamContinuationDecision[] = [];
     let missingRecipeAuthority = false;
 
@@ -3959,25 +3876,28 @@ export function createDispatcherApp(input: {
     const eligible = decisions.filter((decision) => decision.action === "eligible");
     if (eligible.length !== 1) {
       const waitDecision = decisions.find((decision) => decision.action === "wait");
+      const humanDecision = decisions.find((decision) => decision.action === "needs_human");
       const deferredReasonCodes = new Set(["active_run", "backoff_not_elapsed", "cadence_not_elapsed"]);
       const allDecisionsDeferred = decisions.length > 0 && decisions.every(
         (decision) => decision.action === "wait" && deferredReasonCodes.has(decision.reasonCode)
       );
       const outcome = eligible.length > 1
         ? "ambiguous" as const
-        : decisions.some((decision) => decision.action === "needs_human")
+        : humanDecision
           ? "needs_human" as const
           : allDecisionsDeferred
             ? "deferred" as const
           : "not_eligible" as const;
       const reasonCode = eligible.length > 1
         ? "multiple_eligible_workstreams"
-        : outcome === "deferred"
-          ? waitDecision?.reasonCode ?? "active_run"
-          : decisions[0]?.reasonCode ?? "recipe_authority_missing";
+        : outcome === "needs_human"
+          ? humanDecision!.reasonCode
+          : outcome === "deferred"
+            ? waitDecision?.reasonCode ?? "active_run"
+            : decisions[0]?.reasonCode ?? "recipe_authority_missing";
       await recordControlPlaneEvent({
         type: eligible.length > 1 ? "workstream.continuation.ambiguous" : "workstream.continuation.evaluated",
-        severity: eligible.length > 1 ? "warn" : decisions.some((decision) => decision.action === "needs_human") ? "warn" : "info",
+        severity: eligible.length > 1 ? "warn" : humanDecision ? "warn" : "info",
         subject: workThreadId,
         idempotencyKey: stableId("continuation_evaluated", [workThreadId, trigger.id, decisions.map((decision) => decision.inputDigest)]),
         payload: { workThreadId, trigger, outcome, reasonCode, decisions }
@@ -4006,14 +3926,14 @@ export function createDispatcherApp(input: {
     }
     const runId = stableId("run_continuation", [decision.workstreamId, workThreadId, trigger.id]);
     const continuationMetadata = {
+      ...(inputValue.continuationContext?.metadata ?? {}),
       workstreamContinuation: true,
       workstreamId: decision.workstreamId,
       workThreadId,
       triggerId: trigger.id,
       triggerKind: trigger.kind,
       decisionInputDigest: decision.inputDigest,
-      parentRunId: parent.run.id,
-      ...(inputValue.continuationContext?.metadata ?? {})
+      parentRunId: parent.run.id
     };
     const action = ActionHintSchema.parse({
       kind: "resume_work_thread",
@@ -4133,14 +4053,13 @@ export function createDispatcherApp(input: {
         rejectIfActiveConversation: true
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.startsWith("ACTIVE_CONVERSATION_RACE:")) {
+      if (error instanceof ActiveConversationRaceError) {
         return {
           ...base,
           outcome: "deferred",
           decisions,
           reasonCode: "active_run_same_thread",
-          activeRunId: message.slice("ACTIVE_CONVERSATION_RACE:".length)
+          activeRunId: error.activeRunId
         };
       }
       throw error;
@@ -4588,7 +4507,7 @@ export function createDispatcherApp(input: {
       return promoted;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const automaticContinuationRace = message.startsWith("ACTIVE_CONVERSATION_RACE:");
+      const automaticContinuationRace = error instanceof ActiveConversationRaceError;
       await repo.appendRunEvent({
         runId: input.activeRunId,
         type: automaticContinuationRace
@@ -4597,7 +4516,7 @@ export function createDispatcherApp(input: {
         payload: {
           followUpRequestId: next.id,
           ...(automaticContinuationRace
-            ? { activeContinuationRunId: message.slice("ACTIVE_CONVERSATION_RACE:".length) }
+            ? { activeContinuationRunId: error.activeRunId }
             : { error: message })
         },
         visibility: "audit",
@@ -5828,6 +5747,7 @@ export function createDispatcherApp(input: {
       createdCount: results.filter((item) => item.status === "created").length,
       idempotentReplayCount: results.filter((item) => item.status === "idempotent_replay").length,
       followUpQueuedCount: results.filter((item) => item.status === "follow_up_queued").length,
+      waitActiveRunCount: results.filter((item) => item.status === "wait_active_run").length,
       needsHumanDecisionCount: results.filter((item) => item.status === "needs_human_decision").length,
       rejectedCount: results.filter((item) => item.status === "rejected").length,
       exceptionCount: exceptions.length,
@@ -6172,12 +6092,11 @@ export function createDispatcherApp(input: {
           approvalDecisionId: decision.id
         });
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!message.startsWith("ACTIVE_CONVERSATION_RACE:")) throw error;
+        if (!(error instanceof ActiveConversationRaceError)) throw error;
         return c.json({
           outcome: "deferred",
           decision,
-          activeRunId: message.slice("ACTIVE_CONVERSATION_RACE:".length),
+          activeRunId: error.activeRunId,
           reason: "An automatic Workstream continuation already owns this source conversation."
         }, 409);
       }
@@ -6327,13 +6246,12 @@ export function createDispatcherApp(input: {
         fallbackReason: execution.fallbackReason ?? "OpenTag cannot directly apply this intent yet."
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.startsWith("ACTIVE_CONVERSATION_RACE:")) throw error;
+      if (!(error instanceof ActiveConversationRaceError)) throw error;
       return c.json({
         outcome: "deferred",
         decision,
         plan: execution.plan,
-        activeRunId: message.slice("ACTIVE_CONVERSATION_RACE:".length),
+        activeRunId: error.activeRunId,
         reason: "An automatic Workstream continuation already owns this source conversation."
       }, 409);
     }
@@ -6385,10 +6303,10 @@ export function createDispatcherApp(input: {
       if (message.includes("is not queued")) {
         return c.json({ error: "follow_up_request_not_queued" }, 409);
       }
-      if (message.startsWith("ACTIVE_CONVERSATION_RACE:")) {
+      if (error instanceof ActiveConversationRaceError) {
         return c.json({
           error: "active_conversation_race",
-          activeRunId: message.slice("ACTIVE_CONVERSATION_RACE:".length)
+          activeRunId: error.activeRunId
         }, 409);
       }
       throw error;
@@ -7202,11 +7120,10 @@ export function createDispatcherApp(input: {
         ...(body.sourceApplyPlanId ? { sourceApplyPlanId: body.sourceApplyPlanId } : {})
       }));
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.startsWith("ACTIVE_CONVERSATION_RACE:")) throw error;
+      if (!(error instanceof ActiveConversationRaceError)) throw error;
       return c.json({
         error: "active_conversation_race",
-        activeRunId: message.slice("ACTIVE_CONVERSATION_RACE:".length),
+        activeRunId: error.activeRunId,
         reason: "An automatic Workstream continuation already owns this source conversation."
       }, 409);
     }
@@ -7243,7 +7160,7 @@ export function createDispatcherApp(input: {
     for (const workThread of threads) {
       if (workLoops.length >= requestedLimit) break;
       const [completion, runs] = await Promise.all([
-        completionGovernance.getWorkLoop(workThread.id),
+        completionGovernance.readWorkLoop(workThread.id),
         repo.listRunsForWorkThread({ workThreadId: workThread.id })
       ]);
       if (!completion) continue;
@@ -7396,7 +7313,14 @@ export function createDispatcherApp(input: {
           })
         : null;
       const resume = continuation
-        ? continuationResumePresentation(continuation)
+        ? continuationResumePresentation({
+            outcome: continuation.outcome,
+            ...(continuation.reasonCode ? { reasonCode: continuation.reasonCode } : {}),
+            ...(continuation.activeRunId ? { activeRunId: continuation.activeRunId } : {}),
+            ...(continuation.notBefore ? { notBefore: continuation.notBefore } : {}),
+            ...(continuation.run ? { resumedRunId: continuation.run.id } : {}),
+            ...(continuation.escalation ? { humanEscalationId: continuation.escalation.id } : {})
+          })
         : {
             required: false,
             reason: "The human escalation resolution was already recorded; no continuation was evaluated.",

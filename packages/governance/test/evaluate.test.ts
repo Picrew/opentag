@@ -449,6 +449,36 @@ describe("deriveWorkLoopView", () => {
       }])
     });
 
+    const ambiguousArtifactContract: CompletionContract = {
+      ...strictContract(),
+      gates: [{ id: "pr", kind: "artifact", targetKey: "primary_change", artifactKind: "pull_request", minimum: 1 }]
+    };
+    const ambiguousArtifactInput = {
+      ...baseInput(),
+      contract: ambiguousArtifactContract,
+      runResults: [{
+        runId: "run-failed",
+        result: { conclusion: "failure" as const, summary: "The latest Run did not resolve the ambiguity." },
+        recordedAt: t3
+      }],
+      artifacts: [
+        prArtifact({ id: "artifact-a", ref: "github:acme/demo:pull_request:7" }),
+        prArtifact({ id: "artifact-b", ref: "github:acme/demo:pull_request:8" })
+      ]
+    };
+    const ambiguousArtifactAssessment = evaluateCompletion(ambiguousArtifactInput);
+    const ambiguousArtifactView = deriveWorkLoopView({
+      contract: ambiguousArtifactContract,
+      runResults: ambiguousArtifactInput.runResults,
+      assessment: ambiguousArtifactAssessment
+    });
+    expect(ambiguousArtifactView).toMatchObject({
+      completion: "unsatisfied",
+      blockedGateIds: ["pr"],
+      nextAction: { hint: { kind: "reassess_completion", targetId: "thread-1" } }
+    });
+    expect(ambiguousArtifactView.nextAction.hint.kind).not.toBe("resume_work_thread");
+
     const escalation: HumanEscalation = {
       id: "escalation-review",
       workThreadId: "thread-1",

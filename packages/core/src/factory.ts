@@ -161,6 +161,7 @@ export const WorkstreamAdmissionResultStatusSchema = z.enum([
   "created",
   "idempotent_replay",
   "follow_up_queued",
+  "wait_active_run",
   "needs_human_decision",
   "rejected"
 ]);
@@ -205,6 +206,7 @@ export const WorkstreamAdmissionQuietSummarySchema = z.object({
   createdCount: NonNegativeIntegerSchema,
   idempotentReplayCount: NonNegativeIntegerSchema,
   followUpQueuedCount: NonNegativeIntegerSchema,
+  waitActiveRunCount: NonNegativeIntegerSchema,
   needsHumanDecisionCount: NonNegativeIntegerSchema,
   rejectedCount: NonNegativeIntegerSchema,
   exceptionCount: NonNegativeIntegerSchema,
@@ -214,6 +216,7 @@ export const WorkstreamAdmissionQuietSummarySchema = z.object({
   const counted = summary.createdCount
     + summary.idempotentReplayCount
     + summary.followUpQueuedCount
+    + summary.waitActiveRunCount
     + summary.needsHumanDecisionCount
     + summary.rejectedCount;
   if (counted !== summary.totalItems) {
@@ -253,6 +256,7 @@ export const WorkstreamAdmissionBatchResultSchema = z.object({
     createdCount: result.results.filter((item) => item.status === "created").length,
     idempotentReplayCount: result.results.filter((item) => item.status === "idempotent_replay").length,
     followUpQueuedCount: result.results.filter((item) => item.status === "follow_up_queued").length,
+    waitActiveRunCount: result.results.filter((item) => item.status === "wait_active_run").length,
     needsHumanDecisionCount: result.results.filter((item) => item.status === "needs_human_decision").length,
     rejectedCount: result.results.filter((item) => item.status === "rejected").length
   };

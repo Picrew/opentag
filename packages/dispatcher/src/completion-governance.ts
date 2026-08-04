@@ -11,6 +11,7 @@ import {
 } from "@opentag/core";
 import {
   createOpenTagGovernance,
+  deriveWorkLoopView,
   type CompletionArtifact,
   type CompletionEvidenceFact,
   type CompletionEvaluationSnapshot,
@@ -634,6 +635,20 @@ export function createDispatcherCompletionGovernance(input: {
   });
   const reassessmentTails = new Map<string, Promise<GovernanceCommandResult>>();
 
+  async function readPersistedWorkLoop(workThreadId: string): Promise<WorkLoopView | null> {
+    const contract = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
+    if (!contract) return null;
+    const snapshot = await governanceRepository.loadEvaluationSnapshot(workThreadId);
+    if (!snapshot.currentAssessment) return null;
+    return deriveWorkLoopView({
+      contract: snapshot.contract,
+      runResults: snapshot.runResults,
+      materialActionReceipts: snapshot.materialActionReceipts,
+      blockingEscalations: snapshot.blockingEscalations,
+      assessment: snapshot.currentAssessment
+    });
+  }
+
   async function syncHumanEscalation(result: GovernanceCommandResult): Promise<void> {
     const assessment = result.assessment;
     const dedupeKey = `completion:${assessment.contractId}:${assessment.contractVersion}:${assessment.cycle}:blocked`;
@@ -978,6 +993,10 @@ export function createDispatcherCompletionGovernance(input: {
       const contract = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
       if (!contract) return null;
       return (await reassess(workThreadId, `read-work-loop:${workThreadId}`)).view;
+    },
+
+    async readWorkLoop(workThreadId: string): Promise<WorkLoopView | null> {
+      return readPersistedWorkLoop(workThreadId);
     },
 
     async explainWorkThread(workThreadId: string): Promise<CompletionExplanation | null> {

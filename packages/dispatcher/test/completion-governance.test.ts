@@ -254,6 +254,36 @@ describe("dispatcher completion governance", () => {
     const workThreadId = stored.run.thread?.id;
     expect(workThreadId).toBeTruthy();
 
+    expect((await setup.app.request("/v1/runs", jsonRequest({
+      runId: "run_work_loop_terminal",
+      event: githubIssueEvent({ id: "event_work_loop_terminal", sourceEventId: "comment_work_loop_terminal", issueNumber: 3 })
+    }))).status).toBe(201);
+    const terminalClaim = await (await setup.app.request("/v1/runners/runner_1/claim", { method: "POST" })).json() as {
+      attemptId: string;
+      fencingToken: string;
+    };
+    expect((await setup.app.request(
+      "/v1/runners/runner_1/runs/run_work_loop_terminal/complete",
+      jsonRequest({
+        ...terminalClaim,
+        result: {
+          conclusion: "success",
+          summary: "terminal result",
+          createdPullRequestUrl: "https://github.com/acme/demo/pull/9"
+        }
+      })
+    )).status).toBe(200);
+    expect((await setup.app.request(
+      "/v1/completion-evidence/github",
+      jsonRequest(githubSnapshot({ deliveryId: "delivery-work-loop-terminal", pullRequestNumber: 9 }))
+    )).status).toBe(201);
+
+    expect((await setup.app.request("/v1/runs", jsonRequest({
+      runId: "run_work_loop_active",
+      event: githubIssueEvent({ id: "event_work_loop_active", sourceEventId: "comment_work_loop_active", issueNumber: 2 })
+    }))).status).toBe(201);
+    expect((await setup.app.request("/v1/runners/runner_1/claim", { method: "POST" })).status).toBe(200);
+
     const byThread = await setup.app.request(`/v1/work-threads/${encodeURIComponent(workThreadId!)}/completion`);
     expect(byThread.status).toBe(200);
     await expect(byThread.json()).resolves.toMatchObject({
@@ -273,11 +303,42 @@ describe("dispatcher completion governance", () => {
         workThread: { id: workThreadId },
         completion: { completion: "pending", nextAction: { hint: { kind: "refresh_completion_evidence" } } }
       }],
-      scanned: 1,
+      scanned: 3,
       scanLimitReached: false
     });
     expect((await setup.app.request("/v1/work-loops?attention=required&limit=0")).status).toBe(400);
     expect((await setup.app.request("/v1/work-loops")).status).toBe(400);
+  });
+
+  it("keeps the work-loop attention listing read-only when no assessment has been persisted", async () => {
+    const databasePath = temporaryDatabasePath();
+    const setup = await startRun({
+      runId: "run_work_loop_read_only",
+      databasePath,
+      completionPolicies: [strictPolicy]
+    });
+    expect((await completeRun({ setup, runId: "run_work_loop_read_only", conclusion: "success" })).status).toBe(200);
+    const sqlite = new Database(databasePath);
+    onTestFinished(() => sqlite.close());
+    sqlite.prepare("UPDATE work_threads SET current_assessment_id = NULL").run();
+    sqlite.prepare("DELETE FROM completion_assessments").run();
+    sqlite.prepare("DELETE FROM governance_events").run();
+    sqlite.prepare("DELETE FROM human_escalations").run();
+
+    const before = {
+      assessments: (sqlite.prepare("SELECT count(*) AS count FROM completion_assessments").get() as { count: number }).count,
+      governanceEvents: (sqlite.prepare("SELECT count(*) AS count FROM governance_events").get() as { count: number }).count,
+      escalations: (sqlite.prepare("SELECT count(*) AS count FROM human_escalations").get() as { count: number }).count
+    };
+    const response = await setup.app.request("/v1/work-loops?attention=required&limit=10");
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ workLoops: [] });
+    const after = {
+      assessments: (sqlite.prepare("SELECT count(*) AS count FROM completion_assessments").get() as { count: number }).count,
+      governanceEvents: (sqlite.prepare("SELECT count(*) AS count FROM governance_events").get() as { count: number }).count,
+      escalations: (sqlite.prepare("SELECT count(*) AS count FROM human_escalations").get() as { count: number }).count
+    };
+    expect(after).toEqual(before);
   });
 
   it("preserves executor-success semantics for repositories without a strict policy", async () => {

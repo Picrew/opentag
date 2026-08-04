@@ -239,6 +239,7 @@ export function formatFactoryCommandOutput(
         `Created: ${summary.createdCount}`,
         `Idempotent replays: ${summary.idempotentReplayCount}`,
         `Follow-ups queued: ${summary.followUpQueuedCount}`,
+        `Waiting on active Runs: ${summary.waitActiveRunCount}`,
         `Needs human decision: ${summary.needsHumanDecisionCount}`,
         `Rejected: ${summary.rejectedCount}`,
         `Exceptions: ${summary.exceptionCount}${summary.omittedExceptionCount ? ` (${summary.omittedExceptionCount} omitted from samples)` : ""}`

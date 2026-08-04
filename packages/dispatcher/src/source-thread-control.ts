@@ -21,6 +21,7 @@ import {
   type createOpenTagRepository
 } from "@opentag/store";
 import type { CallbackPresentation } from "./presentation.js";
+import { continuationResumePresentation } from "./continuation-presentation.js";
 
 type OpenTagRepository = ReturnType<typeof createOpenTagRepository>;
 
@@ -506,61 +507,8 @@ export function createSourceThreadControlHandler(options: SourceThreadControlOpt
       const selectedOption = selected
         ? transitioned.escalation.options?.find((option) => option.id === selected)
         : undefined;
-      const unresolvedContinuation = changeEffect && !automaticallyResumed
-        ? changeEffect.outcome === "deferred"
-          ? {
-              reason: changeEffect.activeRunId
-                ? `Automatic continuation is deferred because Run ${changeEffect.activeRunId} is active.`
-                : `Automatic continuation is deferred by its cadence or retry policy${changeEffect.notBefore ? ` until ${changeEffect.notBefore}` : ""}.`,
-              nextAction: changeEffect.activeRunId
-                ? "Follow the active Run and wait for terminal evidence before resuming."
-                : `Wait for the governed continuation window${changeEffect.notBefore ? ` until ${changeEffect.notBefore}` : ""}; do not create a duplicate task.`
-            }
-          : changeEffect.outcome === "needs_human"
-            ? {
-                reason: "Automatic continuation requires another governed human decision.",
-                nextAction: changeEffect.humanEscalationId
-                  ? `Resolve human escalation ${changeEffect.humanEscalationId}.`
-                  : "Inspect the WorkThread attention state and resolve the required decision."
-              }
-            : changeEffect.outcome === "ambiguous"
-              ? {
-                  reason: `Automatic continuation is ambiguous (${changeEffect.reasonCode ?? "multiple_authorities"}).`,
-                  nextAction: "Select or repair the authoritative Workstream; do not create a duplicate task."
-                }
-              : changeEffect.outcome === "rejected"
-                ? {
-                    reason: `Automatic continuation was rejected by its authority boundary (${changeEffect.reasonCode ?? "authority_rejected"}).`,
-                    nextAction: "Inspect the Workstream recipe, channel ownership, and control-plane evidence before resuming."
-                  }
-                : changeEffect.outcome === "error"
-                  ? {
-                      reason: "Automatic continuation evaluation failed; this is not ordinary policy ineligibility.",
-                      nextAction: "Inspect continuation failure evidence before retrying or creating another task."
-                    }
-                  : changeEffect.outcome === "not_eligible" && changeEffect.reasonCode !== "manual_policy"
-                    ? {
-                        reason: `The Workstream policy did not admit another Run (${changeEffect.reasonCode ?? "not_eligible"}).`,
-                        nextAction: ({
-                          terminal_work_loop: "Follow the terminal WorkThread evidence; create new work only for a genuinely new objective.",
-                          workstream_blocked: "Resolve the Workstream budget or constraint before asking it to continue.",
-                          stale_trigger: "Follow the current WorkThread state; the stale trigger must not start duplicate work.",
-                          trigger_already_consumed: "Follow the existing continuation Run or terminal evidence for this trigger.",
-                          trigger_not_enabled: "Use a trigger enabled by the recorded Workstream recipe, or update that governed policy.",
-                          action_not_resumable: "Complete the canonical WorkLoop next action before requesting another Run.",
-                          completion_not_available: "Wait for durable WorkLoop completion evidence before requesting continuation."
-                        } as Record<string, string>)[changeEffect.reasonCode ?? ""]
-                          ?? "Inspect the recorded Workstream decision and follow its canonical next action; do not create a duplicate task."
-                      }
-                    : changeEffect.outcome === "not_configured"
-                      ? {
-                          reason: "No Workstream continuation policy is configured.",
-                          nextAction: "Configure a governed Workstream continuation policy before requesting automatic continuation."
-                        }
-                      : {
-                          reason: `The Workstream policy did not admit another Run (${changeEffect.reasonCode ?? "not_eligible"}).`,
-                          nextAction: "Send a new task in this source thread if you want to resume manually with the recorded resolution."
-                        }
+      const continuationPresentation = changeEffect
+        ? continuationResumePresentation(changeEffect)
         : undefined;
       const body = input.command.verb === "acknowledge"
         ? `Acknowledged human escalation ${escalation.id}. It remains blocking until it is resolved or expires.`
@@ -572,8 +520,8 @@ export function createSourceThreadControlHandler(options: SourceThreadControlOpt
             ].join("\n")
           : [
               `Resolved human escalation ${escalation.id}${selectedOption ? ` with ${selectedOption.label}` : ""}.`,
-              unresolvedContinuation?.reason ?? "The resolution was already durably attributed; no new continuation evaluation was required.",
-              unresolvedContinuation?.nextAction ?? "Follow the existing WorkThread state."
+              continuationPresentation?.reason ?? "The resolution was already durably attributed; no new continuation evaluation was required.",
+              continuationPresentation?.nextAction ?? "Follow the existing WorkThread state."
             ].join("\n");
       await deliverThreadControlReply({
         request: input.request,
@@ -586,25 +534,25 @@ export function createSourceThreadControlHandler(options: SourceThreadControlOpt
         escalation: transitioned.escalation,
         ...(input.command.verb === "resolve"
           ? {
-              resume: automaticallyResumed
-                ? { required: false, runId: changeEffect?.resumedRunId, nextAction: "Follow the new Run for execution evidence." }
-                : {
-                    required: Boolean(unresolvedContinuation),
-                    ...(unresolvedContinuation ? { reason: unresolvedContinuation.reason } : {}),
-                    nextAction: unresolvedContinuation?.nextAction ?? "Follow the existing WorkThread state."
-                  }
+              resume: continuationPresentation ?? {
+                required: false,
+                reason: "The human escalation resolution was already recorded; no continuation was evaluated.",
+                nextAction: "Follow the existing WorkThread state."
+              }
             }
           : {})
       });
     } catch (error) {
       if (error instanceof ManagedChannelAuthorityError || error instanceof ChannelBindingCorruptionError) {
-        const reasonCode = error instanceof ManagedChannelAuthorityError
-          ? error.reasonCode
-          : "managed_channel_binding_corrupt";
+        const corrupt = error instanceof ChannelBindingCorruptionError;
+        const reasonCode = corrupt ? "managed_channel_binding_corrupt" : error.reasonCode;
+        const cause = corrupt
+          ? "the durable managed-channel binding is corrupt and must be repaired"
+          : "the owning managed-channel principal is required";
         await deliverThreadControlReply({
           request: input.request,
           command: input.command,
-          body: `Could not update human escalation ${escalation.id}: the owning managed-channel principal is required (${reasonCode}).`,
+          body: `Could not update human escalation ${escalation.id}: ${cause} (${reasonCode}).`,
           ...(target ? { auditRunId: target.run.id } : {})
         });
         return jsonResponse({ outcome: "rejected", escalationId: escalation.id, reasonCode });

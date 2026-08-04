@@ -4441,6 +4441,21 @@ describe("repository-optional channel bindings", () => {
     })).rejects.toEqual(new ManagedChannelAuthorityError("managed_channel_authority_changed"));
     await expect(repo.getHumanEscalation({ id: "escalation-managed-authority-race" }))
       .resolves.toMatchObject({ state: "open" });
+    const protectedEscalation = await repo.getHumanEscalation({ id: "escalation-managed-authority-race" });
+    if (!protectedEscalation) throw new Error("expected protected human escalation");
+    await expect(repo.resolveHumanEscalation({
+      escalation: {
+        ...protectedEscalation,
+        state: "resolved",
+        resolution: {
+          actor: { provider: "opentag", providerUserId: "automatic-reconciler" },
+          reason: "An automatic finalizer must not bypass managed source authority.",
+          resolvedAt: "2026-07-21T10:02:00.000Z"
+        }
+      }
+    })).rejects.toEqual(new ManagedChannelAuthorityError("managed_channel_principal_required"));
+    await expect(repo.getHumanEscalation({ id: "escalation-managed-authority-race" }))
+      .resolves.toMatchObject({ state: "open" });
   });
 
   it("fails closed when persisted managed ownership is malformed", async () => {

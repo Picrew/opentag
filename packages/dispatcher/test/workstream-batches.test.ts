@@ -258,6 +258,87 @@ describe("workstream batch admission", () => {
     });
   });
 
+  it("uses the injected continuation clock and reports the reason from the decision that needs a human", async () => {
+    const evaluatedAt = "2099-07-26T00:30:00.000Z";
+    const { app, recipe, workThreadId } = await factorySetup({
+      completionNow: () => evaluatedAt,
+      continuation: {
+        mode: "evidence_driven",
+        triggers: ["retryable_run_failure"],
+        maxContinuationsPerWorkThread: 1,
+        minIntervalSeconds: 0,
+        backoff: { initialSeconds: 1, maxSeconds: 1 }
+      }
+    });
+    expect((await app.request("/v1/workstream-batches", post({
+      id: "batch_continuation_reason",
+      workstreamId: "workstream_default",
+      items: [{
+        itemId: "item_continuation_reason",
+        runId: "run_continuation_reason_parent",
+        workThreadId,
+        event: {
+          ...event,
+          id: "evt_continuation_reason_parent",
+          sourceEventId: "comment_continuation_reason_parent",
+          receivedAt: "2026-07-26T00:10:00.000Z"
+        }
+      }]
+    }))).status).toBe(201);
+    const parentClaim = await (await app.request("/v1/runners/runner_1/claim", { method: "POST" })).json() as {
+      attemptId: string;
+      fencingToken: string;
+    };
+    const parentCompletion = await app.request(
+      "/v1/runners/runner_1/runs/run_continuation_reason_parent/complete",
+      post({
+        ...parentClaim,
+        result: { conclusion: "failure", summary: "The first bounded attempt failed." }
+      })
+    );
+    const parentBody = await parentCompletion.json() as {
+      continuation: { decisions: Array<{ evaluatedAt: string }>; run: { id: string } };
+    };
+    expect(parentBody.continuation.decisions[0]?.evaluatedAt).toBe(evaluatedAt);
+
+    expect((await app.request("/v1/factory-recipes", post({
+      id: "recipe_manual",
+      version: 1,
+      name: "Manual workstream",
+      continuation: { mode: "manual" },
+      budgets: recipe.budgets
+    }))).status).toBe(201);
+    expect((await app.request("/v1/workstreams", post({
+      id: "a_manual",
+      recipeId: "recipe_manual",
+      recipeVersion: 1,
+      name: "Manual workstream",
+      members: [{ kind: "work_thread", workThreadId }]
+    }))).status).toBe(201);
+
+    const childClaim = await (await app.request("/v1/runners/runner_1/claim", { method: "POST" })).json() as {
+      attemptId: string;
+      fencingToken: string;
+    };
+    const childCompletion = await app.request(
+      `/v1/runners/runner_1/runs/${parentBody.continuation.run.id}/complete`,
+      post({
+        ...childClaim,
+        result: { conclusion: "failure", summary: "The continuation also failed." }
+      })
+    );
+    await expect(childCompletion.json()).resolves.toMatchObject({
+      continuation: {
+        outcome: "needs_human",
+        reasonCode: "continuation_limit_reached",
+        decisions: [
+          { workstreamId: "a_manual", action: "wait", reasonCode: "manual_policy" },
+          { workstreamId: "workstream_default", action: "needs_human", reasonCode: "continuation_limit_reached" }
+        ]
+      }
+    });
+  });
+
   it("keeps queued follow-up promotion behind an already-submitted automatic continuation", async () => {
     const { app, workThreadId } = await factorySetup({
       continuation: {

@@ -197,6 +197,14 @@ export class ManagedChannelAuthorityError extends Error {
   }
 }
 
+export class ActiveConversationRaceError extends Error {
+  override readonly name = "ActiveConversationRaceError";
+
+  constructor(readonly activeRunId: string) {
+    super(`ACTIVE_CONVERSATION_RACE:${activeRunId}`);
+  }
+}
+
 export type ClaimedOpenTagRun = OpenTagRunWithEvent & {
   attemptId: string;
   attemptNumber: number;
@@ -3475,6 +3483,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           }
           return { escalation: current, resolved: false };
         }
+        if (current.sourceAuthority) {
+          throw new ManagedChannelAuthorityError("managed_channel_principal_required");
+        }
         if (current.state === "expired" || current.state === "superseded") {
           throw new Error(`HumanEscalation ${escalation.id} is already terminal in state ${current.state}.`);
         }
@@ -4454,30 +4465,6 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         });
       };
       const sourceDeliveryId = sourceDeliveryIdFromEvent(event);
-      if (sourceDeliveryId) {
-        const existingDelivery = await db
-          .select()
-          .from(sourceDeliveries)
-          .where(and(eq(sourceDeliveries.source, event.source), eq(sourceDeliveries.deliveryId, sourceDeliveryId)))
-          .limit(1)
-          .get();
-        if (existingDelivery) {
-          const existingByDelivery = await db.select().from(runs).where(eq(runs.id, existingDelivery.runId)).limit(1).get();
-          if (existingByDelivery) {
-            reconcileReplayFactoryAttribution(existingByDelivery.id);
-            return recordCreateRunReplay({
-              runRow: existingByDelivery,
-              requestedRunId: input.id,
-              event,
-              projectTarget: repoKey,
-              expectedRunnerId,
-              replayKind: "source_delivery",
-              sourceDeliveryId,
-              createdAt
-            });
-          }
-        }
-      }
       const createDecision = RunAdmissionDecisionSchema.parse({
         action: "start",
         reason: "Source event accepted and ready to create a run.",
@@ -4486,6 +4473,23 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         eventId: event.id
       });
       const insertResult = db.transaction((tx) => {
+        if (sourceDeliveryId) {
+          const existingDelivery = tx.select().from(sourceDeliveries)
+            .where(and(eq(sourceDeliveries.source, event.source), eq(sourceDeliveries.deliveryId, sourceDeliveryId)))
+            .limit(1)
+            .get();
+          if (existingDelivery) {
+            const existingByDelivery = tx.select().from(runs).where(eq(runs.id, existingDelivery.runId)).limit(1).get();
+            if (!existingByDelivery) {
+              throw new Error(`Source delivery ${event.source}:${sourceDeliveryId} references a missing Run.`);
+            }
+            return { outcome: "replay" as const, runRow: existingByDelivery, replayKind: "source_delivery" as const };
+          }
+        }
+        const existingBySourceEvent = tx.select().from(runs).where(eq(runs.eventId, event.id)).limit(1).get();
+        if (existingBySourceEvent) {
+          return { outcome: "replay" as const, runRow: existingBySourceEvent, replayKind: "source_event" as const };
+        }
         if (input.rejectIfActiveConversation || input.rejectIfAutomaticContinuationActive) {
           const activeCandidates = tx.select({ id: runs.id, triggeredByActionJson: runs.triggeredByActionJson })
             .from(runs).where(and(
@@ -4498,7 +4502,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           const active = input.rejectIfActiveConversation
             ? activeCandidates[0]
             : activeCandidates.find((candidate) => isAutomaticWorkstreamContinuationActionJson(candidate.triggeredByActionJson));
-          if (active) throw new Error(`ACTIVE_CONVERSATION_RACE:${active.id}`);
+          if (active) throw new ActiveConversationRaceError(active.id);
         }
         const inserted = tx.insert(runs).values({
         id: input.id,
@@ -4526,7 +4530,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         createdAt,
         updatedAt: createdAt
         }).onConflictDoNothing({ target: runs.eventId }).run();
-        if (inserted.changes === 0) return inserted;
+        if (inserted.changes === 0) {
+          const replay = tx.select().from(runs).where(eq(runs.eventId, event.id)).limit(1).get();
+          if (!replay) throw new Error(`Run already exists for event ${event.id}, but it could not be loaded`);
+          return { outcome: "replay" as const, runRow: replay, replayKind: "source_event" as const };
+        }
         if (sourceDeliveryId) {
           tx.insert(sourceDeliveries).values({ source: event.source, deliveryId: sourceDeliveryId, runId: input.id, eventId: event.id, createdAt })
             .onConflictDoNothing({ target: [sourceDeliveries.source, sourceDeliveries.deliveryId] }).run();
@@ -4548,21 +4556,17 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           }));
         }
         tx.insert(runEvents).values(baseEvents).run();
-        return inserted;
+        return { outcome: "created" as const };
       });
-      if (insertResult.changes === 0) {
-        const existingBySourceEvent = await db.select().from(runs).where(eq(runs.eventId, event.id)).limit(1).get();
-        if (!existingBySourceEvent) {
-          throw new Error(`Run already exists for event ${event.id}, but it could not be loaded`);
-        }
-        reconcileReplayFactoryAttribution(existingBySourceEvent.id);
+      if (insertResult.outcome === "replay") {
+        reconcileReplayFactoryAttribution(insertResult.runRow.id);
         return recordCreateRunReplay({
-          runRow: existingBySourceEvent,
+          runRow: insertResult.runRow,
           requestedRunId: input.id,
           event,
           projectTarget: repoKey,
           expectedRunnerId,
-          replayKind: "source_event",
+          replayKind: insertResult.replayKind,
           sourceDeliveryId,
           createdAt
         });

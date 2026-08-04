@@ -5442,12 +5442,12 @@ describe("dispatcher API", () => {
       escalation: { id: escalationId, state: "resolved", resolution: { optionId: "staging", actor: { providerUserId: "42" } } },
       resume: {
         required: true,
-        reason: "No Workstream continuation policy is configured.",
+        reason: "The recorded resolution has no Workstream continuation policy.",
         nextAction: "Configure a governed Workstream continuation policy before requesting automatic continuation."
       }
     });
     expect(delivered.some((message) => message.body.includes(`Resolved human escalation ${escalationId} with Use staging.`))).toBe(true);
-    expect(delivered.some((message) => message.body.includes("No Workstream continuation policy is configured"))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("The recorded resolution has no Workstream continuation policy"))).toBe(true);
     expect(delivered.some((message) => message.body.includes("Configure a governed Workstream continuation policy"))).toBe(true);
     expect(delivered.some((message) => message.body.includes("Send a new task"))).toBe(false);
   });

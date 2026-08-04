@@ -524,7 +524,11 @@ export function deriveWorkLoopView(input: {
                 hint: { kind: "refresh_completion_evidence" as const, targetId: refreshGate.gateId },
                 causes
               }
-            : failedGateIds.length > 0 || missingGateIds.length > 0 || Boolean(latestRunResult && latestResult?.conclusion !== "success")
+            : blockedGateIds.length === 0 && (
+                failedGateIds.length > 0
+                || missingGateIds.length > 0
+                || Boolean(latestRunResult && latestResult?.conclusion !== "success")
+              )
               ? {
                   summary: `Resume work on ${input.assessment.workThreadId} to address incomplete completion requirements.`,
                   hint: { kind: "resume_work_thread" as const, targetId: input.assessment.workThreadId },

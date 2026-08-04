@@ -123,7 +123,7 @@ describe("factory workstream persistence", () => {
     await expect(repo.listFactoryWorkstreamsForWorkThread({ workThreadId: "missing" })).resolves.toEqual([]);
   });
 
-  it("atomically rejects an automatic continuation while the conversation has an active run", async () => {
+  it("atomically rejects a new run while the conversation has any active run", async () => {
     const { repo } = await setupFactory();
 
     await expect(repo.createRun({
@@ -133,6 +133,54 @@ describe("factory workstream persistence", () => {
       rejectIfActiveConversation: true
     })).rejects.toThrow("ACTIVE_CONVERSATION_RACE:seed-run");
     await expect(repo.getRun({ runId: "automatic-continuation" })).resolves.toBeNull();
+  });
+
+  it("atomically rejects a run while an automatic Workstream continuation is active", async () => {
+    const { repo } = await setupFactory();
+    await repo.createRun({
+      id: "active-automatic-continuation",
+      event: event("active-automatic-continuation"),
+      triggeredByAction: {
+        kind: "resume_work_thread",
+        metadata: { workstreamContinuation: true }
+      }
+    });
+
+    await expect(repo.createRun({
+      id: "blocked-by-automatic-continuation",
+      event: event("blocked-by-automatic-continuation"),
+      rejectIfAutomaticContinuationActive: true
+    })).rejects.toMatchObject({ activeRunId: "active-automatic-continuation" });
+    await expect(repo.getRun({ runId: "blocked-by-automatic-continuation" })).resolves.toBeNull();
+  });
+
+  it("returns an automatic-continuation source-event replay before applying the active-conversation fence", async () => {
+    const { repo } = fixture();
+    const replayEvent = event("automatic-continuation-replay");
+    const triggeredByAction = {
+      kind: "resume_work_thread" as const,
+      metadata: { workstreamContinuation: true }
+    };
+    const first = await repo.createRun({
+      id: "automatic-continuation-replay",
+      event: replayEvent,
+      triggeredByAction,
+      rejectIfActiveConversation: true
+    });
+    const replay = await repo.createRun({
+      id: "automatic-continuation-replay-retry",
+      event: replayEvent,
+      triggeredByAction,
+      rejectIfActiveConversation: true
+    });
+
+    expect(first).toMatchObject({ created: true, run: { id: "automatic-continuation-replay" } });
+    expect(replay).toMatchObject({
+      created: false,
+      run: { id: "automatic-continuation-replay" },
+      replayDecision: { reasonCode: "duplicate_source_event" }
+    });
+    await expect(repo.getRun({ runId: "automatic-continuation-replay-retry" })).resolves.toBeNull();
   });
 
   it("resumes expired batches, fences items, and replays completed results", async () => {
