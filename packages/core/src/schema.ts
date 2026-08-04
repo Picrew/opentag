@@ -1158,6 +1158,119 @@ export const WorkLoopViewSchema = z.object({
   nextAction: WorkLoopNextActionSchema
 }).strict();
 
+export const AcceptedProgressUnresolvedReasonSchema = z.enum([
+  "gate_target_missing",
+  "target_binding_missing",
+  "target_artifact_missing",
+  "artifact_not_found",
+  "artifact_ambiguous",
+  "artifact_source_run_missing",
+  "source_run_not_in_work_thread"
+]);
+
+export const AcceptedProgressResolutionSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("attributed"),
+    artifactId: z.string().min(1),
+    sourceRunId: z.string().min(1)
+  }).strict(),
+  z.object({
+    status: z.literal("unresolved"),
+    reasonCode: AcceptedProgressUnresolvedReasonSchema
+  }).strict()
+]);
+
+export const AcceptedGateAdvanceSchema = z.object({
+  workThreadId: z.string().min(1),
+  contractId: z.string().min(1),
+  contractVersion: z.number().int().positive(),
+  cycle: z.number().int().positive(),
+  assessmentId: z.string().min(1),
+  assessmentSequence: z.number().int().positive(),
+  previousAssessmentId: z.string().min(1).optional(),
+  gateId: CompletionGateIdSchema,
+  targetKey: CompletionTargetKeySchema.optional(),
+  acceptedState: z.literal("passed"),
+  evidenceIds: z.array(z.string().min(1)),
+  acceptedAt: z.string().datetime(),
+  resolution: AcceptedProgressResolutionSchema
+}).strict();
+
+export const AcceptedProgressAttributionViewSchema = z.object({
+  workThreadId: z.string().min(1),
+  contract: z.object({
+    id: z.string().min(1),
+    version: z.number().int().positive(),
+    cycle: z.number().int().positive()
+  }).strict(),
+  currentAssessmentId: z.string().min(1),
+  advances: z.array(AcceptedGateAdvanceSchema),
+  acceptedGateAdvanceCount: z.number().int().nonnegative(),
+  attributedGateAdvanceCount: z.number().int().nonnegative(),
+  unresolvedGateAdvanceCount: z.number().int().nonnegative(),
+  runIdsWithAcceptedProgress: z.array(z.string().min(1))
+}).strict().superRefine((view, ctx) => {
+  if (view.advances.length !== view.acceptedGateAdvanceCount) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "acceptedGateAdvanceCount must equal the number of accepted gate advances.",
+      path: ["acceptedGateAdvanceCount"]
+    });
+  }
+  const attributedGateAdvanceCount = view.advances.filter((advance) => advance.resolution.status === "attributed").length;
+  if (attributedGateAdvanceCount !== view.attributedGateAdvanceCount) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "attributedGateAdvanceCount must equal attributed advances.",
+      path: ["attributedGateAdvanceCount"]
+    });
+  }
+  if (view.advances.length - attributedGateAdvanceCount !== view.unresolvedGateAdvanceCount) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "unresolvedGateAdvanceCount must equal unresolved advances.",
+      path: ["unresolvedGateAdvanceCount"]
+    });
+  }
+  const expectedRunIds = [...new Set(view.advances.flatMap((advance) =>
+    advance.resolution.status === "attributed" ? [advance.resolution.sourceRunId] : []
+  ))].sort();
+  if (
+    expectedRunIds.length !== view.runIdsWithAcceptedProgress.length
+    || expectedRunIds.some((runId, index) => view.runIdsWithAcceptedProgress[index] !== runId)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "runIdsWithAcceptedProgress must be the unique sorted attributed source Run ids.",
+      path: ["runIdsWithAcceptedProgress"]
+    });
+  }
+  const seen = new Set<string>();
+  view.advances.forEach((advance, index) => {
+    if (
+      advance.workThreadId !== view.workThreadId
+      || advance.contractId !== view.contract.id
+      || advance.contractVersion !== view.contract.version
+      || advance.cycle !== view.contract.cycle
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Accepted gate advance authority must match its attribution view.",
+        path: ["advances", index]
+      });
+    }
+    const identity = `${advance.assessmentId}\u0000${advance.gateId}`;
+    if (seen.has(identity)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Accepted gate advances must be unique per assessment and gate.",
+        path: ["advances", index]
+      });
+    }
+    seen.add(identity);
+  });
+});
+
 export const CanonicalMutationDomainSchema = z.enum([
   "status",
   "assignee",
@@ -1401,6 +1514,10 @@ export type HumanEscalationOption = z.infer<typeof HumanEscalationOptionSchema>;
 export type WorkLoopCause = z.infer<typeof WorkLoopCauseSchema>;
 export type WorkLoopNextAction = z.infer<typeof WorkLoopNextActionSchema>;
 export type WorkLoopView = z.infer<typeof WorkLoopViewSchema>;
+export type AcceptedProgressUnresolvedReason = z.infer<typeof AcceptedProgressUnresolvedReasonSchema>;
+export type AcceptedProgressResolution = z.infer<typeof AcceptedProgressResolutionSchema>;
+export type AcceptedGateAdvance = z.infer<typeof AcceptedGateAdvanceSchema>;
+export type AcceptedProgressAttributionView = z.infer<typeof AcceptedProgressAttributionViewSchema>;
 export type HumanEscalationRequest = z.infer<typeof HumanEscalationRequestSchema>;
 export type CanonicalMutationDomain = z.infer<typeof CanonicalMutationDomainSchema>;
 export type MutationIntent = z.infer<typeof MutationIntentSchema>;

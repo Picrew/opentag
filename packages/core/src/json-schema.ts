@@ -1,6 +1,8 @@
 import { zodToJsonSchema } from "zod-to-json-schema";
 import {
   AgentAccessProfileSnapshotSchema,
+  AcceptedGateAdvanceSchema,
+  AcceptedProgressAttributionViewSchema,
   ActionHintSchema,
   MaterialActionReceiptSchema,
   ActionSchema,
@@ -90,6 +92,8 @@ import {
 
 export const OpenTagJsonSchemas = {
   OpenTagEvent: zodToJsonSchema(OpenTagEventSchema, "OpenTagEvent"),
+  AcceptedGateAdvance: zodToJsonSchema(AcceptedGateAdvanceSchema, "AcceptedGateAdvance"),
+  AcceptedProgressAttributionView: zodToJsonSchema(AcceptedProgressAttributionViewSchema, "AcceptedProgressAttributionView"),
   OpenTagRun: zodToJsonSchema(OpenTagRunSchema, "OpenTagRun"),
   OpenTagRunResult: zodToJsonSchema(OpenTagRunResultSchema, "OpenTagRunResult"),
   ConnectionRef: zodToJsonSchema(ConnectionRefSchema, "ConnectionRef"),

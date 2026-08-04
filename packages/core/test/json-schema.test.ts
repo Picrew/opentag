@@ -11,6 +11,8 @@ describe("OpenTagJsonSchemas", () => {
         }
       }
     });
+    expect(OpenTagJsonSchemas.AcceptedGateAdvance).toHaveProperty("definitions.AcceptedGateAdvance");
+    expect(OpenTagJsonSchemas.AcceptedProgressAttributionView).toHaveProperty("definitions.AcceptedProgressAttributionView");
     expect(OpenTagJsonSchemas.OpenTagRun).toHaveProperty("definitions.OpenTagRun");
     expect(OpenTagJsonSchemas.OpenTagRunResult).toHaveProperty("definitions.OpenTagRunResult");
     expect(OpenTagJsonSchemas.WorkThread).toHaveProperty("definitions.WorkThread");
