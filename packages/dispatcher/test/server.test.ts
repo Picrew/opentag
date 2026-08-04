@@ -532,13 +532,21 @@ describe("dispatcher API", () => {
         fallbackExecutorIds: ["codex"]
       }
     });
-    const runnerCanReadAcceptedCompletionMetrics = await app.request(
-      "/v1/routing/accepted-completion-metrics",
+    const runnerCanReadAcceptedProgressMetrics = await app.request(
+      "/v1/routing/accepted-progress-metrics",
       { headers: runnerAuth }
     );
-    expect(runnerCanReadAcceptedCompletionMetrics.status).toBe(200);
-    await expect(runnerCanReadAcceptedCompletionMetrics.json()).resolves.toEqual({
-      metrics: { completedRuns: 0, acceptedCompletions: 0, byRunner: [], byExecutor: [] }
+    expect(runnerCanReadAcceptedProgressMetrics.status).toBe(200);
+    await expect(runnerCanReadAcceptedProgressMetrics.json()).resolves.toEqual({
+      metrics: {
+        completedRuns: 0,
+        runsWithAcceptedProgress: 0,
+        acceptedGateAdvances: 0,
+        attributedAcceptedGateAdvances: 0,
+        unresolvedAcceptedGateAdvances: 0,
+        byRunner: [],
+        byExecutor: []
+      }
     });
 
     const runnerCannotCreateRun = await app.request("/v1/runs", runnerJson({ runId: "run_scope", event: validEvent }));

@@ -1,6 +1,8 @@
 import { zodToJsonSchema } from "zod-to-json-schema";
 import {
   AgentAccessProfileSnapshotSchema,
+  AcceptedGateAdvanceSchema,
+  AcceptedProgressAttributionViewSchema,
   ActionHintSchema,
   MaterialActionReceiptSchema,
   ActionSchema,
@@ -68,7 +70,7 @@ import {
   OpenTagWorkItemRefSchema
 } from "./integration-protocol.js";
 import {
-  AcceptedCompletionMetricsSchema,
+  AcceptedProgressMetricsSchema,
   FrozenRoutingPolicySchema,
   RoutingDecisionSchema,
   RunnerDirectoryEntrySchema,
@@ -90,6 +92,8 @@ import {
 
 export const OpenTagJsonSchemas = {
   OpenTagEvent: zodToJsonSchema(OpenTagEventSchema, "OpenTagEvent"),
+  AcceptedGateAdvance: zodToJsonSchema(AcceptedGateAdvanceSchema, "AcceptedGateAdvance"),
+  AcceptedProgressAttributionView: zodToJsonSchema(AcceptedProgressAttributionViewSchema, "AcceptedProgressAttributionView"),
   OpenTagRun: zodToJsonSchema(OpenTagRunSchema, "OpenTagRun"),
   OpenTagRunResult: zodToJsonSchema(OpenTagRunResultSchema, "OpenTagRunResult"),
   ConnectionRef: zodToJsonSchema(ConnectionRefSchema, "ConnectionRef"),
@@ -155,7 +159,7 @@ export const OpenTagJsonSchemas = {
   RunnerRegistration: zodToJsonSchema(RunnerRegistrationInputSchema, "RunnerRegistration"),
   RunnerDirectoryEntry: zodToJsonSchema(RunnerDirectoryEntrySchema, "RunnerDirectoryEntry"),
   RoutingDecision: zodToJsonSchema(RoutingDecisionSchema, "RoutingDecision"),
-  AcceptedCompletionMetrics: zodToJsonSchema(AcceptedCompletionMetricsSchema, "AcceptedCompletionMetrics"),
+  AcceptedProgressMetrics: zodToJsonSchema(AcceptedProgressMetricsSchema, "AcceptedProgressMetrics"),
   FactoryRecipeSnapshotInput: zodToJsonSchema(FactoryRecipeSnapshotInputSchema, "FactoryRecipeSnapshotInput"),
   FactoryRecipeSnapshot: zodToJsonSchema(FactoryRecipeSnapshotSchema, "FactoryRecipeSnapshot"),
   WorkstreamContinuationPolicy: zodToJsonSchema(WorkstreamContinuationPolicySchema, "WorkstreamContinuationPolicy"),

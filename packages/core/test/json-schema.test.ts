@@ -11,6 +11,8 @@ describe("OpenTagJsonSchemas", () => {
         }
       }
     });
+    expect(OpenTagJsonSchemas.AcceptedGateAdvance).toHaveProperty("definitions.AcceptedGateAdvance");
+    expect(OpenTagJsonSchemas.AcceptedProgressAttributionView).toHaveProperty("definitions.AcceptedProgressAttributionView");
     expect(OpenTagJsonSchemas.OpenTagRun).toHaveProperty("definitions.OpenTagRun");
     expect(OpenTagJsonSchemas.OpenTagRunResult).toHaveProperty("definitions.OpenTagRunResult");
     expect(OpenTagJsonSchemas.WorkThread).toHaveProperty("definitions.WorkThread");
@@ -37,7 +39,7 @@ describe("OpenTagJsonSchemas", () => {
     expect(OpenTagJsonSchemas.RunnerRegistration).toHaveProperty("definitions.RunnerRegistration");
     expect(OpenTagJsonSchemas.RunnerDirectoryEntry).toHaveProperty("definitions.RunnerDirectoryEntry");
     expect(OpenTagJsonSchemas.RoutingDecision).toHaveProperty("definitions.RoutingDecision");
-    expect(OpenTagJsonSchemas.AcceptedCompletionMetrics).toHaveProperty("definitions.AcceptedCompletionMetrics");
+    expect(OpenTagJsonSchemas.AcceptedProgressMetrics).toHaveProperty("definitions.AcceptedProgressMetrics");
     expect(OpenTagJsonSchemas.FactoryRecipeSnapshotInput).toHaveProperty("definitions.FactoryRecipeSnapshotInput");
     expect(OpenTagJsonSchemas.FactoryRecipeSnapshot).toHaveProperty("definitions.FactoryRecipeSnapshot");
     expect(OpenTagJsonSchemas.WorkstreamContinuationPolicy).toHaveProperty("definitions.WorkstreamContinuationPolicy");

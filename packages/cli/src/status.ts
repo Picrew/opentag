@@ -17,7 +17,8 @@ import {
   RoutingDecisionSchema,
   type OpenTagEvent,
   type OpenTagRun,
-  type AcceptedCompletionMetrics,
+  type AcceptedProgressAttributionView,
+  type AcceptedProgressMetrics,
   type FactoryRecipeSnapshot,
   type RunnerDirectoryEntry,
   type RoutingDecision,
@@ -72,8 +73,8 @@ export type StatusSummary = {
   capabilities: string[];
   runnerDirectory?: RunnerDirectoryEntry[];
   runnerDirectoryError?: string;
-  acceptedCompletionMetrics?: AcceptedCompletionMetrics;
-  acceptedCompletionMetricsError?: string;
+  acceptedProgressMetrics?: AcceptedProgressMetrics;
+  acceptedProgressMetricsError?: string;
 };
 
 type RunAuditEvent = {
@@ -127,6 +128,7 @@ export type WorkThreadStatusSummary = {
   dispatcherUrl: string;
   workThread: EnsuredWorkThread;
   completion: CompletionExplanation;
+  acceptedProgress: AcceptedProgressAttributionView | null;
 };
 
 export type WorkLoopAttentionStatusSummary = {
@@ -240,8 +242,8 @@ export async function statusFromConfig(input: {
     }),
     runnerDirectory: routingState.runners,
     ...(routingState.runnersError ? { runnerDirectoryError: routingState.runnersError } : {}),
-    ...(routingState.metrics ? { acceptedCompletionMetrics: routingState.metrics } : {}),
-    ...(routingState.metricsError ? { acceptedCompletionMetricsError: routingState.metricsError } : {})
+    ...(routingState.metrics ? { acceptedProgressMetrics: routingState.metrics } : {}),
+    ...(routingState.metricsError ? { acceptedProgressMetricsError: routingState.metricsError } : {})
   };
 }
 
@@ -252,7 +254,7 @@ async function loadRoutingState(input: {
 }): Promise<{
   runners: RunnerDirectoryEntry[];
   runnersError?: string;
-  metrics?: AcceptedCompletionMetrics;
+  metrics?: AcceptedProgressMetrics;
   metricsError?: string;
 }> {
   if (input.dispatcher !== "online") return { runners: [] };
@@ -264,7 +266,7 @@ async function loadRoutingState(input: {
   });
   const [runners, metrics] = await Promise.allSettled([
     client.listRunners(),
-    client.getAcceptedCompletionMetrics()
+    client.getAcceptedProgressMetrics()
   ]);
   return {
     runners: runners.status === "fulfilled" ? runners.value.runners : [],
@@ -532,7 +534,7 @@ export function formatStatus(summary: StatusSummary): string {
     ...formatControlPlaneAlerts(summary),
     `Runner: ${summary.runnerId}`,
     ...formatRunnerDirectory(summary),
-    ...formatAcceptedCompletionMetrics(summary),
+    ...formatAcceptedProgressMetrics(summary),
     `Run Timeout: ${summary.runTimeoutPolicy}`,
     ...summary.secrets,
     ...summary.agentSessionProfile,
@@ -556,24 +558,24 @@ function formatRunnerDirectory(summary: StatusSummary): string[] {
   ];
 }
 
-function formatAcceptedCompletionMetrics(summary: StatusSummary): string[] {
+function formatAcceptedProgressMetrics(summary: StatusSummary): string[] {
   if (summary.dispatcher !== "online") {
-    return ["Accepted Completion:", "  unavailable (dispatcher offline)"];
+    return ["Accepted Progress:", "  unavailable (dispatcher offline)"];
   }
-  if (summary.acceptedCompletionMetricsError) {
-    return ["Accepted Completion:", `  unavailable: ${summary.acceptedCompletionMetricsError}`];
+  if (summary.acceptedProgressMetricsError) {
+    return ["Accepted Progress:", `  unavailable: ${summary.acceptedProgressMetricsError}`];
   }
-  const metrics = summary.acceptedCompletionMetrics;
+  const metrics = summary.acceptedProgressMetrics;
   if (!metrics) return [];
-  const segment = (label: string, values: AcceptedCompletionMetrics["byRunner"]): string[] => [
+  const segment = (label: string, values: AcceptedProgressMetrics["byRunner"]): string[] => [
     `  ${label}:`,
     ...(values.length
-      ? values.map((value) => `    ${value.id}: ${value.acceptedCompletions}/${value.completedRuns} (${(value.acceptanceRate * 100).toFixed(1)}%)`)
+      ? values.map((value) => `    ${value.id}: runs=${value.runsWithAcceptedProgress}; gate advances=${value.acceptedGateAdvances}; completed runs=${value.completedRuns}`)
       : ["    none"])
   ];
   return [
-    "Accepted Completion:",
-    `  total: ${metrics.acceptedCompletions}/${metrics.completedRuns}`,
+    "Accepted Progress:",
+    `  total: runs=${metrics.runsWithAcceptedProgress}; gate advances=${metrics.acceptedGateAdvances} (${metrics.attributedAcceptedGateAdvances} attributed, ${metrics.unresolvedAcceptedGateAdvances} unresolved); completed runs=${metrics.completedRuns}`,
     ...segment("by runner", metrics.byRunner),
     ...segment("by executor", metrics.byExecutor)
   ];
@@ -1073,6 +1075,16 @@ function workThreadReference(workThread: EnsuredWorkThread): string {
 }
 
 export function formatWorkThreadStatus(summary: WorkThreadStatusSummary): string {
+  const progressLines = summary.acceptedProgress
+    ? [
+        "Accepted Progress:",
+        `  gate advances: ${summary.acceptedProgress.acceptedGateAdvanceCount} (${summary.acceptedProgress.attributedGateAdvanceCount} attributed, ${summary.acceptedProgress.unresolvedGateAdvanceCount} unresolved)`,
+        `  contributing runs: ${summary.acceptedProgress.runIdsWithAcceptedProgress.join(", ") || "none"}`,
+        ...summary.acceptedProgress.advances.map((advance) => advance.resolution.status === "attributed"
+          ? `  ${advance.gateId}: run=${advance.resolution.sourceRunId}; artifact=${advance.resolution.artifactId}; assessment=${advance.assessmentId}`
+          : `  ${advance.gateId}: unresolved=${advance.resolution.reasonCode}; assessment=${advance.assessmentId}`)
+      ]
+    : ["Accepted Progress:", "  unavailable (no current CompletionAssessment attribution)"];
   return [
     `Config: ${summary.configPath}`,
     `Dispatcher: ${summary.dispatcherUrl}`,
@@ -1081,12 +1093,17 @@ export function formatWorkThreadStatus(summary: WorkThreadStatusSummary): string
     `Control anchor: ${summary.workThread.primaryAnchor.provider}:${summary.workThread.primaryAnchor.kind}:${summary.workThread.primaryAnchor.externalId}`,
     ...formatCompletionExplanation(summary.completion),
     `  Action hint: ${summary.completion.nextAction.hint.kind}${summary.completion.nextAction.hint.targetId ? ` target=${summary.completion.nextAction.hint.targetId}` : ""}`,
-    `  Causes: ${summary.completion.nextAction.causes.length ? summary.completion.nextAction.causes.map(workLoopCauseLabel).join(", ") : "none"}`
+    `  Causes: ${summary.completion.nextAction.causes.length ? summary.completion.nextAction.causes.map(workLoopCauseLabel).join(", ") : "none"}`,
+    ...progressLines
   ].join("\n");
 }
 
 export function workThreadStatusJson(summary: WorkThreadStatusSummary): Record<string, unknown> {
-  return { workThread: summary.workThread, completion: summary.completion };
+  return {
+    workThread: summary.workThread,
+    completion: summary.completion,
+    acceptedProgress: summary.acceptedProgress
+  };
 }
 
 export function formatWorkLoopAttentionStatus(summary: WorkLoopAttentionStatusSummary): string {
@@ -1150,8 +1167,11 @@ export function formatWorkstreamStatus(summary: WorkstreamStatusSummary): string
     `Workstream: ${summary.workstream.id} (${summary.workstream.name})`,
     `State: ${summary.evaluation.status}`,
     `Next action: ${workstreamNextAction(summary)}`,
-    "Accepted Outcomes:",
-    `  work threads: ${metrics.acceptedWorkThreadCount}/${metrics.workThreadCount}`,
+    "Completion Authority:",
+    `  accepted work threads: ${metrics.acceptedWorkThreadCount}/${metrics.workThreadCount}`,
+    "Accepted Progress:",
+    `  gate advances: ${metrics.acceptedGateAdvanceCount} (${metrics.attributedGateAdvanceCount} attributed, ${metrics.unresolvedGateAdvanceCount} unresolved)`,
+    `  contributing runs: ${metrics.runsWithAcceptedProgressCount}`,
     "Budget:",
     `  concurrency: ${metrics.activeRunCount}/${budgets.maxConcurrentRuns}; blocked runs=${metrics.budgetBlockedRunCount}`,
     `  attempts: ${metrics.totalAttempts}; per-run limit=${budgets.maxAttemptsPerRun}; exceeded runs=${metrics.attemptsPerRunExceededCount}`,

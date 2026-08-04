@@ -24,7 +24,7 @@ Current cases:
 | `factory-conformance` | No | File-backed recipe/workstream/batch loop with restart replay, bounded exceptions, authoritative accepted outcomes, and Echo plus local ACP executor paths |
 | `openclaw-acp` | Yes | Strict OpenClaw hard-cancellation probe plus worktree cwd, scratch cwd, and fresh-session checks through the generic ACP host |
 | `github-webhook-live` | Yes | Real GitHub repository webhook, local CLI stack, current-head required check, merged PR, durable satisfied assessment, and restart-safe final receipt |
-| `github-factory-live` | Yes | Real external GitHub source thread admitted through a recipe/workstream batch, local execution, PR/check/merge, authoritative accepted metrics, restart replay, and deduplicated source receipt |
+| `github-factory-live` | Yes | Real external GitHub source thread admitted through a recipe/workstream batch, local execution, PR/check/merge, evidence-attributed accepted progress, restart replay, and deduplicated source receipt |
 | `github-cli-live` | Yes | Real GitHub issue callback using dispatcher-assisted run creation |
 | `slack-linear-registry-live` | Yes | Registry-installed CLI receives a real Slack `/linear` mention through Socket Mode, queries the exact mapped Linear project read-only, and posts a verified thread reply |
 | `slack-local-live` | Yes | Real Slack callback using dispatcher-assisted run creation |
@@ -207,7 +207,12 @@ status is recorded for the exact current head, and completion remains pending
 until GitHub reports the merge. The source thread must receive exactly one
 provider-verified completion receipt. The harness restarts against the same
 database, submits the identical batch again, and requires both the durable
-receipt and authoritative workstream metrics to remain byte-equivalent.
+receipt and authoritative accepted-progress metrics captured after replay to
+remain byte-equivalent.
+Fresh verified provider observations may append a semantically equivalent
+satisfied assessment after restart; the harness requires that reassessment to
+preserve the original acceptance time, contract, targets, gate outcomes, and
+unbroken supersession chain.
 
 The sanitized acceptance report is generated from retained provider and store
 observations. It is rejected instead of written when any required relationship
@@ -220,8 +225,8 @@ is missing or contradictory. Its proof matrix is:
 | Local execution | Run snapshots plus latest fenced Attempt runner, executor, locality, and terminal status |
 | PR and check | GitHub PR identity/state and required status tied to the PR head SHA |
 | Accepted completion | Completion snapshots before evidence, after the check, after merge, and after restart |
-| Accepted metrics | Workstream metrics proving terminal Runs remain `1` while accepted WorkThreads advance `0 -> 1` |
-| Restart recovery | Exact batch receipt replay, byte-equivalent satisfied assessment and metrics, and unchanged source-receipt identity, body digest, and count |
+| Accepted metrics | Workstream and routing metrics proving terminal Runs remain `1`, accepted WorkThreads advance `0 -> 1`, all five accepted gate advances are attributed, and the fenced Attempt runner and executor receive that progress |
+| Restart recovery | Exact batch receipt replay followed by observation, semantically continuous satisfied assessment, byte-equivalent attempt-scoped accepted-progress metrics, and unchanged source-receipt identity, body digest, and count |
 | Registry artifact, when selected | Installed CLI, GitHub normalizer, and Core event-schema package versions, trusted public npm resolution, and npm lockfile sha512 integrity receipts |
 
 Run the provider/governance proof with the deterministic local ACP writer:

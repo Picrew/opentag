@@ -119,7 +119,7 @@ const cases = [
     notes: [
       "Uses a real GitHub issue comment as the external planning source, then admits it through WorkThread ensure, an immutable recipe, a WorkThread-only workstream, and a durable batch.",
       "Executes locally, creates and merges a real PR, verifies the required check against the current head, and requires provider-verified accepted completion.",
-      "Restarts the stack, replays the exact batch receipt, verifies the source-thread receipt is not duplicated, and proves accepted workstream metrics remain authoritative.",
+      "Restarts the stack, replays the exact batch receipt, verifies the source-thread receipt is not duplicated, and proves accepted gate advances remain fully attributed to the fenced Attempt runner and executor.",
       "Set OPENTAG_GH_LIVE_EXECUTOR=phase1-fixture to prove the GitHub/factory/governance chain with the deterministic local ACP worktree writer.",
       "This case keeps planning external and explicitly excludes a DAG and operator console."
     ]

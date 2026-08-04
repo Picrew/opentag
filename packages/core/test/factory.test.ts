@@ -291,6 +291,10 @@ describe("factory contracts", () => {
       workstreamId: "workstream_1",
       workThreadCount: 2,
       acceptedWorkThreadCount: 1,
+      acceptedGateAdvanceCount: 2,
+      attributedGateAdvanceCount: 1,
+      unresolvedGateAdvanceCount: 1,
+      runsWithAcceptedProgressCount: 1,
       runCount: 3,
       queuedRunCount: 1,
       activeRunCount: 1,
@@ -306,6 +310,8 @@ describe("factory contracts", () => {
     };
     expect(WorkstreamMetricsSchema.parse(metrics).acceptedWorkThreadCount).toBe(1);
     expect(() => WorkstreamMetricsSchema.parse({ ...metrics, acceptedWorkThreadCount: 3 })).toThrow(/workThreadCount/u);
+    expect(() => WorkstreamMetricsSchema.parse({ ...metrics, acceptedGateAdvanceCount: 3 })).toThrow(/gate advances/u);
+    expect(() => WorkstreamMetricsSchema.parse({ ...metrics, runsWithAcceptedProgressCount: 2 })).toThrow(/attributedGateAdvanceCount/u);
     expect(() => WorkstreamMetricsSchema.parse({ ...metrics, queuedRunCount: 2 })).toThrow(/Run status counts/u);
     expect(() => WorkstreamMetricsSchema.parse({ ...metrics, attemptsByLocality: { local: 1, private: 0, hosted: 0, unknown: 0 } })).toThrow(/totalAttempts/u);
   });

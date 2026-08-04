@@ -392,6 +392,15 @@ capture_workstream_metrics() {
   chmod 600 "$output_path"
 }
 
+capture_accepted_progress_metrics() {
+  local output_path="$1"
+  curl -fsS \
+    -H "authorization: Bearer $OPENTAG_PAIRING_TOKEN" \
+    -o "$output_path" \
+    "http://localhost:${OPENTAG_DISPATCHER_PORT}/v1/routing/accepted-progress-metrics"
+  chmod 600 "$output_path"
+}
+
 completion_payload() {
   local run_id="$1"
   curl -fsS \
@@ -924,7 +933,9 @@ fi
 print_metrics "$RUN_ID"
 if bool_true "$OPENTAG_GH_LIVE_FACTORY"; then
   METRICS_BEFORE_PROVIDER_PATH="$TMP_ROOT/workstream-metrics-before-provider.json"
+  ACCEPTED_PROGRESS_BEFORE_PROVIDER_PATH="$TMP_ROOT/accepted-progress-before-provider.json"
   capture_workstream_metrics "$METRICS_BEFORE_PROVIDER_PATH"
+  capture_accepted_progress_metrics "$ACCEPTED_PROGRESS_BEFORE_PROVIDER_PATH"
 fi
 
 if bool_true "$OPENTAG_GH_LIVE_STRICT_COMPLETION"; then
@@ -995,7 +1006,9 @@ PY
   gh api "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}" >"$SOURCE_ISSUE_PATH"
   if bool_true "$OPENTAG_GH_LIVE_FACTORY"; then
     METRICS_AFTER_MERGE_PATH="$TMP_ROOT/workstream-metrics-after-merge.json"
+    ACCEPTED_PROGRESS_AFTER_MERGE_PATH="$TMP_ROOT/accepted-progress-after-merge.json"
     capture_workstream_metrics "$METRICS_AFTER_MERGE_PATH"
+    capture_accepted_progress_metrics "$ACCEPTED_PROGRESS_AFTER_MERGE_PATH"
   fi
 
   echo "Restarting the CLI stack to verify durable satisfied completion and callback deduplication..."
@@ -1011,6 +1024,11 @@ PY
   ensure_port_free "$OPENTAG_GITHUB_PORT" "GitHub ingress"
   start_cli_stack
   wait_for_completion "$RUN_ID" "satisfied" "merge" "passed"
+  if bool_true "$OPENTAG_GH_LIVE_FACTORY"; then
+    REPLAYED_BATCH_RECEIPT_PATH="$TMP_ROOT/batch-after-restart.json"
+    run_cli factory batch submit --config "$CONFIG_PATH" --input "$BATCH_INPUT_PATH" --json >"$REPLAYED_BATCH_RECEIPT_PATH"
+    wait_for_completion "$RUN_ID" "satisfied" "merge" "passed"
+  fi
   RESTARTED_COMPLETION_PATH="$TMP_ROOT/completion-after-restart.json"
   printf '%s\n' "$COMPLETION_PAYLOAD" >"$RESTARTED_COMPLETION_PATH"
   RECEIPTS_AFTER_RESTART="$(stable_completion_receipt_count 10)"
@@ -1022,9 +1040,9 @@ PY
   gh api "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments?per_page=100" >"$SOURCE_COMMENTS_AFTER_RESTART_PATH"
   if bool_true "$OPENTAG_GH_LIVE_FACTORY"; then
     METRICS_AFTER_RESTART_PATH="$TMP_ROOT/workstream-metrics-after-restart.json"
-    REPLAYED_BATCH_RECEIPT_PATH="$TMP_ROOT/batch-after-restart.json"
+    ACCEPTED_PROGRESS_AFTER_RESTART_PATH="$TMP_ROOT/accepted-progress-after-restart.json"
     capture_workstream_metrics "$METRICS_AFTER_RESTART_PATH"
-    run_cli factory batch submit --config "$CONFIG_PATH" --input "$BATCH_INPUT_PATH" --json >"$REPLAYED_BATCH_RECEIPT_PATH"
+    capture_accepted_progress_metrics "$ACCEPTED_PROGRESS_AFTER_RESTART_PATH"
   fi
 
   if bool_true "$OPENTAG_GH_LIVE_FACTORY"; then
@@ -1056,6 +1074,7 @@ PY
       "$PR_INFO_PATH" "$REQUIRED_CHECKS_PATH" "$RECIPE_RESPONSE_PATH" "$WORKSTREAM_RESPONSE_PATH" \
       "$INITIAL_BATCH_RECEIPT_PATH" "$REPLAYED_BATCH_RECEIPT_PATH" "$RUN_EVIDENCE_PATH" "$ATTEMPT_EVIDENCE_PATH" \
       "$METRICS_BEFORE_PROVIDER_PATH" "$METRICS_AFTER_MERGE_PATH" "$METRICS_AFTER_RESTART_PATH" "$SOURCE_COMMENTS_PATH" "$SOURCE_COMMENTS_AFTER_RESTART_PATH" "$SOURCE_ISSUE_PATH" \
+      "$ACCEPTED_PROGRESS_BEFORE_PROVIDER_PATH" "$ACCEPTED_PROGRESS_AFTER_MERGE_PATH" "$ACCEPTED_PROGRESS_AFTER_RESTART_PATH" \
       "$OWNER/$REPO" "$ISSUE_URL" "$MENTION_URL" "$ISSUE_NUMBER" "$COMMENT_ID" "$EVENT_ID" "$WORK_THREAD_ID" \
       "$RECIPE_ID" "$WORKSTREAM_ID" "$BATCH_ID" "$BATCH_INPUT_DIGEST" "$ASSESSMENT_COUNT" \
       "$RECEIPTS_BEFORE_RESTART" "$RECEIPTS_AFTER_RESTART" "$RUNTIME_SOURCE" "$RUNTIME_ARTIFACT_PATH" "$OPENTAG_GH_LIVE_REQUIRED_CHECK" <<'PY'
@@ -1085,6 +1104,9 @@ from pathlib import Path
     comments_before_restart_path,
     comments_after_restart_path,
     source_issue_path,
+    accepted_progress_before_path,
+    accepted_progress_merged_path,
+    accepted_progress_restarted_path,
     repository,
     issue_url,
     mention_url,
@@ -1193,6 +1215,11 @@ evidence = {
         "beforeProviderEvidence": read(metrics_before_path),
         "afterMerge": read(metrics_merged_path),
         "afterRestart": read(metrics_restarted_path),
+    },
+    "acceptedProgress": {
+        "beforeProviderEvidence": read(accepted_progress_before_path),
+        "afterMerge": read(accepted_progress_merged_path),
+        "afterRestart": read(accepted_progress_restarted_path),
     },
     "assessmentCount": int(assessment_count),
     "sourceReceipt": {
