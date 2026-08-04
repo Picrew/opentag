@@ -5,11 +5,12 @@ import {
   CompletionAssessmentSchema,
   CompletionContractSchema,
   CompletionWaiverSchema,
+  AcceptedProgressAttributionViewSchema,
   HumanEscalationSchema,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
   OpenTagRunSchema,
-  AcceptedCompletionMetricsSchema,
+  AcceptedProgressMetricsSchema,
   FactoryRecipeSnapshotInputSchema,
   FactoryRecipeSnapshotSchema,
   RoutingDecisionSchema,
@@ -21,6 +22,7 @@ import {
   WorkstreamMetricsSchema,
   WorkstreamInputSchema,
   WorkstreamSchema,
+  WorkLoopViewSchema,
   WorkThreadSchema,
   type ActorIdentity,
   type Action,
@@ -30,6 +32,7 @@ import {
   type CompletionAssessment,
   type CompletionContract,
   type CompletionWaiver,
+  type AcceptedProgressAttributionView,
   type HumanEscalation,
   type ActionHint,
   type AdapterMutationMapping,
@@ -40,7 +43,7 @@ import {
   type OpenTagManagedChannelBindingOwnership,
   type OpenTagRun,
   type OpenTagRunResult,
-  type AcceptedCompletionMetrics,
+  type AcceptedProgressMetrics,
   type FactoryRecipeSnapshot,
   type FactoryRecipeSnapshotInput,
   type PolicyRule,
@@ -59,6 +62,7 @@ import {
   type WorkstreamEvaluation,
   type WorkstreamInput,
   type WorkstreamMetrics,
+  type WorkLoopView,
   type WorkThread
 } from "@opentag/core";
 
@@ -95,22 +99,23 @@ export type CompletionEvidenceSummary = {
   receivedAt: string;
 };
 
-export type CompletionExplanation = {
-  workThreadId: string;
-  execution: "idle" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted" | "timed_out" | "needs_human";
-  completion: CompletionAssessment["state"];
-  evidenceBacked: boolean;
-  contract: { id: string; version: number; cycle: number; mode: CompletionContract["mode"] };
-  currentAssessment: CompletionAssessment;
-  targetBindings: CompletionAssessment["targetBindings"];
-  missingGateIds: string[];
-  failedGateIds: string[];
-  blockedGateIds: string[];
-  nextAction: string;
+export type CompletionExplanation = WorkLoopView & {
   contractSnapshot: CompletionContract;
   assessmentHistory: CompletionAssessment[];
   evidence: CompletionEvidenceSummary[];
   openHumanEscalations: HumanEscalation[];
+};
+
+export type WorkLoopAttentionItem = {
+  workThread: EnsuredWorkThread;
+  completion: WorkLoopView;
+};
+
+export type WorkLoopAttentionResult = {
+  attention: "required";
+  workLoops: WorkLoopAttentionItem[];
+  scanned: number;
+  scanLimitReached: boolean;
 };
 
 export type BoundedCompletionWaiverInput = Pick<
@@ -551,6 +556,12 @@ export type OpenTagClient = {
   }): Promise<CancelRunResult>;
   getRun(input: { runId: string }): Promise<OpenTagRunRecord>;
   getCompletion(input: { runId: string }): Promise<{ completion: CompletionExplanation }>;
+  getWorkThreadCompletion(input: { workThreadId: string }): Promise<{
+    workThread: EnsuredWorkThread;
+    completion: CompletionExplanation;
+    acceptedProgress: AcceptedProgressAttributionView | null;
+  }>;
+  listWorkLoopsRequiringAttention(input?: { limit?: number }): Promise<WorkLoopAttentionResult>;
   listHumanEscalations(input: { runId: string }): Promise<{
     escalations: HumanEscalation[];
     resolutionUnavailableReason?: string;
@@ -570,7 +581,7 @@ export type OpenTagClient = {
   getRunMetrics(input: { runId: string }): Promise<{ metrics: RunMetrics }>;
   getRepoMetrics(input: { provider: string; owner: string; repo: string }): Promise<{ metrics: AggregateMetrics }>;
   getWorkThreadMetrics(input: { threadId: string }): Promise<{ metrics: AggregateMetrics }>;
-  getAcceptedCompletionMetrics(): Promise<{ metrics: AcceptedCompletionMetrics }>;
+  getAcceptedProgressMetrics(): Promise<{ metrics: AcceptedProgressMetrics }>;
   getProposal(input: { proposalId: string }): Promise<{ runId: string; snapshot: SuggestedChangesSnapshot }>;
   getProposalLineage(input: { proposalId: string }): Promise<{ lineage: ProposalLineage }>;
   listCurrentMutationIntents(input: { proposalId: string }): Promise<{ intents: MutationIntentActionability[] }>;
@@ -631,7 +642,7 @@ function parseRunTimeoutPolicy(value: unknown): RunTimeoutPolicy {
 }
 
 function parseCompletionExplanation(value: unknown): CompletionExplanation {
-  const completion = value as CompletionExplanation;
+  const completion = WorkLoopViewSchema.passthrough().parse(value) as CompletionExplanation;
   return {
     ...completion,
     contractSnapshot: CompletionContractSchema.parse(completion.contractSnapshot),
@@ -639,6 +650,12 @@ function parseCompletionExplanation(value: unknown): CompletionExplanation {
     assessmentHistory: completion.assessmentHistory.map((assessment) => CompletionAssessmentSchema.parse(assessment)),
     openHumanEscalations: completion.openHumanEscalations.map((escalation) => HumanEscalationSchema.parse(escalation))
   };
+}
+
+function parseEnsuredWorkThread(value: unknown): EnsuredWorkThread {
+  const workThread = WorkThreadSchema.parse(value);
+  if (!workThread.id) throw new Error("WorkThread response is missing its durable id.");
+  return workThread as EnsuredWorkThread;
 }
 
 function parseHumanEscalationResume(value: unknown): HumanEscalationResolutionResult["resume"] {
@@ -1299,6 +1316,58 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       return { completion: parseCompletionExplanation(body.completion) };
     },
 
+    async getWorkThreadCompletion(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/work-threads/${encodeURIComponent(input.workThreadId)}/completion`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "getWorkThreadCompletion");
+      const body = (await response.json()) as { workThread?: unknown; completion?: unknown; acceptedProgress?: unknown };
+      return {
+        workThread: parseEnsuredWorkThread(body.workThread),
+        completion: parseCompletionExplanation(body.completion),
+        acceptedProgress: body.acceptedProgress === null
+          ? null
+          : AcceptedProgressAttributionViewSchema.parse(body.acceptedProgress)
+      };
+    },
+
+    async listWorkLoopsRequiringAttention(input = {}) {
+      const limit = input.limit ?? 25;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        throw new Error("listWorkLoopsRequiringAttention limit must be an integer from 1 to 100.");
+      }
+      const response = await fetchImpl(`${baseUrl}/v1/work-loops?attention=required&limit=${limit}`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "listWorkLoopsRequiringAttention");
+      const body = (await response.json()) as {
+        attention?: unknown;
+        workLoops?: unknown;
+        scanned?: unknown;
+        scanLimitReached?: unknown;
+      };
+      if (
+        body.attention !== "required"
+        || !Array.isArray(body.workLoops)
+        || typeof body.scanned !== "number"
+        || typeof body.scanLimitReached !== "boolean"
+      ) {
+        throw new Error("listWorkLoopsRequiringAttention returned an invalid work-loop list.");
+      }
+      return {
+        attention: "required" as const,
+        workLoops: body.workLoops.map((item) => {
+          const candidate = item as { workThread?: unknown; completion?: unknown };
+          return {
+            workThread: parseEnsuredWorkThread(candidate.workThread),
+            completion: WorkLoopViewSchema.parse(candidate.completion)
+          };
+        }),
+        scanned: body.scanned,
+        scanLimitReached: body.scanLimitReached
+      };
+    },
+
     async listHumanEscalations(input) {
       const response = await fetchImpl(`${baseUrl}/v1/runs/${encodeURIComponent(input.runId)}/human-escalations`, {
         headers: authHeaders(options.pairingToken)
@@ -1421,13 +1490,13 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       return (await response.json()) as { metrics: AggregateMetrics };
     },
 
-    async getAcceptedCompletionMetrics() {
-      const response = await fetchImpl(`${baseUrl}/v1/routing/accepted-completion-metrics`, {
+    async getAcceptedProgressMetrics() {
+      const response = await fetchImpl(`${baseUrl}/v1/routing/accepted-progress-metrics`, {
         headers: authHeaders(options.pairingToken)
       });
-      await assertOk(response, "getAcceptedCompletionMetrics");
+      await assertOk(response, "getAcceptedProgressMetrics");
       const body = (await response.json()) as { metrics?: unknown };
-      return { metrics: AcceptedCompletionMetricsSchema.parse(body.metrics) };
+      return { metrics: AcceptedProgressMetricsSchema.parse(body.metrics) };
     },
 
     async getProposal(input) {

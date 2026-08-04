@@ -33,10 +33,15 @@ import {
   type OpenTagEvent,
   type OpenTagRunResult,
   type OpenTagRun,
+  type ReassessmentObligation,
   type PermissionGrant,
   type SuggestedChangesSnapshot,
   type SuggestedActionCandidate,
   type ThreadActionCommand,
+  type WorkLoopView,
+  type WorkstreamContinuationDecision,
+  type WorkstreamContinuationRecord,
+  type WorkstreamContinuationTriggerEvent,
   createAdapterMutationCompilerRegistry,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
@@ -63,7 +68,7 @@ import {
   readRequestTextWithLimit,
   shouldDeliverSourceReceipt
 } from "@opentag/core";
-import { evaluateWorkstream } from "@opentag/governance";
+import { evaluateWorkstream, evaluateWorkstreamContinuation } from "@opentag/governance";
 import {
   applyGitHubIssueMutationOperation,
   createGitHubIssueMutationCompiler,
@@ -106,14 +111,22 @@ import {
   type LinearMutationOperation
 } from "@opentag/linear";
 import type { SlackBlock } from "@opentag/slack";
-import { ChannelBindingCorruptionError, createOpenTagRepository, migrateSchema } from "@opentag/store";
-import type { LinearRelayInstallation, LinearRelayInstallationAuth } from "@opentag/store";
+import {
+  ActiveConversationRaceError,
+  ChannelBindingCorruptionError,
+  ManagedChannelAuthorityError,
+  createOpenTagRepository,
+  managedChannelBindingAuthorityDigest,
+  migrateSchema
+} from "@opentag/store";
+import type { DurableWorkThread, LinearRelayInstallation, LinearRelayInstallationAuth } from "@opentag/store";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { createReassessmentObligationWorker } from "./reassessment-obligations.js";
 
 /**
  * Parse and validate a request body, mapping ONLY request-body parse failures to
@@ -333,6 +346,7 @@ function createDispatcherRateLimitMiddleware(options: DispatcherRateLimitOptions
   };
 }
 import { createAdmissionRuntime, sourceRepoIsPublic, type AgentAccessProfileCheck } from "./admission.js";
+import { continuationResumePresentation } from "./continuation-presentation.js";
 import { sha256Digest } from "./digest.js";
 import { createDefaultCallbackPresentation, type CallbackPresentation, type LarkRenderLocale } from "./presentation.js";
 import {
@@ -543,6 +557,35 @@ export type ChannelPrincipalCredential = {
 
 type ChannelPrincipalIdentity = Omit<ChannelPrincipalCredential, "credential">;
 
+const MANAGED_CHANNEL_ATTESTATION_KEY = "opentagManagedChannelOwnership";
+
+function eventWithManagedChannelAttestation(
+  event: OpenTagEvent,
+  principal: ChannelPrincipalIdentity | undefined
+): OpenTagEvent {
+  const metadata = { ...(event.metadata ?? {}) };
+  delete metadata[MANAGED_CHANNEL_ATTESTATION_KEY];
+  if (principal) {
+    metadata[MANAGED_CHANNEL_ATTESTATION_KEY] = {
+      provider: principal.provider,
+      applicationId: principal.applicationId,
+      ...(principal.botId ? { botId: principal.botId } : {})
+    };
+  }
+  return { ...event, metadata };
+}
+
+function managedChannelAttestationFromEvent(event: OpenTagEvent): ChannelPrincipalIdentity | undefined {
+  const value = event.metadata?.[MANAGED_CHANNEL_ATTESTATION_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const provider = typeof record["provider"] === "string" ? record["provider"] : undefined;
+  const applicationId = typeof record["applicationId"] === "string" ? record["applicationId"] : undefined;
+  const botId = typeof record["botId"] === "string" ? record["botId"] : undefined;
+  if (!provider || provider !== event.source || !applicationId) return undefined;
+  return { provider, applicationId, ...(botId ? { botId } : {}) };
+}
+
 function channelPrincipalCredentialDigest(credential: string): string {
   return createHash("sha256").update(credential).digest("hex");
 }
@@ -578,6 +621,26 @@ function principalOwnsManagedBinding(principal: ChannelPrincipalIdentity | undef
   return principal?.provider === binding.provider
     && principal.applicationId === binding.ownership.applicationId
     && (!binding.ownership.botId || principal.botId === binding.ownership.botId);
+}
+
+async function managedChannelSourceAuthority(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  event: OpenTagEvent;
+}): Promise<HumanEscalation["sourceAuthority"] | undefined> {
+  if (!["slack", "lark"].includes(input.event.source)) return undefined;
+  const scope = channelBindingScopeFromEvent(input.event);
+  if (!scope) return undefined;
+  const binding = await input.repo.getChannelBinding({ provider: input.event.source, ...scope });
+  if (!binding) return undefined;
+  const authority = {
+    provider: input.event.source,
+    ...scope,
+    ...(binding.ownership ? { ownership: binding.ownership } : {})
+  };
+  return {
+    ...authority,
+    bindingDigest: managedChannelBindingAuthorityDigest(authority)
+  };
 }
 
 const UpsertPolicyRuleSchema = z.object({
@@ -2339,6 +2402,7 @@ async function createChildRunForThreadAction(input: {
     }),
     parentRunId: input.resolved.proposal.runId,
     triggeredByAction: action,
+    rejectIfAutomaticContinuationActive: true,
     sourceProposalId: input.resolved.proposal.snapshot.proposalId,
     ...(input.sourceApplyPlanId ? { sourceApplyPlanId: input.sourceApplyPlanId } : {})
   });
@@ -2778,7 +2842,7 @@ function isRunnerOperatorEndpoint(method: string, path: string): boolean {
   if (method === "GET") {
     if (path === "/v1/control-plane-alerts") return true;
     if (path === "/v1/runners") return true;
-    if (path === "/v1/routing/accepted-completion-metrics") return true;
+    if (path === "/v1/routing/accepted-progress-metrics") return true;
     if (/^\/v1\/runners\/[^/]+$/.test(path)) return true;
     if (/^\/v1\/repo-bindings\/[^/]+\/[^/]+\/[^/]+$/.test(path)) return true;
     if (/^\/v1\/channel-bindings\/[^/]+\/[^/]+\/[^/]+(?:\/status)?$/.test(path)) return true;
@@ -2896,10 +2960,23 @@ export function createDispatcherApp(input: {
   };
   completionPolicies?: GitHubCompletionPolicy[];
   completionNow?: () => string;
+  reassessmentObligations?: {
+    autoStart?: boolean;
+    inline?: boolean;
+    pollIntervalMs?: number;
+    leaseSeconds?: number;
+    batchSize?: number;
+    retryBaseMs?: number;
+    retryMaxMs?: number;
+    maxAttempts?: number;
+  };
 }) {
   const sqlite = input.sqlite ?? openDispatcherDatabase(input.databasePath);
   migrateSchema(sqlite);
   const repo = createOpenTagRepository(drizzle(sqlite));
+  const reassessmentOptions = input.reassessmentObligations ?? {};
+  const inlineReassessmentEnabled = reassessmentOptions.inline !== false;
+  const reassessmentDeferralMs = Math.max(100, reassessmentOptions.pollIntervalMs ?? 1_000);
   const workstreamBatchLeaseSeconds = 300;
   const workstreamBatchHeartbeatMs = Math.floor(workstreamBatchLeaseSeconds * 1_000 / 3);
 
@@ -2942,6 +3019,7 @@ export function createDispatcherApp(input: {
   const completionGovernance = createDispatcherCompletionGovernance({
     repo,
     policies: input.completionPolicies ?? [],
+    deferReassessment: !inlineReassessmentEnabled,
     ...(input.completionNow ? { now: input.completionNow } : {})
   });
   const app = new Hono();
@@ -2976,7 +3054,7 @@ export function createDispatcherApp(input: {
       runId: transition.runId,
       state: projection.state,
       message: projection.message,
-      nextAction: transition.completion.nextAction,
+      nextAction: transition.completion.nextAction.summary,
       detailVisibility: "source_thread"
     });
     const rendered = presentation.render({
@@ -3329,12 +3407,14 @@ export function createDispatcherApp(input: {
     const escalationClass = securityReason ? "security" as const : "configuration" as const;
     const audience = securityReason ? "repo_owner" as const : "operator" as const;
     const dedupeKey = `admission:${inputValue.decision.reasonCode}:${subjectRef}:v1`;
+    const sourceAuthority = await managedChannelSourceAuthority({ repo, event: inputValue.event });
     const escalation = HumanEscalationSchema.parse({
       id: `escalation_${createHash("sha256")
         .update(`${workThread.id}\0${dedupeKey}`)
         .digest("hex")
         .slice(0, 24)}`,
       workThreadId: workThread.id,
+      ...(sourceAuthority ? { sourceAuthority } : {}),
       class: escalationClass,
       audience,
       subjectRef,
@@ -3381,8 +3461,8 @@ export function createDispatcherApp(input: {
 
   type RunAdmissionHttpResult = {
     body: Record<string, unknown>;
-    status: 200 | 201 | 202 | 403;
-    batchStatus: "created" | "idempotent_replay" | "follow_up_queued" | "needs_human_decision" | "rejected";
+    status: 200 | 201 | 202 | 403 | 409;
+    batchStatus: "created" | "idempotent_replay" | "follow_up_queued" | "wait_active_run" | "needs_human_decision" | "rejected";
     reasonCode?: string;
     admittedRunId?: string;
     followUpRequestId?: string;
@@ -3396,6 +3476,7 @@ export function createDispatcherApp(input: {
     quiet?: boolean;
     workstreamId?: string;
     admissionBatchId?: string;
+    activeRaceRetry?: boolean;
   }): Promise<RunAdmissionHttpResult> {
     let ownershipVerified = false;
     try {
@@ -3442,14 +3523,16 @@ export function createDispatcherApp(input: {
       };
     }
 
+    const admittedEvent = eventWithManagedChannelAttestation(inputValue.event, inputValue.channelPrincipal);
+
     const admitted = await admission.admitRun({
       requestId: inputValue.runId,
-      event: inputValue.event,
+      event: admittedEvent,
       ...(inputValue.workstreamId ? { workstreamId: inputValue.workstreamId } : {}),
       ...(inputValue.admissionBatchId ? { admissionBatchId: inputValue.admissionBatchId } : {})
     });
     if (admitted.outcome === "needs_human_decision") {
-      const projectTarget = projectTargetRefFromEvent(inputValue.event);
+      const projectTarget = projectTargetRefFromEvent(admittedEvent);
       await recordControlPlaneEvent({
         type: "admission.needs_human_decision",
         severity: ["repo_context_missing", "repo_not_bound"].includes(admitted.decision.reasonCode) ? "warn" : "info",
@@ -3457,14 +3540,14 @@ export function createDispatcherApp(input: {
         payload: {
           runId: inputValue.runId,
           decision: admitted.decision,
-          source: inputValue.event.source,
-          sourceEventId: inputValue.event.sourceEventId,
+          source: admittedEvent.source,
+          sourceEventId: admittedEvent.sourceEventId,
           projectTarget: projectTarget ? `${projectTarget.provider}:${projectTarget.owner}/${projectTarget.repo}` : null
         }
       });
       const humanDecision = await structureAdmissionHumanDecision({
         requestId: inputValue.runId,
-        event: inputValue.event,
+        event: admittedEvent,
         decision: admitted.decision,
         deliverSourceCallback: !inputValue.quiet
       });
@@ -3480,7 +3563,7 @@ export function createDispatcherApp(input: {
     if (admitted.outcome === "drop_duplicate") {
       const replay = await repo.createRun({
         id: inputValue.runId,
-        event: inputValue.event,
+        event: admittedEvent,
         ...(inputValue.workstreamId ? { workstreamId: inputValue.workstreamId } : {}),
         ...(inputValue.admissionBatchId ? { admissionBatchId: inputValue.admissionBatchId } : {})
       });
@@ -3540,15 +3623,43 @@ export function createDispatcherApp(input: {
       };
     }
 
-    const createdRun = await repo.createRun({
-      id: inputValue.runId,
-      event: inputValue.event,
-      accessProfileSnapshot: admitted.accessProfileSnapshot,
-      policySnapshotProvenance: admitted.policySnapshotProvenance,
-      routingPolicy: admitted.routingPolicy,
-      ...(inputValue.workstreamId ? { workstreamId: inputValue.workstreamId } : {}),
-      ...(inputValue.admissionBatchId ? { admissionBatchId: inputValue.admissionBatchId } : {})
-    });
+    if (admitted.outcome === "wait_active_run") {
+      return {
+        body: { decision: admitted.decision },
+        status: 202,
+        batchStatus: "wait_active_run",
+        reasonCode: admitted.decision.reasonCode,
+        ...(admitted.decision.activeRunId ? { admittedRunId: admitted.decision.activeRunId } : {})
+      };
+    }
+
+    let createdRun;
+    try {
+      createdRun = await repo.createRun({
+        id: inputValue.runId,
+        event: admittedEvent,
+        accessProfileSnapshot: admitted.accessProfileSnapshot,
+        policySnapshotProvenance: admitted.policySnapshotProvenance,
+        routingPolicy: admitted.routingPolicy,
+        ...(inputValue.workstreamId ? { workstreamId: inputValue.workstreamId } : {}),
+        ...(inputValue.admissionBatchId ? { admissionBatchId: inputValue.admissionBatchId } : {}),
+        rejectIfAutomaticContinuationActive: true
+      });
+    } catch (error) {
+      if (!(error instanceof ActiveConversationRaceError)) throw error;
+      if (!inputValue.activeRaceRetry) {
+        return admitAndCreateRun({ ...inputValue, activeRaceRetry: true });
+      }
+      return {
+        body: {
+          error: "active_conversation_race",
+          activeRunId: error.activeRunId
+        },
+        status: 409,
+        batchStatus: "rejected",
+        reasonCode: "active_run_same_thread"
+      };
+    }
     if (!createdRun.created) {
       return {
         body: { decision: createdRun.replayDecision, run: createdRun.run, idempotentReplay: true },
@@ -3603,6 +3714,646 @@ export function createDispatcherApp(input: {
     }
     return { body: { decision: admitted.decision, run }, status: 201, batchStatus: "created", admittedRunId: run.id };
   }
+
+  type WorkstreamContinuationDispatch = {
+    outcome: "not_configured" | "not_eligible" | "ambiguous" | "created" | "replayed" | "deferred" | "needs_human" | "rejected" | "error";
+    workThreadId: string;
+    trigger: WorkstreamContinuationTriggerEvent;
+    decisions: WorkstreamContinuationDecision[];
+    reasonCode?: string;
+    activeRunId?: string;
+    notBefore?: string;
+    run?: OpenTagRun;
+    escalation?: HumanEscalation;
+  };
+
+  function humanResolutionContinuationContext(escalation: HumanEscalation): {
+    pointer: OpenTagEvent["context"][number];
+    metadata: Record<string, unknown>;
+  } | undefined {
+    const resolution = escalation.resolution;
+    if (!resolution) return undefined;
+    const selectedOption = resolution.optionId
+      ? escalation.options?.find((option) => option.id === resolution.optionId)
+      : undefined;
+    const snapshot = sanitizeCredentialLikeValue({
+      humanEscalationId: escalation.id,
+      ...(resolution.optionId ? { optionId: resolution.optionId } : {}),
+      ...(selectedOption ? {
+        optionLabel: selectedOption.label,
+        optionConsequence: selectedOption.consequence
+      } : {}),
+      ...(resolution.reason ? { reason: resolution.reason } : {}),
+      resolver: resolution.actor,
+      resolvedAt: resolution.resolvedAt
+    });
+    const digest = `sha256:${createHash("sha256").update(JSON.stringify(snapshot)).digest("hex")}`;
+    return {
+      pointer: {
+        kind: "text",
+        title: "OpenTag human resolution",
+        uri: [
+          "OpenTag durable human resolution.",
+          `Human escalation: ${snapshot.humanEscalationId}`,
+          ...(typeof snapshot.optionId === "string" ? [`Selected option: ${snapshot.optionId}`] : []),
+          ...(typeof snapshot.optionLabel === "string" ? [`Selected option label: ${snapshot.optionLabel}`] : []),
+          ...(typeof snapshot.optionConsequence === "string" ? [`Selected option consequence: ${snapshot.optionConsequence}`] : []),
+          ...(typeof snapshot.reason === "string" ? [`Resolution reason: ${snapshot.reason}`] : []),
+          `Resolver: ${snapshot.resolver.provider}:${snapshot.resolver.providerUserId}${snapshot.resolver.handle ? ` (${snapshot.resolver.handle})` : ""}`,
+          `Resolved at: ${snapshot.resolvedAt}`,
+          `Resolution digest: ${digest}`
+        ].join("\n"),
+        visibility: "organization"
+      },
+      metadata: {
+        humanEscalationId: escalation.id,
+        humanResolutionDigest: digest
+      }
+    };
+  }
+
+  async function dispatchWorkstreamContinuation(inputValue: {
+    workThreadId: string;
+    trigger: WorkstreamContinuationTriggerEvent;
+    preferredParentRunId?: string;
+    continuationActor?: ActorIdentity;
+    continuationPrincipal?: ChannelPrincipalIdentity;
+    durableHumanResolution?: HumanEscalation;
+    continuationContext?: {
+      pointer: OpenTagEvent["context"][number];
+      metadata: Record<string, unknown>;
+    };
+  }): Promise<WorkstreamContinuationDispatch> {
+    const { workThreadId, trigger } = inputValue;
+    const storedWorkstreams = await repo.listFactoryWorkstreamsForWorkThread({ workThreadId, limit: 101 });
+    const base = { workThreadId, trigger };
+    if (storedWorkstreams.length === 0) {
+      return { ...base, outcome: "not_configured", decisions: [], reasonCode: "workstream_not_configured" };
+    }
+    if (storedWorkstreams.length > 100) {
+      await recordControlPlaneEvent({
+        type: "workstream.continuation.ambiguous",
+        severity: "warn",
+        subject: workThreadId,
+        idempotencyKey: stableId("continuation_ambiguous", [workThreadId, trigger.id, "workstream_limit"]),
+        payload: { workThreadId, trigger, workstreamCount: storedWorkstreams.length, reasonCode: "workstream_limit_exceeded" }
+      });
+      return { ...base, outcome: "ambiguous", decisions: [], reasonCode: "workstream_limit_exceeded" };
+    }
+
+    const workLoop = await completionGovernance.getWorkLoop(workThreadId);
+    if (!workLoop) {
+      return { ...base, outcome: "not_eligible", decisions: [], reasonCode: "completion_not_available" };
+    }
+    const runs = await repo.listRunsForWorkThread({ workThreadId });
+    const activeRunIds = runs
+      .filter(({ run }) =>
+        ["queued", "assigned", "running"].includes(run.status)
+        || (run.status === "needs_approval" && !run.result)
+      )
+      .map(({ run }) => run.id);
+    const now = input.completionNow?.() ?? new Date().toISOString();
+    const evaluatedAt = Date.parse(trigger.occurredAt) > Date.parse(now)
+      ? trigger.occurredAt
+      : now;
+    const decisions: WorkstreamContinuationDecision[] = [];
+    let missingRecipeAuthority = false;
+
+    for (const storedWorkstream of storedWorkstreams) {
+      const storedRecipe = await repo.getFactoryRecipeSnapshot({
+        id: storedWorkstream.recipeId,
+        version: storedWorkstream.recipeVersion
+      });
+      if (!storedRecipe) {
+        missingRecipeAuthority = true;
+        await recordControlPlaneEvent({
+          type: "workstream.continuation.authority_missing",
+          severity: "error",
+          subject: storedWorkstream.id,
+          idempotencyKey: stableId("continuation_authority_missing", [storedWorkstream.id, trigger.id]),
+          payload: {
+            workstreamId: storedWorkstream.id,
+            workThreadId,
+            recipeId: storedWorkstream.recipeId,
+            recipeVersion: storedWorkstream.recipeVersion,
+            trigger
+          }
+        });
+        continue;
+      }
+      const recipe = FactoryRecipeSnapshotSchema.parse({
+        ...storedRecipe.recipe,
+        createdAt: storedRecipe.createdAt,
+        contentDigest: storedRecipe.contentDigest
+      });
+      const workstream = WorkstreamSchema.parse({
+        ...storedWorkstream.workstream,
+        createdAt: storedWorkstream.createdAt,
+        contentDigest: storedWorkstream.contentDigest
+      });
+      const metrics = WorkstreamMetricsSchema.parse(await repo.getWorkstreamMetrics({ workstreamId: workstream.id }));
+      const evaluation = evaluateWorkstream({ recipe, workstream, metrics, evaluatedAt });
+      const continuations: WorkstreamContinuationRecord[] = runs.flatMap(({ run }) => {
+        const metadata = run.triggeredByAction?.metadata;
+        if (
+          run.triggeredByAction?.kind !== "resume_work_thread"
+          || metadata?.["workstreamContinuation"] !== true
+          || metadataString(metadata, "workstreamId") !== workstream.id
+          || metadataString(metadata, "workThreadId") !== workThreadId
+        ) {
+          return [];
+        }
+        const triggerId = metadataString(metadata, "triggerId");
+        if (!triggerId) return [];
+        return [{
+          workstreamId: workstream.id,
+          workThreadId,
+          runId: run.id,
+          triggerId,
+          startedAt: run.createdAt,
+          ...(run.result ? { conclusion: run.result.conclusion } : {})
+        }];
+      });
+      decisions.push(evaluateWorkstreamContinuation({
+        recipe,
+        workstream,
+        evaluation,
+        workLoop,
+        trigger,
+        activeRunIds,
+        continuations,
+        evaluatedAt
+      }));
+    }
+
+    if (missingRecipeAuthority) {
+      return { ...base, outcome: "rejected", decisions, reasonCode: "recipe_authority_missing" };
+    }
+
+    const eligible = decisions.filter((decision) => decision.action === "eligible");
+    if (eligible.length !== 1) {
+      const waitDecision = decisions.find((decision) => decision.action === "wait");
+      const humanDecision = decisions.find((decision) => decision.action === "needs_human");
+      const deferredReasonCodes = new Set(["active_run", "backoff_not_elapsed", "cadence_not_elapsed"]);
+      const allDecisionsDeferred = decisions.length > 0 && decisions.every(
+        (decision) => decision.action === "wait" && deferredReasonCodes.has(decision.reasonCode)
+      );
+      const outcome = eligible.length > 1
+        ? "ambiguous" as const
+        : humanDecision
+          ? "needs_human" as const
+          : allDecisionsDeferred
+            ? "deferred" as const
+          : "not_eligible" as const;
+      const reasonCode = eligible.length > 1
+        ? "multiple_eligible_workstreams"
+        : outcome === "needs_human"
+          ? humanDecision!.reasonCode
+          : outcome === "deferred"
+            ? waitDecision?.reasonCode ?? "active_run"
+            : decisions[0]?.reasonCode ?? "recipe_authority_missing";
+      await recordControlPlaneEvent({
+        type: eligible.length > 1 ? "workstream.continuation.ambiguous" : "workstream.continuation.evaluated",
+        severity: eligible.length > 1 ? "warn" : humanDecision ? "warn" : "info",
+        subject: workThreadId,
+        idempotencyKey: stableId("continuation_evaluated", [workThreadId, trigger.id, decisions.map((decision) => decision.inputDigest)]),
+        payload: { workThreadId, trigger, outcome, reasonCode, decisions }
+      });
+      return {
+        ...base,
+        outcome,
+        decisions,
+        reasonCode,
+        ...(outcome === "deferred" && reasonCode === "active_run" && activeRunIds[0]
+          ? { activeRunId: activeRunIds[0] }
+          : {}),
+        ...(outcome === "deferred" && waitDecision?.notBefore ? { notBefore: waitDecision.notBefore } : {})
+      };
+    }
+
+    const decision = eligible[0]!;
+    const parent = inputValue.preferredParentRunId
+      ? runs.find(({ run }) => run.id === inputValue.preferredParentRunId)
+      : runs.at(-1);
+    if (!parent) {
+      return { ...base, outcome: "rejected", decisions, reasonCode: "parent_run_not_found" };
+    }
+    if (trigger.kind === "human_escalation_resolved" && !inputValue.continuationActor) {
+      return { ...base, outcome: "rejected", decisions, reasonCode: "human_resolution_actor_missing" };
+    }
+    const runId = stableId("run_continuation", [decision.workstreamId, workThreadId, trigger.id]);
+    const continuationMetadata = {
+      ...(inputValue.continuationContext?.metadata ?? {}),
+      workstreamContinuation: true,
+      workstreamId: decision.workstreamId,
+      workThreadId,
+      triggerId: trigger.id,
+      triggerKind: trigger.kind,
+      decisionInputDigest: decision.inputDigest,
+      parentRunId: parent.run.id
+    };
+    const action = ActionHintSchema.parse({
+      kind: "resume_work_thread",
+      targetId: workThreadId,
+      metadata: continuationMetadata
+    });
+    const event = childEventFromParent({
+      parentEvent: inputValue.continuationActor
+        ? { ...parent.event, actor: inputValue.continuationActor }
+        : parent.event,
+      childRunId: runId,
+      actionKind: action.kind,
+      commandText: `Resume WorkThread ${workThreadId} after ${trigger.kind}.`,
+      receivedAt: evaluatedAt,
+      extraContext: [
+        {
+          kind: "text",
+          title: "OpenTag governed WorkLoop continuation",
+          uri: [
+            "OpenTag evidence-driven continuation.",
+            `Workstream: ${decision.workstreamId}`,
+            `WorkThread: ${workThreadId}`,
+            `Trigger: ${trigger.kind} (${trigger.id})`,
+            `Previous run: ${parent.run.id}`,
+            `Next action: ${decision.nextAction.summary}`
+          ].join("\n"),
+          visibility: parent.event.source === "github" ? "public" : "organization"
+        },
+        ...(inputValue.continuationContext ? [inputValue.continuationContext.pointer] : [])
+      ],
+      metadata: continuationMetadata
+    });
+
+    let ownershipVerified = false;
+    try {
+      const inheritedPrincipal = managedChannelAttestationFromEvent(event);
+      ownershipVerified = await managedChannelOwnershipVerified({
+        repo,
+        event,
+        ...(inheritedPrincipal ? { principal: inheritedPrincipal } : {})
+      });
+    } catch (error) {
+      if (!(error instanceof ChannelBindingCorruptionError)) throw error;
+      return { ...base, outcome: "rejected", decisions, reasonCode: "managed_channel_binding_corrupt" };
+    }
+    if (!ownershipVerified) {
+      return { ...base, outcome: "rejected", decisions, reasonCode: "managed_channel_ownership_unverified" };
+    }
+    if (trigger.kind === "human_escalation_resolved" && ["slack", "lark"].includes(event.source)) {
+      const durableResolutionAuthority = inputValue.durableHumanResolution
+        && inputValue.durableHumanResolution.id === trigger.id.replace(/^human-escalation:/u, "")
+        && inputValue.durableHumanResolution.workThreadId === workThreadId
+        && inputValue.durableHumanResolution.state === "resolved"
+        && inputValue.durableHumanResolution.sourceAuthority?.provider === event.source;
+      if (!inputValue.continuationPrincipal && !durableResolutionAuthority) {
+        return { ...base, outcome: "rejected", decisions, reasonCode: "managed_channel_request_principal_missing" };
+      }
+      if (inputValue.continuationPrincipal) {
+        const requestOwnershipVerified = await managedChannelOwnershipVerified({
+          repo,
+          event,
+          principal: inputValue.continuationPrincipal
+        });
+        if (!requestOwnershipVerified) {
+          return { ...base, outcome: "rejected", decisions, reasonCode: "managed_channel_request_principal_mismatch" };
+        }
+      }
+    }
+
+    const admitted = await admission.admitRun({
+      requestId: runId,
+      event,
+      workstreamId: decision.workstreamId,
+      activeRunPolicy: "wait"
+    });
+    if (admitted.outcome === "wait_active_run") {
+      return {
+        ...base,
+        outcome: "deferred",
+        decisions,
+        reasonCode: admitted.decision.reasonCode,
+        ...(admitted.decision.activeRunId ? { activeRunId: admitted.decision.activeRunId } : {})
+      };
+    }
+    if (admitted.outcome === "needs_human_decision") {
+      const humanDecision = await structureAdmissionHumanDecision({
+        requestId: runId,
+        event,
+        decision: admitted.decision,
+        deliverSourceCallback: false
+      });
+      return {
+        ...base,
+        outcome: "needs_human",
+        decisions,
+        reasonCode: admitted.decision.reasonCode,
+        ...(humanDecision.escalation ? { escalation: humanDecision.escalation } : {})
+      };
+    }
+    if (admitted.outcome === "follow_up_queued") {
+      return {
+        ...base,
+        outcome: "deferred",
+        decisions,
+        reasonCode: admitted.decision.reasonCode,
+        ...(admitted.decision.activeRunId ? { activeRunId: admitted.decision.activeRunId } : {})
+      };
+    }
+    if (admitted.outcome === "drop_duplicate") {
+      return { ...base, outcome: "replayed", decisions, run: admitted.run };
+    }
+
+    let createdRun;
+    try {
+      createdRun = await repo.createRun({
+        id: runId,
+        event,
+        accessProfileSnapshot: admitted.accessProfileSnapshot,
+        policySnapshotProvenance: admitted.policySnapshotProvenance,
+        routingPolicy: admitted.routingPolicy,
+        parentRunId: parent.run.id,
+        triggeredByAction: action,
+        workstreamId: decision.workstreamId,
+        rejectIfActiveConversation: true
+      });
+    } catch (error) {
+      if (error instanceof ActiveConversationRaceError) {
+        return {
+          ...base,
+          outcome: "deferred",
+          decisions,
+          reasonCode: "active_run_same_thread",
+          activeRunId: error.activeRunId
+        };
+      }
+      throw error;
+    }
+    const outcome = createdRun.created ? "created" as const : "replayed" as const;
+    await recordControlPlaneEvent({
+      type: "workstream.continuation.dispatched",
+      severity: "info",
+      subject: decision.workstreamId,
+      idempotencyKey: stableId("continuation_dispatched", [decision.workstreamId, workThreadId, trigger.id]),
+      payload: {
+        outcome,
+        runId: createdRun.run.id,
+        parentRunId: parent.run.id,
+        workstreamId: decision.workstreamId,
+        workThreadId,
+        trigger,
+        decision
+      }
+    });
+    return { ...base, outcome, decisions, run: createdRun.run };
+  }
+
+  async function attemptWorkstreamContinuation(inputValue: {
+    workThreadId: string;
+    trigger: WorkstreamContinuationTriggerEvent;
+    preferredParentRunId?: string;
+    continuationActor?: ActorIdentity;
+    continuationPrincipal?: ChannelPrincipalIdentity;
+    durableHumanResolution?: HumanEscalation;
+    continuationContext?: {
+      pointer: OpenTagEvent["context"][number];
+      metadata: Record<string, unknown>;
+    };
+  }): Promise<WorkstreamContinuationDispatch> {
+    try {
+      return await dispatchWorkstreamContinuation(inputValue);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await recordControlPlaneEvent({
+        type: "workstream.continuation.failed",
+        severity: "error",
+        subject: inputValue.workThreadId,
+        idempotencyKey: stableId("continuation_failed", [inputValue.workThreadId, inputValue.trigger.id, message]),
+        payload: { workThreadId: inputValue.workThreadId, trigger: inputValue.trigger, message }
+      });
+      return {
+        outcome: "error",
+        workThreadId: inputValue.workThreadId,
+        trigger: inputValue.trigger,
+        decisions: [],
+        reasonCode: "continuation_dispatch_failed"
+      };
+    }
+  }
+
+  async function processReassessmentObligation(obligation: ReassessmentObligation) {
+    const workThread = await repo.getWorkThread({ workThreadId: obligation.workThreadId });
+    if (!workThread) {
+      return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The obligation WorkThread no longer exists." };
+    }
+
+    let sourceRun: Awaited<ReturnType<typeof repo.getRun>> | null = null;
+    let sourceEscalation: HumanEscalation | null = null;
+    let evidenceDelivery: { provider: string; deliveryId: string } | null = null;
+    if (obligation.sourceKind === "run_result_recorded") {
+      sourceRun = await repo.getRun({ runId: obligation.sourceId });
+      if (!sourceRun?.run.result || sourceRun.run.thread?.id !== obligation.workThreadId) {
+        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The recorded Run result source is unavailable." };
+      }
+    } else if (obligation.sourceKind === "verification_evidence_attached") {
+      const records = await repo.listVerificationEvidence({ workThreadId: obligation.workThreadId });
+      const matching = records.find((record) =>
+        [record.provider, record.deliveryId, record.subjectRef, obligation.workThreadId].join(":") === obligation.sourceId
+      );
+      if (!matching) {
+        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The attached verification evidence source is unavailable." };
+      }
+      evidenceDelivery = { provider: matching.provider, deliveryId: matching.deliveryId };
+    } else if (obligation.sourceKind === "human_escalation_changed") {
+      sourceEscalation = await repo.getHumanEscalation({ id: obligation.sourceId });
+      if (!sourceEscalation || sourceEscalation.workThreadId !== obligation.workThreadId) {
+        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The HumanEscalation source is unavailable." };
+      }
+    } else if (obligation.sourceKind === "completion_waiver_changed") {
+      const waivers = await repo.listCompletionWaivers({ workThreadId: obligation.workThreadId });
+      if (!waivers.some((waiver) => waiver.id === obligation.sourceId)) {
+        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The completion waiver source is unavailable." };
+      }
+    } else if (
+      obligation.sourceKind === "material_action_receipt_recorded"
+      || obligation.sourceKind === "material_action_reconciled"
+    ) {
+      const receipts = await repo.listMaterialActionReceiptsForWorkThread({ workThreadId: obligation.workThreadId });
+      if (!receipts.some((receipt) => receipt.actionId === obligation.sourceId)) {
+        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The material-action receipt source is unavailable." };
+      }
+    }
+
+    const governanceResult = sourceRun
+      ? await completionGovernance.ingestRunResult(sourceRun.run.id)
+      : await completionGovernance.reassessWorkThread(
+          obligation.workThreadId,
+          `reassessment-obligation:${obligation.id}:${obligation.attemptCount}`
+        );
+    if (governanceResult) await deliverCompletionTransition(obligation.workThreadId);
+    const satisfiedAssessmentId = governanceResult?.assessment.id;
+
+    const promotableRunId = sourceRun?.run.result
+      && sourceRun.run.result.conclusion !== "needs_human"
+      && sourceRun.run.result.conclusion !== "cancelled"
+      ? sourceRun.run.id
+      : null;
+    const promotedFollowUp = promotableRunId
+      ? await promoteNextFollowUpAfterTerminalRun({ activeRunId: promotableRunId })
+      : null;
+    if (promotedFollowUp) {
+      return {
+        outcome: "satisfied" as const,
+        reasonCode: "continuation_dispatched" as const,
+        ...(satisfiedAssessmentId ? { satisfiedAssessmentId } : {})
+      };
+    }
+
+    let continuationInput: Parameters<typeof attemptWorkstreamContinuation>[0] | null = null;
+    if (sourceRun?.run.result && ["failure", "interrupted", "timed_out"].includes(sourceRun.run.result.conclusion)) {
+      continuationInput = {
+        workThreadId: obligation.workThreadId,
+        trigger: {
+          id: `run-terminal:${sourceRun.run.id}`,
+          kind: "retryable_run_failure",
+          occurredAt: sourceRun.run.updatedAt
+        },
+        preferredParentRunId: sourceRun.run.id
+      };
+    } else if (evidenceDelivery) {
+      continuationInput = {
+        workThreadId: obligation.workThreadId,
+        trigger: {
+          id: evidenceDelivery.provider === "github"
+            ? `github-evidence:${evidenceDelivery.deliveryId}`
+            : `completion-evidence:${evidenceDelivery.provider}:${evidenceDelivery.deliveryId}`,
+          kind: "completion_evidence_changed",
+          occurredAt: obligation.createdAt
+        }
+      };
+    } else if (sourceEscalation?.state === "resolved" && sourceEscalation.resolution) {
+      const resolutionContext = humanResolutionContinuationContext(sourceEscalation);
+      continuationInput = {
+        workThreadId: obligation.workThreadId,
+        trigger: {
+          id: `human-escalation:${sourceEscalation.id}`,
+          kind: "human_escalation_resolved",
+          occurredAt: sourceEscalation.resolution.resolvedAt
+        },
+        continuationActor: sourceEscalation.resolution.actor,
+        durableHumanResolution: sourceEscalation,
+        ...(resolutionContext ? { continuationContext: resolutionContext } : {}),
+        ...(sourceEscalation.runId ? { preferredParentRunId: sourceEscalation.runId } : {})
+      };
+    } else if (
+      obligation.sourceKind === "material_action_receipt_recorded"
+      || obligation.sourceKind === "material_action_reconciled"
+      || obligation.sourceKind === "completion_waiver_changed"
+    ) {
+      continuationInput = {
+        workThreadId: obligation.workThreadId,
+        trigger: {
+          id: `completion-evidence:${obligation.sourceKind}:${obligation.sourceId}:${obligation.sourceDigest}`,
+          kind: "completion_evidence_changed",
+          occurredAt: obligation.createdAt
+        }
+      };
+    }
+
+    if (!continuationInput) {
+      return satisfiedAssessmentId
+        ? { outcome: "satisfied" as const, reasonCode: "assessment_satisfied" as const, satisfiedAssessmentId }
+        : { outcome: "satisfied" as const, reasonCode: "continuation_terminal" as const };
+    }
+    const continuation = await attemptWorkstreamContinuation(continuationInput);
+    if (continuation.outcome === "error") {
+      throw new Error(continuation.reasonCode ?? "Continuation dispatch failed during reassessment delivery.");
+    }
+    if (continuation.outcome === "deferred") {
+      const notBefore = continuation.notBefore ?? new Date(
+        Date.parse(input.completionNow?.() ?? new Date().toISOString()) + reassessmentDeferralMs
+      ).toISOString();
+      return {
+        outcome: "rescheduled" as const,
+        reasonCode: "continuation_deferred" as const,
+        notBefore
+      };
+    }
+    if (continuation.outcome === "created" || continuation.outcome === "replayed") {
+      return {
+        outcome: "satisfied" as const,
+        reasonCode: "continuation_dispatched" as const,
+        ...(satisfiedAssessmentId ? { satisfiedAssessmentId } : {})
+      };
+    }
+    if (continuation.outcome === "needs_human" || continuation.outcome === "ambiguous") {
+      return {
+        outcome: "blocked" as const,
+        reasonCode: "needs_human" as const,
+        lastError: continuation.reasonCode ?? "Continuation requires an attributed human decision."
+      };
+    }
+    if (continuation.outcome === "rejected") {
+      return {
+        outcome: "blocked" as const,
+        reasonCode: "authority_missing" as const,
+        lastError: continuation.reasonCode ?? "Continuation authority was rejected."
+      };
+    }
+    return {
+      outcome: "satisfied" as const,
+      reasonCode: "continuation_terminal" as const,
+      ...(satisfiedAssessmentId ? { satisfiedAssessmentId } : {})
+    };
+  }
+
+  const reassessmentWorker = createReassessmentObligationWorker({
+    repo,
+    process: processReassessmentObligation,
+    ...(reassessmentOptions.pollIntervalMs ? { pollIntervalMs: reassessmentOptions.pollIntervalMs } : {}),
+    ...(reassessmentOptions.leaseSeconds ? { leaseSeconds: reassessmentOptions.leaseSeconds } : {}),
+    ...(reassessmentOptions.batchSize ? { batchSize: reassessmentOptions.batchSize } : {}),
+    ...(reassessmentOptions.retryBaseMs ? { retryBaseMs: reassessmentOptions.retryBaseMs } : {}),
+    ...(reassessmentOptions.retryMaxMs ? { retryMaxMs: reassessmentOptions.retryMaxMs } : {}),
+    ...(reassessmentOptions.maxAttempts ? { maxAttempts: reassessmentOptions.maxAttempts } : {}),
+    ...(input.completionNow ? { now: () => new Date(input.completionNow!()) } : {}),
+    onError: async (error) => {
+      try {
+        await recordControlPlaneEvent({
+          type: "completion_governance.reassessment_obligation_failed",
+          severity: "error",
+          payload: sanitizeCredentialLikeValue({ error: error instanceof Error ? error.message : String(error) })
+        });
+      } catch {
+        // The process can be shutting down after its SQLite owner has closed.
+      }
+    }
+  });
+
+  async function authorizeManagedHumanEscalationChange(
+    escalation: HumanEscalation,
+    principal?: ChannelPrincipalIdentity
+  ): Promise<{ allowed: boolean; reasonCode?: string }> {
+    if (!escalation.runId) return { allowed: true };
+    const stored = await repo.getRun({ runId: escalation.runId });
+    if (!stored) {
+      return { allowed: false, reasonCode: "managed_channel_authority_unavailable" };
+    }
+    if (!["slack", "lark"].includes(stored.event.source)) return { allowed: true };
+    try {
+      const allowed = await managedChannelOwnershipVerified({
+        repo,
+        event: stored.event,
+        ...(principal ? { principal } : {})
+      });
+      return allowed
+        ? { allowed: true }
+        : { allowed: false, reasonCode: "managed_channel_principal_required" };
+    } catch (error) {
+      if (!(error instanceof ChannelBindingCorruptionError)) throw error;
+      return { allowed: false, reasonCode: "managed_channel_binding_corrupt" };
+    }
+  }
+
   const sourceThreadControl = createSourceThreadControlHandler({
     repo,
     presentation,
@@ -3611,38 +4362,39 @@ export function createDispatcherApp(input: {
     deliverAuditedMessage: (message) => deliverAndAudit({ repo, sink: callbackSink, retry: callbackRetry, message }),
     deliverDirectMessage: (message) => callbackSink.deliver(message),
     recordControlPlaneEvent,
-    onHumanEscalationChanged: async (escalation) => {
+    authorizeHumanEscalationChange: authorizeManagedHumanEscalationChange,
+    onHumanEscalationChanged: async (escalation, actor, channelPrincipal) => {
       if (escalation.runId) await completionGovernance.reassessRun(escalation.runId);
       await deliverCompletionTransition(escalation.workThreadId);
+      if (escalation.state === "resolved") {
+        const resolutionContext = humanResolutionContinuationContext(escalation);
+        const continuation = await attemptWorkstreamContinuation({
+          workThreadId: escalation.workThreadId,
+          trigger: {
+            id: `human-escalation:${escalation.id}`,
+            kind: "human_escalation_resolved",
+            occurredAt: escalation.resolution?.resolvedAt ?? new Date().toISOString()
+          },
+          continuationActor: actor,
+          ...(channelPrincipal ? { continuationPrincipal: channelPrincipal } : {}),
+          ...(resolutionContext ? { continuationContext: resolutionContext } : {}),
+          ...(escalation.runId ? { preferredParentRunId: escalation.runId } : {})
+        });
+        reassessmentWorker.wake();
+        return {
+          outcome: continuation.outcome,
+          ...(continuation.reasonCode ? { reasonCode: continuation.reasonCode } : {}),
+          ...(continuation.activeRunId ? { activeRunId: continuation.activeRunId } : {}),
+          ...(continuation.notBefore ? { notBefore: continuation.notBefore } : {}),
+          ...(continuation.run ? { resumedRunId: continuation.run.id } : {}),
+          ...(continuation.escalation ? { humanEscalationId: continuation.escalation.id } : {})
+        };
+      }
+      reassessmentWorker.wake();
     },
     ...(input.completionNow ? { now: input.completionNow } : {})
   });
-  queueMicrotask(() => {
-    void (async () => {
-      const completedRuns = await repo.listRunsWithResults();
-      const workThreadIds = [...new Set(completedRuns.flatMap((stored) =>
-        stored.run.thread?.id ? [stored.run.thread.id] : []
-      ))].sort();
-      for (const workThreadId of workThreadIds) {
-        const latest = currentWorkThreadRun(await repo.listRunsForWorkThread({ workThreadId }));
-        if (!latest?.run.result) continue;
-        await completionGovernance.ingestRunResult(latest.run.id);
-        await deliverCompletionTransition(workThreadId);
-      }
-    })().catch(async (error) => {
-      try {
-        await recordControlPlaneEvent({
-          type: "completion_governance.recovery_failed",
-          severity: "error",
-          payload: { error: error instanceof Error ? error.message : String(error) }
-        });
-      } catch {
-        // The owning process may already be shutting down and its SQLite file
-        // may have been removed. Recovery failure reporting must not create an
-        // unhandled rejection during teardown.
-      }
-    });
-  });
+  if (reassessmentOptions.autoStart !== false) reassessmentWorker.start();
   const parseDispatcherBody = async <S extends z.ZodTypeAny>(
     c: Context,
     schema: S,
@@ -3924,6 +4676,23 @@ export function createDispatcherApp(input: {
   async function promoteNextFollowUpAfterTerminalRun(input: {
     activeRunId: string;
   }): Promise<{ followUpRequest: import("@opentag/core").FollowUpRequest; run: OpenTagRun } | null> {
+    const existing = (await repo.listFollowUpsForActiveRun({ activeRunId: input.activeRunId }))
+      .find((followUp) => followUp.status === "promoting" || followUp.status === "promoted");
+    if (existing?.status === "promoted") {
+      const createdRun = existing.createdRunId
+        ? await repo.getRun({ runId: existing.createdRunId })
+        : null;
+      if (!createdRun || createdRun.event.id !== existing.sourceEventId) {
+        throw new Error(`Promoted follow-up request ${existing.id} has no matching created Run.`);
+      }
+      return { followUpRequest: existing, run: createdRun.run };
+    }
+    if (existing?.status === "promoting") {
+      return promoteFollowUpRequest({
+        followUpRequestId: existing.id,
+        runId: existing.createdRunId ?? `run_${randomUUID()}`
+      });
+    }
     const [next] = await repo.listQueuedFollowUpsForActiveRun({ activeRunId: input.activeRunId });
     if (!next) return null;
 
@@ -3945,18 +4714,27 @@ export function createDispatcherApp(input: {
       });
       return promoted;
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const automaticContinuationRace = error instanceof ActiveConversationRaceError;
       await repo.appendRunEvent({
         runId: input.activeRunId,
-        type: "follow_up_request.auto_promote_failed",
+        type: automaticContinuationRace
+          ? "follow_up_request.auto_promote_deferred"
+          : "follow_up_request.auto_promote_failed",
         payload: {
           followUpRequestId: next.id,
-          error: error instanceof Error ? error.message : String(error)
+          ...(automaticContinuationRace
+            ? { activeContinuationRunId: error.activeRunId }
+            : { error: message })
         },
         visibility: "audit",
-        importance: "high",
-        message: `Could not auto-promote queued follow-up ${next.id}.`
+        importance: automaticContinuationRace ? "normal" : "high",
+        message: automaticContinuationRace
+          ? `Deferred queued follow-up ${next.id} behind the automatic Workstream continuation.`
+          : `Could not auto-promote queued follow-up ${next.id}.`
       });
-      return null;
+      if (automaticContinuationRace) return null;
+      throw error;
     }
   }
   const admission = createAdmissionRuntime({
@@ -4317,7 +5095,18 @@ export function createDispatcherApp(input: {
       throw error;
     }
     if (result.workThreadId) await deliverCompletionTransition(result.workThreadId);
-    return c.json(result, result.outcome === "recorded" ? 201 : 200);
+    const continuation = inlineReassessmentEnabled && result.outcome === "recorded" && result.workThreadId
+      ? await attemptWorkstreamContinuation({
+          workThreadId: result.workThreadId,
+          trigger: {
+            id: `github-evidence:${snapshot.deliveryId}`,
+            kind: "completion_evidence_changed",
+            occurredAt: new Date().toISOString()
+          }
+      })
+      : null;
+    reassessmentWorker.wake();
+    return c.json({ ...result, ...(continuation ? { continuation } : {}) }, result.outcome === "recorded" ? 201 : 200);
   });
 
   app.post("/v1/completion-evidence/github/batch", async (c) => {
@@ -4331,8 +5120,22 @@ export function createDispatcherApp(input: {
       }
       throw error;
     }
-    for (const workThreadId of result.workThreadIds) await deliverCompletionTransition(workThreadId);
-    return c.json(result, result.outcome === "recorded" ? 201 : 200);
+    const continuations: WorkstreamContinuationDispatch[] = [];
+    for (const workThreadId of result.workThreadIds) {
+      await deliverCompletionTransition(workThreadId);
+      if (inlineReassessmentEnabled && result.outcome === "recorded") {
+        continuations.push(await attemptWorkstreamContinuation({
+          workThreadId,
+          trigger: {
+            id: `github-evidence:${snapshots[0]!.deliveryId}`,
+            kind: "completion_evidence_changed",
+            occurredAt: new Date().toISOString()
+          }
+        }));
+      }
+    }
+    reassessmentWorker.wake();
+    return c.json({ ...result, ...(continuations.length > 0 ? { continuations } : {}) }, result.outcome === "recorded" ? 201 : 200);
   });
 
   app.post("/v1/completion-escalations/github", async (c) => {
@@ -4674,8 +5477,8 @@ export function createDispatcherApp(input: {
     return c.json({ metrics });
   });
 
-  app.get("/v1/routing/accepted-completion-metrics", async (c) => {
-    return c.json({ metrics: await repo.getAcceptedCompletionMetrics() });
+  app.get("/v1/routing/accepted-progress-metrics", async (c) => {
+    return c.json({ metrics: await repo.getAcceptedProgressMetrics() });
   });
 
   app.post("/v1/channel-bindings", async (c) => {
@@ -5155,6 +5958,7 @@ export function createDispatcherApp(input: {
       createdCount: results.filter((item) => item.status === "created").length,
       idempotentReplayCount: results.filter((item) => item.status === "idempotent_replay").length,
       followUpQueuedCount: results.filter((item) => item.status === "follow_up_queued").length,
+      waitActiveRunCount: results.filter((item) => item.status === "wait_active_run").length,
       needsHumanDecisionCount: results.filter((item) => item.status === "needs_human_decision").length,
       rejectedCount: results.filter((item) => item.status === "rejected").length,
       exceptionCount: exceptions.length,
@@ -5249,7 +6053,12 @@ export function createDispatcherApp(input: {
     const parsed = await parseDispatcherBody(c, ThreadActionInputSchema);
     const controlCommand = parseThreadControlCommand(parsed.rawText);
     if (controlCommand) {
-      return sourceThreadControl.handle({ request: parsed, command: controlCommand });
+      const channelPrincipal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+      return sourceThreadControl.handle({
+        request: parsed,
+        command: controlCommand,
+        ...(channelPrincipal ? { channelPrincipal } : {})
+      });
     }
 
     const command = parseThreadActionCommand(parsed.rawText);
@@ -5484,13 +6293,24 @@ export function createDispatcherApp(input: {
     }
 
     if (command.verb === "continue") {
-      const childRun = await createChildRunForThreadAction({
-        repo,
-        command,
-        resolved: resolved.resolved,
-        runId: stableChildRunId({ command, resolved: resolved.resolved }),
-        approvalDecisionId: decision.id
-      });
+      let childRun: OpenTagRun;
+      try {
+        childRun = await createChildRunForThreadAction({
+          repo,
+          command,
+          resolved: resolved.resolved,
+          runId: stableChildRunId({ command, resolved: resolved.resolved }),
+          approvalDecisionId: decision.id
+        });
+      } catch (error) {
+        if (!(error instanceof ActiveConversationRaceError)) throw error;
+        return c.json({
+          outcome: "deferred",
+          decision,
+          activeRunId: error.activeRunId,
+          reason: "An automatic Workstream continuation already owns this source conversation."
+        }, 409);
+      }
       const body = renderChildRunCreatedBody({
         lead: "Continuing in OpenTag from this approved action.",
         resolved: resolved.resolved,
@@ -5620,20 +6440,32 @@ export function createDispatcherApp(input: {
       return c.json({ outcome: "stale", decision, plan: execution.plan }, 200);
     }
 
-    const childRun = await createChildRunForThreadAction({
-      repo,
-      command,
-      resolved: resolved.resolved,
-      runId: stableChildRunId({
+    let childRun: OpenTagRun;
+    try {
+      childRun = await createChildRunForThreadAction({
+        repo,
         command,
         resolved: resolved.resolved,
+        runId: stableChildRunId({
+          command,
+          resolved: resolved.resolved,
+          sourceApplyPlanId: execution.plan.id,
+          fallbackReason: execution.fallbackReason ?? "OpenTag cannot directly apply this intent yet."
+        }),
+        approvalDecisionId: decision.id,
         sourceApplyPlanId: execution.plan.id,
         fallbackReason: execution.fallbackReason ?? "OpenTag cannot directly apply this intent yet."
-      }),
-      approvalDecisionId: decision.id,
-      sourceApplyPlanId: execution.plan.id,
-      fallbackReason: execution.fallbackReason ?? "OpenTag cannot directly apply this intent yet."
-    });
+      });
+    } catch (error) {
+      if (!(error instanceof ActiveConversationRaceError)) throw error;
+      return c.json({
+        outcome: "deferred",
+        decision,
+        plan: execution.plan,
+        activeRunId: error.activeRunId,
+        reason: "An automatic Workstream continuation already owns this source conversation."
+      }, 409);
+    }
     const body = renderChildRunCreatedBody({
       lead: "Needs setup before OpenTag can apply this action directly.",
       resolved: resolved.resolved,
@@ -5668,6 +6500,9 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/follow-up-requests/:id/create-run", async (c) => {
     const parsed = await parseDispatcherBody(c, PromoteFollowUpRequestSchema);
+    const requested = await repo.getFollowUpRequest({ id: c.req.param("id") });
+    if (!requested) return c.json({ error: "follow_up_request_not_found" }, 404);
+    if (requested.status !== "queued") return c.json({ error: "follow_up_request_not_queued" }, 409);
     let promoted;
     try {
       promoted = await promoteFollowUpRequest({
@@ -5681,6 +6516,12 @@ export function createDispatcherApp(input: {
       }
       if (message.includes("is not queued")) {
         return c.json({ error: "follow_up_request_not_queued" }, 409);
+      }
+      if (error instanceof ActiveConversationRaceError) {
+        return c.json({
+          error: "active_conversation_race",
+          activeRunId: error.activeRunId
+        }, 409);
       }
       throw error;
     }
@@ -6147,7 +6988,7 @@ export function createDispatcherApp(input: {
           runId,
           state: "running",
           message: "Execution succeeded; work completion is waiting for verified repository evidence.",
-          nextAction: completionResult.view.nextAction,
+          nextAction: completionResult.view.nextAction.summary,
           detailVisibility: "source_thread"
         })
       : strictExecutionNotComplete
@@ -6161,7 +7002,7 @@ export function createDispatcherApp(input: {
                   ? "interrupted"
                   : "timed_out",
             message: `Execution ${completedResult.conclusion}; work is not complete.`,
-            nextAction: completionResult.view.nextAction,
+            nextAction: completionResult.view.nextAction.summary,
             detailVisibility: "source_thread"
           })
       : presentation.finalPresentation({
@@ -6195,9 +7036,23 @@ export function createDispatcherApp(input: {
     clearDelayedLarkStatusCard(runId);
     const shouldPromoteFollowUp = completedResult.conclusion !== "needs_human" && completedResult.conclusion !== "cancelled";
     const promotedFollowUp = shouldPromoteFollowUp ? await promoteNextFollowUpAfterTerminalRun({ activeRunId: runId }) : null;
+    const retryableFailure = ["failure", "interrupted", "timed_out"].includes(completedResult.conclusion);
+    const continuation = !promotedFollowUp && retryableFailure && stored.run.thread?.id
+      ? await attemptWorkstreamContinuation({
+          workThreadId: stored.run.thread.id,
+          trigger: {
+            id: `run-terminal:${runId}`,
+            kind: "retryable_run_failure",
+            occurredAt: stored.run.updatedAt
+          },
+          preferredParentRunId: runId
+        })
+      : null;
+    reassessmentWorker.wake();
     return c.json({
       ok: true,
       ...(completionResult ? { completion: completionResult.view } : {}),
+      ...(continuation ? { continuation } : {}),
       ...(promotedFollowUp
         ? {
             promotedFollowUp: {
@@ -6462,20 +7317,31 @@ export function createDispatcherApp(input: {
     if (!parent) return c.json({ error: "parent_run_not_found" }, 404);
     const receivedAt = new Date().toISOString();
     const sourceProposalId = body.sourceProposalId ?? body.action.targetId;
-    const { run } = await repo.createRun({
-      id: body.runId,
-      event: childEventFromParent({
-        parentEvent: parent.event,
-        childRunId: body.runId,
-        ...(body.commandText ? { commandText: body.commandText } : {}),
-        actionKind: body.action.kind,
-        receivedAt
-      }),
-      parentRunId,
-      triggeredByAction: body.action,
-      ...(sourceProposalId ? { sourceProposalId } : {}),
-      ...(body.sourceApplyPlanId ? { sourceApplyPlanId: body.sourceApplyPlanId } : {})
-    });
+    let run: OpenTagRun;
+    try {
+      ({ run } = await repo.createRun({
+        id: body.runId,
+        event: childEventFromParent({
+          parentEvent: parent.event,
+          childRunId: body.runId,
+          ...(body.commandText ? { commandText: body.commandText } : {}),
+          actionKind: body.action.kind,
+          receivedAt
+        }),
+        parentRunId,
+        triggeredByAction: body.action,
+        rejectIfAutomaticContinuationActive: true,
+        ...(sourceProposalId ? { sourceProposalId } : {}),
+        ...(body.sourceApplyPlanId ? { sourceApplyPlanId: body.sourceApplyPlanId } : {})
+      }));
+    } catch (error) {
+      if (!(error instanceof ActiveConversationRaceError)) throw error;
+      return c.json({
+        error: "active_conversation_race",
+        activeRunId: error.activeRunId,
+        reason: "An automatic Workstream continuation already owns this source conversation."
+      }, 409);
+    }
     return c.json({ run }, 201);
   });
 
@@ -6483,6 +7349,119 @@ export function createDispatcherApp(input: {
     const stored = await repo.getRun({ runId: c.req.param("runId") });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     return c.json(stored);
+  });
+
+  app.get("/v1/work-threads/:workThreadId/completion", async (c) => {
+    const workThreadId = c.req.param("workThreadId");
+    const workThread = await repo.getWorkThread({ workThreadId });
+    if (!workThread) return c.json({ error: "work_thread_not_found" }, 404);
+    const [completion, acceptedProgress] = await Promise.all([
+      completionGovernance.explainWorkThread(workThreadId),
+      repo.getAcceptedProgressAttribution({ workThreadId })
+    ]);
+    if (!completion) return c.json({ error: "completion_not_available" }, 404);
+    return c.json({ workThread, completion, acceptedProgress });
+  });
+
+  app.get("/v1/work-threads/:workThreadId/reassessment-obligations", async (c) => {
+    const workThreadId = c.req.param("workThreadId");
+    const workThread = await repo.getWorkThread({ workThreadId });
+    if (!workThread) return c.json({ error: "work_thread_not_found" }, 404);
+    const obligations = await repo.listReassessmentObligations({ workThreadId, limit: 500 });
+    const now = input.completionNow?.() ?? new Date().toISOString();
+    const unresolved = obligations.filter((obligation) => obligation.state === "pending" || obligation.state === "leased");
+    const oldestDueAt = unresolved
+      .map((obligation) => obligation.notBefore)
+      .sort((left, right) => left.localeCompare(right))[0];
+    const counts = {
+      pending: obligations.filter((obligation) => obligation.state === "pending").length,
+      leased: obligations.filter((obligation) => obligation.state === "leased").length,
+      satisfied: obligations.filter((obligation) => obligation.state === "satisfied").length,
+      blocked: obligations.filter((obligation) => obligation.state === "blocked").length
+    };
+    return c.json({
+      workThreadId,
+      summary: {
+        total: obligations.length,
+        ...counts,
+        ...(oldestDueAt ? { oldestDueAt } : {}),
+        truncated: obligations.length === 500
+      },
+      obligations: obligations.map((obligation) => ({
+        id: obligation.id,
+        sourceKind: obligation.sourceKind,
+        sourceId: obligation.sourceId,
+        sourceDigest: obligation.sourceDigest,
+        state: obligation.state,
+        notBefore: obligation.notBefore,
+        attemptCount: obligation.attemptCount,
+        ...(obligation.leaseExpiresAt ? { leaseExpiresAt: obligation.leaseExpiresAt } : {}),
+        ...(obligation.lastReasonCode ? { lastReasonCode: obligation.lastReasonCode } : {}),
+        ...(obligation.lastError ? { lastError: obligation.lastError } : {}),
+        ...(obligation.satisfiedAssessmentId ? { satisfiedAssessmentId: obligation.satisfiedAssessmentId } : {}),
+        createdAt: obligation.createdAt,
+        updatedAt: obligation.updatedAt,
+        nextAction: obligation.state === "blocked"
+          ? {
+              kind: "inspect_blocked_obligation",
+              summary: "Inspect the typed reason and restore the missing durable authority before retrying."
+            }
+          : obligation.state === "leased"
+            ? {
+                kind: "wait_for_current_lease",
+                summary: "Wait for the current fenced reassessment lease to finish or expire."
+              }
+            : obligation.state === "pending" && obligation.notBefore > now
+              ? {
+                  kind: "wait_until_due",
+                  summary: `Wait until ${obligation.notBefore}; no provider replay is required.`
+                }
+              : obligation.state === "pending"
+                ? {
+                    kind: "wait_for_reassessment",
+                    summary: "Wait for the due reassessment worker; inspect this obligation if it remains pending."
+                  }
+                : {
+                    kind: "none",
+                    summary: "This delivery obligation is satisfied; WorkLoop completion remains separately authoritative."
+                  }
+      }))
+    });
+  });
+
+  app.get("/v1/work-loops", async (c) => {
+    const attention = c.req.query("attention");
+    if (attention !== "required") {
+      return c.json({ error: "invalid_attention_filter", message: "Use attention=required." }, 400);
+    }
+    const requestedLimit = Number(c.req.query("limit") ?? "25");
+    if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 100) {
+      return c.json({ error: "invalid_limit", message: "limit must be an integer from 1 to 100." }, 400);
+    }
+    const scanLimit = Math.min(500, Math.max(100, requestedLimit * 5));
+    const threads = await repo.listWorkThreads({ limit: scanLimit });
+    const workLoops: Array<{ workThread: DurableWorkThread; completion: WorkLoopView }> = [];
+    for (const workThread of threads) {
+      if (workLoops.length >= requestedLimit) break;
+      const [completion, runs] = await Promise.all([
+        completionGovernance.readWorkLoop(workThread.id),
+        repo.listRunsForWorkThread({ workThreadId: workThread.id })
+      ]);
+      if (!completion) continue;
+      const latestRun = runs.at(-1)?.run;
+      if (latestRun && (latestRun.status === "queued" || latestRun.status === "assigned" || latestRun.status === "running")) {
+        continue;
+      }
+      if (
+        completion.completion === "satisfied"
+        || completion.completion === "waived"
+        || completion.nextAction.hint.kind === "none"
+      ) {
+        continue;
+      }
+      workLoops.push({ workThread, completion });
+    }
+    return c.json({ attention: "required", workLoops, scanned: threads.length, scanLimitReached: threads.length === scanLimit });
   });
 
   app.get("/v1/runs/:runId/completion", async (c) => {
@@ -6522,14 +7501,24 @@ export function createDispatcherApp(input: {
     const parsed = HumanEscalationAcknowledgeInputSchema.parse(sanitizeCredentialLikeValue(
       await parseDispatcherBody(c, HumanEscalationAcknowledgeInputSchema)
     ));
-    if (!await repo.getHumanEscalation({ id: escalationId })) {
+    const existingEscalation = await repo.getHumanEscalation({ id: escalationId });
+    if (!existingEscalation) {
       return c.json({ error: "human_escalation_not_found" }, 404);
+    }
+    const channelPrincipal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const authorization = await authorizeManagedHumanEscalationChange(
+      existingEscalation,
+      channelPrincipal
+    );
+    if (!authorization.allowed) {
+      return c.json({ error: authorization.reasonCode ?? "managed_channel_principal_required" }, 403);
     }
     try {
       const result = await repo.transitionHumanEscalation({
         id: escalationId,
         toState: "acknowledged",
         actor: parsed.actor,
+        ...(channelPrincipal ? { channelPrincipal } : {}),
         at: parsed.acknowledgedAt ?? input.completionNow?.() ?? new Date().toISOString()
       });
       if (result.escalation.state === "expired") {
@@ -6539,8 +7528,15 @@ export function createDispatcherApp(input: {
           escalation: result.escalation
         }, 409);
       }
+      reassessmentWorker.wake();
       return c.json({ outcome: result.changed ? "acknowledged" : "duplicate", escalation: result.escalation }, result.changed ? 201 : 200);
     } catch (error) {
+      if (error instanceof ManagedChannelAuthorityError) {
+        return c.json({ error: error.reasonCode }, 403);
+      }
+      if (error instanceof ChannelBindingCorruptionError) {
+        return c.json({ error: "managed_channel_binding_corrupt" }, 403);
+      }
       const message = error instanceof Error ? error.message : "Invalid human escalation acknowledgement.";
       return c.json({ error: "invalid_human_escalation_transition", message }, 409);
     }
@@ -6551,14 +7547,24 @@ export function createDispatcherApp(input: {
     const parsed = HumanEscalationResolveInputSchema.parse(sanitizeCredentialLikeValue(
       await parseDispatcherBody(c, HumanEscalationResolveInputSchema)
     ));
-    if (!await repo.getHumanEscalation({ id: escalationId })) {
+    const existingEscalation = await repo.getHumanEscalation({ id: escalationId });
+    if (!existingEscalation) {
       return c.json({ error: "human_escalation_not_found" }, 404);
+    }
+    const channelPrincipal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const authorization = await authorizeManagedHumanEscalationChange(
+      existingEscalation,
+      channelPrincipal
+    );
+    if (!authorization.allowed) {
+      return c.json({ error: authorization.reasonCode ?? "managed_channel_principal_required" }, 403);
     }
     try {
       const result = await repo.transitionHumanEscalation({
         id: escalationId,
         toState: "resolved",
         actor: parsed.actor,
+        ...(channelPrincipal ? { channelPrincipal } : {}),
         ...(parsed.optionId ? { optionId: parsed.optionId } : {}),
         ...(parsed.reason ? { reason: parsed.reason } : {}),
         at: parsed.resolvedAt ?? input.completionNow?.() ?? new Date().toISOString()
@@ -6576,17 +7582,50 @@ export function createDispatcherApp(input: {
         await deliverCompletionTransition(result.escalation.workThreadId);
         completion = await completionGovernance.explainRun(result.escalation.runId);
       }
+      const resolutionContext = humanResolutionContinuationContext(result.escalation);
+      const continuation = result.changed
+        ? await attemptWorkstreamContinuation({
+            workThreadId: result.escalation.workThreadId,
+            trigger: {
+              id: `human-escalation:${result.escalation.id}`,
+              kind: "human_escalation_resolved",
+              occurredAt: result.escalation.resolution?.resolvedAt ?? new Date().toISOString()
+            },
+            continuationActor: parsed.actor,
+            ...(channelPrincipal ? { continuationPrincipal: channelPrincipal } : {}),
+            ...(resolutionContext ? { continuationContext: resolutionContext } : {}),
+            ...(result.escalation.runId ? { preferredParentRunId: result.escalation.runId } : {})
+          })
+        : null;
+      reassessmentWorker.wake();
+      const resume = continuation
+        ? continuationResumePresentation({
+            outcome: continuation.outcome,
+            ...(continuation.reasonCode ? { reasonCode: continuation.reasonCode } : {}),
+            ...(continuation.activeRunId ? { activeRunId: continuation.activeRunId } : {}),
+            ...(continuation.notBefore ? { notBefore: continuation.notBefore } : {}),
+            ...(continuation.run ? { resumedRunId: continuation.run.id } : {}),
+            ...(continuation.escalation ? { humanEscalationId: continuation.escalation.id } : {})
+          })
+        : {
+            required: false,
+            reason: "The human escalation resolution was already recorded; no continuation was evaluated.",
+            nextAction: "Follow the existing WorkThread state."
+          };
       return c.json({
         outcome: result.changed ? "resolved" : "duplicate",
         escalation: result.escalation,
         ...(completion ? { completion } : {}),
-        resume: {
-          required: true,
-          reason: "Resolution is durable context; OpenTag does not inject it into an executor process that already stopped.",
-          nextAction: "Send a new source-thread task to resume work with this resolution."
-        }
+        ...(continuation ? { continuation } : {}),
+        resume
       }, result.changed ? 201 : 200);
     } catch (error) {
+      if (error instanceof ManagedChannelAuthorityError) {
+        return c.json({ error: error.reasonCode }, 403);
+      }
+      if (error instanceof ChannelBindingCorruptionError) {
+        return c.json({ error: "managed_channel_binding_corrupt" }, 403);
+      }
       const message = error instanceof Error ? error.message : "Invalid human escalation resolution.";
       return c.json({ error: "invalid_human_escalation_transition", message }, 409);
     }
@@ -6605,6 +7644,7 @@ export function createDispatcherApp(input: {
       await deliverCompletionTransition(result.assessment.workThreadId);
       const completion = await completionGovernance.explainRun(runId);
       if (!completion || !result.assessment.waiver) return c.json({ error: "completion_not_available" }, 404);
+      reassessmentWorker.wake();
       return c.json({ outcome: result.outcome, completion, waiver: result.assessment.waiver }, result.outcome === "recorded" ? 201 : 200);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Invalid completion waiver.";
@@ -6661,5 +7701,9 @@ export function createDispatcherApp(input: {
     return c.json({ error: "internal_server_error" }, 500);
   });
 
-  return app;
+  return Object.assign(app, {
+    async stopBackgroundWorkers() {
+      await reassessmentWorker.stop();
+    }
+  });
 }

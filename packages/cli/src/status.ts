@@ -4,7 +4,9 @@ import {
   type ChannelRuntimeStatus,
   type CompletionExplanation,
   type ControlPlaneAlert,
-  type RunMetrics
+  type EnsuredWorkThread,
+  type RunMetrics,
+  type WorkLoopAttentionItem
 } from "@opentag/client";
 import {
   createSourceThreadStatusPresentation,
@@ -15,7 +17,8 @@ import {
   RoutingDecisionSchema,
   type OpenTagEvent,
   type OpenTagRun,
-  type AcceptedCompletionMetrics,
+  type AcceptedProgressAttributionView,
+  type AcceptedProgressMetrics,
   type FactoryRecipeSnapshot,
   type RunnerDirectoryEntry,
   type RoutingDecision,
@@ -47,6 +50,8 @@ export type StatusCommandOptions = {
   run?: string;
   channel?: string;
   workstream?: string;
+  workThread?: string;
+  attention?: boolean;
   json?: boolean;
 };
 
@@ -68,8 +73,8 @@ export type StatusSummary = {
   capabilities: string[];
   runnerDirectory?: RunnerDirectoryEntry[];
   runnerDirectoryError?: string;
-  acceptedCompletionMetrics?: AcceptedCompletionMetrics;
-  acceptedCompletionMetricsError?: string;
+  acceptedProgressMetrics?: AcceptedProgressMetrics;
+  acceptedProgressMetricsError?: string;
 };
 
 type RunAuditEvent = {
@@ -116,6 +121,22 @@ export type WorkstreamStatusSummary = {
   metrics: WorkstreamMetrics;
   evaluation: WorkstreamEvaluation;
   alerts: ControlPlaneAlert[];
+};
+
+export type WorkThreadStatusSummary = {
+  configPath: string;
+  dispatcherUrl: string;
+  workThread: EnsuredWorkThread;
+  completion: CompletionExplanation;
+  acceptedProgress: AcceptedProgressAttributionView | null;
+};
+
+export type WorkLoopAttentionStatusSummary = {
+  configPath: string;
+  dispatcherUrl: string;
+  workLoops: WorkLoopAttentionItem[];
+  scanned: number;
+  scanLimitReached: boolean;
 };
 
 export function parseChannelRef(ref: string): { provider: string; accountId: string; conversationId: string } {
@@ -221,8 +242,8 @@ export async function statusFromConfig(input: {
     }),
     runnerDirectory: routingState.runners,
     ...(routingState.runnersError ? { runnerDirectoryError: routingState.runnersError } : {}),
-    ...(routingState.metrics ? { acceptedCompletionMetrics: routingState.metrics } : {}),
-    ...(routingState.metricsError ? { acceptedCompletionMetricsError: routingState.metricsError } : {})
+    ...(routingState.metrics ? { acceptedProgressMetrics: routingState.metrics } : {}),
+    ...(routingState.metricsError ? { acceptedProgressMetricsError: routingState.metricsError } : {})
   };
 }
 
@@ -233,7 +254,7 @@ async function loadRoutingState(input: {
 }): Promise<{
   runners: RunnerDirectoryEntry[];
   runnersError?: string;
-  metrics?: AcceptedCompletionMetrics;
+  metrics?: AcceptedProgressMetrics;
   metricsError?: string;
 }> {
   if (input.dispatcher !== "online") return { runners: [] };
@@ -245,7 +266,7 @@ async function loadRoutingState(input: {
   });
   const [runners, metrics] = await Promise.allSettled([
     client.listRunners(),
-    client.getAcceptedCompletionMetrics()
+    client.getAcceptedProgressMetrics()
   ]);
   return {
     runners: runners.status === "fulfilled" ? runners.value.runners : [],
@@ -322,6 +343,78 @@ export async function getWorkstreamStatusSummary(input: {
     workstreamId: input.workstreamId,
     ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
   });
+}
+
+export async function getWorkThreadStatusSummary(input: {
+  workThreadId: string;
+  configPath?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<WorkThreadStatusSummary> {
+  const configPath = input.configPath ?? defaultConfigPath();
+  const config = readCliConfig(configPath);
+  return workThreadStatusFromConfig({
+    config,
+    configPath,
+    workThreadId: input.workThreadId,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+  });
+}
+
+export async function getWorkLoopAttentionStatusSummary(input: {
+  configPath?: string;
+  fetchImpl?: typeof fetch;
+  limit?: number;
+} = {}): Promise<WorkLoopAttentionStatusSummary> {
+  const configPath = input.configPath ?? defaultConfigPath();
+  const config = readCliConfig(configPath);
+  return workLoopAttentionStatusFromConfig({
+    config,
+    configPath,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    ...(input.limit ? { limit: input.limit } : {})
+  });
+}
+
+function governanceStatusClient(input: {
+  config: OpenTagCliConfig;
+  fetchImpl?: typeof fetch;
+}) {
+  const token = input.config.daemon.pairingToken ?? runnerDispatcherToken(input.config.daemon);
+  return createOpenTagClient({
+    dispatcherUrl: input.config.daemon.dispatcherUrl,
+    ...(token ? { pairingToken: token } : {}),
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+  });
+}
+
+export async function workThreadStatusFromConfig(input: {
+  config: OpenTagCliConfig;
+  configPath: string;
+  workThreadId: string;
+  fetchImpl?: typeof fetch;
+}): Promise<WorkThreadStatusSummary> {
+  const result = await governanceStatusClient(input).getWorkThreadCompletion({ workThreadId: input.workThreadId });
+  return {
+    configPath: input.configPath,
+    dispatcherUrl: input.config.daemon.dispatcherUrl,
+    ...result
+  };
+}
+
+export async function workLoopAttentionStatusFromConfig(input: {
+  config: OpenTagCliConfig;
+  configPath: string;
+  fetchImpl?: typeof fetch;
+  limit?: number;
+}): Promise<WorkLoopAttentionStatusSummary> {
+  const result = await governanceStatusClient(input).listWorkLoopsRequiringAttention({ limit: input.limit ?? 25 });
+  return {
+    configPath: input.configPath,
+    dispatcherUrl: input.config.daemon.dispatcherUrl,
+    workLoops: result.workLoops,
+    scanned: result.scanned,
+    scanLimitReached: result.scanLimitReached
+  };
 }
 
 export async function workstreamStatusFromConfig(input: {
@@ -441,7 +534,7 @@ export function formatStatus(summary: StatusSummary): string {
     ...formatControlPlaneAlerts(summary),
     `Runner: ${summary.runnerId}`,
     ...formatRunnerDirectory(summary),
-    ...formatAcceptedCompletionMetrics(summary),
+    ...formatAcceptedProgressMetrics(summary),
     `Run Timeout: ${summary.runTimeoutPolicy}`,
     ...summary.secrets,
     ...summary.agentSessionProfile,
@@ -465,24 +558,24 @@ function formatRunnerDirectory(summary: StatusSummary): string[] {
   ];
 }
 
-function formatAcceptedCompletionMetrics(summary: StatusSummary): string[] {
+function formatAcceptedProgressMetrics(summary: StatusSummary): string[] {
   if (summary.dispatcher !== "online") {
-    return ["Accepted Completion:", "  unavailable (dispatcher offline)"];
+    return ["Accepted Progress:", "  unavailable (dispatcher offline)"];
   }
-  if (summary.acceptedCompletionMetricsError) {
-    return ["Accepted Completion:", `  unavailable: ${summary.acceptedCompletionMetricsError}`];
+  if (summary.acceptedProgressMetricsError) {
+    return ["Accepted Progress:", `  unavailable: ${summary.acceptedProgressMetricsError}`];
   }
-  const metrics = summary.acceptedCompletionMetrics;
+  const metrics = summary.acceptedProgressMetrics;
   if (!metrics) return [];
-  const segment = (label: string, values: AcceptedCompletionMetrics["byRunner"]): string[] => [
+  const segment = (label: string, values: AcceptedProgressMetrics["byRunner"]): string[] => [
     `  ${label}:`,
     ...(values.length
-      ? values.map((value) => `    ${value.id}: ${value.acceptedCompletions}/${value.completedRuns} (${(value.acceptanceRate * 100).toFixed(1)}%)`)
+      ? values.map((value) => `    ${value.id}: runs=${value.runsWithAcceptedProgress}; gate advances=${value.acceptedGateAdvances}; completed runs=${value.completedRuns}`)
       : ["    none"])
   ];
   return [
-    "Accepted Completion:",
-    `  total: ${metrics.acceptedCompletions}/${metrics.completedRuns}`,
+    "Accepted Progress:",
+    `  total: runs=${metrics.runsWithAcceptedProgress}; gate advances=${metrics.acceptedGateAdvances} (${metrics.attributedAcceptedGateAdvances} attributed, ${metrics.unresolvedAcceptedGateAdvances} unresolved); completed runs=${metrics.completedRuns}`,
     ...segment("by runner", metrics.byRunner),
     ...segment("by executor", metrics.byExecutor)
   ];
@@ -959,8 +1052,82 @@ export function formatCompletionExplanation(completion: CompletionExplanation): 
           `    ${escalation.id}: ${escalation.class}/${escalation.state} - ${escalation.summary}`
         )
       : ["    none"]),
-    `  Next action: ${completion.nextAction}`
+    `  Next action: ${completion.nextAction.summary}`
   ];
+}
+
+function workLoopCauseLabel(cause: WorkLoopAttentionItem["completion"]["nextAction"]["causes"][number]): string {
+  if (cause.kind === "completion_gate") {
+    return `gate:${cause.gateId}/${cause.state}/${cause.reasonCode}`;
+  }
+  if (cause.kind === "human_escalation") {
+    return `escalation:${cause.escalationId}/${cause.class}/${cause.audience}`;
+  }
+  if (cause.kind === "material_action") {
+    return `action:${cause.actionId}/${cause.outcome}`;
+  }
+  return `run:${cause.runId}/${cause.conclusion}`;
+}
+
+function workThreadReference(workThread: EnsuredWorkThread): string {
+  const reference = workThread.workItemReference;
+  return `${reference.provider}:${reference.kind}:${reference.externalId}`;
+}
+
+export function formatWorkThreadStatus(summary: WorkThreadStatusSummary): string {
+  const progressLines = summary.acceptedProgress
+    ? [
+        "Accepted Progress:",
+        `  gate advances: ${summary.acceptedProgress.acceptedGateAdvanceCount} (${summary.acceptedProgress.attributedGateAdvanceCount} attributed, ${summary.acceptedProgress.unresolvedGateAdvanceCount} unresolved)`,
+        `  contributing runs: ${summary.acceptedProgress.runIdsWithAcceptedProgress.join(", ") || "none"}`,
+        ...summary.acceptedProgress.advances.map((advance) => advance.resolution.status === "attributed"
+          ? `  ${advance.gateId}: run=${advance.resolution.sourceRunId}; artifact=${advance.resolution.artifactId}; assessment=${advance.assessmentId}`
+          : `  ${advance.gateId}: unresolved=${advance.resolution.reasonCode}; assessment=${advance.assessmentId}`)
+      ]
+    : ["Accepted Progress:", "  unavailable (no current CompletionAssessment attribution)"];
+  return [
+    `Config: ${summary.configPath}`,
+    `Dispatcher: ${summary.dispatcherUrl}`,
+    `WorkThread: ${summary.workThread.id}`,
+    `Work item: ${workThreadReference(summary.workThread)}`,
+    `Control anchor: ${summary.workThread.primaryAnchor.provider}:${summary.workThread.primaryAnchor.kind}:${summary.workThread.primaryAnchor.externalId}`,
+    ...formatCompletionExplanation(summary.completion),
+    `  Action hint: ${summary.completion.nextAction.hint.kind}${summary.completion.nextAction.hint.targetId ? ` target=${summary.completion.nextAction.hint.targetId}` : ""}`,
+    `  Causes: ${summary.completion.nextAction.causes.length ? summary.completion.nextAction.causes.map(workLoopCauseLabel).join(", ") : "none"}`,
+    ...progressLines
+  ].join("\n");
+}
+
+export function workThreadStatusJson(summary: WorkThreadStatusSummary): Record<string, unknown> {
+  return {
+    workThread: summary.workThread,
+    completion: summary.completion,
+    acceptedProgress: summary.acceptedProgress
+  };
+}
+
+export function formatWorkLoopAttentionStatus(summary: WorkLoopAttentionStatusSummary): string {
+  return [
+    `Work loops requiring attention: ${summary.workLoops.length} (scanned ${summary.scanned})`,
+    ...summary.workLoops.flatMap((item) => [
+      `  ${item.workThread.id}: ${item.completion.completion}/${item.completion.execution} ${workThreadReference(item.workThread)}`,
+      `    Next: ${item.completion.nextAction.summary}`,
+      `    Hint: ${item.completion.nextAction.hint.kind}${item.completion.nextAction.hint.targetId ? ` target=${item.completion.nextAction.hint.targetId}` : ""}`,
+      `    Causes: ${item.completion.nextAction.causes.map(workLoopCauseLabel).join(", ") || "none"}`
+    ]),
+    ...(summary.scanLimitReached ? ["  More WorkThreads may exist beyond the bounded scan; narrow by --work-thread when you have an id."] : []),
+    `Config: ${summary.configPath}`,
+    `Dispatcher: ${summary.dispatcherUrl}`
+  ].join("\n");
+}
+
+export function workLoopAttentionStatusJson(summary: WorkLoopAttentionStatusSummary): Record<string, unknown> {
+  return {
+    attention: "required",
+    workLoops: summary.workLoops,
+    scanned: summary.scanned,
+    scanLimitReached: summary.scanLimitReached
+  };
 }
 
 function workstreamNextAction(summary: WorkstreamStatusSummary): string {
@@ -1000,8 +1167,11 @@ export function formatWorkstreamStatus(summary: WorkstreamStatusSummary): string
     `Workstream: ${summary.workstream.id} (${summary.workstream.name})`,
     `State: ${summary.evaluation.status}`,
     `Next action: ${workstreamNextAction(summary)}`,
-    "Accepted Outcomes:",
-    `  work threads: ${metrics.acceptedWorkThreadCount}/${metrics.workThreadCount}`,
+    "Completion Authority:",
+    `  accepted work threads: ${metrics.acceptedWorkThreadCount}/${metrics.workThreadCount}`,
+    "Accepted Progress:",
+    `  gate advances: ${metrics.acceptedGateAdvanceCount} (${metrics.attributedGateAdvanceCount} attributed, ${metrics.unresolvedGateAdvanceCount} unresolved)`,
+    `  contributing runs: ${metrics.runsWithAcceptedProgressCount}`,
     "Budget:",
     `  concurrency: ${metrics.activeRunCount}/${budgets.maxConcurrentRuns}; blocked runs=${metrics.budgetBlockedRunCount}`,
     `  attempts: ${metrics.totalAttempts}; per-run limit=${budgets.maxAttemptsPerRun}; exceeded runs=${metrics.attemptsPerRunExceededCount}`,
@@ -1079,14 +1249,13 @@ export function formatChannelStatus(summary: ChannelStatusSummary): string {
 }
 
 export async function runStatusCommand(options: StatusCommandOptions): Promise<void> {
-  if (options.json && !options.workstream) {
-    throw new Error("Use --json with --workstream.");
+  const selectors = [options.run, options.channel, options.workstream, options.workThread, options.attention ? "attention" : undefined]
+    .filter(Boolean);
+  if (selectors.length > 1) {
+    throw new Error("Use only one of --run, --channel, --workstream, --work-thread, or --attention.");
   }
-  if (options.run && options.channel) {
-    throw new Error("Use either --run or --channel, not both.");
-  }
-  if (options.workstream && (options.run || options.channel)) {
-    throw new Error("Use only one of --run, --channel, or --workstream.");
+  if (options.json && !options.workstream && !options.workThread && !options.attention) {
+    throw new Error("Use --json with --workstream, --work-thread, or --attention.");
   }
   if (options.workstream) {
     const summary = await getWorkstreamStatusSummary({
@@ -1094,6 +1263,23 @@ export async function runStatusCommand(options: StatusCommandOptions): Promise<v
       ...(options.config ? { configPath: options.config } : {})
     });
     console.log(options.json ? JSON.stringify(workstreamStatusJson(summary), null, 2) : formatWorkstreamStatus(summary));
+    return;
+  }
+  if (options.workThread) {
+    const summary = await getWorkThreadStatusSummary({
+      workThreadId: options.workThread,
+      ...(options.config ? { configPath: options.config } : {})
+    });
+    console.log(options.json ? JSON.stringify(workThreadStatusJson(summary), null, 2) : formatWorkThreadStatus(summary));
+    return;
+  }
+  if (options.attention) {
+    const summary = await getWorkLoopAttentionStatusSummary({
+      ...(options.config ? { configPath: options.config } : {})
+    });
+    console.log(options.json
+      ? JSON.stringify(workLoopAttentionStatusJson(summary), null, 2)
+      : formatWorkLoopAttentionStatus(summary));
     return;
   }
   if (options.run) {

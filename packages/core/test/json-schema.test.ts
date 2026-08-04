@@ -11,6 +11,8 @@ describe("OpenTagJsonSchemas", () => {
         }
       }
     });
+    expect(OpenTagJsonSchemas.AcceptedGateAdvance).toHaveProperty("definitions.AcceptedGateAdvance");
+    expect(OpenTagJsonSchemas.AcceptedProgressAttributionView).toHaveProperty("definitions.AcceptedProgressAttributionView");
     expect(OpenTagJsonSchemas.OpenTagRun).toHaveProperty("definitions.OpenTagRun");
     expect(OpenTagJsonSchemas.OpenTagRunResult).toHaveProperty("definitions.OpenTagRunResult");
     expect(OpenTagJsonSchemas.WorkThread).toHaveProperty("definitions.WorkThread");
@@ -21,6 +23,7 @@ describe("OpenTagJsonSchemas", () => {
     expect(OpenTagJsonSchemas.CompletionGateResult).toHaveProperty("definitions.CompletionGateResult");
     expect(OpenTagJsonSchemas.CompletionWaiver).toHaveProperty("definitions.CompletionWaiver");
     expect(OpenTagJsonSchemas.CompletionAssessment).toHaveProperty("definitions.CompletionAssessment");
+    expect(OpenTagJsonSchemas.ReassessmentObligation).toHaveProperty("definitions.ReassessmentObligation");
     expect(OpenTagJsonSchemas.HumanEscalation).toHaveProperty("definitions.HumanEscalation");
     expect(OpenTagJsonSchemas.ContextPacket).toHaveProperty("definitions.ContextPacket");
     expect(OpenTagJsonSchemas.RunAdmissionDecision).toHaveProperty("definitions.RunAdmissionDecision");
@@ -37,9 +40,12 @@ describe("OpenTagJsonSchemas", () => {
     expect(OpenTagJsonSchemas.RunnerRegistration).toHaveProperty("definitions.RunnerRegistration");
     expect(OpenTagJsonSchemas.RunnerDirectoryEntry).toHaveProperty("definitions.RunnerDirectoryEntry");
     expect(OpenTagJsonSchemas.RoutingDecision).toHaveProperty("definitions.RoutingDecision");
-    expect(OpenTagJsonSchemas.AcceptedCompletionMetrics).toHaveProperty("definitions.AcceptedCompletionMetrics");
+    expect(OpenTagJsonSchemas.AcceptedProgressMetrics).toHaveProperty("definitions.AcceptedProgressMetrics");
     expect(OpenTagJsonSchemas.FactoryRecipeSnapshotInput).toHaveProperty("definitions.FactoryRecipeSnapshotInput");
     expect(OpenTagJsonSchemas.FactoryRecipeSnapshot).toHaveProperty("definitions.FactoryRecipeSnapshot");
+    expect(OpenTagJsonSchemas.WorkstreamContinuationPolicy).toHaveProperty("definitions.WorkstreamContinuationPolicy");
+    expect(OpenTagJsonSchemas.WorkstreamContinuationDecisionInput).toHaveProperty("definitions.WorkstreamContinuationDecisionInput");
+    expect(OpenTagJsonSchemas.WorkstreamContinuationDecision).toHaveProperty("definitions.WorkstreamContinuationDecision");
     expect(OpenTagJsonSchemas.WorkstreamInput).toHaveProperty("definitions.WorkstreamInput");
     expect(OpenTagJsonSchemas.Workstream).toHaveProperty("definitions.Workstream");
     expect(OpenTagJsonSchemas.WorkstreamAdmissionBatchInput).toHaveProperty("definitions.WorkstreamAdmissionBatchInput");

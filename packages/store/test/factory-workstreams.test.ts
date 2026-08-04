@@ -108,6 +108,81 @@ describe("factory workstream persistence", () => {
     await expect(repo.createFactoryWorkstream({ id: "workstream", recipeId: "recipe", recipeVersion: 1, workstream: { id: "workstream", name: "changed" }, workThreadIds: ["missing"] })).resolves.toMatchObject({ outcome: "conflict" });
   });
 
+  it("lists the bounded Workstream authority for a WorkThread", async () => {
+    const { repo, workThreadId } = await setupFactory();
+
+    await expect(repo.listFactoryWorkstreamsForWorkThread({ workThreadId })).resolves.toMatchObject([
+      {
+        id: "workstream",
+        recipeId: "recipe",
+        recipeVersion: 1,
+        workstream: { id: "workstream", name: "one" },
+        workThreadIds: [workThreadId]
+      }
+    ]);
+    await expect(repo.listFactoryWorkstreamsForWorkThread({ workThreadId: "missing" })).resolves.toEqual([]);
+  });
+
+  it("atomically rejects a new run while the conversation has any active run", async () => {
+    const { repo } = await setupFactory();
+
+    await expect(repo.createRun({
+      id: "automatic-continuation",
+      event: event("automatic-continuation"),
+      workstreamId: "workstream",
+      rejectIfActiveConversation: true
+    })).rejects.toThrow("ACTIVE_CONVERSATION_RACE:seed-run");
+    await expect(repo.getRun({ runId: "automatic-continuation" })).resolves.toBeNull();
+  });
+
+  it("atomically rejects a run while an automatic Workstream continuation is active", async () => {
+    const { repo } = await setupFactory();
+    await repo.createRun({
+      id: "active-automatic-continuation",
+      event: event("active-automatic-continuation"),
+      triggeredByAction: {
+        kind: "resume_work_thread",
+        metadata: { workstreamContinuation: true }
+      }
+    });
+
+    await expect(repo.createRun({
+      id: "blocked-by-automatic-continuation",
+      event: event("blocked-by-automatic-continuation"),
+      rejectIfAutomaticContinuationActive: true
+    })).rejects.toMatchObject({ activeRunId: "active-automatic-continuation" });
+    await expect(repo.getRun({ runId: "blocked-by-automatic-continuation" })).resolves.toBeNull();
+  });
+
+  it("returns an automatic-continuation source-event replay before applying the active-conversation fence", async () => {
+    const { repo } = fixture();
+    const replayEvent = event("automatic-continuation-replay");
+    const triggeredByAction = {
+      kind: "resume_work_thread" as const,
+      metadata: { workstreamContinuation: true }
+    };
+    const first = await repo.createRun({
+      id: "automatic-continuation-replay",
+      event: replayEvent,
+      triggeredByAction,
+      rejectIfActiveConversation: true
+    });
+    const replay = await repo.createRun({
+      id: "automatic-continuation-replay-retry",
+      event: replayEvent,
+      triggeredByAction,
+      rejectIfActiveConversation: true
+    });
+
+    expect(first).toMatchObject({ created: true, run: { id: "automatic-continuation-replay" } });
+    expect(replay).toMatchObject({
+      created: false,
+      run: { id: "automatic-continuation-replay" },
+      replayDecision: { reasonCode: "duplicate_source_event" }
+    });
+    await expect(repo.getRun({ runId: "automatic-continuation-replay-retry" })).resolves.toBeNull();
+  });
+
   it("resumes expired batches, fences items, and replays completed results", async () => {
     const { repo, workThreadId } = await setupFactory();
     const items = [{ itemId: "item", runId: "run", workThreadId, event: event("batch") }];
@@ -250,6 +325,54 @@ describe("factory workstream persistence", () => {
     await expect(repo.getWorkstreamMetrics({ workstreamId: "workstream" })).resolves.toMatchObject({ acceptedWorkThreadCount: 0 });
     sqlite.prepare("UPDATE work_threads SET current_assessment_id = ? WHERE id = ?").run("assessment-accepted", workThreadId);
     await expect(repo.getWorkstreamMetrics({ workstreamId: "workstream" })).resolves.toMatchObject({ acceptedWorkThreadCount: 1 });
+  });
+
+  it("fails Workstream metrics closed when accepted-progress authority is corrupt", async () => {
+    const { sqlite, repo, workThreadId } = await setupFactory();
+    const assessment = {
+      id: "assessment-broken-lineage",
+      workThreadId,
+      contractId: "contract-broken-lineage",
+      contractVersion: 1,
+      cycle: 1,
+      sequence: 1,
+      supersedesAssessmentId: "assessment-missing",
+      inputDigest: `sha256:${"f".repeat(64)}`,
+      targetBindings: [],
+      state: "pending",
+      evidenceBacked: true,
+      gateResults: [{
+        gateId: "acceptance",
+        state: "passed",
+        evidenceIds: ["evidence-broken-lineage"],
+        reasonCode: "human_acceptance_recorded",
+        reason: "The stored assessment is valid, but its declared predecessor is missing.",
+        evaluatedAt: "2026-07-26T00:00:00.000Z"
+      }],
+      assessedAt: "2026-07-26T00:00:00.000Z",
+      assessedBy: "opentag"
+    };
+    sqlite.prepare(`INSERT INTO completion_assessments
+      (id, work_thread_id, contract_id, contract_version, cycle, sequence, supersedes_assessment_id, input_digest, state, assessment_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        assessment.id,
+        workThreadId,
+        assessment.contractId,
+        assessment.contractVersion,
+        assessment.cycle,
+        assessment.sequence,
+        assessment.supersedesAssessmentId,
+        assessment.inputDigest,
+        assessment.state,
+        JSON.stringify(assessment),
+        assessment.assessedAt
+      );
+    sqlite.prepare("UPDATE work_threads SET current_assessment_id = ? WHERE id = ?")
+      .run(assessment.id, workThreadId);
+
+    await expect(repo.getWorkstreamMetrics({ workstreamId: "workstream" }))
+      .rejects.toThrow(/Accepted progress authority is invalid.*missing predecessor/iu);
   });
 
   it("counts only current unexpired persisted waiver authority", async () => {

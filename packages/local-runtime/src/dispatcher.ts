@@ -61,6 +61,7 @@ export type LocalDispatcherRuntimeInput = {
   githubCallbackToken?: string;
   githubApplyToken?: string | null;
   completionPolicies?: GitHubCompletionPolicy[];
+  reassessmentObligations?: Parameters<typeof createDispatcherApp>[0]["reassessmentObligations"];
   gitlabToken?: string;
   gitlabBaseUrl?: string;
   gitlabWebhookSecret?: string;
@@ -522,6 +523,14 @@ export function dispatcherRuntimeHardeningInputFromEnv(env: NodeJS.ProcessEnv): 
   };
 }
 
+export function reassessmentObligationTestRuntimeInputFromEnv(
+  env: NodeJS.ProcessEnv
+): LocalDispatcherRuntimeInput["reassessmentObligations"] | undefined {
+  return env.OPENTAG_REASSESSMENT_OBLIGATION_TEST_HOLD === "true"
+    ? { autoStart: false, inline: false }
+    : undefined;
+}
+
 export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDispatcherRuntimeInput {
   const port = Number(env.PORT ?? "3030");
   if (!Number.isInteger(port) || port <= 0) {
@@ -603,6 +612,7 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
         ? env.OPENTAG_GITHUB_APPLY_TOKEN
         : undefined;
   const completionPolicies = parseGitHubCompletionPolicies(env.OPENTAG_GITHUB_COMPLETION_POLICIES_JSON);
+  const reassessmentObligations = reassessmentObligationTestRuntimeInputFromEnv(env);
 
   return {
     port,
@@ -616,6 +626,7 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(env.OPENTAG_GITHUB_CALLBACK_TOKEN ? { githubCallbackToken: env.OPENTAG_GITHUB_CALLBACK_TOKEN } : {}),
     ...(githubApplyToken !== undefined ? { githubApplyToken } : {}),
     ...(completionPolicies ? { completionPolicies } : {}),
+    ...(reassessmentObligations ? { reassessmentObligations } : {}),
     ...(env.OPENTAG_GITLAB_TOKEN ? { gitlabToken: env.OPENTAG_GITLAB_TOKEN } : {}),
     ...(env.OPENTAG_GITLAB_BASE_URL ? { gitlabBaseUrl: env.OPENTAG_GITLAB_BASE_URL } : {}),
     ...(env.OPENTAG_GITLAB_WEBHOOK_SECRET ? { gitlabWebhookSecret: env.OPENTAG_GITLAB_WEBHOOK_SECRET } : {}),
@@ -772,11 +783,14 @@ function startTelegramPolling(input: {
 export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispatcherHandle {
   const githubCallbackToken = input.githubCallbackToken ?? input.githubToken;
   const githubApplyToken = input.githubApplyToken === null ? undefined : (input.githubApplyToken ?? input.githubToken);
+  const reassessmentObligations = input.reassessmentObligations
+    ?? reassessmentObligationTestRuntimeInputFromEnv(process.env);
   const backgroundHandles: BackgroundHandle[] = [];
 
   const app = createDispatcherApp({
     databasePath: input.databasePath,
     ...(input.completionPolicies ? { completionPolicies: input.completionPolicies } : {}),
+    ...(reassessmentObligations ? { reassessmentObligations } : {}),
     ...(input.pairingToken ? { pairingToken: input.pairingToken } : {}),
     ...(input.runnerToken ? { runnerToken: input.runnerToken } : {}),
     ...(input.runnerTokens ? { runnerTokens: input.runnerTokens } : {}),
@@ -1269,8 +1283,9 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
   return {
     url: `http://localhost:${input.port}`,
     server,
-    close() {
-      return new Promise<void>((resolve, reject) => {
+    async close() {
+      await app.stopBackgroundWorkers();
+      await new Promise<void>((resolve, reject) => {
         server.closeIdleConnections?.();
         server.close((error?: Error) => {
           if (error) {
@@ -1280,9 +1295,8 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
           resolve();
         });
         server.closeAllConnections?.();
-      }).then(async () => {
-        await Promise.allSettled([...backgroundHandles].reverse().map((handle) => handle.close()));
       });
+      await Promise.allSettled([...backgroundHandles].reverse().map((handle) => handle.close()));
     }
   };
 }

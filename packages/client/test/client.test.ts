@@ -87,7 +87,7 @@ function completionExplanationFixture() {
       missingGateIds: [],
       failedGateIds: [],
       blockedGateIds: [],
-      nextAction: "No action required.",
+      nextAction: { summary: "No action required.", hint: { kind: "none" as const }, causes: [] },
       contractSnapshot: contract,
       assessmentHistory: [assessment],
       evidence: [],
@@ -188,6 +188,7 @@ describe("@opentag/client", () => {
         createdCount: 1,
         idempotentReplayCount: 0,
         followUpQueuedCount: 0,
+        waitActiveRunCount: 0,
         needsHumanDecisionCount: 0,
         rejectedCount: 0,
         exceptionCount: 0,
@@ -215,6 +216,10 @@ describe("@opentag/client", () => {
       workstreamId: workstream.id,
       workThreadCount: 1,
       acceptedWorkThreadCount: 1,
+      acceptedGateAdvanceCount: 1,
+      attributedGateAdvanceCount: 1,
+      unresolvedGateAdvanceCount: 0,
+      runsWithAcceptedProgressCount: 1,
       runCount: 1,
       queuedRunCount: 0,
       activeRunCount: 0,
@@ -382,9 +387,12 @@ describe("@opentag/client", () => {
         return jsonResponse({
           metrics: {
             completedRuns: 2,
-            acceptedCompletions: 1,
-            byRunner: [{ id: "runner_private", completedRuns: 2, acceptedCompletions: 1, acceptanceRate: 0.5 }],
-            byExecutor: [{ id: "codex", completedRuns: 2, acceptedCompletions: 1, acceptanceRate: 0.5 }]
+            runsWithAcceptedProgress: 1,
+            acceptedGateAdvances: 2,
+            attributedAcceptedGateAdvances: 1,
+            unresolvedAcceptedGateAdvances: 1,
+            byRunner: [{ id: "runner_private", completedRuns: 2, runsWithAcceptedProgress: 1, acceptedGateAdvances: 1 }],
+            byExecutor: [{ id: "codex", completedRuns: 2, runsWithAcceptedProgress: 1, acceptedGateAdvances: 1 }]
           }
         });
       }
@@ -401,14 +409,14 @@ describe("@opentag/client", () => {
     await expect(client.listRunners()).resolves.toMatchObject({
       runners: [{ runnerId: "runner_private", readiness: { state: "ready" }, capacity: { active: 1, limit: 2 } }]
     });
-    await expect(client.getAcceptedCompletionMetrics()).resolves.toMatchObject({
-      metrics: { completedRuns: 2, acceptedCompletions: 1, byExecutor: [{ id: "codex", acceptanceRate: 0.5 }] }
+    await expect(client.getAcceptedProgressMetrics()).resolves.toMatchObject({
+      metrics: { completedRuns: 2, runsWithAcceptedProgress: 1, byExecutor: [{ id: "codex", acceptedGateAdvances: 1 }] }
     });
 
     expect(requests.map((request) => request.url)).toEqual([
       "http://dispatcher.test/v1/runners",
       "http://dispatcher.test/v1/runners",
-      "http://dispatcher.test/v1/routing/accepted-completion-metrics"
+      "http://dispatcher.test/v1/routing/accepted-progress-metrics"
     ]);
     expect(JSON.parse(String(requests[0]?.init?.body))).toMatchObject({
       runnerId: "runner_private",
@@ -465,6 +473,70 @@ describe("@opentag/client", () => {
       reason: fixture.waiver.reason,
       gateIds: ["pull_request"]
     });
+  });
+
+  it("reads one governed WorkThread and a bounded work-loop attention view", async () => {
+    const fixture = completionExplanationFixture();
+    const workThread = {
+      id: "thread-client-1",
+      workItemReference: {
+        provider: "github",
+        kind: "issue",
+        externalId: "acme/demo#1",
+        uri: "https://github.com/acme/demo/issues/1"
+      },
+      primaryAnchor: {
+        provider: "github",
+        kind: "github_thread",
+        externalId: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        controlPlane: true,
+        canApprove: true
+      }
+    };
+    const requests: string[] = [];
+    const acceptedProgress = {
+      workThreadId: workThread.id,
+      contract: { id: "contract_client_1", version: 1, cycle: 1 },
+      currentAssessmentId: "assessment_client_1",
+      advances: [],
+      acceptedGateAdvanceCount: 0,
+      attributedGateAdvanceCount: 0,
+      unresolvedGateAdvanceCount: 0,
+      runIdsWithAcceptedProgress: []
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url) => {
+        const href = String(url);
+        requests.push(href);
+        if (href.endsWith("/v1/work-threads/thread-client-1/completion")) {
+          return jsonResponse({ workThread, completion: fixture.completion, acceptedProgress });
+        }
+        if (href.endsWith("/v1/work-loops?attention=required&limit=10")) {
+          return jsonResponse({ attention: "required", workLoops: [], scanned: 1, scanLimitReached: false });
+        }
+        return jsonResponse({ error: "unexpected_url" }, 500);
+      }
+    });
+
+    await expect(client.getWorkThreadCompletion({ workThreadId: workThread.id })).resolves.toMatchObject({
+      workThread: { id: workThread.id },
+      completion: { completion: "waived", nextAction: { hint: { kind: "none" } } },
+      acceptedProgress: { currentAssessmentId: "assessment_client_1", acceptedGateAdvanceCount: 0 }
+    });
+    await expect(client.listWorkLoopsRequiringAttention({ limit: 10 })).resolves.toEqual({
+      attention: "required",
+      workLoops: [],
+      scanned: 1,
+      scanLimitReached: false
+    });
+    expect(requests).toEqual([
+      "http://dispatcher.test/v1/work-threads/thread-client-1/completion",
+      "http://dispatcher.test/v1/work-loops?attention=required&limit=10"
+    ]);
+    await expect(client.listWorkLoopsRequiringAttention({ limit: 0 })).rejects.toThrow("integer from 1 to 100");
   });
 
   it("lists, acknowledges, and resolves attributed human escalations", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   FactoryRecipeBudgetSchema,
   FactoryRecipeSnapshotInputSchema,
+  WorkstreamContinuationPolicySchema,
   WorkstreamAdmissionBatchInputSchema,
   WorkstreamAdmissionBatchReceiptSchema,
   WorkstreamAdmissionBatchResultSchema,
@@ -38,6 +39,33 @@ describe("factory contracts", () => {
     expect(() => FactoryRecipeBudgetSchema.parse({ ...budgets, maxCostUnits: 4, costUnitsPerAttempt: 5 })).toThrow(/cannot exceed/u);
     expect(() => FactoryRecipeBudgetSchema.parse({ ...budgets, allowedLocalities: ["local", "local"] })).toThrow(/unique/u);
     expect(() => FactoryRecipeBudgetSchema.parse({ ...budgets, unknown: true })).toThrow();
+  });
+
+  it("keeps automatic continuation explicit, bounded, and versioned with the recipe", () => {
+    const policy = {
+      mode: "evidence_driven" as const,
+      triggers: ["completion_evidence_changed", "human_escalation_resolved"] as const,
+      maxContinuationsPerWorkThread: 3,
+      minIntervalSeconds: 60,
+      backoff: { initialSeconds: 30, maxSeconds: 300 }
+    };
+    expect(FactoryRecipeSnapshotInputSchema.parse({
+      id: "recipe_continuation",
+      version: 2,
+      name: "Governed continuation",
+      continuation: policy,
+      budgets
+    }).continuation).toEqual(policy);
+    expect(WorkstreamContinuationPolicySchema.parse({ mode: "manual" })).toEqual({ mode: "manual" });
+    expect(() => WorkstreamContinuationPolicySchema.parse({
+      ...policy,
+      triggers: ["completion_evidence_changed", "completion_evidence_changed"]
+    })).toThrow(/unique/u);
+    expect(() => WorkstreamContinuationPolicySchema.parse({
+      ...policy,
+      backoff: { initialSeconds: 60, maxSeconds: 30 }
+    })).toThrow(/cannot be less/u);
+    expect(() => WorkstreamContinuationPolicySchema.parse({ mode: "manual", triggers: policy.triggers })).toThrow();
   });
 
   it("accepts only unique WorkThread members", () => {
@@ -91,6 +119,7 @@ describe("factory contracts", () => {
       createdCount: 0,
       idempotentReplayCount: 0,
       followUpQueuedCount: 0,
+      waitActiveRunCount: 0,
       needsHumanDecisionCount: 12,
       rejectedCount: 0,
       exceptionCount: 12,
@@ -140,6 +169,7 @@ describe("factory contracts", () => {
       createdCount: 1,
       idempotentReplayCount: 0,
       followUpQueuedCount: 0,
+      waitActiveRunCount: 0,
       needsHumanDecisionCount: 0,
       rejectedCount: 0,
       exceptionCount: 0,
@@ -218,11 +248,53 @@ describe("factory contracts", () => {
     }).success).toBe(false);
   });
 
+  it("preserves wait-active-run as a non-exceptional durable batch outcome", () => {
+    const result = WorkstreamAdmissionBatchResultSchema.parse({
+      batchId: "batch_wait",
+      workstreamId: "workstream_1",
+      inputDigest: `sha256:${"b".repeat(64)}`,
+      results: [{
+        itemId: "item_wait",
+        index: 0,
+        runId: "run_wait",
+        status: "wait_active_run",
+        statusCode: 202,
+        reasonCode: "active_run_same_thread",
+        admittedRunId: "run_active"
+      }],
+      summary: {
+        totalItems: 1,
+        createdCount: 0,
+        idempotentReplayCount: 0,
+        followUpQueuedCount: 0,
+        waitActiveRunCount: 1,
+        needsHumanDecisionCount: 0,
+        rejectedCount: 0,
+        exceptionCount: 0,
+        exceptions: [],
+        omittedExceptionCount: 0
+      },
+      completedAt: "2026-07-26T00:01:00.000Z"
+    });
+
+    expect(result.results[0]?.status).toBe("wait_active_run");
+    expect(result.summary).toMatchObject({
+      waitActiveRunCount: 1,
+      rejectedCount: 0,
+      exceptionCount: 0,
+      exceptions: []
+    });
+  });
+
   it("validates WorkThread authority, run breakdown, cost, and locality dimensions", () => {
     const metrics = {
       workstreamId: "workstream_1",
       workThreadCount: 2,
       acceptedWorkThreadCount: 1,
+      acceptedGateAdvanceCount: 2,
+      attributedGateAdvanceCount: 1,
+      unresolvedGateAdvanceCount: 1,
+      runsWithAcceptedProgressCount: 1,
       runCount: 3,
       queuedRunCount: 1,
       activeRunCount: 1,
@@ -238,6 +310,8 @@ describe("factory contracts", () => {
     };
     expect(WorkstreamMetricsSchema.parse(metrics).acceptedWorkThreadCount).toBe(1);
     expect(() => WorkstreamMetricsSchema.parse({ ...metrics, acceptedWorkThreadCount: 3 })).toThrow(/workThreadCount/u);
+    expect(() => WorkstreamMetricsSchema.parse({ ...metrics, acceptedGateAdvanceCount: 3 })).toThrow(/gate advances/u);
+    expect(() => WorkstreamMetricsSchema.parse({ ...metrics, runsWithAcceptedProgressCount: 2 })).toThrow(/attributedGateAdvanceCount/u);
     expect(() => WorkstreamMetricsSchema.parse({ ...metrics, queuedRunCount: 2 })).toThrow(/Run status counts/u);
     expect(() => WorkstreamMetricsSchema.parse({ ...metrics, attemptsByLocality: { local: 1, private: 0, hosted: 0, unknown: 0 } })).toThrow(/totalAttempts/u);
   });

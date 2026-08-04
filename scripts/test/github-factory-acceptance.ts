@@ -96,6 +96,31 @@ export type GitHubFactoryAcceptanceEvidence = {
     afterMerge: JsonObject;
     afterRestart: JsonObject;
   };
+  acceptedProgress: {
+    beforeProviderEvidence: JsonObject;
+    afterMerge: JsonObject;
+    afterRestart: JsonObject;
+  };
+  reassessmentObligation: {
+    sourceKind: "verification_evidence_attached";
+    sourceId: string;
+    sourceDigest: string;
+    beforeCrash: {
+      state: "pending";
+      assessmentId: null;
+      assessmentCount: number;
+      evidenceRecordCount: number;
+    };
+    afterRestart: {
+      state: "satisfied";
+      attemptCount: number;
+      satisfiedAssessmentId: string;
+      assessmentCount: number;
+      evidenceRecordCount: number;
+    };
+    afterSecondRestartAssessmentCount: number;
+    matchingCount: number;
+  };
   assessmentCount: number;
   sourceReceipt: {
     matchedPhrase: string;
@@ -116,9 +141,9 @@ export type GitHubFactoryAcceptanceEvidence = {
 
 export type GitHubFactoryAcceptanceReport = Omit<
   GitHubFactoryAcceptanceEvidence,
-  "factory" | "completion" | "metrics"
+  "factory" | "completion" | "metrics" | "acceptedProgress"
 > & {
-  schemaVersion: 1;
+  schemaVersion: 2;
   case: "github-factory-live";
   factory: Omit<GitHubFactoryAcceptanceEvidence["factory"], "batch"> & {
     batch: Omit<GitHubFactoryAcceptanceEvidence["factory"]["batch"], "initialReceipt" | "replayedReceipt"> & {
@@ -129,6 +154,7 @@ export type GitHubFactoryAcceptanceReport = Omit<
   };
   completion: GitHubFactoryAcceptanceEvidence["completion"];
   metrics: GitHubFactoryAcceptanceEvidence["metrics"];
+  acceptedProgress: GitHubFactoryAcceptanceEvidence["acceptedProgress"];
   assertions: {
     externalPlanningSystemRemainedAuthoritative: true;
     factoryBatchCreatedAttributedRun: true;
@@ -138,10 +164,19 @@ export type GitHubFactoryAcceptanceReport = Omit<
     requiredCheckDidNotBypassMerge: true;
     providerVerifiedMergeSatisfiedContract: true;
     acceptedOutcomeAdvancedAuthoritatively: true;
+    acceptedProgressAttributedToAttempt: true;
     restartPreservedSatisfiedAssessment: true;
+    restartPreservedAcceptedProgress: true;
     restartPreservedWorkstreamMetrics: true;
     restartReplayedExactBatchReceipt: true;
     restartDidNotDuplicateFinalReceipt: true;
+    providerFactAndObligationCommittedTogether: true;
+    crashOccurredBeforeReassessment: true;
+    restartClaimedPendingObligation: true;
+    restartSatisfiedObligationWithCurrentAssessment: true;
+    providerDeliveryWasNotReplayed: true;
+    restartDidNotDuplicateAssessmentTransition: true;
+    acceptedProgressRemainedAuthoritative: true;
   };
   excludedScope: ["dag", "operator_console"];
 };
@@ -197,6 +232,86 @@ function gateState(snapshot: JsonObject, gateId: string): string | undefined {
   return undefined;
 }
 
+function assessmentAuthority(assessment: JsonObject): JsonObject {
+  const targetBindings = assessment["targetBindings"];
+  const gateResults = assessment["gateResults"];
+  if (!Array.isArray(targetBindings) || !Array.isArray(gateResults)) {
+    throw new Error("completion assessment authority requires target bindings and gate results.");
+  }
+  return {
+    workThreadId: assessment["workThreadId"],
+    triggeredByRunId: assessment["triggeredByRunId"],
+    contractId: assessment["contractId"],
+    contractVersion: assessment["contractVersion"],
+    cycle: assessment["cycle"],
+    state: assessment["state"],
+    evidenceBacked: assessment["evidenceBacked"],
+    acceptedAt: assessment["acceptedAt"],
+    targetBindings,
+    gateResults: gateResults.map((value) => {
+      const gate = object(value, "completion gate result");
+      return {
+        gateId: gate["gateId"],
+        targetKey: gate["targetKey"],
+        state: gate["state"],
+        reasonCode: gate["reasonCode"]
+      };
+    })
+  };
+}
+
+function sameDurableAssessment(left: JsonObject, right: JsonObject): boolean {
+  return left["id"] === right["id"]
+    && left["sequence"] === right["sequence"]
+    && left["supersedesAssessmentId"] === right["supersedesAssessmentId"]
+    && left["inputDigest"] === right["inputDigest"]
+    && left["assessedAt"] === right["assessedAt"]
+    && left["assessedBy"] === right["assessedBy"]
+    && isDeepStrictEqual(assessmentAuthority(left), assessmentAuthority(right));
+}
+
+function restartPreservedSatisfiedAssessment(
+  mergedAssessment: JsonObject,
+  restartedAssessment: JsonObject,
+  restartedSnapshot: JsonObject
+): boolean {
+  if (isDeepStrictEqual(mergedAssessment, restartedAssessment)) return true;
+
+  const mergedId = string(mergedAssessment["id"], "merged completion assessment id");
+  const restartedId = string(restartedAssessment["id"], "restarted completion assessment id");
+  const mergedSequence = number(mergedAssessment["sequence"], "merged completion assessment sequence");
+  const restartedSequence = number(restartedAssessment["sequence"], "restarted completion assessment sequence");
+  if (restartedSequence <= mergedSequence) return false;
+
+  const history = restartedSnapshot["assessmentHistory"];
+  if (!Array.isArray(history)) return false;
+  const assessments = history.map((value) => object(value, "completion assessment history entry"));
+  const assessmentIds = assessments.map((assessment) => string(assessment["id"], "completion assessment history id"));
+  if (new Set(assessmentIds).size !== assessmentIds.length) return false;
+  const mergedIndex = assessments.findIndex((assessment) => assessment["id"] === mergedId);
+  const restartedHistoryAssessment = assessments.at(-1);
+  if (
+    mergedIndex < 0
+    || !sameDurableAssessment(assessments[mergedIndex]!, mergedAssessment)
+    || restartedHistoryAssessment?.["id"] !== restartedId
+    || !sameDurableAssessment(restartedHistoryAssessment, restartedAssessment)
+    || restartedAssessment["state"] !== "satisfied"
+    || restartedAssessment["evidenceBacked"] !== true
+  ) return false;
+
+  const authority = assessmentAuthority(mergedAssessment);
+  let previous = mergedAssessment;
+  for (const assessment of assessments.slice(mergedIndex + 1)) {
+    if (assessment["supersedesAssessmentId"] !== previous["id"]) return false;
+    if (number(assessment["sequence"], "completion assessment sequence") !== number(previous["sequence"], "completion assessment sequence") + 1) {
+      return false;
+    }
+    if (!isDeepStrictEqual(assessmentAuthority(assessment), authority)) return false;
+    previous = assessment;
+  }
+  return previous["id"] === restartedId;
+}
+
 function receiptBody(receipt: JsonObject): JsonObject {
   return object(receipt["receipt"] ?? receipt, "batch receipt");
 }
@@ -223,6 +338,41 @@ function metrics(snapshot: JsonObject): JsonObject {
 
 function metric(snapshot: JsonObject, field: string): number {
   return number(metrics(snapshot)[field], `workstream metric ${field}`);
+}
+
+function acceptedProgressMetrics(snapshot: JsonObject): JsonObject {
+  return object(snapshot["metrics"] ?? snapshot, "accepted progress metrics");
+}
+
+function acceptedProgressMetric(snapshot: JsonObject, field: string): number {
+  return number(acceptedProgressMetrics(snapshot)[field], `accepted progress metric ${field}`);
+}
+
+function acceptedProgressSegment(snapshot: JsonObject, dimension: "byRunner" | "byExecutor", id: string): JsonObject | undefined {
+  const values = acceptedProgressMetrics(snapshot)[dimension];
+  if (!Array.isArray(values)) throw new Error(`accepted progress ${dimension} must be an array.`);
+  const matches = values
+    .map((value) => object(value, `accepted progress ${dimension} segment`))
+    .filter((segment) => segment["id"] === id);
+  if (matches.length > 1) throw new Error(`accepted progress ${dimension} contains duplicate ${id} segments.`);
+  return matches[0];
+}
+
+function acceptedProgressProof(snapshot: JsonObject, runnerId: string, executorId: string): JsonObject {
+  const snapshotMetrics = acceptedProgressMetrics(snapshot);
+  const runner = acceptedProgressSegment(snapshot, "byRunner", runnerId);
+  const executor = acceptedProgressSegment(snapshot, "byExecutor", executorId);
+  return {
+    metrics: {
+      completedRuns: snapshotMetrics["completedRuns"],
+      runsWithAcceptedProgress: snapshotMetrics["runsWithAcceptedProgress"],
+      acceptedGateAdvances: snapshotMetrics["acceptedGateAdvances"],
+      attributedAcceptedGateAdvances: snapshotMetrics["attributedAcceptedGateAdvances"],
+      unresolvedAcceptedGateAdvances: snapshotMetrics["unresolvedAcceptedGateAdvances"],
+      byRunner: runner ? [runner] : [],
+      byExecutor: executor ? [executor] : []
+    }
+  };
 }
 
 function invariant(condition: unknown, message: string): asserts condition {
@@ -319,12 +469,54 @@ export function buildGitHubFactoryAcceptanceReport(
   const restartedCompletion = completionState(evidence.completion.afterRestart);
   const mergedAssessment = currentAssessment(evidence.completion.afterMerge);
   const restartedAssessment = currentAssessment(evidence.completion.afterRestart);
+  const obligation = evidence.reassessmentObligation;
   const beforeTerminal = metric(evidence.metrics.beforeProviderEvidence, "terminalRunCount");
   const beforeAccepted = metric(evidence.metrics.beforeProviderEvidence, "acceptedWorkThreadCount");
   const mergedTerminal = metric(evidence.metrics.afterMerge, "terminalRunCount");
   const mergedAccepted = metric(evidence.metrics.afterMerge, "acceptedWorkThreadCount");
   const restartedTerminal = metric(evidence.metrics.afterRestart, "terminalRunCount");
   const restartedAccepted = metric(evidence.metrics.afterRestart, "acceptedWorkThreadCount");
+  const beforeWorkstreamGateAdvances = metric(evidence.metrics.beforeProviderEvidence, "acceptedGateAdvanceCount");
+  const mergedWorkstreamGateAdvances = metric(evidence.metrics.afterMerge, "acceptedGateAdvanceCount");
+  const restartedWorkstreamGateAdvances = metric(evidence.metrics.afterRestart, "acceptedGateAdvanceCount");
+  const beforeAcceptedGateAdvances = acceptedProgressMetric(evidence.acceptedProgress.beforeProviderEvidence, "acceptedGateAdvances");
+  const mergedAcceptedGateAdvances = acceptedProgressMetric(evidence.acceptedProgress.afterMerge, "acceptedGateAdvances");
+  const restartedAcceptedGateAdvances = acceptedProgressMetric(evidence.acceptedProgress.afterRestart, "acceptedGateAdvances");
+  const mergedAttributedGateAdvances = acceptedProgressMetric(
+    evidence.acceptedProgress.afterMerge,
+    "attributedAcceptedGateAdvances"
+  );
+  const mergedUnresolvedGateAdvances = acceptedProgressMetric(
+    evidence.acceptedProgress.afterMerge,
+    "unresolvedAcceptedGateAdvances"
+  );
+  const runnerAcceptedProgress = acceptedProgressSegment(
+    evidence.acceptedProgress.afterMerge,
+    "byRunner",
+    evidence.attempt.runnerId
+  );
+  const executorAcceptedProgress = acceptedProgressSegment(
+    evidence.acceptedProgress.afterMerge,
+    "byExecutor",
+    evidence.attempt.executorId
+  );
+  const acceptedProgress = {
+    beforeProviderEvidence: acceptedProgressProof(
+      evidence.acceptedProgress.beforeProviderEvidence,
+      evidence.attempt.runnerId,
+      evidence.attempt.executorId
+    ),
+    afterMerge: acceptedProgressProof(
+      evidence.acceptedProgress.afterMerge,
+      evidence.attempt.runnerId,
+      evidence.attempt.executorId
+    ),
+    afterRestart: acceptedProgressProof(
+      evidence.acceptedProgress.afterRestart,
+      evidence.attempt.runnerId,
+      evidence.attempt.executorId
+    )
+  };
 
   invariant(evidence.source.issueUrl.includes("github.com/"), "source work item is not a GitHub issue URL");
   invariant(evidence.source.mentionUrl.includes("#issuecomment-"), "source mention is not a GitHub issue comment");
@@ -352,16 +544,71 @@ export function buildGitHubFactoryAcceptanceReport(
   invariant(evidence.requiredCheck.headSha === evidence.pullRequest.headRefOid, "required check is not bound to the PR head");
   invariant(evidence.requiredCheck.state === "success", `required check state is ${evidence.requiredCheck.state}`);
   invariant(evidence.pullRequest.state.toUpperCase() === "MERGED" && Boolean(evidence.pullRequest.mergedAt), "pull request is not provider-verified merged");
+  invariant(obligation.sourceKind === "verification_evidence_attached", "crash proof is not bound to attached verification evidence");
+  invariant(obligation.sourceId.length > 0, "reassessment obligation source identity is missing");
+  invariant(/^sha256:[0-9a-f]{64}$/u.test(obligation.sourceDigest), "reassessment obligation source digest is invalid");
+  invariant(obligation.beforeCrash.state === "pending", "reassessment obligation was not pending before the crash");
+  invariant(obligation.beforeCrash.assessmentId === null, "provider evidence was already assessed before the claimed crash");
+  invariant(obligation.beforeCrash.assessmentCount > 0, "no pre-crash assessment lineage was retained");
+  invariant(obligation.beforeCrash.evidenceRecordCount > 0, "provider evidence was not committed before the crash");
+  invariant(obligation.afterRestart.state === "satisfied", "reassessment obligation remained pending after restart");
+  invariant(obligation.afterRestart.attemptCount >= 1, "restart did not claim the pending reassessment obligation");
+  invariant(
+    obligation.afterRestart.satisfiedAssessmentId === mergedAssessment["id"],
+    "reassessment obligation is linked to the wrong current assessment"
+  );
+  invariant(obligation.matchingCount === 1, "provider delivery produced a duplicate reassessment obligation");
+  invariant(
+    obligation.beforeCrash.evidenceRecordCount === obligation.afterRestart.evidenceRecordCount,
+    "provider evidence was replayed while recovering the obligation"
+  );
+  invariant(
+    obligation.afterRestart.assessmentCount === obligation.afterSecondRestartAssessmentCount,
+    "second restart duplicated the assessment transition"
+  );
+  invariant(
+    obligation.afterRestart.assessmentCount >= obligation.beforeCrash.assessmentCount
+      && evidence.assessmentCount === obligation.afterSecondRestartAssessmentCount,
+    "retained assessment counts do not match the crash/restart sequence"
+  );
   invariant(mergedCompletion === "satisfied", "merge did not satisfy completion");
   invariant(gateState(evidence.completion.afterMerge, "merge") === "passed", "merge gate did not pass");
   invariant(restartedCompletion === "satisfied", "restart lost the satisfied completion state");
   invariant(
-    isDeepStrictEqual(mergedAssessment, restartedAssessment),
+    restartPreservedSatisfiedAssessment(mergedAssessment, restartedAssessment, evidence.completion.afterRestart),
     "restart changed the durable satisfied completion assessment"
   );
   invariant(evidence.assessmentCount > 0, "no durable CompletionAssessment was recorded");
   invariant(beforeTerminal === 1 && mergedTerminal === 1 && restartedTerminal === 1, "terminal Run authority changed across provider evidence or restart");
   invariant(beforeAccepted === 0 && mergedAccepted === 1 && restartedAccepted === 1, "accepted outcome did not advance 0 -> 1 and remain authoritative");
+  invariant(
+    beforeWorkstreamGateAdvances === 1 && mergedWorkstreamGateAdvances === 5 && restartedWorkstreamGateAdvances === 5,
+    "workstream accepted gate advances did not move 1 -> 5 and remain stable"
+  );
+  invariant(
+    beforeAcceptedGateAdvances === 1 && mergedAcceptedGateAdvances === 5 && restartedAcceptedGateAdvances === 5,
+    "provider-live accepted progress did not move 1 -> 5 and remain stable"
+  );
+  invariant(
+    mergedAttributedGateAdvances === mergedAcceptedGateAdvances && mergedUnresolvedGateAdvances === 0,
+    "provider-live accepted progress was not fully attributed"
+  );
+  invariant(
+    runnerAcceptedProgress?.["completedRuns"] === 1
+      && runnerAcceptedProgress["runsWithAcceptedProgress"] === 1
+      && runnerAcceptedProgress["acceptedGateAdvances"] === mergedAcceptedGateAdvances,
+    "Attempt runner did not receive accepted progress"
+  );
+  invariant(
+    executorAcceptedProgress?.["completedRuns"] === 1
+      && executorAcceptedProgress["runsWithAcceptedProgress"] === 1
+      && executorAcceptedProgress["acceptedGateAdvances"] === mergedAcceptedGateAdvances,
+    "Attempt executor did not receive accepted progress"
+  );
+  invariant(
+    isDeepStrictEqual(acceptedProgress.afterMerge, acceptedProgress.afterRestart),
+    "restart changed accepted progress attribution"
+  );
   invariant(isDeepStrictEqual(evidence.metrics.afterMerge, evidence.metrics.afterRestart), "restart changed authoritative workstream metrics");
   invariant(evidence.sourceReceipt.matchedPhrase.length > 0, "source-thread completion receipt was not observed");
   invariant(evidence.sourceReceipt.beforeRestart.bodyDigest.startsWith("sha256:"), "source-thread receipt digest is missing before restart");
@@ -374,7 +621,7 @@ export function buildGitHubFactoryAcceptanceReport(
   );
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     case: "github-factory-live",
     recordedAt: evidence.recordedAt,
     repository: evidence.repository,
@@ -399,6 +646,8 @@ export function buildGitHubFactoryAcceptanceReport(
     requiredCheck: evidence.requiredCheck,
     completion: evidence.completion,
     metrics: evidence.metrics,
+    acceptedProgress,
+    reassessmentObligation: evidence.reassessmentObligation,
     assessmentCount: evidence.assessmentCount,
     sourceReceipt: evidence.sourceReceipt,
     assertions: {
@@ -410,10 +659,19 @@ export function buildGitHubFactoryAcceptanceReport(
       requiredCheckDidNotBypassMerge: true,
       providerVerifiedMergeSatisfiedContract: true,
       acceptedOutcomeAdvancedAuthoritatively: true,
+      acceptedProgressAttributedToAttempt: true,
       restartPreservedSatisfiedAssessment: true,
+      restartPreservedAcceptedProgress: true,
       restartPreservedWorkstreamMetrics: true,
       restartReplayedExactBatchReceipt: true,
-      restartDidNotDuplicateFinalReceipt: true
+      restartDidNotDuplicateFinalReceipt: true,
+      providerFactAndObligationCommittedTogether: true,
+      crashOccurredBeforeReassessment: true,
+      restartClaimedPendingObligation: true,
+      restartSatisfiedObligationWithCurrentAssessment: true,
+      providerDeliveryWasNotReplayed: true,
+      restartDidNotDuplicateAssessmentTransition: true,
+      acceptedProgressRemainedAuthoritative: true
     },
     excludedScope: ["dag", "operator_console"]
   };

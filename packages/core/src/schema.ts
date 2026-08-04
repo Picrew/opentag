@@ -465,6 +465,7 @@ export const WorkThreadSchema = z.object({
 
 export const RunAdmissionActionSchema = z.enum([
   "start",
+  "wait",
   "drop_duplicate",
   "queue_follow_up",
   "attach_to_active_run",
@@ -594,6 +595,10 @@ export const ActionHintSchema = z.object({
     "link_to_work_item",
     "request_review",
     "create_pull_request",
+    "refresh_completion_evidence",
+    "reconcile_material_action",
+    "resume_work_thread",
+    "reassess_completion",
     "none"
   ]),
   targetId: z.string().min(1).optional(),
@@ -899,6 +904,157 @@ export const CompletionAssessmentSchema = z
     }
   });
 
+export const ReassessmentObligationSourceKindSchema = z.enum([
+  "run_result_recorded",
+  "verification_evidence_attached",
+  "material_action_receipt_recorded",
+  "material_action_reconciled",
+  "human_escalation_changed",
+  "completion_waiver_changed",
+  "continuation_not_before"
+]);
+
+export const ReassessmentObligationStateSchema = z.enum([
+  "pending",
+  "leased",
+  "satisfied",
+  "blocked"
+]);
+
+export const ReassessmentObligationReasonCodeSchema = z.enum([
+  "assessment_satisfied",
+  "continuation_dispatched",
+  "continuation_terminal",
+  "continuation_deferred",
+  "source_missing",
+  "authority_missing",
+  "reassessment_failed",
+  "needs_human"
+]);
+
+const ReassessmentPendingReasonCodes = new Set([
+  "continuation_deferred",
+  "reassessment_failed"
+]);
+const ReassessmentSatisfiedReasonCodes = new Set([
+  "assessment_satisfied",
+  "continuation_dispatched",
+  "continuation_terminal"
+]);
+const ReassessmentBlockedReasonCodes = new Set([
+  "source_missing",
+  "authority_missing",
+  "needs_human"
+]);
+
+export const ReassessmentObligationSchema = z
+  .object({
+    id: z.string().min(1),
+    workThreadId: z.string().min(1),
+    sourceKind: ReassessmentObligationSourceKindSchema,
+    sourceId: z.string().min(1),
+    sourceDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+    notBefore: z.string().datetime(),
+    state: ReassessmentObligationStateSchema,
+    leaseOwner: z.string().min(1).optional(),
+    leaseExpiresAt: z.string().datetime().optional(),
+    leaseToken: z.string().min(1).optional(),
+    attemptCount: z.number().int().nonnegative(),
+    lastReasonCode: ReassessmentObligationReasonCodeSchema.optional(),
+    lastError: z.string().min(1).max(4096).optional(),
+    satisfiedAssessmentId: z.string().min(1).optional(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime()
+  })
+  .strict()
+  .superRefine((obligation, ctx) => {
+    const activeLeaseFields = [obligation.leaseOwner, obligation.leaseExpiresAt, obligation.leaseToken];
+    if (obligation.state === "leased") {
+      if (activeLeaseFields.some((field) => !field)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "A leased reassessment obligation requires lease owner, expiry, and fencing token.",
+          path: ["leaseToken"]
+        });
+      }
+      if (obligation.attemptCount < 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "A leased reassessment obligation must record at least one attempt.",
+          path: ["attemptCount"]
+        });
+      }
+    } else if (activeLeaseFields.some((field) => field !== undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Active lease fields are allowed only while a reassessment obligation is leased.",
+        path: ["leaseOwner"]
+      });
+    }
+
+    if (obligation.satisfiedAssessmentId && obligation.state !== "satisfied") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Only a satisfied reassessment obligation may reference a satisfying assessment.",
+        path: ["satisfiedAssessmentId"]
+      });
+    }
+    if (obligation.state === "satisfied" && !obligation.lastReasonCode) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A satisfied reassessment obligation requires a terminal reason.",
+        path: ["lastReasonCode"]
+      });
+    }
+    if (obligation.state === "blocked" && !obligation.lastReasonCode) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A blocked reassessment obligation requires a terminal reason.",
+        path: ["lastReasonCode"]
+      });
+    }
+    if (obligation.lastReasonCode === "assessment_satisfied" && !obligation.satisfiedAssessmentId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "An assessment-backed satisfaction requires its assessment id.",
+        path: ["satisfiedAssessmentId"]
+      });
+    }
+    if (
+      obligation.state === "pending"
+      && obligation.lastReasonCode
+      && !ReassessmentPendingReasonCodes.has(obligation.lastReasonCode)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "The pending obligation reason must describe deferral or a retryable reassessment failure.",
+        path: ["lastReasonCode"]
+      });
+    }
+    if (
+      obligation.state === "satisfied"
+      && obligation.lastReasonCode
+      && !ReassessmentSatisfiedReasonCodes.has(obligation.lastReasonCode)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "The satisfied obligation reason must describe completed governance delivery.",
+        path: ["lastReasonCode"]
+      });
+    }
+    if (
+      obligation.state === "blocked"
+      && obligation.lastReasonCode
+      && !ReassessmentBlockedReasonCodes.has(obligation.lastReasonCode)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "The blocked obligation reason must describe missing authority or required human action.",
+        path: ["lastReasonCode"]
+      });
+    }
+  });
+
 export const HumanEscalationOptionSchema = z
   .object({
     id: z.string().min(1),
@@ -941,6 +1097,24 @@ export const HumanEscalationSchema = z
     workThreadId: z.string().min(1),
     runId: z.string().min(1).optional(),
     attemptId: z.string().min(1).optional(),
+    sourceAuthority: z
+      .object({
+        provider: z.string().min(1),
+        accountId: z.string().min(1),
+        conversationId: z.string().min(1),
+        ownership: z
+          .object({
+            mode: z.literal("managed"),
+            exclusive: z.literal(true),
+            applicationId: z.string().trim().min(1).max(255).regex(/^[^\u0000-\u001f\u007f]+$/u),
+            botId: z.string().trim().min(1).max(255).regex(/^[^\u0000-\u001f\u007f]+$/u).optional()
+          })
+          .strict()
+          .optional(),
+        bindingDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/)
+      })
+      .strict()
+      .optional(),
     class: z.enum(["approval", "missing_input", "configuration", "verification", "reconciliation", "security"]),
     audience: z.enum(["requester", "work_item_owner", "repo_owner", "operator", "security"]),
     subjectRef: z.string().min(1),
@@ -1082,6 +1256,171 @@ export const HumanEscalationSchema = z
       });
     }
   });
+
+export const WorkLoopCauseSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("completion_gate"),
+    gateId: z.string().min(1),
+    state: CompletionGateResultStateSchema,
+    reasonCode: CompletionReasonCodeSchema
+  }).strict(),
+  z.object({
+    kind: z.literal("human_escalation"),
+    escalationId: z.string().min(1),
+    class: z.enum(["approval", "missing_input", "configuration", "verification", "reconciliation", "security"]),
+    audience: z.enum(["requester", "work_item_owner", "repo_owner", "operator", "security"]),
+    blocking: z.boolean()
+  }).strict(),
+  z.object({
+    kind: z.literal("material_action"),
+    actionId: z.string().min(1),
+    outcome: z.enum(["failed", "unknown"]),
+    receiptIds: z.array(z.string().min(1))
+  }).strict(),
+  z.object({
+    kind: z.literal("run"),
+    runId: z.string().min(1),
+    conclusion: z.enum(["success", "failure", "cancelled", "interrupted", "timed_out", "needs_human"])
+  }).strict()
+]);
+
+export const WorkLoopNextActionSchema = z.object({
+  summary: z.string().min(1),
+  hint: ActionHintSchema,
+  causes: z.array(WorkLoopCauseSchema)
+}).strict();
+
+export const WorkLoopViewSchema = z.object({
+  workThreadId: z.string().min(1),
+  execution: z.enum(["idle", "running", "succeeded", "failed", "cancelled", "interrupted", "timed_out", "needs_human"]),
+  completion: CompletionStateSchema,
+  evidenceBacked: z.boolean(),
+  contract: z.object({
+    id: z.string().min(1),
+    version: z.number().int().positive(),
+    cycle: z.number().int().positive(),
+    mode: z.enum(["execution_compat", "governed"])
+  }).strict(),
+  currentAssessment: CompletionAssessmentSchema,
+  targetBindings: z.array(ResolvedCompletionTargetSchema),
+  missingGateIds: z.array(z.string().min(1)),
+  failedGateIds: z.array(z.string().min(1)),
+  blockedGateIds: z.array(z.string().min(1)),
+  nextAction: WorkLoopNextActionSchema
+}).strict();
+
+export const AcceptedProgressUnresolvedReasonSchema = z.enum([
+  "gate_target_missing",
+  "target_binding_missing",
+  "target_artifact_missing",
+  "artifact_not_found",
+  "artifact_ambiguous",
+  "artifact_source_run_missing",
+  "source_run_not_in_work_thread"
+]);
+
+export const AcceptedProgressResolutionSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("attributed"),
+    artifactId: z.string().min(1),
+    sourceRunId: z.string().min(1)
+  }).strict(),
+  z.object({
+    status: z.literal("unresolved"),
+    reasonCode: AcceptedProgressUnresolvedReasonSchema
+  }).strict()
+]);
+
+export const AcceptedGateAdvanceSchema = z.object({
+  workThreadId: z.string().min(1),
+  contractId: z.string().min(1),
+  contractVersion: z.number().int().positive(),
+  cycle: z.number().int().positive(),
+  assessmentId: z.string().min(1),
+  assessmentSequence: z.number().int().positive(),
+  previousAssessmentId: z.string().min(1).optional(),
+  gateId: CompletionGateIdSchema,
+  targetKey: CompletionTargetKeySchema.optional(),
+  acceptedState: z.literal("passed"),
+  evidenceIds: z.array(z.string().min(1)),
+  acceptedAt: z.string().datetime(),
+  resolution: AcceptedProgressResolutionSchema
+}).strict();
+
+export const AcceptedProgressAttributionViewSchema = z.object({
+  workThreadId: z.string().min(1),
+  contract: z.object({
+    id: z.string().min(1),
+    version: z.number().int().positive(),
+    cycle: z.number().int().positive()
+  }).strict(),
+  currentAssessmentId: z.string().min(1),
+  advances: z.array(AcceptedGateAdvanceSchema),
+  acceptedGateAdvanceCount: z.number().int().nonnegative(),
+  attributedGateAdvanceCount: z.number().int().nonnegative(),
+  unresolvedGateAdvanceCount: z.number().int().nonnegative(),
+  runIdsWithAcceptedProgress: z.array(z.string().min(1))
+}).strict().superRefine((view, ctx) => {
+  if (view.advances.length !== view.acceptedGateAdvanceCount) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "acceptedGateAdvanceCount must equal the number of accepted gate advances.",
+      path: ["acceptedGateAdvanceCount"]
+    });
+  }
+  const attributedGateAdvanceCount = view.advances.filter((advance) => advance.resolution.status === "attributed").length;
+  if (attributedGateAdvanceCount !== view.attributedGateAdvanceCount) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "attributedGateAdvanceCount must equal attributed advances.",
+      path: ["attributedGateAdvanceCount"]
+    });
+  }
+  if (view.advances.length - attributedGateAdvanceCount !== view.unresolvedGateAdvanceCount) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "unresolvedGateAdvanceCount must equal unresolved advances.",
+      path: ["unresolvedGateAdvanceCount"]
+    });
+  }
+  const expectedRunIds = [...new Set(view.advances.flatMap((advance) =>
+    advance.resolution.status === "attributed" ? [advance.resolution.sourceRunId] : []
+  ))].sort();
+  if (
+    expectedRunIds.length !== view.runIdsWithAcceptedProgress.length
+    || expectedRunIds.some((runId, index) => view.runIdsWithAcceptedProgress[index] !== runId)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "runIdsWithAcceptedProgress must be the unique sorted attributed source Run ids.",
+      path: ["runIdsWithAcceptedProgress"]
+    });
+  }
+  const seen = new Set<string>();
+  view.advances.forEach((advance, index) => {
+    if (
+      advance.workThreadId !== view.workThreadId
+      || advance.contractId !== view.contract.id
+      || advance.contractVersion !== view.contract.version
+      || advance.cycle !== view.contract.cycle
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Accepted gate advance authority must match its attribution view.",
+        path: ["advances", index]
+      });
+    }
+    const identity = `${advance.assessmentId}\u0000${advance.gateId}`;
+    if (seen.has(identity)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Accepted gate advances must be unique per assessment and gate.",
+        path: ["advances", index]
+      });
+    }
+    seen.add(identity);
+  });
+});
 
 export const CanonicalMutationDomainSchema = z.enum([
   "status",
@@ -1321,8 +1660,19 @@ export type CompletionReasonCode = z.infer<typeof CompletionReasonCodeSchema>;
 export type CompletionGateResult = z.infer<typeof CompletionGateResultSchema>;
 export type CompletionWaiver = z.infer<typeof CompletionWaiverSchema>;
 export type CompletionAssessment = z.infer<typeof CompletionAssessmentSchema>;
+export type ReassessmentObligationSourceKind = z.infer<typeof ReassessmentObligationSourceKindSchema>;
+export type ReassessmentObligationState = z.infer<typeof ReassessmentObligationStateSchema>;
+export type ReassessmentObligationReasonCode = z.infer<typeof ReassessmentObligationReasonCodeSchema>;
+export type ReassessmentObligation = z.infer<typeof ReassessmentObligationSchema>;
 export type HumanEscalation = z.infer<typeof HumanEscalationSchema>;
 export type HumanEscalationOption = z.infer<typeof HumanEscalationOptionSchema>;
+export type WorkLoopCause = z.infer<typeof WorkLoopCauseSchema>;
+export type WorkLoopNextAction = z.infer<typeof WorkLoopNextActionSchema>;
+export type WorkLoopView = z.infer<typeof WorkLoopViewSchema>;
+export type AcceptedProgressUnresolvedReason = z.infer<typeof AcceptedProgressUnresolvedReasonSchema>;
+export type AcceptedProgressResolution = z.infer<typeof AcceptedProgressResolutionSchema>;
+export type AcceptedGateAdvance = z.infer<typeof AcceptedGateAdvanceSchema>;
+export type AcceptedProgressAttributionView = z.infer<typeof AcceptedProgressAttributionViewSchema>;
 export type HumanEscalationRequest = z.infer<typeof HumanEscalationRequestSchema>;
 export type CanonicalMutationDomain = z.infer<typeof CanonicalMutationDomainSchema>;
 export type MutationIntent = z.infer<typeof MutationIntentSchema>;

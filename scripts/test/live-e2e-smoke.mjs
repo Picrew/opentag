@@ -104,7 +104,7 @@ const cases = [
     id: "github-factory-live",
     label: "Live GitHub recipe-driven factory acceptance",
     live: true,
-    command: "OPENTAG_GH_LIVE_FACTORY=true scripts/dev/run-github-webhook-live-test.sh",
+    command: "OPENTAG_GH_LIVE_FACTORY=true OPENTAG_GH_LIVE_REASSESSMENT_CRASH=true scripts/dev/run-github-webhook-live-test.sh",
     requiredCommands: [
       "corepack",
       "curl",
@@ -119,7 +119,9 @@ const cases = [
     notes: [
       "Uses a real GitHub issue comment as the external planning source, then admits it through WorkThread ensure, an immutable recipe, a WorkThread-only workstream, and a durable batch.",
       "Executes locally, creates and merges a real PR, verifies the required check against the current head, and requires provider-verified accepted completion.",
-      "Restarts the stack, replays the exact batch receipt, verifies the source-thread receipt is not duplicated, and proves accepted workstream metrics remain authoritative.",
+      "Terminates the first stack after real merged-provider evidence and its pending ReassessmentObligation commit but before reassessment, then restarts without replaying the webhook or completion request.",
+      "Proves restart claims and satisfies that exact obligation, then restarts again to verify neither the assessment transition nor source-thread receipt duplicates.",
+      "Replays the exact batch receipt only after recovery and proves accepted gate advances remain fully attributed to the fenced Attempt runner and executor.",
       "Set OPENTAG_GH_LIVE_EXECUTOR=phase1-fixture to prove the GitHub/factory/governance chain with the deterministic local ACP worktree writer.",
       "This case keeps planning external and explicitly excludes a DAG and operator console."
     ]

@@ -168,7 +168,9 @@ program
   .option("--run <runId>", "Show audit details for one run")
   .option("--channel <provider:account/conversation>", "Show active run and queued follow-ups for one source container")
   .option("--workstream <workstreamId>", "Show budget and accepted-outcome health for one factory workstream")
-  .option("--json", "Print structured --workstream status as JSON")
+  .option("--work-thread <workThreadId>", "Show the governed completion loop for one WorkThread")
+  .option("--attention", "Show governed work loops that require a next action")
+  .option("--json", "Print structured workstream, work-thread, or attention status as JSON")
   .action(runCliAction(runStatusCommand));
 
 program

@@ -12,35 +12,63 @@ function integrity(value: string): string {
   return `sha512-${createHash("sha512").update(value).digest("base64")}`;
 }
 
-function completion(state: string, requiredChecks: string, merge: string) {
+function completion(
+  state: string,
+  requiredChecks: string,
+  merge: string,
+  options: {
+    assessmentId?: string;
+    sequence?: number;
+    inputDigest?: string;
+    supersedesAssessmentId?: string;
+    history?: unknown[];
+  } = {}
+) {
+  const assessment = {
+    id: options.assessmentId ?? "assessment_live_42",
+    workThreadId: "thread_live_42",
+    triggeredByRunId: "run_live_42",
+    contractId: "completion:thread_live_42:github-pr",
+    contractVersion: 1,
+    cycle: 1,
+    sequence: options.sequence ?? 3,
+    inputDigest: options.inputDigest ?? digest,
+    state,
+    evidenceBacked: true,
+    acceptedAt: state === "satisfied" ? "2026-07-27T00:10:00.000Z" : undefined,
+    supersedesAssessmentId: options.supersedesAssessmentId,
+    assessedAt: "2026-07-27T00:10:00.000Z",
+    assessedBy: "opentag",
+    targetBindings: [
+      {
+        key: "primary_change",
+        provider: "github",
+        resourceRef: "github:amplifthq/opentag-test:pull_request:7",
+        resourceVersion: "abc123"
+      }
+    ],
+    gateResults: [
+      { gateId: "required_checks", targetKey: "primary_change", state: requiredChecks, reasonCode: "verification_state" },
+      { gateId: "merge", targetKey: "primary_change", state: merge, reasonCode: "external_state" }
+    ]
+  };
   return {
     completion: state,
-    currentAssessment: {
-      id: "assessment_live_42",
-      inputDigest: digest,
-      state,
-      targetBindings: [
-        {
-          key: "primary_change",
-          provider: "github",
-          resourceRef: "github:amplifthq/opentag-test:pull_request:7",
-          resourceVersion: "abc123"
-        }
-      ],
-      gateResults: [
-        { gateId: "required_checks", state: requiredChecks },
-        { gateId: "merge", state: merge }
-      ]
-    }
+    currentAssessment: assessment,
+    assessmentHistory: [...(options.history ?? []), assessment]
   };
 }
 
-function workstreamMetrics(acceptedWorkThreadCount: number) {
+function workstreamMetrics(acceptedWorkThreadCount: number, acceptedGateAdvanceCount: number) {
   return {
     metrics: {
       workstreamId: "workstream_live_42",
       workThreadCount: 1,
       acceptedWorkThreadCount,
+      acceptedGateAdvanceCount,
+      attributedGateAdvanceCount: acceptedGateAdvanceCount,
+      unresolvedGateAdvanceCount: 0,
+      runsWithAcceptedProgressCount: 1,
       runCount: 1,
       queuedRunCount: 0,
       activeRunCount: 0,
@@ -53,6 +81,25 @@ function workstreamMetrics(acceptedWorkThreadCount: number) {
       attemptsPerRunExceededCount: 0,
       totalCostUnits: 1,
       attemptsByLocality: { local: 1, private: 0, hosted: 0, unknown: 0 }
+    }
+  };
+}
+
+function acceptedProgressMetrics(acceptedGateAdvances: number) {
+  const segment = {
+    completedRuns: 1,
+    runsWithAcceptedProgress: 1,
+    acceptedGateAdvances
+  };
+  return {
+    metrics: {
+      completedRuns: 1,
+      runsWithAcceptedProgress: 1,
+      acceptedGateAdvances,
+      attributedAcceptedGateAdvances: acceptedGateAdvances,
+      unresolvedAcceptedGateAdvances: 0,
+      byRunner: [{ id: "runner_live", ...segment }],
+      byExecutor: [{ id: "phase1-fixture", ...segment }]
     }
   };
 }
@@ -132,9 +179,34 @@ function evidence(): GitHubFactoryAcceptanceEvidence {
       afterRestart: completion("satisfied", "passed", "passed")
     },
     metrics: {
-      beforeProviderEvidence: workstreamMetrics(0),
-      afterMerge: workstreamMetrics(1),
-      afterRestart: workstreamMetrics(1)
+      beforeProviderEvidence: workstreamMetrics(0, 1),
+      afterMerge: workstreamMetrics(1, 5),
+      afterRestart: workstreamMetrics(1, 5)
+    },
+    acceptedProgress: {
+      beforeProviderEvidence: acceptedProgressMetrics(1),
+      afterMerge: acceptedProgressMetrics(5),
+      afterRestart: acceptedProgressMetrics(5)
+    },
+    reassessmentObligation: {
+      sourceKind: "verification_evidence_attached",
+      sourceId: "github:delivery-merge:github:amplifthq/opentag-test:pull_request:7:thread_live_42",
+      sourceDigest: digest,
+      beforeCrash: {
+        state: "pending",
+        assessmentId: null,
+        assessmentCount: 2,
+        evidenceRecordCount: 3
+      },
+      afterRestart: {
+        state: "satisfied",
+        attemptCount: 1,
+        satisfiedAssessmentId: "assessment_live_42",
+        assessmentCount: 3,
+        evidenceRecordCount: 3
+      },
+      afterSecondRestartAssessmentCount: 3,
+      matchingCount: 1
     },
     assessmentCount: 3,
     sourceReceipt: {
@@ -211,20 +283,64 @@ describe("GitHub factory live acceptance report", () => {
     const report = buildGitHubFactoryAcceptanceReport(evidence());
 
     expect(report).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       case: "github-factory-live",
       factory: {
         workThreadId: "thread_live_42",
         batch: { admittedRunId: "run_live_42", restartReplayMatched: true }
       },
       metrics: {
-        beforeProviderEvidence: { metrics: { terminalRunCount: 1, acceptedWorkThreadCount: 0 } },
-        afterMerge: { metrics: { terminalRunCount: 1, acceptedWorkThreadCount: 1 } }
+        beforeProviderEvidence: {
+          metrics: { terminalRunCount: 1, acceptedWorkThreadCount: 0, acceptedGateAdvanceCount: 1 }
+        },
+        afterMerge: {
+          metrics: { terminalRunCount: 1, acceptedWorkThreadCount: 1, acceptedGateAdvanceCount: 5 }
+        }
+      },
+      acceptedProgress: {
+        beforeProviderEvidence: { metrics: { acceptedGateAdvances: 1 } },
+        afterMerge: {
+          metrics: {
+            acceptedGateAdvances: 5,
+            attributedAcceptedGateAdvances: 5,
+            unresolvedAcceptedGateAdvances: 0,
+            byRunner: [{ id: "runner_live", acceptedGateAdvances: 5 }],
+            byExecutor: [{ id: "phase1-fixture", acceptedGateAdvances: 5 }]
+          }
+        }
       },
       excludedScope: ["dag", "operator_console"]
     });
     expect(Object.values(report.assertions).every((value) => value === true)).toBe(true);
     expect(JSON.stringify(report)).not.toContain("fencingToken");
+  });
+
+  it("rejects a reassessment obligation that remains pending after restart", () => {
+    const input = evidence();
+    (input.reassessmentObligation.afterRestart as Record<string, unknown>)["state"] = "pending";
+
+    expect(() => buildGitHubFactoryAcceptanceReport(input)).toThrow(/remained pending after restart/u);
+  });
+
+  it("rejects a reassessment obligation linked to the wrong assessment", () => {
+    const input = evidence();
+    input.reassessmentObligation.afterRestart.satisfiedAssessmentId = "assessment_wrong";
+
+    expect(() => buildGitHubFactoryAcceptanceReport(input)).toThrow(/linked to the wrong current assessment/u);
+  });
+
+  it("rejects a duplicate provider-delivery obligation", () => {
+    const input = evidence();
+    input.reassessmentObligation.matchingCount = 2;
+
+    expect(() => buildGitHubFactoryAcceptanceReport(input)).toThrow(/duplicate reassessment obligation/u);
+  });
+
+  it("rejects evidence that was already assessed before the claimed crash", () => {
+    const input = evidence();
+    (input.reassessmentObligation.beforeCrash as Record<string, unknown>)["assessmentId"] = "assessment_live_42";
+
+    expect(() => buildGitHubFactoryAcceptanceReport(input)).toThrow(/already assessed before the claimed crash/u);
   });
 
   it("requires registry artifact identity for a registry-installed proof", () => {
@@ -299,9 +415,126 @@ describe("GitHub factory live acceptance report", () => {
 
   it("rejects accepted metrics that advance before provider-verified completion", () => {
     const input = evidence();
-    input.metrics.beforeProviderEvidence = workstreamMetrics(1);
+    input.metrics.beforeProviderEvidence = workstreamMetrics(1, 1);
 
     expect(() => buildGitHubFactoryAcceptanceReport(input)).toThrow(/accepted outcome did not advance 0 -> 1/u);
+  });
+
+  it("accepts a semantically identical satisfied reassessment after restart", () => {
+    const input = evidence();
+    const mergedAssessment = input.completion.afterMerge.currentAssessment as Record<string, unknown>;
+    input.completion.afterRestart = completion("satisfied", "passed", "passed", {
+      assessmentId: "assessment_live_43",
+      sequence: 4,
+      inputDigest: `sha256:${"b".repeat(64)}`,
+      supersedesAssessmentId: "assessment_live_42",
+      history: [mergedAssessment]
+    });
+
+    expect(buildGitHubFactoryAcceptanceReport(input).assertions).toMatchObject({
+      restartPreservedSatisfiedAssessment: true,
+      acceptedProgressAttributedToAttempt: true,
+      restartPreservedAcceptedProgress: true
+    });
+  });
+
+  it("accepts an unbroken multi-hop satisfied reassessment chain", () => {
+    const input = evidence();
+    const mergedAssessment = input.completion.afterMerge.currentAssessment as Record<string, unknown>;
+    const intermediate = completion("satisfied", "passed", "passed", {
+      assessmentId: "assessment_live_43",
+      sequence: 4,
+      inputDigest: `sha256:${"b".repeat(64)}`,
+      supersedesAssessmentId: "assessment_live_42",
+      history: [mergedAssessment]
+    }).currentAssessment as Record<string, unknown>;
+    input.completion.afterRestart = completion("satisfied", "passed", "passed", {
+      assessmentId: "assessment_live_44",
+      sequence: 5,
+      inputDigest: `sha256:${"c".repeat(64)}`,
+      supersedesAssessmentId: "assessment_live_43",
+      history: [mergedAssessment, intermediate]
+    });
+
+    expect(buildGitHubFactoryAcceptanceReport(input).assertions.restartPreservedSatisfiedAssessment).toBe(true);
+  });
+
+  it("rejects a current assessment that disagrees with the history tail", () => {
+    const input = evidence();
+    const mergedAssessment = input.completion.afterMerge.currentAssessment as Record<string, unknown>;
+    input.completion.afterRestart = completion("satisfied", "passed", "passed", {
+      assessmentId: "assessment_live_43",
+      sequence: 4,
+      inputDigest: `sha256:${"b".repeat(64)}`,
+      supersedesAssessmentId: "assessment_live_42",
+      history: [mergedAssessment]
+    });
+    input.completion.afterRestart.currentAssessment = {
+      ...input.completion.afterRestart.currentAssessment as object,
+      contractId: "completion:different-authority"
+    };
+
+    expect(() => buildGitHubFactoryAcceptanceReport(input)).toThrow(/restart changed the durable satisfied completion assessment/u);
+  });
+
+  it("rejects broken, non-consecutive, or duplicate reassessment lineage", () => {
+    const mergedAssessment = evidence().completion.afterMerge.currentAssessment as Record<string, unknown>;
+
+    const broken = evidence();
+    broken.completion.afterRestart = completion("satisfied", "passed", "passed", {
+      assessmentId: "assessment_live_44",
+      sequence: 5,
+      inputDigest: `sha256:${"c".repeat(64)}`,
+      supersedesAssessmentId: "assessment_live_43",
+      history: [mergedAssessment]
+    });
+    expect(() => buildGitHubFactoryAcceptanceReport(broken)).toThrow(/restart changed the durable satisfied completion assessment/u);
+
+    const duplicate = evidence();
+    duplicate.completion.afterRestart = completion("satisfied", "passed", "passed", {
+      assessmentId: "assessment_live_43",
+      sequence: 4,
+      inputDigest: `sha256:${"b".repeat(64)}`,
+      supersedesAssessmentId: "assessment_live_42",
+      history: [mergedAssessment, { ...mergedAssessment }]
+    });
+    expect(() => buildGitHubFactoryAcceptanceReport(duplicate)).toThrow(/restart changed the durable satisfied completion assessment/u);
+  });
+
+  it("omits unrelated runner and executor identities from the retained report", () => {
+    const input = evidence();
+    for (const snapshot of Object.values(input.acceptedProgress)) {
+      const snapshotMetrics = snapshot.metrics as Record<string, unknown>;
+      snapshotMetrics.byRunner = [
+        ...(snapshotMetrics.byRunner as unknown[]),
+        { id: "runner_unrelated", completedRuns: 0, runsWithAcceptedProgress: 0, acceptedGateAdvances: 0 }
+      ];
+      snapshotMetrics.byExecutor = [
+        ...(snapshotMetrics.byExecutor as unknown[]),
+        { id: "executor_unrelated", completedRuns: 0, runsWithAcceptedProgress: 0, acceptedGateAdvances: 0 }
+      ];
+    }
+
+    const report = buildGitHubFactoryAcceptanceReport(input);
+    expect(JSON.stringify(report.acceptedProgress)).not.toContain("unrelated");
+  });
+
+  it("rejects unresolved or misattributed provider-live accepted progress", () => {
+    const unresolved = evidence();
+    const unresolvedMetrics = unresolved.acceptedProgress.afterMerge.metrics as Record<string, unknown>;
+    unresolvedMetrics.unresolvedAcceptedGateAdvances = 1;
+    unresolvedMetrics.attributedAcceptedGateAdvances = 4;
+    expect(() => buildGitHubFactoryAcceptanceReport(unresolved)).toThrow(/provider-live accepted progress was not fully attributed/u);
+
+    const wrongRunner = evidence();
+    const wrongRunnerMetrics = wrongRunner.acceptedProgress.afterMerge.metrics as Record<string, unknown>;
+    wrongRunnerMetrics.byRunner = [{
+      id: "runner_other",
+      completedRuns: 1,
+      runsWithAcceptedProgress: 1,
+      acceptedGateAdvances: 5
+    }];
+    expect(() => buildGitHubFactoryAcceptanceReport(wrongRunner)).toThrow(/Attempt runner did not receive accepted progress/u);
   });
 
   it("rejects a restart that changes the durable batch receipt or completion assessment", () => {

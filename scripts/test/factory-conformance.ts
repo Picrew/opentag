@@ -435,6 +435,7 @@ async function main(): Promise<void> {
       createdCount: 2,
       idempotentReplayCount: 0,
       followUpQueuedCount: 0,
+      waitActiveRunCount: 0,
       needsHumanDecisionCount: 0,
       rejectedCount: 0,
       exceptionCount: 0,
@@ -513,11 +514,14 @@ async function main(): Promise<void> {
     );
 
     const { metrics: preEvidenceWorkstreamMetrics } = await recoveredClient.getWorkstreamMetrics({ id: workstream.id });
-    const { metrics: preEvidenceAcceptedMetrics } = await recoveredClient.getAcceptedCompletionMetrics();
+    const { metrics: preEvidenceAcceptedMetrics } = await recoveredClient.getAcceptedProgressMetrics();
     assert.equal(preEvidenceWorkstreamMetrics.terminalRunCount, 2);
     assert.equal(preEvidenceWorkstreamMetrics.acceptedWorkThreadCount, 0);
     assert.equal(preEvidenceAcceptedMetrics.completedRuns, 2);
-    assert.equal(preEvidenceAcceptedMetrics.acceptedCompletions, 0);
+    assert.equal(preEvidenceAcceptedMetrics.runsWithAcceptedProgress, 2);
+    assert.equal(preEvidenceAcceptedMetrics.acceptedGateAdvances, 2);
+    assert.equal(preEvidenceAcceptedMetrics.attributedAcceptedGateAdvances, 2);
+    assert.equal(preEvidenceAcceptedMetrics.unresolvedAcceptedGateAdvances, 0);
 
     await ingestAcceptedGitHubOutcome(recoveredClient, {
       deliveryId: "delivery_phase4b_echo",
@@ -541,17 +545,20 @@ async function main(): Promise<void> {
     assert.equal(evaluation.status, "healthy");
     assert.equal(evaluation.acceptedWorkThreadCount, 2);
 
-    const { metrics: acceptedMetrics } = await recoveredClient.getAcceptedCompletionMetrics();
+    const { metrics: acceptedMetrics } = await recoveredClient.getAcceptedProgressMetrics();
     assert.equal(acceptedMetrics.completedRuns, 2);
-    assert.equal(acceptedMetrics.acceptedCompletions, 2);
+    assert.equal(acceptedMetrics.runsWithAcceptedProgress, 2);
+    assert.equal(acceptedMetrics.acceptedGateAdvances, 10);
+    assert.equal(acceptedMetrics.attributedAcceptedGateAdvances, 10);
+    assert.equal(acceptedMetrics.unresolvedAcceptedGateAdvances, 0);
     for (const executorId of ["echo", "custom"]) {
       const segment = acceptedMetrics.byExecutor.find((entry) => entry.id === executorId);
       assert(segment, `Accepted metrics must include executor '${executorId}'.`);
       assert.deepEqual(segment, {
         id: executorId,
         completedRuns: 1,
-        acceptedCompletions: 1,
-        acceptanceRate: 1
+        runsWithAcceptedProgress: 1,
+        acceptedGateAdvances: 5
       });
     }
 
@@ -684,18 +691,18 @@ async function main(): Promise<void> {
           terminalRuns: preEvidenceWorkstreamMetrics.terminalRunCount,
           acceptedWorkThreads: preEvidenceWorkstreamMetrics.acceptedWorkThreadCount,
           completedRuns: preEvidenceAcceptedMetrics.completedRuns,
-          acceptedCompletions: preEvidenceAcceptedMetrics.acceptedCompletions
+          acceptedGateAdvances: preEvidenceAcceptedMetrics.acceptedGateAdvances
         },
         afterVerifiedEvidence: {
           terminalRuns: workstreamMetrics.terminalRunCount,
           acceptedWorkThreads: workstreamMetrics.acceptedWorkThreadCount,
           completedRuns: acceptedMetrics.completedRuns,
-          acceptedCompletions: acceptedMetrics.acceptedCompletions
+          acceptedGateAdvances: acceptedMetrics.acceptedGateAdvances
         },
-        authorityRule: "Terminal Run success alone is not accepted; only current evidence-backed CompletionAssessments become accepted outcomes."
+        authorityRule: "Terminal Run success alone is not accepted; current WorkThread acceptance comes only from the current evidence-backed CompletionAssessment."
       },
       acceptedOutcomeAuthority: {
-        basis: "current CompletionAssessment joined to each WorkThread and the latest terminal Attempt attribution exposed by the public run event stream",
+        basis: "current CompletionAssessment authority plus accepted gate-to-target-to-artifact-to-source-Run attribution; terminal Attempts provide execution dimensions only",
         workThreads: acceptedAuthorities
       },
       workstreamMetrics,

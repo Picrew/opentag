@@ -100,12 +100,18 @@ async function startRun(input: {
   databasePath?: string;
   completionNow?: () => string;
   issueNumber?: number;
+  reassessmentObligations?: {
+    autoStart?: boolean;
+    inline?: boolean;
+    pollIntervalMs?: number;
+  };
 }) {
   const delivered: CallbackMessage[] = [];
   const app = createDispatcherApp({
     databasePath: input.databasePath ?? ":memory:",
     ...(input.completionPolicies ? { completionPolicies: input.completionPolicies } : {}),
     ...(input.completionNow ? { completionNow: input.completionNow } : {}),
+    reassessmentObligations: input.reassessmentObligations ?? { autoStart: false },
     callbackSink: {
       async deliver(message) {
         delivered.push(message);
@@ -243,6 +249,179 @@ describe("dispatcher completion governance", () => {
     expect(setup.delivered.at(-1)).toMatchObject({ kind: "final" });
     expect(setup.delivered.at(-1)?.body).toContain("Execution succeeded");
     expect(setup.delivered.at(-1)?.body).toContain("verified repository evidence");
+  });
+
+  it("exposes WorkThread completion and a bounded work-loop attention view", async () => {
+    const setup = await startRun({ runId: "run_work_loop_status", completionPolicies: [strictPolicy] });
+    expect((await completeRun({ setup, runId: "run_work_loop_status", conclusion: "success" })).status).toBe(200);
+    const stored = await (await setup.app.request("/v1/runs/run_work_loop_status")).json() as {
+      run: { thread?: { id?: string } };
+    };
+    const workThreadId = stored.run.thread?.id;
+    expect(workThreadId).toBeTruthy();
+
+    expect((await setup.app.request("/v1/runs", jsonRequest({
+      runId: "run_work_loop_terminal",
+      event: githubIssueEvent({ id: "event_work_loop_terminal", sourceEventId: "comment_work_loop_terminal", issueNumber: 3 })
+    }))).status).toBe(201);
+    const terminalClaim = await (await setup.app.request("/v1/runners/runner_1/claim", { method: "POST" })).json() as {
+      attemptId: string;
+      fencingToken: string;
+    };
+    expect((await setup.app.request(
+      "/v1/runners/runner_1/runs/run_work_loop_terminal/complete",
+      jsonRequest({
+        ...terminalClaim,
+        result: {
+          conclusion: "success",
+          summary: "terminal result",
+          createdPullRequestUrl: "https://github.com/acme/demo/pull/9"
+        }
+      })
+    )).status).toBe(200);
+    expect((await setup.app.request(
+      "/v1/completion-evidence/github",
+      jsonRequest(githubSnapshot({ deliveryId: "delivery-work-loop-terminal", pullRequestNumber: 9 }))
+    )).status).toBe(201);
+
+    expect((await setup.app.request("/v1/runs", jsonRequest({
+      runId: "run_work_loop_active",
+      event: githubIssueEvent({ id: "event_work_loop_active", sourceEventId: "comment_work_loop_active", issueNumber: 2 })
+    }))).status).toBe(201);
+    expect((await setup.app.request("/v1/runners/runner_1/claim", { method: "POST" })).status).toBe(200);
+
+    const byThread = await setup.app.request(`/v1/work-threads/${encodeURIComponent(workThreadId!)}/completion`);
+    expect(byThread.status).toBe(200);
+    await expect(byThread.json()).resolves.toMatchObject({
+      workThread: { id: workThreadId },
+      completion: {
+        workThreadId,
+        completion: "pending",
+        nextAction: { hint: { kind: "refresh_completion_evidence", targetId: "required_checks" } }
+      },
+      acceptedProgress: {
+        workThreadId,
+        acceptedGateAdvanceCount: 1,
+        attributedGateAdvanceCount: 1,
+        unresolvedGateAdvanceCount: 0,
+        runIdsWithAcceptedProgress: ["run_work_loop_status"],
+        advances: [{
+          gateId: "pull_request",
+          resolution: {
+            status: "attributed",
+            sourceRunId: "run_work_loop_status"
+          }
+        }]
+      }
+    });
+
+    const attention = await setup.app.request("/v1/work-loops?attention=required&limit=10");
+    expect(attention.status).toBe(200);
+    await expect(attention.json()).resolves.toMatchObject({
+      attention: "required",
+      workLoops: [{
+        workThread: { id: workThreadId },
+        completion: { completion: "pending", nextAction: { hint: { kind: "refresh_completion_evidence" } } }
+      }],
+      scanned: 3,
+      scanLimitReached: false
+    });
+    expect((await setup.app.request("/v1/work-loops?attention=required&limit=0")).status).toBe(400);
+    expect((await setup.app.request("/v1/work-loops")).status).toBe(400);
+  });
+
+  it("keeps the completion endpoint available across a completion-cycle authority boundary", async () => {
+    const databasePath = temporaryDatabasePath();
+    const setup = await startRun({
+      runId: "run_completion_cycle_boundary",
+      completionPolicies: [strictPolicy],
+      databasePath
+    });
+    expect((await completeRun({
+      setup,
+      runId: "run_completion_cycle_boundary",
+      conclusion: "success"
+    })).status).toBe(200);
+    const stored = await (await setup.app.request("/v1/runs/run_completion_cycle_boundary")).json() as {
+      run: { thread?: { id?: string } };
+    };
+    const workThreadId = stored.run.thread?.id;
+    expect(workThreadId).toBeTruthy();
+
+    const sqlite = new Database(databasePath);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const currentContract = await repo.getLatestCompletionContractForWorkThread({ workThreadId: workThreadId! });
+    if (!currentContract) throw new Error("expected current completion contract");
+    const currentAssessment = await repo.getCurrentCompletionAssessment({ workThreadId: workThreadId! });
+    if (!currentAssessment) throw new Error("expected current completion assessment");
+    await repo.recordCompletionContract({
+      contract: {
+        ...currentContract,
+        version: currentContract.version + 1,
+        cycle: currentContract.cycle + 1
+      }
+    });
+    await expect(repo.appendCompletionAssessment({
+      expectedCurrentAssessmentId: currentAssessment.id,
+      assessment: {
+        ...currentAssessment,
+        id: "assessment_completion_cycle_boundary",
+        contractVersion: currentContract.version + 1,
+        cycle: currentContract.cycle + 1,
+        sequence: 1,
+        supersedesAssessmentId: currentAssessment.id,
+        inputDigest: `sha256:${"9".repeat(64)}`,
+        assessedAt: "2026-07-21T10:06:00.000Z"
+      }
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    sqlite.close();
+
+    const firstRead = await setup.app.request(`/v1/work-threads/${encodeURIComponent(workThreadId!)}/completion`);
+    expect(firstRead.status).toBe(200);
+    const currentRead = await setup.app.request(`/v1/work-threads/${encodeURIComponent(workThreadId!)}/completion`);
+    expect(currentRead.status).toBe(200);
+    await expect(currentRead.json()).resolves.toMatchObject({
+      workThread: { id: workThreadId },
+      acceptedProgress: {
+        contract: {
+          id: currentContract.id,
+          version: currentContract.version + 1,
+          cycle: currentContract.cycle + 1
+        },
+        currentAssessmentId: expect.any(String)
+      }
+    });
+  });
+
+  it("keeps the work-loop attention listing read-only when no assessment has been persisted", async () => {
+    const databasePath = temporaryDatabasePath();
+    const setup = await startRun({
+      runId: "run_work_loop_read_only",
+      databasePath,
+      completionPolicies: [strictPolicy]
+    });
+    expect((await completeRun({ setup, runId: "run_work_loop_read_only", conclusion: "success" })).status).toBe(200);
+    const sqlite = new Database(databasePath);
+    onTestFinished(() => sqlite.close());
+    sqlite.prepare("UPDATE work_threads SET current_assessment_id = NULL").run();
+    sqlite.prepare("DELETE FROM completion_assessments").run();
+    sqlite.prepare("DELETE FROM governance_events").run();
+    sqlite.prepare("DELETE FROM human_escalations").run();
+
+    const before = {
+      assessments: (sqlite.prepare("SELECT count(*) AS count FROM completion_assessments").get() as { count: number }).count,
+      governanceEvents: (sqlite.prepare("SELECT count(*) AS count FROM governance_events").get() as { count: number }).count,
+      escalations: (sqlite.prepare("SELECT count(*) AS count FROM human_escalations").get() as { count: number }).count
+    };
+    const response = await setup.app.request("/v1/work-loops?attention=required&limit=10");
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ workLoops: [] });
+    const after = {
+      assessments: (sqlite.prepare("SELECT count(*) AS count FROM completion_assessments").get() as { count: number }).count,
+      governanceEvents: (sqlite.prepare("SELECT count(*) AS count FROM governance_events").get() as { count: number }).count,
+      escalations: (sqlite.prepare("SELECT count(*) AS count FROM human_escalations").get() as { count: number }).count
+    };
+    expect(after).toEqual(before);
   });
 
   it("preserves executor-success semantics for repositories without a strict policy", async () => {
@@ -499,23 +678,24 @@ describe("dispatcher completion governance", () => {
 
   it("reassesses dirty durable completion state and emits the missed semantic transition at startup", async () => {
     const databasePath = temporaryDatabasePath();
-    const setup = await startRun({ runId: "run_startup_recovery", completionPolicies: [strictPolicy], databasePath });
+    const setup = await startRun({
+      runId: "run_startup_recovery",
+      completionPolicies: [strictPolicy],
+      databasePath,
+      reassessmentObligations: { autoStart: false, inline: false }
+    });
     await completeRun({ setup, runId: "run_startup_recovery", conclusion: "success" });
     await setup.app.request(
       "/v1/completion-evidence/github",
       jsonRequest(githubSnapshot({ deliveryId: "delivery-startup-recovery" }))
     );
     const sqlite = new Database(databasePath);
-    sqlite.prepare("DELETE FROM completion_assessments WHERE state = 'satisfied'").run();
-    sqlite.prepare("DELETE FROM callback_deliveries").run();
-    sqlite.prepare(`
-      UPDATE work_threads
-      SET current_assessment_id = (
-        SELECT id FROM completion_assessments
-        WHERE work_thread_id = work_threads.id
-        ORDER BY sequence DESC LIMIT 1
-      )
-    `).run();
+    expect(sqlite.prepare(`
+      SELECT state FROM reassessment_obligations
+      WHERE source_kind = 'verification_evidence_attached'
+    `).get()).toEqual({ state: "pending" });
+    expect(sqlite.prepare("SELECT state FROM completion_assessments ORDER BY sequence DESC LIMIT 1").get())
+      .toEqual({ state: "pending" });
     sqlite.close();
     const recoveredCallbacks: CallbackMessage[] = [];
     createDispatcherApp({
@@ -524,8 +704,8 @@ describe("dispatcher completion governance", () => {
       callbackSink: { async deliver(message) { recoveredCallbacks.push(message); } }
     });
 
-    for (let attempt = 0; attempt < 20 && recoveredCallbacks.length === 0; attempt += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
+    for (let attempt = 0; attempt < 50 && recoveredCallbacks.length === 0; attempt += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
     }
 
     expect(recoveredCallbacks).toEqual(expect.arrayContaining([

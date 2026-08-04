@@ -11,7 +11,10 @@ import { createDefaultCallbackPresentation } from "../src/presentation.js";
 import { createDispatcherApp as createRawDispatcherApp, type CallbackMessage } from "../src/server.js";
 
 function createDispatcherApp(input: Parameters<typeof createRawDispatcherApp>[0]): ReturnType<typeof createRawDispatcherApp> {
-  const app = createRawDispatcherApp(input);
+  const app = createRawDispatcherApp({
+    ...input,
+    reassessmentObligations: input.reassessmentObligations ?? { autoStart: false }
+  });
   const leases = new Map<string, { attemptId: string; fencingToken: string }>();
   const request = app.request.bind(app);
   app.request = (async (requestInput: Request | string, requestInit?: RequestInit) => {
@@ -532,13 +535,21 @@ describe("dispatcher API", () => {
         fallbackExecutorIds: ["codex"]
       }
     });
-    const runnerCanReadAcceptedCompletionMetrics = await app.request(
-      "/v1/routing/accepted-completion-metrics",
+    const runnerCanReadAcceptedProgressMetrics = await app.request(
+      "/v1/routing/accepted-progress-metrics",
       { headers: runnerAuth }
     );
-    expect(runnerCanReadAcceptedCompletionMetrics.status).toBe(200);
-    await expect(runnerCanReadAcceptedCompletionMetrics.json()).resolves.toEqual({
-      metrics: { completedRuns: 0, acceptedCompletions: 0, byRunner: [], byExecutor: [] }
+    expect(runnerCanReadAcceptedProgressMetrics.status).toBe(200);
+    await expect(runnerCanReadAcceptedProgressMetrics.json()).resolves.toEqual({
+      metrics: {
+        completedRuns: 0,
+        runsWithAcceptedProgress: 0,
+        acceptedGateAdvances: 0,
+        attributedAcceptedGateAdvances: 0,
+        unresolvedAcceptedGateAdvances: 0,
+        byRunner: [],
+        byExecutor: []
+      }
     });
 
     const runnerCannotCreateRun = await app.request("/v1/runs", runnerJson({ runId: "run_scope", event: validEvent }));
@@ -5360,7 +5371,11 @@ describe("dispatcher API", () => {
     await expect(resolved.json()).resolves.toMatchObject({
       outcome: "resolved",
       escalation: { state: "resolved", resolution: { actor: { providerUserId: "42" } } },
-      resume: { required: true }
+      resume: {
+        required: true,
+        reason: "The recorded resolution has no Workstream continuation policy.",
+        nextAction: "Configure a governed Workstream continuation policy before requesting automatic continuation."
+      }
     });
     const missingAcknowledgement = await app.request(
       "/v1/human-escalations/missing-escalation/acknowledge",
@@ -5436,10 +5451,16 @@ describe("dispatcher API", () => {
     await expect(resolved.json()).resolves.toMatchObject({
       outcome: "resolved",
       escalation: { id: escalationId, state: "resolved", resolution: { optionId: "staging", actor: { providerUserId: "42" } } },
-      resume: { required: true }
+      resume: {
+        required: true,
+        reason: "The recorded resolution has no Workstream continuation policy.",
+        nextAction: "Configure a governed Workstream continuation policy before requesting automatic continuation."
+      }
     });
     expect(delivered.some((message) => message.body.includes(`Resolved human escalation ${escalationId} with Use staging.`))).toBe(true);
-    expect(delivered.some((message) => message.body.includes("did not inject it into the executor process"))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("The recorded resolution has no Workstream continuation policy"))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("Configure a governed Workstream continuation policy"))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("Send a new task"))).toBe(false);
   });
 
   it("deduplicates runner progress retries by idempotency key before callback delivery", async () => {

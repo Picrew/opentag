@@ -1,6 +1,8 @@
 import { zodToJsonSchema } from "zod-to-json-schema";
 import {
   AgentAccessProfileSnapshotSchema,
+  AcceptedGateAdvanceSchema,
+  AcceptedProgressAttributionViewSchema,
   ActionHintSchema,
   MaterialActionReceiptSchema,
   ActionSchema,
@@ -22,6 +24,7 @@ import {
   CompletionGateSchema,
   CompletionTargetSelectorSchema,
   CompletionWaiverSchema,
+  ReassessmentObligationSchema,
   ResolvedCompletionTargetSchema,
   ContextPacketSchema,
   ConnectionRefSchema,
@@ -45,6 +48,9 @@ import {
   SuccessMetricNameSchema,
   VerificationEvidenceSchema,
   WorkItemReferenceSchema,
+  WorkLoopCauseSchema,
+  WorkLoopNextActionSchema,
+  WorkLoopViewSchema,
   WorkThreadSchema
 } from "./schema.js";
 import {
@@ -65,7 +71,7 @@ import {
   OpenTagWorkItemRefSchema
 } from "./integration-protocol.js";
 import {
-  AcceptedCompletionMetricsSchema,
+  AcceptedProgressMetricsSchema,
   FrozenRoutingPolicySchema,
   RoutingDecisionSchema,
   RunnerDirectoryEntrySchema,
@@ -74,6 +80,9 @@ import {
 import {
   FactoryRecipeSnapshotInputSchema,
   FactoryRecipeSnapshotSchema,
+  WorkstreamContinuationDecisionInputSchema,
+  WorkstreamContinuationDecisionSchema,
+  WorkstreamContinuationPolicySchema,
   WorkstreamAdmissionBatchInputSchema,
   WorkstreamAdmissionBatchReceiptSchema,
   WorkstreamEvaluationSchema,
@@ -84,6 +93,8 @@ import {
 
 export const OpenTagJsonSchemas = {
   OpenTagEvent: zodToJsonSchema(OpenTagEventSchema, "OpenTagEvent"),
+  AcceptedGateAdvance: zodToJsonSchema(AcceptedGateAdvanceSchema, "AcceptedGateAdvance"),
+  AcceptedProgressAttributionView: zodToJsonSchema(AcceptedProgressAttributionViewSchema, "AcceptedProgressAttributionView"),
   OpenTagRun: zodToJsonSchema(OpenTagRunSchema, "OpenTagRun"),
   OpenTagRunResult: zodToJsonSchema(OpenTagRunResultSchema, "OpenTagRunResult"),
   ConnectionRef: zodToJsonSchema(ConnectionRefSchema, "ConnectionRef"),
@@ -110,7 +121,11 @@ export const OpenTagJsonSchemas = {
   CompletionGateResult: zodToJsonSchema(CompletionGateResultSchema, "CompletionGateResult"),
   CompletionWaiver: zodToJsonSchema(CompletionWaiverSchema, "CompletionWaiver"),
   CompletionAssessment: zodToJsonSchema(CompletionAssessmentSchema, "CompletionAssessment"),
+  ReassessmentObligation: zodToJsonSchema(ReassessmentObligationSchema, "ReassessmentObligation"),
   HumanEscalation: zodToJsonSchema(HumanEscalationSchema, "HumanEscalation"),
+  WorkLoopCause: zodToJsonSchema(WorkLoopCauseSchema, "WorkLoopCause"),
+  WorkLoopNextAction: zodToJsonSchema(WorkLoopNextActionSchema, "WorkLoopNextAction"),
+  WorkLoopView: zodToJsonSchema(WorkLoopViewSchema, "WorkLoopView"),
   ContextPacket: zodToJsonSchema(ContextPacketSchema, "ContextPacket"),
   OpenTagIntegrationManifest: zodToJsonSchema(OpenTagIntegrationManifestSchema, "OpenTagIntegrationManifest"),
   OpenTagActorRef: zodToJsonSchema(OpenTagActorRefSchema, "OpenTagActorRef"),
@@ -146,9 +161,12 @@ export const OpenTagJsonSchemas = {
   RunnerRegistration: zodToJsonSchema(RunnerRegistrationInputSchema, "RunnerRegistration"),
   RunnerDirectoryEntry: zodToJsonSchema(RunnerDirectoryEntrySchema, "RunnerDirectoryEntry"),
   RoutingDecision: zodToJsonSchema(RoutingDecisionSchema, "RoutingDecision"),
-  AcceptedCompletionMetrics: zodToJsonSchema(AcceptedCompletionMetricsSchema, "AcceptedCompletionMetrics"),
+  AcceptedProgressMetrics: zodToJsonSchema(AcceptedProgressMetricsSchema, "AcceptedProgressMetrics"),
   FactoryRecipeSnapshotInput: zodToJsonSchema(FactoryRecipeSnapshotInputSchema, "FactoryRecipeSnapshotInput"),
   FactoryRecipeSnapshot: zodToJsonSchema(FactoryRecipeSnapshotSchema, "FactoryRecipeSnapshot"),
+  WorkstreamContinuationPolicy: zodToJsonSchema(WorkstreamContinuationPolicySchema, "WorkstreamContinuationPolicy"),
+  WorkstreamContinuationDecisionInput: zodToJsonSchema(WorkstreamContinuationDecisionInputSchema, "WorkstreamContinuationDecisionInput"),
+  WorkstreamContinuationDecision: zodToJsonSchema(WorkstreamContinuationDecisionSchema, "WorkstreamContinuationDecision"),
   WorkstreamInput: zodToJsonSchema(WorkstreamInputSchema, "WorkstreamInput"),
   Workstream: zodToJsonSchema(WorkstreamSchema, "Workstream"),
   WorkstreamAdmissionBatchInput: zodToJsonSchema(WorkstreamAdmissionBatchInputSchema, "WorkstreamAdmissionBatchInput"),

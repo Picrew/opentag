@@ -3,7 +3,12 @@ import type { CompletionAssessment, WorkThread } from "@opentag/core";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
-import { ChannelBindingCorruptionError, createOpenTagRepository } from "../src/repository.js";
+import {
+  ChannelBindingCorruptionError,
+  ManagedChannelAuthorityError,
+  createOpenTagRepository,
+  managedChannelBindingAuthorityDigest
+} from "../src/repository.js";
 import { migrateSchema } from "../src/schema.js";
 
 function githubIssueContext(issueNumber: number) {
@@ -3568,6 +3573,127 @@ describe("explainable multi-runner routing", () => {
     });
   });
 
+  it("resumes a reserved follow-up Run after the Run commit outlives its parent audit write", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const parentEvent = larkEvent({ id: "event_follow_up_parent", sourceEventId: "source_follow_up_parent" });
+    const followUpEvent = larkEvent({ id: "event_follow_up_reserved", sourceEventId: "source_follow_up_reserved" });
+    await repo.createRun({ id: "run_follow_up_parent", event: parentEvent });
+    await repo.createFollowUpRequest({
+      id: "follow_up_reserved",
+      event: followUpEvent,
+      decision: {
+        action: "queue_follow_up",
+        reason: "An active run owns this conversation.",
+        reasonCode: "active_run_same_thread",
+        eventId: followUpEvent.id,
+        activeRunId: "run_follow_up_parent",
+        decidedAt: "2026-07-25T00:00:00.000Z"
+      },
+      activeRunId: "run_follow_up_parent"
+    });
+    sqlite.exec(`
+      CREATE TRIGGER fail_follow_up_child_audit
+      BEFORE INSERT ON run_events
+      WHEN NEW.type = 'run.child_created'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected child audit failure');
+      END;
+    `);
+
+    await expect(repo.createRunFromFollowUpRequest({
+      followUpRequestId: "follow_up_reserved",
+      runId: "run_follow_up_reserved"
+    })).rejects.toThrow(/injected child audit failure/u);
+    expect(await repo.getFollowUpRequest({ id: "follow_up_reserved" })).toMatchObject({
+      status: "promoting",
+      createdRunId: "run_follow_up_reserved"
+    });
+    await expect(repo.getRun({ runId: "run_follow_up_reserved" })).resolves.toMatchObject({
+      event: { id: followUpEvent.id }
+    });
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM runs WHERE event_id = ?").get(followUpEvent.id)).toEqual({ count: 1 });
+
+    sqlite.exec("DROP TRIGGER fail_follow_up_child_audit");
+    const recovered = await repo.createRunFromFollowUpRequest({
+      followUpRequestId: "follow_up_reserved",
+      runId: "run_follow_up_reserved_retry_must_not_win"
+    });
+    expect(recovered).toMatchObject({
+      followUpRequest: { status: "promoted", createdRunId: "run_follow_up_reserved" },
+      run: { id: "run_follow_up_reserved" }
+    });
+    await expect(repo.createRunFromFollowUpRequest({
+      followUpRequestId: "follow_up_reserved",
+      runId: "run_follow_up_reserved_second_retry"
+    })).resolves.toMatchObject({ run: { id: "run_follow_up_reserved" } });
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM runs WHERE event_id = ?").get(followUpEvent.id)).toEqual({ count: 1 });
+
+    const parentEvents = await repo.listRunEvents({ runId: "run_follow_up_parent" });
+    expect(parentEvents.filter((event) => event.type === "run.child_created")).toHaveLength(1);
+    expect(parentEvents.filter((event) => event.type === "follow_up_request.promoted")).toHaveLength(1);
+  });
+
+  it("retries the promotion audit before finalizing a reserved follow-up Run", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const parentEvent = larkEvent({ id: "event_promotion_audit_parent", sourceEventId: "source_promotion_audit_parent" });
+    const followUpEvent = larkEvent({ id: "event_promotion_audit", sourceEventId: "source_promotion_audit" });
+    await repo.createRun({ id: "run_promotion_audit_parent", event: parentEvent });
+    await repo.createFollowUpRequest({
+      id: "follow_up_promotion_audit",
+      event: followUpEvent,
+      decision: {
+        action: "queue_follow_up",
+        reason: "An active run owns this conversation.",
+        reasonCode: "active_run_same_thread",
+        eventId: followUpEvent.id,
+        activeRunId: "run_promotion_audit_parent",
+        decidedAt: "2026-07-25T00:00:00.000Z"
+      },
+      activeRunId: "run_promotion_audit_parent"
+    });
+    sqlite.exec(`
+      CREATE TRIGGER fail_follow_up_promoted_audit
+      BEFORE INSERT ON run_events
+      WHEN NEW.type = 'follow_up_request.promoted'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected promotion audit failure');
+      END;
+    `);
+
+    await expect(repo.createRunFromFollowUpRequest({
+      followUpRequestId: "follow_up_promotion_audit",
+      runId: "run_promotion_audit"
+    })).rejects.toThrow(/injected promotion audit failure/u);
+    expect(await repo.getFollowUpRequest({ id: "follow_up_promotion_audit" })).toMatchObject({
+      status: "promoting",
+      createdRunId: "run_promotion_audit"
+    });
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM runs WHERE event_id = ?").get(followUpEvent.id)).toEqual({ count: 1 });
+
+    sqlite.exec("DROP TRIGGER fail_follow_up_promoted_audit");
+    await expect(repo.createRunFromFollowUpRequest({
+      followUpRequestId: "follow_up_promotion_audit",
+      runId: "run_promotion_audit_retry_must_not_win"
+    })).resolves.toMatchObject({
+      followUpRequest: { status: "promoted", createdRunId: "run_promotion_audit" },
+      run: { id: "run_promotion_audit" }
+    });
+    await expect(repo.createRunFromFollowUpRequest({
+      followUpRequestId: "follow_up_promotion_audit",
+      runId: "run_promotion_audit_second_retry"
+    })).resolves.toMatchObject({ run: { id: "run_promotion_audit" } });
+
+    const parentEvents = await repo.listRunEvents({ runId: "run_promotion_audit_parent" });
+    expect(parentEvents.filter((event) => event.type === "run.child_created")).toHaveLength(1);
+    expect(parentEvents.filter((event) => event.type === "follow_up_request.promoted")).toHaveLength(1);
+  });
+
   it("preserves explicit directory capability when an older runner sends a minimal heartbeat", async () => {
     const { repo } = routingRepository();
     await repo.registerRunner({
@@ -4011,7 +4137,7 @@ describe("explainable multi-runner routing", () => {
     })).rejects.toThrow(/require a primary default executor/iu);
   });
 
-  it("attributes accepted completion to the authoritative latest run without per-run correlation queries", async () => {
+  it("attributes accepted gate progress to artifact provenance instead of the latest run", async () => {
     const { sqlite, repo } = routingRepository();
     await repo.registerRunner({
       runnerId: "runner-old",
@@ -4041,7 +4167,24 @@ describe("explainable multi-runner routing", () => {
       runId: oldRun.run.id,
       attemptId: oldClaim.attemptId,
       fencingToken: oldClaim.fencingToken,
-      result: { conclusion: "success", summary: "Old run complete." }
+      result: {
+        conclusion: "success",
+        summary: "Old run created the accepted artifact.",
+        artifacts: [{
+          id: "artifact_metric_old",
+          kind: "pull_request",
+          title: "Accepted pull request",
+          uri: "https://github.com/acme/demo/pull/42",
+          sourceRunId: "run_metric_new"
+        }]
+      }
+    });
+    await expect(repo.getRun({ runId: oldRun.run.id })).resolves.toMatchObject({
+      run: {
+        result: {
+          artifacts: [{ id: "artifact_metric_old", sourceRunId: oldRun.run.id }]
+        }
+      }
     });
 
     await repo.createRepoBinding({
@@ -4089,11 +4232,18 @@ describe("explainable multi-runner routing", () => {
         cycle: 1,
         sequence: 1,
         inputDigest: `sha256:${"a".repeat(64)}`,
-        targetBindings: [],
+        targetBindings: [{
+          key: "primary_change",
+          provider: "github",
+          resourceRef: "acme/demo#pull:42",
+          resourceVersion: "a".repeat(40),
+          artifactId: "artifact_metric_old"
+        }],
         state: "satisfied",
         evidenceBacked: true,
         gateResults: [{
           gateId: "checks",
+          targetKey: "primary_change",
           state: "passed",
           evidenceIds: ["evidence_metric"],
           reasonCode: "verification_passed",
@@ -4192,28 +4342,53 @@ describe("explainable multi-runner routing", () => {
     }) as typeof sqlite.prepare;
     let metrics;
     try {
-      metrics = await repo.getAcceptedCompletionMetrics();
+      metrics = await repo.getAcceptedProgressMetrics();
     } finally {
       sqlite.prepare = originalPrepareMethod;
     }
 
     expect(metrics).toEqual({
       completedRuns: 3,
-      acceptedCompletions: 1,
+      runsWithAcceptedProgress: 1,
+      acceptedGateAdvances: 2,
+      attributedAcceptedGateAdvances: 1,
+      unresolvedAcceptedGateAdvances: 1,
       byRunner: [
-        { id: "runner-new", completedRuns: 1, acceptedCompletions: 1, acceptanceRate: 1 },
-        { id: "runner-old", completedRuns: 2, acceptedCompletions: 0, acceptanceRate: 0 }
+        { id: "runner-new", completedRuns: 1, runsWithAcceptedProgress: 0, acceptedGateAdvances: 0 },
+        { id: "runner-old", completedRuns: 2, runsWithAcceptedProgress: 1, acceptedGateAdvances: 1 }
       ],
       byExecutor: [
-        { id: "codex", completedRuns: 2, acceptedCompletions: 0, acceptanceRate: 0 },
-        { id: "hermes", completedRuns: 1, acceptedCompletions: 1, acceptanceRate: 1 }
+        { id: "codex", completedRuns: 2, runsWithAcceptedProgress: 1, acceptedGateAdvances: 1 },
+        { id: "hermes", completedRuns: 1, runsWithAcceptedProgress: 0, acceptedGateAdvances: 0 }
       ]
     });
-    expect(aggregateReadStatements).toBe(2);
+    await expect(repo.getAcceptedProgressAttribution({ workThreadId: threadId })).resolves.toMatchObject({
+      workThreadId: threadId,
+      acceptedGateAdvanceCount: 1,
+      attributedGateAdvanceCount: 1,
+      unresolvedGateAdvanceCount: 0,
+      runIdsWithAcceptedProgress: [oldRun.run.id],
+      advances: [{
+        gateId: "checks",
+        resolution: {
+          status: "attributed",
+          artifactId: "artifact_metric_old",
+          sourceRunId: oldRun.run.id
+        }
+      }]
+    });
+    await expect(repo.getAcceptedProgressAttribution({ workThreadId: compatibilityThreadId })).resolves.toMatchObject({
+      acceptedGateAdvanceCount: 1,
+      attributedGateAdvanceCount: 0,
+      unresolvedGateAdvanceCount: 1,
+      runIdsWithAcceptedProgress: []
+    });
+    expect(aggregateReadStatements).toBe(4);
 
     sqlite.prepare("UPDATE work_threads SET current_assessment_id = ? WHERE id = ?")
       .run("assessment_metric_current", compatibilityThreadId);
-    await expect(repo.getAcceptedCompletionMetrics()).resolves.toEqual(metrics);
+    await expect(repo.getAcceptedProgressMetrics())
+      .rejects.toThrow(/Accepted progress authority is invalid/iu);
     sqlite.prepare("UPDATE work_threads SET current_assessment_id = ? WHERE id = ?")
       .run(compatibilityAssessment.id, compatibilityThreadId);
 
@@ -4227,38 +4402,26 @@ describe("explainable multi-runner routing", () => {
       state: "satisfied",
       evidenceBacked: true
     }), "assessment_metric_current");
-    await expect(repo.getAcceptedCompletionMetrics()).resolves.toMatchObject({
-      completedRuns: 3,
-      acceptedCompletions: 0,
-      byRunner: [
-        { id: "runner-new", acceptedCompletions: 0 },
-        { id: "runner-old", acceptedCompletions: 0 }
-      ],
-      byExecutor: [
-        { id: "codex", acceptedCompletions: 0 },
-        { id: "hermes", acceptedCompletions: 0 }
-      ]
-    });
+    await expect(repo.getAcceptedProgressMetrics())
+      .rejects.toThrow(/Accepted progress authority is invalid/iu);
 
     sqlite.prepare("UPDATE completion_assessments SET assessment_json = ? WHERE id = ?").run(JSON.stringify({
       ...acceptedAssessment,
       state: "waived",
       assessedBy: "human"
     }), "assessment_metric_current");
-    await expect(repo.getAcceptedCompletionMetrics()).resolves.toMatchObject({
-      completedRuns: 3,
-      acceptedCompletions: 0
-    });
+    await expect(repo.getAcceptedProgressMetrics())
+      .rejects.toThrow(/Accepted progress authority is invalid/iu);
+    await expect(repo.getAcceptedProgressAttribution({ workThreadId: threadId }))
+      .rejects.toThrow(/Accepted progress authority is invalid/iu);
 
     sqlite.prepare("UPDATE completion_assessments SET assessment_json = ? WHERE id = ?")
       .run("not-json", "assessment_metric_current");
-    await expect(repo.getAcceptedCompletionMetrics()).resolves.toMatchObject({
-      completedRuns: 3,
-      acceptedCompletions: 0
-    });
+    await expect(repo.getAcceptedProgressMetrics())
+      .rejects.toThrow(/Accepted progress authority is invalid/iu);
   });
 
-  it("does not count needs-approval completion as an accepted completion attempt", async () => {
+  it("keeps needs-approval execution out of completed-run usage metrics", async () => {
     const { repo } = routingRepository();
     await repo.registerRunner({
       runnerId: "runner-primary",
@@ -4289,9 +4452,12 @@ describe("explainable multi-runner routing", () => {
     await expect(repo.getRun({ runId: "run_metrics_needs_approval" })).resolves.toMatchObject({
       run: { status: "needs_approval" }
     });
-    await expect(repo.getAcceptedCompletionMetrics()).resolves.toEqual({
+    await expect(repo.getAcceptedProgressMetrics()).resolves.toEqual({
       completedRuns: 0,
-      acceptedCompletions: 0,
+      runsWithAcceptedProgress: 0,
+      acceptedGateAdvances: 0,
+      attributedAcceptedGateAdvances: 0,
+      unresolvedAcceptedGateAdvances: 0,
       byRunner: [],
       byExecutor: []
     });
@@ -4379,6 +4545,78 @@ describe("repository-optional channel bindings", () => {
     })).resolves.toBe(false);
     await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" }))
       .resolves.toMatchObject({ repo: "replacement", ownership: { applicationId: "A999" } });
+  });
+
+  it("rechecks managed authority inside the human-escalation transition transaction", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    const original = {
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      ownership: { mode: "managed" as const, exclusive: true as const, applicationId: "A123", botId: "U123" }
+    };
+    await repo.upsertChannelBinding(original);
+    const thread = (await repo.upsertWorkThread({ thread: completionWorkThread() })).thread;
+    await repo.openHumanEscalation({
+      escalation: {
+        id: "escalation-managed-authority-race",
+        workThreadId: thread.id,
+        sourceAuthority: {
+          provider: original.provider,
+          accountId: original.accountId,
+          conversationId: original.conversationId,
+          ownership: original.ownership,
+          bindingDigest: managedChannelBindingAuthorityDigest(original)
+        },
+        class: "security",
+        audience: "operator",
+        subjectRef: "slack:T123/C456",
+        state: "open",
+        blocking: true,
+        summary: "Managed source authority changed.",
+        reason: "The current managed source owner must authorize this transition.",
+        openedAt: completionTimestamp
+      }
+    });
+
+    // This models a caller that read and authorized the old binding before the
+    // binding rotation committed. The repository must not trust that stale preflight.
+    await expect(repo.getChannelBinding(original)).resolves.toMatchObject({
+      ownership: { applicationId: "A123", botId: "U123" }
+    });
+    await repo.upsertChannelBinding({
+      ...original,
+      ownership: { mode: "managed", exclusive: true, applicationId: "A999", botId: "U999" },
+      allowManagedOwnershipOverride: true
+    });
+
+    await expect(repo.transitionHumanEscalation({
+      id: "escalation-managed-authority-race",
+      toState: "resolved",
+      actor: { provider: "slack", providerUserId: "human-1", handle: "alice" },
+      channelPrincipal: { provider: "slack", applicationId: "A123", botId: "U123" },
+      reason: "The stale owner attempted to resolve after rotation.",
+      at: "2026-07-21T10:01:00.000Z"
+    })).rejects.toEqual(new ManagedChannelAuthorityError("managed_channel_authority_changed"));
+    await expect(repo.getHumanEscalation({ id: "escalation-managed-authority-race" }))
+      .resolves.toMatchObject({ state: "open" });
+    const protectedEscalation = await repo.getHumanEscalation({ id: "escalation-managed-authority-race" });
+    if (!protectedEscalation) throw new Error("expected protected human escalation");
+    await expect(repo.resolveHumanEscalation({
+      escalation: {
+        ...protectedEscalation,
+        state: "resolved",
+        resolution: {
+          actor: { provider: "opentag", providerUserId: "automatic-reconciler" },
+          reason: "An automatic finalizer must not bypass managed source authority.",
+          resolvedAt: "2026-07-21T10:02:00.000Z"
+        }
+      }
+    })).rejects.toEqual(new ManagedChannelAuthorityError("managed_channel_principal_required"));
+    await expect(repo.getHumanEscalation({ id: "escalation-managed-authority-race" }))
+      .resolves.toMatchObject({ state: "open" });
   });
 
   it("fails closed when persisted managed ownership is malformed", async () => {

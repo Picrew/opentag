@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
-  AcceptedCompletionMetricsSchema,
+  AcceptedProgressMetricsSchema,
   AgentAccessProfileSnapshotSchema,
   ApprovalDecisionSchema,
   ActorIdentitySchema,
@@ -19,9 +19,14 @@ import {
   CompletionWaiverSchema,
   ContextPacketSchema,
   conversationKeyFromEvent,
+  conversationKeysFromEvent,
   defaultRunEventMetadata,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
+  ReassessmentObligationReasonCodeSchema,
+  ReassessmentObligationSchema,
+  ReassessmentObligationSourceKindSchema,
+  ReassessmentObligationStateSchema,
   PolicyRuleSchema,
   PolicySnapshotProvenanceSchema,
   ProposalLineageSchema,
@@ -63,6 +68,7 @@ import {
   type ApplyIntentOutcome,
   type ApplyPlan,
   type ActionHint,
+  type AcceptedProgressAttributionView,
   type AdapterMutationMapping,
   type CompletionAssessment,
   type CompletionContract,
@@ -75,6 +81,10 @@ import {
   type OpenTagManagedChannelBindingOwnership,
   type OpenTagRun,
   type OpenTagRunResult,
+  type ReassessmentObligation,
+  type ReassessmentObligationReasonCode,
+  type ReassessmentObligationSourceKind,
+  type ReassessmentObligationState,
   type PolicyRule,
   type PolicySnapshotProvenance,
   type ProjectTargetRef,
@@ -82,7 +92,7 @@ import {
   type RunAdmissionDecision,
   type RunEventImportance,
   type RunEventVisibility,
-  type AcceptedCompletionMetrics,
+  type AcceptedProgressMetrics,
   type RoutingDecision,
   type RunnerDirectoryEntry,
   type RunnerRegistrationConfig,
@@ -92,7 +102,11 @@ import {
   type WorkThread,
   type WorkstreamInput
 } from "@opentag/core";
-import { evaluateRouting } from "@opentag/governance";
+import {
+  deriveAcceptedProgressAttribution,
+  evaluateRouting,
+  type CompletionArtifact
+} from "@opentag/governance";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, notExists, or, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { alias } from "drizzle-orm/sqlite-core";
@@ -118,6 +132,7 @@ import {
   repoBindings,
   repoMutationMappings,
   repoPolicyRules,
+  reassessmentObligations,
   callbackDeliveries,
   followUpRequests,
   runEvents,
@@ -164,6 +179,15 @@ export type RecordVerificationEvidenceInput = {
   receivedAt?: string;
 };
 
+export type EnqueueReassessmentObligationInput = {
+  workThreadId: string;
+  sourceKind: ReassessmentObligationSourceKind;
+  sourceId: string;
+  sourceDigest: string;
+  notBefore?: string;
+  createdAt?: string;
+};
+
 export type GovernanceAuditEvent = {
   id: number;
   workThreadId?: string;
@@ -175,6 +199,33 @@ export type GovernanceAuditEvent = {
 
 export class ChannelBindingCorruptionError extends Error {
   override readonly name = "ChannelBindingCorruptionError";
+}
+
+export type ManagedChannelPrincipalIdentity = {
+  provider: string;
+  applicationId: string;
+  botId?: string;
+};
+
+export type ManagedChannelAuthorityFailureReason =
+  | "managed_channel_authority_unavailable"
+  | "managed_channel_authority_changed"
+  | "managed_channel_principal_required";
+
+export class ManagedChannelAuthorityError extends Error {
+  override readonly name = "ManagedChannelAuthorityError";
+
+  constructor(readonly reasonCode: ManagedChannelAuthorityFailureReason) {
+    super(reasonCode);
+  }
+}
+
+export class ActiveConversationRaceError extends Error {
+  override readonly name = "ActiveConversationRaceError";
+
+  constructor(readonly activeRunId: string) {
+    super(`ACTIVE_CONVERSATION_RACE:${activeRunId}`);
+  }
 }
 
 export type ClaimedOpenTagRun = OpenTagRunWithEvent & {
@@ -275,6 +326,28 @@ export type ChannelBinding = {
   | { repoProvider: string; owner: string; repo: string }
   | { repoProvider?: never; owner?: never; repo?: never }
 );
+
+export function managedChannelBindingAuthorityDigest(input: Pick<
+  ChannelBinding,
+  "provider" | "accountId" | "conversationId" | "ownership"
+>): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify({
+    provider: input.provider,
+    accountId: input.accountId,
+    conversationId: input.conversationId,
+    ownership: input.ownership ?? null
+  })).digest("hex")}`;
+}
+
+function principalOwnsManagedChannelBinding(
+  principal: ManagedChannelPrincipalIdentity | undefined,
+  binding: ChannelBinding
+): boolean {
+  if (!binding.ownership) return true;
+  return principal?.provider === binding.provider
+    && principal.applicationId === binding.ownership.applicationId
+    && (!binding.ownership.botId || principal.botId === binding.ownership.botId);
+}
 
 export type SlackChannelBinding = {
   teamId: string;
@@ -495,6 +568,10 @@ export type WorkstreamMetrics = {
   workstreamId: string;
   workThreadCount: number;
   acceptedWorkThreadCount: number;
+  acceptedGateAdvanceCount: number;
+  attributedGateAdvanceCount: number;
+  unresolvedGateAdvanceCount: number;
+  runsWithAcceptedProgressCount: number;
   runCount: number;
   queuedRunCount: number;
   activeRunCount: number;
@@ -673,6 +750,101 @@ function completionWaiverFromRow(row: typeof completionWaivers.$inferSelect): Co
   return CompletionWaiverSchema.parse(JSON.parse(row.waiverJson));
 }
 
+function reassessmentObligationFromRow(
+  row: typeof reassessmentObligations.$inferSelect
+): ReassessmentObligation {
+  return ReassessmentObligationSchema.parse({
+    id: row.id,
+    workThreadId: row.workThreadId,
+    sourceKind: row.sourceKind,
+    sourceId: row.sourceId,
+    sourceDigest: row.sourceDigest,
+    notBefore: row.notBefore,
+    state: row.state,
+    ...(row.leaseOwner ? { leaseOwner: row.leaseOwner } : {}),
+    ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt } : {}),
+    ...(row.leaseToken ? { leaseToken: row.leaseToken } : {}),
+    attemptCount: row.attemptCount,
+    ...(row.lastReasonCode ? { lastReasonCode: row.lastReasonCode } : {}),
+    ...(row.lastError ? { lastError: row.lastError } : {}),
+    ...(row.satisfiedAssessmentId ? { satisfiedAssessmentId: row.satisfiedAssessmentId } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  });
+}
+
+function reassessmentObligationValues(
+  input: EnqueueReassessmentObligationInput
+): typeof reassessmentObligations.$inferInsert {
+  const sourceKind = ReassessmentObligationSourceKindSchema.parse(input.sourceKind);
+  const sourceId = OpenTagEventSchema.shape.id.parse(input.sourceId);
+  const sourceDigest = input.sourceDigest;
+  const createdAt = OpenTagEventSchema.shape.receivedAt.parse(input.createdAt ?? nowIso());
+  const notBefore = OpenTagEventSchema.shape.receivedAt.parse(input.notBefore ?? createdAt);
+  const identityDigest = canonicalSha256Json({ sourceKind, sourceId, sourceDigest });
+  const obligation = ReassessmentObligationSchema.parse({
+    id: `reassessment_${identityDigest.slice("sha256:".length, "sha256:".length + 32)}`,
+    workThreadId: input.workThreadId,
+    sourceKind,
+    sourceId,
+    sourceDigest,
+    notBefore,
+    state: "pending",
+    attemptCount: 0,
+    createdAt,
+    updatedAt: createdAt
+  });
+  return obligation;
+}
+
+function verificationEvidenceAttachmentObligation(input: {
+  workThreadId: string;
+  provider: string;
+  deliveryId: string;
+  subjectRef: string;
+  records: Array<Pick<typeof verificationEvidenceRecords.$inferSelect, "id" | "payloadDigest">>;
+  at: string;
+}): typeof reassessmentObligations.$inferInsert {
+  const sourceId = [input.provider, input.deliveryId, input.subjectRef, input.workThreadId].join(":");
+  const sourceDigest = canonicalSha256Json({
+    workThreadId: input.workThreadId,
+    provider: input.provider,
+    deliveryId: input.deliveryId,
+    subjectRef: input.subjectRef,
+    records: input.records
+      .map((record) => ({ id: record.id, payloadDigest: record.payloadDigest }))
+      .sort((left, right) => left.id.localeCompare(right.id))
+  });
+  return reassessmentObligationValues({
+    workThreadId: input.workThreadId,
+    sourceKind: "verification_evidence_attached",
+    sourceId,
+    sourceDigest,
+    notBefore: input.at,
+    createdAt: input.at
+  });
+}
+
+function humanEscalationReassessmentObligation(
+  escalation: HumanEscalation,
+  at: string
+): typeof reassessmentObligations.$inferInsert {
+  return reassessmentObligationValues({
+    workThreadId: escalation.workThreadId,
+    sourceKind: "human_escalation_changed",
+    sourceId: escalation.id,
+    sourceDigest: canonicalSha256Json(escalation),
+    notBefore: at,
+    createdAt: at
+  });
+}
+
+function sanitizeReassessmentError(error: string | undefined): string | undefined {
+  if (!error) return undefined;
+  const sanitized = String(sanitizeCredentialLikeValue(error)).slice(0, 4096);
+  return sanitized || undefined;
+}
+
 function storedVerificationEvidenceFromRow(
   row: typeof verificationEvidenceRecords.$inferSelect
 ): StoredVerificationEvidence {
@@ -788,6 +960,19 @@ function stableActionJson(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function isAutomaticWorkstreamContinuationActionJson(value: string | null): boolean {
+  if (!value) return false;
+  try {
+    const action = ActionHintSchema.safeParse(JSON.parse(value));
+    return action.success
+      && action.data.kind === "resume_work_thread"
+      && action.data.metadata?.["workstreamContinuation"] === true;
+  } catch {
+    // An unreadable action cannot safely prove that a queued Run is unrelated.
+    return true;
+  }
 }
 
 type CurrentAssessmentAuthorityRow = {
@@ -1905,6 +2090,59 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     await db.insert(runEvents).values(runEventValues(safeInput));
   }
 
+  async function appendRunChildCreatedEvent(input: {
+    parentRunId: string;
+    childRunId: string;
+    payload: unknown;
+    message: string;
+    createdAt: string;
+  }): Promise<void> {
+    const eventInput: Parameters<typeof runEventValues>[0] = {
+      runId: input.parentRunId,
+      type: "run.child_created",
+      payload: input.payload,
+      visibility: "audit",
+      importance: "normal",
+      message: input.message,
+      createdAt: input.createdAt
+    };
+    const safeInput = sanitizeRunEventValue(eventInput, await attemptFencingTokensForRun(input.parentRunId));
+    await db.insert(runEvents).values({
+      ...runEventValues(safeInput),
+      progressIdempotencyDigest: sha256Json({ kind: "run_child_created", childRunId: input.childRunId })
+    }).onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] });
+  }
+
+  async function appendFollowUpPromotedEvent(input: {
+    parentRunId: string;
+    followUpRequestId: string;
+    createdRunId: string;
+    sourceEventId: string;
+    createdAt: string;
+  }): Promise<void> {
+    const eventInput: Parameters<typeof runEventValues>[0] = {
+      runId: input.parentRunId,
+      type: "follow_up_request.promoted",
+      payload: {
+        followUpRequestId: input.followUpRequestId,
+        createdRunId: input.createdRunId,
+        sourceEventId: input.sourceEventId
+      },
+      visibility: "audit",
+      importance: "normal",
+      createdAt: input.createdAt
+    };
+    const safeInput = sanitizeRunEventValue(eventInput, await attemptFencingTokensForRun(input.parentRunId));
+    await db.insert(runEvents).values({
+      ...runEventValues(safeInput),
+      progressIdempotencyDigest: sha256Json({
+        kind: "follow_up_request_promoted",
+        followUpRequestId: input.followUpRequestId,
+        createdRunId: input.createdRunId
+      })
+    }).onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] });
+  }
+
   type RoutingDirectorySnapshot = {
     registrations: RunnerRegistration[];
     directory: RunnerDirectoryEntry[];
@@ -2301,6 +2539,140 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     });
   }
 
+  type AcceptedProgressSnapshot = {
+    acceptedGateAdvanceCount: number;
+    attributedGateAdvanceCount: number;
+    unresolvedGateAdvanceCount: number;
+    runIdsWithAcceptedProgress: string[];
+    acceptedGateAdvancesByRunId: Map<string, number>;
+    projectionsByWorkThreadId: Map<string, AcceptedProgressAttributionView>;
+  };
+
+  async function acceptedProgressSnapshot(input: { workThreadIds?: string[] } = {}): Promise<AcceptedProgressSnapshot> {
+    const requestedIds = input.workThreadIds ? [...new Set(input.workThreadIds)] : undefined;
+    if (requestedIds?.length === 0) {
+      return {
+        acceptedGateAdvanceCount: 0,
+        attributedGateAdvanceCount: 0,
+        unresolvedGateAdvanceCount: 0,
+        runIdsWithAcceptedProgress: [],
+        acceptedGateAdvancesByRunId: new Map(),
+        projectionsByWorkThreadId: new Map()
+      };
+    }
+    const currentRows = await db.select({
+      workThreadId: workThreads.id,
+      assessmentJson: completionAssessments.assessmentJson
+    }).from(workThreads)
+      .innerJoin(completionAssessments, eq(completionAssessments.id, workThreads.currentAssessmentId))
+      .where(requestedIds ? inArray(workThreads.id, requestedIds) : undefined);
+    const workThreadIds = currentRows.map((row) => row.workThreadId);
+    if (workThreadIds.length === 0) {
+      return {
+        acceptedGateAdvanceCount: 0,
+        attributedGateAdvanceCount: 0,
+        unresolvedGateAdvanceCount: 0,
+        runIdsWithAcceptedProgress: [],
+        acceptedGateAdvancesByRunId: new Map(),
+        projectionsByWorkThreadId: new Map()
+      };
+    }
+    const [assessmentRows, progressRunRows] = await Promise.all([
+      db.select({
+        workThreadId: completionAssessments.workThreadId,
+        assessmentJson: completionAssessments.assessmentJson
+      }).from(completionAssessments)
+        .where(inArray(completionAssessments.workThreadId, workThreadIds))
+        .orderBy(asc(completionAssessments.cycle), asc(completionAssessments.sequence)),
+      db.select({
+        id: runs.id,
+        workThreadId: runs.workThreadId,
+        resultJson: runs.resultJson,
+        updatedAt: runs.updatedAt
+      }).from(runs).where(inArray(runs.workThreadId, workThreadIds))
+    ]);
+    const assessmentsByWorkThread = new Map<string, CompletionAssessment[]>();
+    for (const row of assessmentRows) {
+      const parsed = CompletionAssessmentSchema.safeParse(recordFromJson(row.assessmentJson));
+      if (!parsed.success) continue;
+      const values = assessmentsByWorkThread.get(row.workThreadId) ?? [];
+      values.push(parsed.data);
+      assessmentsByWorkThread.set(row.workThreadId, values);
+    }
+    const artifactsByWorkThread = new Map<string, CompletionArtifact[]>();
+    const runIdsByWorkThread = new Map<string, string[]>();
+    for (const row of progressRunRows) {
+      if (!row.workThreadId) continue;
+      const threadRunIds = runIdsByWorkThread.get(row.workThreadId) ?? [];
+      threadRunIds.push(row.id);
+      runIdsByWorkThread.set(row.workThreadId, threadRunIds);
+      if (!row.resultJson) continue;
+      const parsedResult = OpenTagRunResultSchema.safeParse(recordFromJson(row.resultJson));
+      if (!parsedResult.success) continue;
+      const artifacts = artifactsByWorkThread.get(row.workThreadId) ?? [];
+      if (parsedResult.data.createdPullRequestUrl) {
+        artifacts.push({
+          id: `${row.id}:created-pull-request`,
+          kind: "pull_request",
+          sourceRunId: row.id,
+          uri: parsedResult.data.createdPullRequestUrl,
+          recordedAt: row.updatedAt
+        });
+      }
+      for (const [index, artifact] of (parsedResult.data.artifacts ?? []).entries()) {
+        artifacts.push({
+          id: artifact.id ?? `${row.id}:artifact:${index + 1}`,
+          kind: artifact.kind ?? artifact.type ?? "custom",
+          sourceRunId: row.id,
+          ...(artifact.uri ? { uri: artifact.uri } : {}),
+          recordedAt: artifact.createdAt ?? row.updatedAt
+        });
+      }
+      artifactsByWorkThread.set(row.workThreadId, artifacts);
+    }
+    let acceptedGateAdvanceCount = 0;
+    let attributedGateAdvanceCount = 0;
+    let unresolvedGateAdvanceCount = 0;
+    const acceptedGateAdvancesByRunId = new Map<string, number>();
+    const projectionsByWorkThreadId = new Map<string, AcceptedProgressAttributionView>();
+    for (const row of currentRows) {
+      const currentAssessment = CompletionAssessmentSchema.safeParse(recordFromJson(row.assessmentJson));
+      if (!currentAssessment.success || currentAssessment.data.workThreadId !== row.workThreadId) {
+        throw new Error(`Accepted progress authority is invalid for WorkThread ${row.workThreadId}: current assessment is malformed or belongs to another WorkThread.`);
+      }
+      try {
+        const projection = deriveAcceptedProgressAttribution({
+          currentAssessment: currentAssessment.data,
+          assessmentHistory: assessmentsByWorkThread.get(row.workThreadId) ?? [],
+          artifacts: artifactsByWorkThread.get(row.workThreadId) ?? [],
+          workThreadRunIds: runIdsByWorkThread.get(row.workThreadId) ?? []
+        });
+        projectionsByWorkThreadId.set(row.workThreadId, projection);
+        acceptedGateAdvanceCount += projection.acceptedGateAdvanceCount;
+        attributedGateAdvanceCount += projection.attributedGateAdvanceCount;
+        unresolvedGateAdvanceCount += projection.unresolvedGateAdvanceCount;
+        for (const advance of projection.advances) {
+          if (advance.resolution.status !== "attributed") continue;
+          acceptedGateAdvancesByRunId.set(
+            advance.resolution.sourceRunId,
+            (acceptedGateAdvancesByRunId.get(advance.resolution.sourceRunId) ?? 0) + 1
+          );
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "unknown derivation failure";
+        throw new Error(`Accepted progress authority is invalid for WorkThread ${row.workThreadId}: ${reason}`);
+      }
+    }
+    return {
+      acceptedGateAdvanceCount,
+      attributedGateAdvanceCount,
+      unresolvedGateAdvanceCount,
+      runIdsWithAcceptedProgress: [...acceptedGateAdvancesByRunId.keys()].sort(),
+      acceptedGateAdvancesByRunId,
+      projectionsByWorkThreadId
+    };
+  }
+
   return {
     appendRunEvent,
 
@@ -2340,6 +2712,28 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const members = await db.select({ workThreadId: factoryWorkstreamMembers.workThreadId }).from(factoryWorkstreamMembers)
         .where(eq(factoryWorkstreamMembers.workstreamId, input.id)).orderBy(asc(factoryWorkstreamMembers.workThreadId));
       return factoryWorkstreamFromRows(row, members);
+    },
+
+    async listFactoryWorkstreamsForWorkThread(input: {
+      workThreadId: string;
+      limit?: number;
+    }): Promise<StoredFactoryWorkstream[]> {
+      const limit = Math.min(101, Math.max(1, Math.trunc(input.limit ?? 101)));
+      const rows = await db.select({ workstream: factoryWorkstreams })
+        .from(factoryWorkstreamMembers)
+        .innerJoin(factoryWorkstreams, eq(factoryWorkstreams.id, factoryWorkstreamMembers.workstreamId))
+        .where(eq(factoryWorkstreamMembers.workThreadId, input.workThreadId))
+        .orderBy(asc(factoryWorkstreams.id))
+        .limit(limit);
+      const stored: StoredFactoryWorkstream[] = [];
+      for (const { workstream } of rows) {
+        const members = await db.select({ workThreadId: factoryWorkstreamMembers.workThreadId })
+          .from(factoryWorkstreamMembers)
+          .where(eq(factoryWorkstreamMembers.workstreamId, workstream.id))
+          .orderBy(asc(factoryWorkstreamMembers.workThreadId));
+        stored.push(factoryWorkstreamFromRows(workstream, members));
+      }
+      return stored;
     },
 
     async createFactoryWorkstream(input: {
@@ -2581,6 +2975,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const acceptedWorkThreadCount = currentAssessmentRows.filter((row) =>
         currentAssessmentIsAccepted(row, evaluatedAt)
       ).length;
+      const acceptedProgress = await acceptedProgressSnapshot({
+        workThreadIds: memberRows.map((row) => row.workThreadId)
+      });
       const runRows = await db.select().from(runs).where(eq(runs.workstreamId, input.workstreamId));
       const attemptRows = runRows.length > 0 ? await db.select({
         runId: attempts.runId,
@@ -2609,6 +3006,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         workstreamId: input.workstreamId,
         workThreadCount: memberRows.length,
         acceptedWorkThreadCount,
+        acceptedGateAdvanceCount: acceptedProgress.acceptedGateAdvanceCount,
+        attributedGateAdvanceCount: acceptedProgress.attributedGateAdvanceCount,
+        unresolvedGateAdvanceCount: acceptedProgress.unresolvedGateAdvanceCount,
+        runsWithAcceptedProgressCount: acceptedProgress.runIdsWithAcceptedProgress.length,
         runCount: runRows.length,
         queuedRunCount: runRows.filter((run) => run.status === "queued").length,
         activeRunCount: runRows.filter((run) => ["assigned", "running"].includes(run.status)).length,
@@ -2630,6 +3031,368 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async getWorkThread(input: { workThreadId: string }): Promise<DurableWorkThread | null> {
       const row = await db.select().from(workThreads).where(eq(workThreads.id, input.workThreadId)).limit(1).get();
       return row ? workThreadFromRow(row) : null;
+    },
+
+    async listWorkThreads(input: { limit?: number } = {}): Promise<DurableWorkThread[]> {
+      const limit = Math.min(500, Math.max(1, Math.trunc(input.limit ?? 100)));
+      const rows = await db
+        .select()
+        .from(workThreads)
+        .orderBy(desc(workThreads.updatedAt), asc(workThreads.id))
+        .limit(limit);
+      return rows.map(workThreadFromRow);
+    },
+
+    async enqueueReassessmentObligation(
+      input: EnqueueReassessmentObligationInput
+    ): Promise<{ outcome: "created" | "existing"; obligation: ReassessmentObligation }> {
+      const values = reassessmentObligationValues(input);
+      return db.transaction((tx) => {
+        const thread = tx.select({ id: workThreads.id }).from(workThreads)
+          .where(eq(workThreads.id, values.workThreadId)).limit(1).get();
+        if (!thread) throw new Error(`WorkThread ${values.workThreadId} does not exist.`);
+        const inserted = tx.insert(reassessmentObligations).values(values).onConflictDoNothing().run();
+        const row = tx.select().from(reassessmentObligations).where(and(
+          eq(reassessmentObligations.sourceKind, values.sourceKind),
+          eq(reassessmentObligations.sourceId, values.sourceId),
+          eq(reassessmentObligations.sourceDigest, values.sourceDigest)
+        )).limit(1).get();
+        if (!row) throw new Error("ReassessmentObligation disappeared after enqueue.");
+        if (row.workThreadId !== values.workThreadId) {
+          throw new Error("ReassessmentObligation source identity is already bound to a different WorkThread.");
+        }
+        return {
+          outcome: inserted.changes === 1 ? "created" as const : "existing" as const,
+          obligation: reassessmentObligationFromRow(row)
+        };
+      }, { behavior: "immediate" });
+    },
+
+    async getReassessmentObligation(input: { id: string }): Promise<ReassessmentObligation | null> {
+      const row = await db.select().from(reassessmentObligations)
+        .where(eq(reassessmentObligations.id, input.id)).limit(1).get();
+      return row ? reassessmentObligationFromRow(row) : null;
+    },
+
+    async listReassessmentObligations(input: {
+      workThreadId?: string;
+      state?: ReassessmentObligationState;
+      limit?: number;
+    } = {}): Promise<ReassessmentObligation[]> {
+      const limit = Math.min(500, Math.max(1, Math.trunc(input.limit ?? 100)));
+      const state = input.state ? ReassessmentObligationStateSchema.parse(input.state) : undefined;
+      const rows = input.workThreadId && state
+        ? await db.select().from(reassessmentObligations).where(and(
+            eq(reassessmentObligations.workThreadId, input.workThreadId),
+            eq(reassessmentObligations.state, state)
+          )).orderBy(asc(reassessmentObligations.notBefore), asc(reassessmentObligations.createdAt), asc(reassessmentObligations.id)).limit(limit)
+        : input.workThreadId
+          ? await db.select().from(reassessmentObligations)
+              .where(eq(reassessmentObligations.workThreadId, input.workThreadId))
+              .orderBy(asc(reassessmentObligations.notBefore), asc(reassessmentObligations.createdAt), asc(reassessmentObligations.id)).limit(limit)
+          : state
+            ? await db.select().from(reassessmentObligations)
+                .where(eq(reassessmentObligations.state, state))
+                .orderBy(asc(reassessmentObligations.notBefore), asc(reassessmentObligations.createdAt), asc(reassessmentObligations.id)).limit(limit)
+            : await db.select().from(reassessmentObligations)
+                .orderBy(asc(reassessmentObligations.notBefore), asc(reassessmentObligations.createdAt), asc(reassessmentObligations.id)).limit(limit);
+      return rows.map(reassessmentObligationFromRow);
+    },
+
+    async claimDueReassessmentObligations(input: {
+      leaseOwner: string;
+      leaseSeconds: number;
+      limit: number;
+      now?: Date;
+    }): Promise<ReassessmentObligation[]> {
+      if (!input.leaseOwner) throw new Error("A reassessment obligation claim requires leaseOwner.");
+      if (!Number.isFinite(input.leaseSeconds) || input.leaseSeconds <= 0) {
+        throw new Error("A reassessment obligation claim requires positive leaseSeconds.");
+      }
+      if (!Number.isFinite(input.limit) || input.limit <= 0) {
+        throw new Error("A reassessment obligation claim requires a positive limit.");
+      }
+      const limit = Math.min(100, Math.max(1, Math.trunc(input.limit)));
+      const now = input.now ?? new Date();
+      const at = now.toISOString();
+      const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000).toISOString();
+      return db.transaction((tx) => {
+        const due = tx.select().from(reassessmentObligations).where(or(
+          and(
+            eq(reassessmentObligations.state, "pending"),
+            lte(reassessmentObligations.notBefore, at)
+          ),
+          and(
+            eq(reassessmentObligations.state, "leased"),
+            isNotNull(reassessmentObligations.leaseExpiresAt),
+            lte(reassessmentObligations.leaseExpiresAt, at)
+          )
+        )).orderBy(
+          asc(reassessmentObligations.notBefore),
+          asc(reassessmentObligations.createdAt),
+          asc(reassessmentObligations.id)
+        ).limit(limit).all();
+        const claimed: ReassessmentObligation[] = [];
+        for (const row of due) {
+          const leaseToken = randomUUID();
+          const updated = tx.update(reassessmentObligations).set({
+            state: "leased",
+            leaseOwner: input.leaseOwner,
+            leaseExpiresAt,
+            leaseToken,
+            attemptCount: row.attemptCount + 1,
+            updatedAt: at
+          }).where(and(
+            eq(reassessmentObligations.id, row.id),
+            or(
+              and(
+                eq(reassessmentObligations.state, "pending"),
+                lte(reassessmentObligations.notBefore, at)
+              ),
+              and(
+                eq(reassessmentObligations.state, "leased"),
+                isNotNull(reassessmentObligations.leaseExpiresAt),
+                lte(reassessmentObligations.leaseExpiresAt, at)
+              )
+            )
+          )).run();
+          if (updated.changes !== 1) continue;
+          claimed.push(reassessmentObligationFromRow({
+            ...row,
+            state: "leased",
+            leaseOwner: input.leaseOwner,
+            leaseExpiresAt,
+            leaseToken,
+            attemptCount: row.attemptCount + 1,
+            updatedAt: at
+          }));
+        }
+        return claimed;
+      }, { behavior: "immediate" });
+    },
+
+    async renewReassessmentObligationLease(input: {
+      id: string;
+      leaseOwner: string;
+      leaseToken: string;
+      leaseSeconds: number;
+      now?: Date;
+    }): Promise<{ outcome: "renewed" | "stale_lease" | "not_found"; obligation?: ReassessmentObligation }> {
+      if (!Number.isFinite(input.leaseSeconds) || input.leaseSeconds <= 0) {
+        throw new Error("A reassessment obligation renewal requires positive leaseSeconds.");
+      }
+      const now = input.now ?? new Date();
+      const at = now.toISOString();
+      const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000).toISOString();
+      return db.transaction((tx) => {
+        const row = tx.select().from(reassessmentObligations).where(eq(reassessmentObligations.id, input.id)).limit(1).get();
+        if (!row) return { outcome: "not_found" as const };
+        if (
+          row.state !== "leased"
+          || row.leaseOwner !== input.leaseOwner
+          || row.leaseToken !== input.leaseToken
+          || !row.leaseExpiresAt
+          || row.leaseExpiresAt <= at
+        ) return { outcome: "stale_lease" as const, obligation: reassessmentObligationFromRow(row) };
+        const renewed = tx.update(reassessmentObligations).set({ leaseExpiresAt, updatedAt: at })
+          .where(and(
+            eq(reassessmentObligations.id, input.id),
+            eq(reassessmentObligations.state, "leased"),
+            eq(reassessmentObligations.leaseOwner, input.leaseOwner),
+            eq(reassessmentObligations.leaseToken, input.leaseToken),
+            gt(reassessmentObligations.leaseExpiresAt, at)
+          )).run();
+        if (renewed.changes !== 1) {
+          return { outcome: "stale_lease" as const, obligation: reassessmentObligationFromRow(row) };
+        }
+        return {
+          outcome: "renewed" as const,
+          obligation: reassessmentObligationFromRow({ ...row, leaseExpiresAt, updatedAt: at })
+        };
+      }, { behavior: "immediate" });
+    },
+
+    async satisfyReassessmentObligation(input: {
+      id: string;
+      leaseOwner: string;
+      leaseToken: string;
+      reasonCode: Extract<ReassessmentObligationReasonCode, "assessment_satisfied" | "continuation_dispatched" | "continuation_terminal">;
+      satisfiedAssessmentId?: string;
+      now?: Date;
+    }): Promise<{ outcome: "satisfied" | "duplicate" | "stale_lease" | "not_found"; obligation?: ReassessmentObligation }> {
+      const reasonCode = ReassessmentObligationReasonCodeSchema.parse(input.reasonCode);
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const row = tx.select().from(reassessmentObligations).where(eq(reassessmentObligations.id, input.id)).limit(1).get();
+        if (!row) return { outcome: "not_found" as const };
+        if (row.state === "satisfied") {
+          const duplicate = row.lastReasonCode === reasonCode
+            && (row.satisfiedAssessmentId ?? undefined) === input.satisfiedAssessmentId;
+          return {
+            outcome: duplicate ? "duplicate" as const : "stale_lease" as const,
+            obligation: reassessmentObligationFromRow(row)
+          };
+        }
+        if (
+          row.state !== "leased"
+          || row.leaseOwner !== input.leaseOwner
+          || row.leaseToken !== input.leaseToken
+          || !row.leaseExpiresAt
+          || row.leaseExpiresAt <= at
+        ) return { outcome: "stale_lease" as const, obligation: reassessmentObligationFromRow(row) };
+        const obligation = ReassessmentObligationSchema.parse({
+          ...reassessmentObligationFromRow(row),
+          state: "satisfied",
+          leaseOwner: undefined,
+          leaseExpiresAt: undefined,
+          leaseToken: undefined,
+          lastReasonCode: reasonCode,
+          lastError: undefined,
+          satisfiedAssessmentId: input.satisfiedAssessmentId,
+          updatedAt: at
+        });
+        const satisfied = tx.update(reassessmentObligations).set({
+          state: "satisfied",
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          leaseToken: null,
+          lastReasonCode: reasonCode,
+          lastError: null,
+          satisfiedAssessmentId: input.satisfiedAssessmentId ?? null,
+          updatedAt: at
+        }).where(and(
+          eq(reassessmentObligations.id, input.id),
+          eq(reassessmentObligations.state, "leased"),
+          eq(reassessmentObligations.leaseOwner, input.leaseOwner),
+          eq(reassessmentObligations.leaseToken, input.leaseToken),
+          gt(reassessmentObligations.leaseExpiresAt, at)
+        )).run();
+        if (satisfied.changes !== 1) {
+          return { outcome: "stale_lease" as const, obligation: reassessmentObligationFromRow(row) };
+        }
+        return { outcome: "satisfied" as const, obligation };
+      }, { behavior: "immediate" });
+    },
+
+    async rescheduleReassessmentObligation(input: {
+      id: string;
+      leaseOwner: string;
+      leaseToken: string;
+      notBefore: string;
+      reasonCode: Extract<ReassessmentObligationReasonCode, "continuation_deferred" | "reassessment_failed">;
+      lastError?: string;
+      now?: Date;
+    }): Promise<{ outcome: "rescheduled" | "stale_lease" | "not_found"; obligation?: ReassessmentObligation }> {
+      const reasonCode = ReassessmentObligationReasonCodeSchema.parse(input.reasonCode);
+      const notBefore = OpenTagEventSchema.shape.receivedAt.parse(input.notBefore);
+      const lastError = sanitizeReassessmentError(input.lastError);
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const row = tx.select().from(reassessmentObligations).where(eq(reassessmentObligations.id, input.id)).limit(1).get();
+        if (!row) return { outcome: "not_found" as const };
+        if (
+          row.state !== "leased"
+          || row.leaseOwner !== input.leaseOwner
+          || row.leaseToken !== input.leaseToken
+          || !row.leaseExpiresAt
+          || row.leaseExpiresAt <= at
+        ) return { outcome: "stale_lease" as const, obligation: reassessmentObligationFromRow(row) };
+        const obligation = ReassessmentObligationSchema.parse({
+          ...reassessmentObligationFromRow(row),
+          state: "pending",
+          notBefore,
+          leaseOwner: undefined,
+          leaseExpiresAt: undefined,
+          leaseToken: undefined,
+          lastReasonCode: reasonCode,
+          lastError,
+          satisfiedAssessmentId: undefined,
+          updatedAt: at
+        });
+        const rescheduled = tx.update(reassessmentObligations).set({
+          state: "pending",
+          notBefore,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          leaseToken: null,
+          lastReasonCode: reasonCode,
+          lastError: lastError ?? null,
+          satisfiedAssessmentId: null,
+          updatedAt: at
+        }).where(and(
+          eq(reassessmentObligations.id, input.id),
+          eq(reassessmentObligations.state, "leased"),
+          eq(reassessmentObligations.leaseOwner, input.leaseOwner),
+          eq(reassessmentObligations.leaseToken, input.leaseToken),
+          gt(reassessmentObligations.leaseExpiresAt, at)
+        )).run();
+        if (rescheduled.changes !== 1) {
+          return { outcome: "stale_lease" as const, obligation: reassessmentObligationFromRow(row) };
+        }
+        return { outcome: "rescheduled" as const, obligation };
+      }, { behavior: "immediate" });
+    },
+
+    async blockReassessmentObligation(input: {
+      id: string;
+      leaseOwner: string;
+      leaseToken: string;
+      reasonCode: Extract<ReassessmentObligationReasonCode, "source_missing" | "authority_missing" | "needs_human">;
+      lastError?: string;
+      now?: Date;
+    }): Promise<{ outcome: "blocked" | "duplicate" | "stale_lease" | "not_found"; obligation?: ReassessmentObligation }> {
+      const reasonCode = ReassessmentObligationReasonCodeSchema.parse(input.reasonCode);
+      const lastError = sanitizeReassessmentError(input.lastError);
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const row = tx.select().from(reassessmentObligations).where(eq(reassessmentObligations.id, input.id)).limit(1).get();
+        if (!row) return { outcome: "not_found" as const };
+        if (row.state === "blocked") {
+          const duplicate = row.lastReasonCode === reasonCode && (row.lastError ?? undefined) === lastError;
+          return {
+            outcome: duplicate ? "duplicate" as const : "stale_lease" as const,
+            obligation: reassessmentObligationFromRow(row)
+          };
+        }
+        if (
+          row.state !== "leased"
+          || row.leaseOwner !== input.leaseOwner
+          || row.leaseToken !== input.leaseToken
+          || !row.leaseExpiresAt
+          || row.leaseExpiresAt <= at
+        ) return { outcome: "stale_lease" as const, obligation: reassessmentObligationFromRow(row) };
+        const obligation = ReassessmentObligationSchema.parse({
+          ...reassessmentObligationFromRow(row),
+          state: "blocked",
+          leaseOwner: undefined,
+          leaseExpiresAt: undefined,
+          leaseToken: undefined,
+          lastReasonCode: reasonCode,
+          lastError,
+          satisfiedAssessmentId: undefined,
+          updatedAt: at
+        });
+        const blocked = tx.update(reassessmentObligations).set({
+          state: "blocked",
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          leaseToken: null,
+          lastReasonCode: reasonCode,
+          lastError: lastError ?? null,
+          satisfiedAssessmentId: null,
+          updatedAt: at
+        }).where(and(
+          eq(reassessmentObligations.id, input.id),
+          eq(reassessmentObligations.state, "leased"),
+          eq(reassessmentObligations.leaseOwner, input.leaseOwner),
+          eq(reassessmentObligations.leaseToken, input.leaseToken),
+          gt(reassessmentObligations.leaseExpiresAt, at)
+        )).run();
+        if (blocked.changes !== 1) {
+          return { outcome: "stale_lease" as const, obligation: reassessmentObligationFromRow(row) };
+        }
+        return { outcome: "blocked" as const, obligation };
+      }, { behavior: "immediate" });
     },
 
     async attachRunToWorkThread(input: { runId: string; workThreadId: string }): Promise<boolean> {
@@ -2764,6 +3527,26 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           payloadJson: JSON.stringify({ provider: input.provider, deliveryId: input.deliveryId, subjectRef: input.subjectRef, subjectVersion: input.subjectVersion, kind: evidence.kind, assurance: evidence.assurance, payloadDigest }),
           createdAt: receivedAt
         }).run();
+        if (input.workThreadId) {
+          const attachedRows = tx.select({
+            id: verificationEvidenceRecords.id,
+            payloadDigest: verificationEvidenceRecords.payloadDigest,
+            receivedAt: verificationEvidenceRecords.receivedAt
+          }).from(verificationEvidenceRecords).where(and(
+            eq(verificationEvidenceRecords.workThreadId, input.workThreadId),
+            eq(verificationEvidenceRecords.provider, input.provider),
+            eq(verificationEvidenceRecords.deliveryId, input.deliveryId),
+            eq(verificationEvidenceRecords.subjectRef, input.subjectRef)
+          )).all();
+          tx.insert(reassessmentObligations).values(verificationEvidenceAttachmentObligation({
+            workThreadId: input.workThreadId,
+            provider: input.provider,
+            deliveryId: input.deliveryId,
+            subjectRef: input.subjectRef,
+            records: attachedRows,
+            at: attachedRows.map((attached) => attached.receivedAt).sort()[0] ?? receivedAt
+          })).onConflictDoNothing().run();
+        }
         return { evidence: storedVerificationEvidenceFromRow(row), created: true };
       });
     },
@@ -2851,6 +3634,40 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           created += 1;
           stored.push(storedVerificationEvidenceFromRow(row));
         }
+        const attachmentGroups = new Map<string, StoredVerificationEvidence[]>();
+        for (const evidence of stored) {
+          if (!evidence.workThreadId) continue;
+          const key = JSON.stringify([
+            evidence.workThreadId,
+            evidence.provider,
+            evidence.deliveryId,
+            evidence.subjectRef
+          ]);
+          const group = attachmentGroups.get(key) ?? [];
+          group.push(evidence);
+          attachmentGroups.set(key, group);
+        }
+        for (const group of attachmentGroups.values()) {
+          const first = group[0]!;
+          const attachedRows = tx.select({
+            id: verificationEvidenceRecords.id,
+            payloadDigest: verificationEvidenceRecords.payloadDigest,
+            receivedAt: verificationEvidenceRecords.receivedAt
+          }).from(verificationEvidenceRecords).where(and(
+            eq(verificationEvidenceRecords.workThreadId, first.workThreadId!),
+            eq(verificationEvidenceRecords.provider, first.provider),
+            eq(verificationEvidenceRecords.deliveryId, first.deliveryId),
+            eq(verificationEvidenceRecords.subjectRef, first.subjectRef)
+          )).all();
+          tx.insert(reassessmentObligations).values(verificationEvidenceAttachmentObligation({
+            workThreadId: first.workThreadId!,
+            provider: first.provider,
+            deliveryId: first.deliveryId,
+            subjectRef: first.subjectRef,
+            records: attachedRows,
+            at: attachedRows.map((attached) => attached.receivedAt).sort()[0]!
+          })).onConflictDoNothing().run();
+        }
         return { evidence: stored, created };
       });
     },
@@ -2890,6 +3707,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ))
           .run().changes;
         if (attached > 0) {
+          const attachedAt = input.attachedAt ?? nowIso();
           tx.insert(governanceEvents).values({
             workThreadId: input.workThreadId,
             type: "verification_evidence.attached",
@@ -2900,8 +3718,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               subjectRef: input.subjectRef,
               recordCount: attached
             }),
-            createdAt: input.attachedAt ?? nowIso()
+            createdAt: attachedAt
           }).run();
+          tx.insert(reassessmentObligations).values(verificationEvidenceAttachmentObligation({
+            workThreadId: input.workThreadId,
+            provider: input.provider,
+            deliveryId: input.deliveryId,
+            subjectRef: input.subjectRef,
+            records,
+            at: attachedAt
+          })).onConflictDoNothing().run();
         }
         return { attached };
       });
@@ -3019,6 +3845,17 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return row ? completionAssessmentFromRow(row) : null;
     },
 
+    async getAcceptedProgressAttribution(input: { workThreadId: string }): Promise<AcceptedProgressAttributionView | null> {
+      const thread = await db.select({ currentAssessmentId: workThreads.currentAssessmentId })
+        .from(workThreads)
+        .where(eq(workThreads.id, input.workThreadId))
+        .limit(1)
+        .get();
+      if (!thread?.currentAssessmentId) return null;
+      const snapshot = await acceptedProgressSnapshot({ workThreadIds: [input.workThreadId] });
+      return snapshot.projectionsByWorkThreadId.get(input.workThreadId) ?? null;
+    },
+
     async recordCompletionWaiver(input: { waiver: CompletionWaiver }): Promise<{ waiver: CompletionWaiver; created: boolean }> {
       const waiver = CompletionWaiverSchema.parse(sanitizeCredentialLikeValue(input.waiver));
       const waiverJson = JSON.stringify(waiver);
@@ -3072,6 +3909,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           }),
           createdAt: waiver.waivedAt
         }).run();
+        tx.insert(reassessmentObligations).values(reassessmentObligationValues({
+          workThreadId: contract.workThreadId,
+          sourceKind: "completion_waiver_changed",
+          sourceId: waiver.id,
+          sourceDigest: contentDigest,
+          notBefore: waiver.waivedAt,
+          createdAt: waiver.waivedAt
+        })).onConflictDoNothing().run();
         return { waiver, created: true };
       });
     },
@@ -3173,6 +4018,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           payloadJson: JSON.stringify({ class: escalation.class, blocking: escalation.blocking, dedupeKey: escalation.dedupeKey ?? null }),
           createdAt
         }).run();
+        tx.insert(reassessmentObligations)
+          .values(humanEscalationReassessmentObligation(escalation, createdAt))
+          .onConflictDoNothing()
+          .run();
         return { escalation, created: true };
       });
     },
@@ -3182,6 +4031,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       toState: "acknowledged" | "resolved" | "expired" | "superseded";
       at: string;
       actor?: ActorIdentity;
+      channelPrincipal?: ManagedChannelPrincipalIdentity;
       optionId?: string;
       reason?: string;
       supersededById?: string;
@@ -3191,6 +4041,32 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const existing = tx.select().from(humanEscalations).where(eq(humanEscalations.id, input.id)).limit(1).get();
         if (!existing) throw new Error(`HumanEscalation ${input.id} does not exist.`);
         const current = humanEscalationFromRow(existing);
+        if (
+          (input.toState === "acknowledged" || input.toState === "resolved")
+          && current.sourceAuthority
+        ) {
+          const authority = current.sourceAuthority;
+          const bindingRow = tx
+            .select()
+            .from(channelBindings)
+            .where(and(
+              eq(channelBindings.provider, authority.provider),
+              eq(channelBindings.accountId, authority.accountId),
+              eq(channelBindings.conversationId, authority.conversationId)
+            ))
+            .limit(1)
+            .get();
+          if (!bindingRow) {
+            throw new ManagedChannelAuthorityError("managed_channel_authority_unavailable");
+          }
+          const binding = channelBindingFromRow(bindingRow);
+          if (managedChannelBindingAuthorityDigest(binding) !== authority.bindingDigest) {
+            throw new ManagedChannelAuthorityError("managed_channel_authority_changed");
+          }
+          if (!principalOwnsManagedChannelBinding(input.channelPrincipal, binding)) {
+            throw new ManagedChannelAuthorityError("managed_channel_principal_required");
+          }
+        }
         const expiredDueToDeadline = Boolean(
           (input.toState === "acknowledged" || input.toState === "resolved")
           && current.expiresAt
@@ -3305,6 +4181,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           }),
           createdAt: transitionedAt
         }).run();
+        tx.insert(reassessmentObligations)
+          .values(humanEscalationReassessmentObligation(escalation, transitionedAt))
+          .onConflictDoNothing()
+          .run();
         return { escalation, changed: true };
       });
     },
@@ -3361,6 +4241,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           }
           return { escalation: current, resolved: false };
         }
+        if (current.sourceAuthority) {
+          throw new ManagedChannelAuthorityError("managed_channel_principal_required");
+        }
         if (current.state === "expired" || current.state === "superseded") {
           throw new Error(`HumanEscalation ${escalation.id} is already terminal in state ${current.state}.`);
         }
@@ -3385,6 +4268,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           payloadJson: JSON.stringify({ class: escalation.class, actor: resolution.actor, reason: resolution.reason ?? null }),
           createdAt: resolution.resolvedAt
         }).run();
+        tx.insert(reassessmentObligations)
+          .values(humanEscalationReassessmentObligation(escalation, resolution.resolvedAt))
+          .onConflictDoNothing()
+          .run();
         return { escalation, resolved: true };
       });
     },
@@ -3419,12 +4306,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const rows = await db
         .select()
         .from(runs)
-        .where(and(eq(runs.conversationKey, input.conversationKey), inArray(runs.status, ["assigned", "running", "needs_approval"])))
+        .where(and(eq(runs.conversationKey, input.conversationKey), inArray(runs.status, ["queued", "assigned", "running", "needs_approval"])))
         .orderBy(asc(runs.createdAt));
       // A permission wait keeps its attempt attached so the runtime can heartbeat
       // and resume it. A completed needs_human run clears the attempt and must not
       // block later work in the same conversation.
-      const row = rows.find((candidate) => candidate.status !== "needs_approval" || candidate.currentAttemptId !== null);
+      const row = rows.find((candidate) =>
+        candidate.status === "queued"
+          ? isAutomaticWorkstreamContinuationActionJson(candidate.triggeredByActionJson)
+          : candidate.status !== "needs_approval" || candidate.currentAttemptId !== null
+      );
       if (!row) return null;
       return {
         run: runFromRow(row),
@@ -3681,30 +4572,90 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return rows.map(followUpRequestFromRow);
     },
 
+    async listFollowUpsForActiveRun(input: { activeRunId: string }): Promise<FollowUpRequest[]> {
+      const rows = await db
+        .select()
+        .from(followUpRequests)
+        .where(eq(followUpRequests.activeRunId, input.activeRunId))
+        .orderBy(asc(followUpRequests.createdAt));
+      return rows.map(followUpRequestFromRow);
+    },
+
     async createRunFromFollowUpRequest(input: { followUpRequestId: string; runId: string }): Promise<{ followUpRequest: FollowUpRequest; run: OpenTagRun }> {
-      const row = await db.select().from(followUpRequests).where(eq(followUpRequests.id, input.followUpRequestId)).limit(1).get();
+      let row = await db.select().from(followUpRequests).where(eq(followUpRequests.id, input.followUpRequestId)).limit(1).get();
       if (!row) {
         throw new Error(`Follow-up request not found: ${input.followUpRequestId}`);
       }
-      if (row.status !== "queued") {
+      if (row.status === "promoted") {
+        if (!row.createdRunId) {
+          throw new Error(`Promoted follow-up request ${input.followUpRequestId} has no created Run.`);
+        }
+        const existing = await this.getRun({ runId: row.createdRunId });
+        if (!existing || existing.event.id !== row.sourceEventId) {
+          throw new Error(`Promoted follow-up request ${input.followUpRequestId} has no matching created Run.`);
+        }
+        if (row.activeRunId) {
+          await appendFollowUpPromotedEvent({
+            parentRunId: row.activeRunId,
+            followUpRequestId: row.id,
+            createdRunId: existing.run.id,
+            sourceEventId: row.sourceEventId,
+            createdAt: row.updatedAt
+          });
+        }
+        return { followUpRequest: followUpRequestFromRow(row), run: existing.run };
+      }
+      if (row.status !== "queued" && row.status !== "promoting") {
         throw new Error(`Follow-up request ${input.followUpRequestId} is not queued.`);
       }
-      const updatedAt = nowIso();
-      const promoteResult = await db
-        .update(followUpRequests)
-        .set({
-          status: "promoting",
-          updatedAt
-        })
-        .where(and(eq(followUpRequests.id, input.followUpRequestId), eq(followUpRequests.status, "queued")));
-      if (promoteResult.changes === 0) {
-        throw new Error(`Follow-up request ${input.followUpRequestId} is not queued.`);
+      let promotionRunId = row.createdRunId ?? input.runId;
+      let updatedAt = nowIso();
+      if (row.status === "queued") {
+        const promoteResult = await db
+          .update(followUpRequests)
+          .set({
+            status: "promoting",
+            createdRunId: promotionRunId,
+            updatedAt
+          })
+          .where(and(eq(followUpRequests.id, input.followUpRequestId), eq(followUpRequests.status, "queued")));
+        if (promoteResult.changes === 0) {
+          row = await db.select().from(followUpRequests).where(eq(followUpRequests.id, input.followUpRequestId)).limit(1).get();
+          if (!row || row.status !== "promoting" || !row.createdRunId) {
+            throw new Error(`Follow-up request ${input.followUpRequestId} is not queued.`);
+          }
+          promotionRunId = row.createdRunId;
+          updatedAt = row.updatedAt;
+        } else {
+          row = { ...row, status: "promoting", createdRunId: promotionRunId, updatedAt };
+        }
+      } else if (!row.createdRunId) {
+        const repairResult = await db
+          .update(followUpRequests)
+          .set({ createdRunId: promotionRunId, updatedAt })
+          .where(and(
+            eq(followUpRequests.id, input.followUpRequestId),
+            eq(followUpRequests.status, "promoting"),
+            isNull(followUpRequests.createdRunId)
+          ));
+        if (repairResult.changes === 0) {
+          row = await db.select().from(followUpRequests).where(eq(followUpRequests.id, input.followUpRequestId)).limit(1).get();
+          if (!row?.createdRunId) {
+            throw new Error(`Promoting follow-up request ${input.followUpRequestId} has no reserved Run identity.`);
+          }
+          promotionRunId = row.createdRunId;
+          updatedAt = row.updatedAt;
+        } else {
+          row = { ...row, createdRunId: promotionRunId, updatedAt };
+        }
       }
-      const followUp = followUpRequestFromRow({ ...row, status: "promoting", updatedAt });
+      const followUp = followUpRequestFromRow({ ...row, status: "promoting", createdRunId: promotionRunId, updatedAt });
+      let run: OpenTagRun;
       try {
-        const { run, created } = await this.createRun({
-          id: input.runId,
+        const createdRun = await this.createRun({
+          id: promotionRunId,
           event: followUp.event,
+          rejectIfAutomaticContinuationActive: true,
           ...(followUp.accessProfileSnapshot ? { accessProfileSnapshot: followUp.accessProfileSnapshot } : {}),
           ...(followUp.policySnapshotProvenance ? { policySnapshotProvenance: followUp.policySnapshotProvenance } : {}),
           ...(followUp.routingPolicy ? { routingPolicy: followUp.routingPolicy } : {}),
@@ -3715,42 +4666,66 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             admissionItemRunId: followUp.id
           } : {})
         });
-        if (!created) {
-          throw new Error(`Run already exists for follow-up request ${input.followUpRequestId}.`);
+        if (!createdRun.created) {
+          const existing = await this.getRun({ runId: promotionRunId });
+          if (!existing || existing.event.id !== followUp.sourceEventId) {
+            throw new Error(`Run already exists for follow-up request ${input.followUpRequestId}.`);
+          }
+          run = existing.run;
+        } else {
+          run = createdRun.run;
         }
-        await db
-          .update(followUpRequests)
-          .set({
-            status: "promoted",
-            createdRunId: run.id,
-            updatedAt
-          })
-          .where(eq(followUpRequests.id, input.followUpRequestId));
-        const updated = await db.select().from(followUpRequests).where(eq(followUpRequests.id, input.followUpRequestId)).limit(1).get();
-        if (!updated) {
-          throw new Error(`Follow-up request ${input.followUpRequestId} was promoted but could not be loaded`);
-        }
-        if (followUp.activeRunId) {
-          await appendRunEvent({
-            runId: followUp.activeRunId,
-            type: "follow_up_request.promoted",
-            payload: { followUpRequestId: followUp.id, createdRunId: run.id, sourceEventId: followUp.sourceEventId },
-            visibility: "audit",
-            importance: "normal",
-            createdAt: updatedAt
-          });
-        }
-        return { followUpRequest: followUpRequestFromRow(updated), run };
       } catch (error) {
-        await db
-          .update(followUpRequests)
-          .set({
-            status: "queued",
-            updatedAt: nowIso()
-          })
-          .where(and(eq(followUpRequests.id, input.followUpRequestId), eq(followUpRequests.status, "promoting")));
-        throw error;
+        const committed = await this.getRun({ runId: promotionRunId });
+        if (committed?.event.id === followUp.sourceEventId) {
+          run = committed.run;
+        } else {
+          if (error instanceof ActiveConversationRaceError && !committed) {
+            await db
+              .update(followUpRequests)
+              .set({
+                status: "queued",
+                createdRunId: null,
+                updatedAt: nowIso()
+              })
+              .where(and(
+                eq(followUpRequests.id, input.followUpRequestId),
+                eq(followUpRequests.status, "promoting"),
+                eq(followUpRequests.createdRunId, promotionRunId)
+              ));
+          }
+          throw error;
+        }
       }
+      if (followUp.activeRunId) {
+        await appendRunChildCreatedEvent({
+          parentRunId: followUp.activeRunId,
+          childRunId: run.id,
+          payload: { childRunId: run.id },
+          message: `Created child run ${run.id}.`,
+          createdAt: run.createdAt
+        });
+        await appendFollowUpPromotedEvent({
+          parentRunId: followUp.activeRunId,
+          followUpRequestId: followUp.id,
+          createdRunId: run.id,
+          sourceEventId: followUp.sourceEventId,
+          createdAt: updatedAt
+        });
+      }
+      await db
+        .update(followUpRequests)
+        .set({ status: "promoted", createdRunId: run.id, updatedAt })
+        .where(and(
+          eq(followUpRequests.id, input.followUpRequestId),
+          eq(followUpRequests.status, "promoting"),
+          eq(followUpRequests.createdRunId, promotionRunId)
+        ));
+      const updated = await db.select().from(followUpRequests).where(eq(followUpRequests.id, input.followUpRequestId)).limit(1).get();
+      if (!updated || updated.status !== "promoted" || updated.createdRunId !== run.id) {
+        throw new Error(`Follow-up request ${input.followUpRequestId} was promoted but could not be loaded`);
+      }
+      return { followUpRequest: followUpRequestFromRow(updated), run };
     },
 
     async registerRunner(input: RunnerRegistrationInput): Promise<void> {
@@ -4232,6 +5207,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       workstreamId?: string;
       admissionBatchId?: string;
       admissionItemRunId?: string;
+      rejectIfActiveConversation?: boolean;
+      rejectIfAutomaticContinuationActive?: boolean;
     }): Promise<CreateRunResult> {
       const event = OpenTagEventSchema.parse(input.event);
       const accessProfileSnapshot = input.accessProfileSnapshot
@@ -4333,30 +5310,6 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         });
       };
       const sourceDeliveryId = sourceDeliveryIdFromEvent(event);
-      if (sourceDeliveryId) {
-        const existingDelivery = await db
-          .select()
-          .from(sourceDeliveries)
-          .where(and(eq(sourceDeliveries.source, event.source), eq(sourceDeliveries.deliveryId, sourceDeliveryId)))
-          .limit(1)
-          .get();
-        if (existingDelivery) {
-          const existingByDelivery = await db.select().from(runs).where(eq(runs.id, existingDelivery.runId)).limit(1).get();
-          if (existingByDelivery) {
-            reconcileReplayFactoryAttribution(existingByDelivery.id);
-            return recordCreateRunReplay({
-              runRow: existingByDelivery,
-              requestedRunId: input.id,
-              event,
-              projectTarget: repoKey,
-              expectedRunnerId,
-              replayKind: "source_delivery",
-              sourceDeliveryId,
-              createdAt
-            });
-          }
-        }
-      }
       const createDecision = RunAdmissionDecisionSchema.parse({
         action: "start",
         reason: "Source event accepted and ready to create a run.",
@@ -4365,6 +5318,37 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         eventId: event.id
       });
       const insertResult = db.transaction((tx) => {
+        if (sourceDeliveryId) {
+          const existingDelivery = tx.select().from(sourceDeliveries)
+            .where(and(eq(sourceDeliveries.source, event.source), eq(sourceDeliveries.deliveryId, sourceDeliveryId)))
+            .limit(1)
+            .get();
+          if (existingDelivery) {
+            const existingByDelivery = tx.select().from(runs).where(eq(runs.id, existingDelivery.runId)).limit(1).get();
+            if (!existingByDelivery) {
+              throw new Error(`Source delivery ${event.source}:${sourceDeliveryId} references a missing Run.`);
+            }
+            return { outcome: "replay" as const, runRow: existingByDelivery, replayKind: "source_delivery" as const };
+          }
+        }
+        const existingBySourceEvent = tx.select().from(runs).where(eq(runs.eventId, event.id)).limit(1).get();
+        if (existingBySourceEvent) {
+          return { outcome: "replay" as const, runRow: existingBySourceEvent, replayKind: "source_event" as const };
+        }
+        if (input.rejectIfActiveConversation || input.rejectIfAutomaticContinuationActive) {
+          const activeCandidates = tx.select({ id: runs.id, triggeredByActionJson: runs.triggeredByActionJson })
+            .from(runs).where(and(
+            inArray(runs.conversationKey, conversationKeysFromEvent(event)),
+            or(
+              inArray(runs.status, ["queued", "assigned", "running"]),
+              and(eq(runs.status, "needs_approval"), isNotNull(runs.currentAttemptId))
+            )
+          )).orderBy(asc(runs.createdAt), asc(runs.id)).all();
+          const active = input.rejectIfActiveConversation
+            ? activeCandidates[0]
+            : activeCandidates.find((candidate) => isAutomaticWorkstreamContinuationActionJson(candidate.triggeredByActionJson));
+          if (active) throw new ActiveConversationRaceError(active.id);
+        }
         const inserted = tx.insert(runs).values({
         id: input.id,
         eventId: event.id,
@@ -4391,7 +5375,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         createdAt,
         updatedAt: createdAt
         }).onConflictDoNothing({ target: runs.eventId }).run();
-        if (inserted.changes === 0) return inserted;
+        if (inserted.changes === 0) {
+          const replay = tx.select().from(runs).where(eq(runs.eventId, event.id)).limit(1).get();
+          if (!replay) throw new Error(`Run already exists for event ${event.id}, but it could not be loaded`);
+          return { outcome: "replay" as const, runRow: replay, replayKind: "source_event" as const };
+        }
         if (sourceDeliveryId) {
           tx.insert(sourceDeliveries).values({ source: event.source, deliveryId: sourceDeliveryId, runId: input.id, eventId: event.id, createdAt })
             .onConflictDoNothing({ target: [sourceDeliveries.source, sourceDeliveries.deliveryId] }).run();
@@ -4413,37 +5401,31 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           }));
         }
         tx.insert(runEvents).values(baseEvents).run();
-        return inserted;
+        return { outcome: "created" as const };
       });
-      if (insertResult.changes === 0) {
-        const existingBySourceEvent = await db.select().from(runs).where(eq(runs.eventId, event.id)).limit(1).get();
-        if (!existingBySourceEvent) {
-          throw new Error(`Run already exists for event ${event.id}, but it could not be loaded`);
-        }
-        reconcileReplayFactoryAttribution(existingBySourceEvent.id);
+      if (insertResult.outcome === "replay") {
+        reconcileReplayFactoryAttribution(insertResult.runRow.id);
         return recordCreateRunReplay({
-          runRow: existingBySourceEvent,
+          runRow: insertResult.runRow,
           requestedRunId: input.id,
           event,
           projectTarget: repoKey,
           expectedRunnerId,
-          replayKind: "source_event",
+          replayKind: insertResult.replayKind,
           sourceDeliveryId,
           createdAt
         });
       }
       if (input.parentRunId) {
-        await appendRunEvent({
-          runId: input.parentRunId,
-          type: "run.child_created",
+        await appendRunChildCreatedEvent({
+          parentRunId: input.parentRunId,
+          childRunId: input.id,
           payload: {
             childRunId: input.id,
             ...(triggeredByAction ? { triggeredByAction } : {}),
             ...(input.sourceProposalId ? { sourceProposalId: input.sourceProposalId } : {}),
             ...(input.sourceApplyPlanId ? { sourceApplyPlanId: input.sourceApplyPlanId } : {})
           },
-          visibility: "audit",
-          importance: "normal",
           message: `Created child run ${input.id}.`,
           createdAt
         });
@@ -4807,6 +5789,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                 payloadJson: JSON.stringify({ class: escalation.class, blocking: true, dedupeKey, source: "access_profile" }),
                 createdAt: blockedAt
               }).run();
+              tx.insert(reassessmentObligations)
+                .values(humanEscalationReassessmentObligation(escalation, blockedAt))
+                .onConflictDoNothing()
+                .run();
             }
             tx.insert(runEvents).values(runEventValues({
               runId: candidate.id,
@@ -5367,7 +6353,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               artifacts: parsedResult.artifacts.map((artifact, index) => ({
                 ...artifact,
                 id: artifact.id ?? `${input.runId}:artifact:${index + 1}`,
-                sourceRunId: artifact.sourceRunId ?? input.runId,
+                sourceRunId: input.runId,
                 createdAt: artifact.createdAt ?? updatedAt
               }))
             }
@@ -5598,6 +6584,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             ...result,
             humanEscalationId: effectiveEscalation.id
           });
+          tx.insert(reassessmentObligations)
+            .values(humanEscalationReassessmentObligation(effectiveEscalation, updatedAt))
+            .onConflictDoNothing()
+            .run();
         }
         tx.update(runs)
           .set({
@@ -5642,6 +6632,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         }
         for (const event of completionEventsForResult(completedResult)) {
           tx.insert(runEvents).values(event).run();
+        }
+        if (currentRun.workThreadId) {
+          tx.insert(reassessmentObligations).values(reassessmentObligationValues({
+            workThreadId: currentRun.workThreadId,
+            sourceKind: "run_result_recorded",
+            sourceId: input.runId,
+            sourceDigest: canonicalSha256Json(completedResult),
+            notBefore: updatedAt,
+            createdAt: updatedAt
+          })).onConflictDoNothing().run();
         }
         return "completed" as const;
       });
@@ -6172,6 +7172,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           message: `Material action ${input.actionId} ${receipt.outcome}.`,
           createdAt: updatedAt
         })).run();
+        if (run.workThreadId) {
+          tx.insert(reassessmentObligations).values(reassessmentObligationValues({
+            workThreadId: run.workThreadId,
+            sourceKind: "material_action_receipt_recorded",
+            sourceId: input.actionId,
+            sourceDigest: canonicalSha256Json(receipt),
+            notBefore: updatedAt,
+            createdAt: updatedAt
+          })).onConflictDoNothing().run();
+        }
         const updatedRow = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
         if (!updatedRow) throw new Error("Material action disappeared after recording its receipt.");
         return { kind: "recorded" as const, action: actionFromRow(updatedRow) };
@@ -6276,6 +7286,18 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           payloadJson: JSON.stringify(auditPayload),
           createdAt: updatedAt
         }).run();
+        const run = tx.select({ workThreadId: runs.workThreadId }).from(runs)
+          .where(eq(runs.id, row.runId)).limit(1).get();
+        if (run?.workThreadId) {
+          tx.insert(reassessmentObligations).values(reassessmentObligationValues({
+            workThreadId: run.workThreadId,
+            sourceKind: "material_action_reconciled",
+            sourceId: input.actionId,
+            sourceDigest: canonicalSha256Json(receipt),
+            notBefore: updatedAt,
+            createdAt: updatedAt
+          })).onConflictDoNothing().run();
+        }
         const updated = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
         return { outcome: "reconciled" as const, action: actionFromRow(updated!) };
       });
@@ -7160,43 +8182,25 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return claimed;
     },
 
-    async getAcceptedCompletionMetrics(): Promise<AcceptedCompletionMetrics> {
-      const currentAssessmentRows = await db.select({
-        assessmentId: completionAssessments.id,
-        threadId: workThreads.id,
-        persistedThreadId: completionAssessments.workThreadId,
-        assessmentJson: completionAssessments.assessmentJson,
-        waiverId: completionWaivers.id,
-        waiverWorkThreadId: completionWaivers.workThreadId,
-        waiverContractId: completionWaivers.contractId,
-        waiverContractVersion: completionWaivers.contractVersion,
-        waiverCycle: completionWaivers.cycle,
-        waiverContentDigest: completionWaivers.contentDigest,
-        waiverJson: completionWaivers.waiverJson
-      }).from(workThreads)
-        .innerJoin(completionAssessments, eq(completionAssessments.id, workThreads.currentAssessmentId))
-        .leftJoin(completionWaivers, eq(
-          completionWaivers.id,
-          sql<string | null>`CASE WHEN json_valid(${completionAssessments.assessmentJson}) THEN json_extract(${completionAssessments.assessmentJson}, '$.waiver.id') ELSE NULL END`
-        ));
-      const evaluatedAt = nowIso();
-      const acceptedAssessmentRefs = currentAssessmentRows.flatMap((assessment) => {
-        return currentAssessmentIsAccepted(assessment, evaluatedAt)
-          ? [{ assessmentId: assessment.assessmentId, workThreadId: assessment.threadId }]
-          : [];
-      });
+    async getAcceptedProgressMetrics(): Promise<AcceptedProgressMetrics> {
+      const acceptedProgress = await acceptedProgressSnapshot();
+      const acceptedProgressRows = [...acceptedProgress.acceptedGateAdvancesByRunId].map(([runId, acceptedGateAdvances]) => ({
+        runId,
+        acceptedGateAdvances
+      }));
       type AggregateRow = {
         dimension: "total" | "runner" | "executor";
         id: string | null;
         completedRuns: number;
-        acceptedCompletions: number;
+        runsWithAcceptedProgress: number;
+        acceptedGateAdvances: number;
       };
       const aggregateRows = db.all<AggregateRow>(sql`
-        WITH accepted_assessments AS (
-          SELECT DISTINCT
-            json_extract(value, '$.assessmentId') AS id,
-            json_extract(value, '$.workThreadId') AS work_thread_id
-          FROM json_each(${JSON.stringify(acceptedAssessmentRefs)})
+        WITH accepted_progress AS (
+          SELECT
+            json_extract(value, '$.runId') AS run_id,
+            json_extract(value, '$.acceptedGateAdvances') AS accepted_gate_advances
+          FROM json_each(${JSON.stringify(acceptedProgressRows)})
         ),
         latest_attempt_numbers AS (
           SELECT run_id, max(number) AS number
@@ -7209,28 +8213,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           INNER JOIN latest_attempt_numbers AS latest
             ON latest.run_id = attempt.run_id AND latest.number = attempt.number
         ),
-        ranked_thread_runs AS (
-          SELECT id,
-            row_number() OVER (
-              PARTITION BY work_thread_id
-              ORDER BY created_at DESC, id DESC
-            ) AS authority_rank
-          FROM runs
-          WHERE work_thread_id IS NOT NULL
-        ),
         attributable_runs AS (
           SELECT
             run.id,
             attempt.runner_id,
             attempt.selected_executor_id,
-            CASE WHEN ranked.authority_rank = 1 AND accepted_assessment.id IS NOT NULL THEN 1 ELSE 0 END AS accepted
+            coalesce(progress.accepted_gate_advances, 0) AS accepted_gate_advances
           FROM runs AS run
           INNER JOIN latest_attempts AS attempt ON attempt.run_id = run.id
-          LEFT JOIN ranked_thread_runs AS ranked ON ranked.id = run.id
-          LEFT JOIN work_threads AS thread ON thread.id = run.work_thread_id
-          LEFT JOIN accepted_assessments AS accepted_assessment
-            ON accepted_assessment.id = thread.current_assessment_id
-            AND accepted_assessment.work_thread_id = thread.id
+          LEFT JOIN accepted_progress AS progress ON progress.run_id = run.id
           WHERE run.status IN ('succeeded', 'failed', 'cancelled', 'interrupted', 'timed_out')
             AND run.current_attempt_id IS NULL
             AND run.assigned_runner_id IS NULL
@@ -7238,22 +8229,24 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             AND attempt.status = run.status
         ),
         dimension_rows AS (
-          SELECT 'runner' AS dimension, runner_id AS id, accepted FROM attributable_runs
+          SELECT 'runner' AS dimension, runner_id AS id, accepted_gate_advances FROM attributable_runs
           UNION ALL
-          SELECT 'executor' AS dimension, selected_executor_id AS id, accepted FROM attributable_runs
+          SELECT 'executor' AS dimension, selected_executor_id AS id, accepted_gate_advances FROM attributable_runs
         )
         SELECT
           'total' AS dimension,
           NULL AS id,
           count(*) AS completedRuns,
-          coalesce(sum(accepted), 0) AS acceptedCompletions
+          coalesce(sum(CASE WHEN accepted_gate_advances > 0 THEN 1 ELSE 0 END), 0) AS runsWithAcceptedProgress,
+          coalesce(sum(accepted_gate_advances), 0) AS acceptedGateAdvances
         FROM attributable_runs
         UNION ALL
         SELECT
           dimension,
           id,
           count(*) AS completedRuns,
-          coalesce(sum(accepted), 0) AS acceptedCompletions
+          coalesce(sum(CASE WHEN accepted_gate_advances > 0 THEN 1 ELSE 0 END), 0) AS runsWithAcceptedProgress,
+          coalesce(sum(accepted_gate_advances), 0) AS acceptedGateAdvances
         FROM dimension_rows
         GROUP BY dimension, id
         ORDER BY dimension, id
@@ -7264,13 +8257,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .map((row) => ({
           id: row.id,
           completedRuns: row.completedRuns,
-          acceptedCompletions: row.acceptedCompletions,
-          acceptanceRate: row.completedRuns === 0 ? 0 : row.acceptedCompletions / row.completedRuns
+          runsWithAcceptedProgress: row.runsWithAcceptedProgress,
+          acceptedGateAdvances: row.acceptedGateAdvances
         }));
 
-      return AcceptedCompletionMetricsSchema.parse({
+      return AcceptedProgressMetricsSchema.parse({
         completedRuns: total?.completedRuns ?? 0,
-        acceptedCompletions: total?.acceptedCompletions ?? 0,
+        runsWithAcceptedProgress: acceptedProgress.runIdsWithAcceptedProgress.length,
+        acceptedGateAdvances: acceptedProgress.acceptedGateAdvanceCount,
+        attributedAcceptedGateAdvances: acceptedProgress.attributedGateAdvanceCount,
+        unresolvedAcceptedGateAdvances: acceptedProgress.unresolvedGateAdvanceCount,
         byRunner: segment("runner"),
         byExecutor: segment("executor")
       });

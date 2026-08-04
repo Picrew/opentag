@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  AcceptedProgressAttributionViewSchema,
   AgentAccessProfileSnapshotSchema,
+  ActionHintSchema,
   ActionPermissionRequestSchema,
   ApprovalDecisionSchema,
   ApplyPlanSchema,
@@ -528,6 +530,15 @@ describe("Agent Work Protocol schemas", () => {
 
     expect(typeof structured.nextAction).toBe("object");
     expect(legacy.nextAction).toBe("Review the branch.");
+
+    for (const kind of [
+      "refresh_completion_evidence",
+      "reconcile_material_action",
+      "resume_work_thread",
+      "reassess_completion"
+    ]) {
+      expect(ActionHintSchema.parse({ kind, targetId: "thread-1" })).toEqual({ kind, targetId: "thread-1" });
+    }
   });
 
   it("models timed out runs as a distinct terminal outcome", () => {
@@ -702,6 +713,62 @@ describe("Completion governance schemas", () => {
     });
 
     expect(waived.waiver?.gateIds).toEqual(["checks"]);
+  });
+
+  it("keeps accepted progress as a counted provenance projection", () => {
+    const attributed = {
+      workThreadId: "thread_github_1",
+      contractId: "contract_github_1",
+      contractVersion: 1,
+      cycle: 1,
+      assessmentId: "assessment_2",
+      assessmentSequence: 2,
+      previousAssessmentId: "assessment_1",
+      gateId: "pull_request",
+      targetKey: "primary_change",
+      acceptedState: "passed" as const,
+      evidenceIds: ["artifact_pr_42"],
+      acceptedAt: createdAt,
+      resolution: {
+        status: "attributed" as const,
+        artifactId: "artifact_pr_42",
+        sourceRunId: "run_1"
+      }
+    };
+    const unresolved = {
+      ...attributed,
+      gateId: "human_acceptance",
+      targetKey: undefined,
+      evidenceIds: ["decision_1"],
+      resolution: {
+        status: "unresolved" as const,
+        reasonCode: "gate_target_missing" as const
+      }
+    };
+    const view = AcceptedProgressAttributionViewSchema.parse({
+      workThreadId: "thread_github_1",
+      contract: { id: "contract_github_1", version: 1, cycle: 1 },
+      currentAssessmentId: "assessment_2",
+      advances: [attributed, unresolved],
+      acceptedGateAdvanceCount: 2,
+      attributedGateAdvanceCount: 1,
+      unresolvedGateAdvanceCount: 1,
+      runIdsWithAcceptedProgress: ["run_1"]
+    });
+
+    expect(view.runIdsWithAcceptedProgress).toEqual(["run_1"]);
+    expect(() => AcceptedProgressAttributionViewSchema.parse({
+      ...view,
+      attributedGateAdvanceCount: 2
+    })).toThrow(/attributedGateAdvanceCount/u);
+    expect(() => AcceptedProgressAttributionViewSchema.parse({
+      ...view,
+      runIdsWithAcceptedProgress: ["run_2"]
+    })).toThrow(/unique sorted attributed source Run ids/u);
+    expect(() => AcceptedProgressAttributionViewSchema.parse({
+      ...view,
+      advances: [{ ...attributed, workThreadId: "thread_other" }, unresolved]
+    })).toThrow(/authority must match/u);
   });
 
   it("requires resolved human escalations to retain actor attribution", () => {
