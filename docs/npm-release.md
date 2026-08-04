@@ -77,7 +77,9 @@ as a clean result.
 The packed-install gate also imports `@opentag/governance`, evaluates a minimal
 completion contract, and checks the installed CLI's bounded completion-waiver
 help. This proves the new public package and CLI surface resolve from tarballs,
-not from workspace aliases.
+not from workspace aliases. It also scans installed public-package `.json`,
+`.md`, `.txt`, and `.log` artifacts for token-like values, private keys, raw
+secret fields, full Lark message IDs, and developer-local absolute paths.
 
 The OpenClaw gate expects a running Gateway and the named profile. Override
 `OPENTAG_OPENCLAW_COMMAND`, `OPENTAG_OPENCLAW_GATEWAY_URL`, or

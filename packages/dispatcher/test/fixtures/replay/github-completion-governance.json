@@ -142,6 +142,16 @@
       "source_control.required_checks",
       "source_control.pull_request_state"
     ],
+    "pendingNextAction": {
+      "kind": "refresh_completion_evidence",
+      "targetId": "required_checks",
+      "causeGateIds": ["required_checks", "base_branch", "merge"],
+      "causeReasonCodes": ["verification_missing", "verification_missing", "external_state_missing"]
+    },
+    "finalNextAction": {
+      "kind": "none",
+      "causeCount": 0
+    },
     "finalBodyContains": "Complete: provider-verified completion requirements are satisfied."
   }
 }

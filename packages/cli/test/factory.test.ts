@@ -101,6 +101,7 @@ const batchReceipt = {
       createdCount: 1,
       idempotentReplayCount: 0,
       followUpQueuedCount: 0,
+      waitActiveRunCount: 0,
       needsHumanDecisionCount: 0,
       rejectedCount: 0,
       exceptionCount: 0,

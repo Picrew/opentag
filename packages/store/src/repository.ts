@@ -19,6 +19,7 @@ import {
   CompletionWaiverSchema,
   ContextPacketSchema,
   conversationKeyFromEvent,
+  conversationKeysFromEvent,
   defaultRunEventMetadata,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
@@ -177,6 +178,33 @@ export class ChannelBindingCorruptionError extends Error {
   override readonly name = "ChannelBindingCorruptionError";
 }
 
+export type ManagedChannelPrincipalIdentity = {
+  provider: string;
+  applicationId: string;
+  botId?: string;
+};
+
+export type ManagedChannelAuthorityFailureReason =
+  | "managed_channel_authority_unavailable"
+  | "managed_channel_authority_changed"
+  | "managed_channel_principal_required";
+
+export class ManagedChannelAuthorityError extends Error {
+  override readonly name = "ManagedChannelAuthorityError";
+
+  constructor(readonly reasonCode: ManagedChannelAuthorityFailureReason) {
+    super(reasonCode);
+  }
+}
+
+export class ActiveConversationRaceError extends Error {
+  override readonly name = "ActiveConversationRaceError";
+
+  constructor(readonly activeRunId: string) {
+    super(`ACTIVE_CONVERSATION_RACE:${activeRunId}`);
+  }
+}
+
 export type ClaimedOpenTagRun = OpenTagRunWithEvent & {
   attemptId: string;
   attemptNumber: number;
@@ -275,6 +303,28 @@ export type ChannelBinding = {
   | { repoProvider: string; owner: string; repo: string }
   | { repoProvider?: never; owner?: never; repo?: never }
 );
+
+export function managedChannelBindingAuthorityDigest(input: Pick<
+  ChannelBinding,
+  "provider" | "accountId" | "conversationId" | "ownership"
+>): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify({
+    provider: input.provider,
+    accountId: input.accountId,
+    conversationId: input.conversationId,
+    ownership: input.ownership ?? null
+  })).digest("hex")}`;
+}
+
+function principalOwnsManagedChannelBinding(
+  principal: ManagedChannelPrincipalIdentity | undefined,
+  binding: ChannelBinding
+): boolean {
+  if (!binding.ownership) return true;
+  return principal?.provider === binding.provider
+    && principal.applicationId === binding.ownership.applicationId
+    && (!binding.ownership.botId || principal.botId === binding.ownership.botId);
+}
 
 export type SlackChannelBinding = {
   teamId: string;
@@ -788,6 +838,19 @@ function stableActionJson(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function isAutomaticWorkstreamContinuationActionJson(value: string | null): boolean {
+  if (!value) return false;
+  try {
+    const action = ActionHintSchema.safeParse(JSON.parse(value));
+    return action.success
+      && action.data.kind === "resume_work_thread"
+      && action.data.metadata?.["workstreamContinuation"] === true;
+  } catch {
+    // An unreadable action cannot safely prove that a queued Run is unrelated.
+    return true;
+  }
 }
 
 type CurrentAssessmentAuthorityRow = {
@@ -2342,6 +2405,28 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return factoryWorkstreamFromRows(row, members);
     },
 
+    async listFactoryWorkstreamsForWorkThread(input: {
+      workThreadId: string;
+      limit?: number;
+    }): Promise<StoredFactoryWorkstream[]> {
+      const limit = Math.min(101, Math.max(1, Math.trunc(input.limit ?? 101)));
+      const rows = await db.select({ workstream: factoryWorkstreams })
+        .from(factoryWorkstreamMembers)
+        .innerJoin(factoryWorkstreams, eq(factoryWorkstreams.id, factoryWorkstreamMembers.workstreamId))
+        .where(eq(factoryWorkstreamMembers.workThreadId, input.workThreadId))
+        .orderBy(asc(factoryWorkstreams.id))
+        .limit(limit);
+      const stored: StoredFactoryWorkstream[] = [];
+      for (const { workstream } of rows) {
+        const members = await db.select({ workThreadId: factoryWorkstreamMembers.workThreadId })
+          .from(factoryWorkstreamMembers)
+          .where(eq(factoryWorkstreamMembers.workstreamId, workstream.id))
+          .orderBy(asc(factoryWorkstreamMembers.workThreadId));
+        stored.push(factoryWorkstreamFromRows(workstream, members));
+      }
+      return stored;
+    },
+
     async createFactoryWorkstream(input: {
       id: string;
       recipeId: string;
@@ -2630,6 +2715,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async getWorkThread(input: { workThreadId: string }): Promise<DurableWorkThread | null> {
       const row = await db.select().from(workThreads).where(eq(workThreads.id, input.workThreadId)).limit(1).get();
       return row ? workThreadFromRow(row) : null;
+    },
+
+    async listWorkThreads(input: { limit?: number } = {}): Promise<DurableWorkThread[]> {
+      const limit = Math.min(500, Math.max(1, Math.trunc(input.limit ?? 100)));
+      const rows = await db
+        .select()
+        .from(workThreads)
+        .orderBy(desc(workThreads.updatedAt), asc(workThreads.id))
+        .limit(limit);
+      return rows.map(workThreadFromRow);
     },
 
     async attachRunToWorkThread(input: { runId: string; workThreadId: string }): Promise<boolean> {
@@ -3182,6 +3277,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       toState: "acknowledged" | "resolved" | "expired" | "superseded";
       at: string;
       actor?: ActorIdentity;
+      channelPrincipal?: ManagedChannelPrincipalIdentity;
       optionId?: string;
       reason?: string;
       supersededById?: string;
@@ -3191,6 +3287,32 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const existing = tx.select().from(humanEscalations).where(eq(humanEscalations.id, input.id)).limit(1).get();
         if (!existing) throw new Error(`HumanEscalation ${input.id} does not exist.`);
         const current = humanEscalationFromRow(existing);
+        if (
+          (input.toState === "acknowledged" || input.toState === "resolved")
+          && current.sourceAuthority
+        ) {
+          const authority = current.sourceAuthority;
+          const bindingRow = tx
+            .select()
+            .from(channelBindings)
+            .where(and(
+              eq(channelBindings.provider, authority.provider),
+              eq(channelBindings.accountId, authority.accountId),
+              eq(channelBindings.conversationId, authority.conversationId)
+            ))
+            .limit(1)
+            .get();
+          if (!bindingRow) {
+            throw new ManagedChannelAuthorityError("managed_channel_authority_unavailable");
+          }
+          const binding = channelBindingFromRow(bindingRow);
+          if (managedChannelBindingAuthorityDigest(binding) !== authority.bindingDigest) {
+            throw new ManagedChannelAuthorityError("managed_channel_authority_changed");
+          }
+          if (!principalOwnsManagedChannelBinding(input.channelPrincipal, binding)) {
+            throw new ManagedChannelAuthorityError("managed_channel_principal_required");
+          }
+        }
         const expiredDueToDeadline = Boolean(
           (input.toState === "acknowledged" || input.toState === "resolved")
           && current.expiresAt
@@ -3361,6 +3483,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           }
           return { escalation: current, resolved: false };
         }
+        if (current.sourceAuthority) {
+          throw new ManagedChannelAuthorityError("managed_channel_principal_required");
+        }
         if (current.state === "expired" || current.state === "superseded") {
           throw new Error(`HumanEscalation ${escalation.id} is already terminal in state ${current.state}.`);
         }
@@ -3419,12 +3544,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const rows = await db
         .select()
         .from(runs)
-        .where(and(eq(runs.conversationKey, input.conversationKey), inArray(runs.status, ["assigned", "running", "needs_approval"])))
+        .where(and(eq(runs.conversationKey, input.conversationKey), inArray(runs.status, ["queued", "assigned", "running", "needs_approval"])))
         .orderBy(asc(runs.createdAt));
       // A permission wait keeps its attempt attached so the runtime can heartbeat
       // and resume it. A completed needs_human run clears the attempt and must not
       // block later work in the same conversation.
-      const row = rows.find((candidate) => candidate.status !== "needs_approval" || candidate.currentAttemptId !== null);
+      const row = rows.find((candidate) =>
+        candidate.status === "queued"
+          ? isAutomaticWorkstreamContinuationActionJson(candidate.triggeredByActionJson)
+          : candidate.status !== "needs_approval" || candidate.currentAttemptId !== null
+      );
       if (!row) return null;
       return {
         run: runFromRow(row),
@@ -3705,6 +3834,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const { run, created } = await this.createRun({
           id: input.runId,
           event: followUp.event,
+          rejectIfAutomaticContinuationActive: true,
           ...(followUp.accessProfileSnapshot ? { accessProfileSnapshot: followUp.accessProfileSnapshot } : {}),
           ...(followUp.policySnapshotProvenance ? { policySnapshotProvenance: followUp.policySnapshotProvenance } : {}),
           ...(followUp.routingPolicy ? { routingPolicy: followUp.routingPolicy } : {}),
@@ -4232,6 +4362,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       workstreamId?: string;
       admissionBatchId?: string;
       admissionItemRunId?: string;
+      rejectIfActiveConversation?: boolean;
+      rejectIfAutomaticContinuationActive?: boolean;
     }): Promise<CreateRunResult> {
       const event = OpenTagEventSchema.parse(input.event);
       const accessProfileSnapshot = input.accessProfileSnapshot
@@ -4333,30 +4465,6 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         });
       };
       const sourceDeliveryId = sourceDeliveryIdFromEvent(event);
-      if (sourceDeliveryId) {
-        const existingDelivery = await db
-          .select()
-          .from(sourceDeliveries)
-          .where(and(eq(sourceDeliveries.source, event.source), eq(sourceDeliveries.deliveryId, sourceDeliveryId)))
-          .limit(1)
-          .get();
-        if (existingDelivery) {
-          const existingByDelivery = await db.select().from(runs).where(eq(runs.id, existingDelivery.runId)).limit(1).get();
-          if (existingByDelivery) {
-            reconcileReplayFactoryAttribution(existingByDelivery.id);
-            return recordCreateRunReplay({
-              runRow: existingByDelivery,
-              requestedRunId: input.id,
-              event,
-              projectTarget: repoKey,
-              expectedRunnerId,
-              replayKind: "source_delivery",
-              sourceDeliveryId,
-              createdAt
-            });
-          }
-        }
-      }
       const createDecision = RunAdmissionDecisionSchema.parse({
         action: "start",
         reason: "Source event accepted and ready to create a run.",
@@ -4365,6 +4473,37 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         eventId: event.id
       });
       const insertResult = db.transaction((tx) => {
+        if (sourceDeliveryId) {
+          const existingDelivery = tx.select().from(sourceDeliveries)
+            .where(and(eq(sourceDeliveries.source, event.source), eq(sourceDeliveries.deliveryId, sourceDeliveryId)))
+            .limit(1)
+            .get();
+          if (existingDelivery) {
+            const existingByDelivery = tx.select().from(runs).where(eq(runs.id, existingDelivery.runId)).limit(1).get();
+            if (!existingByDelivery) {
+              throw new Error(`Source delivery ${event.source}:${sourceDeliveryId} references a missing Run.`);
+            }
+            return { outcome: "replay" as const, runRow: existingByDelivery, replayKind: "source_delivery" as const };
+          }
+        }
+        const existingBySourceEvent = tx.select().from(runs).where(eq(runs.eventId, event.id)).limit(1).get();
+        if (existingBySourceEvent) {
+          return { outcome: "replay" as const, runRow: existingBySourceEvent, replayKind: "source_event" as const };
+        }
+        if (input.rejectIfActiveConversation || input.rejectIfAutomaticContinuationActive) {
+          const activeCandidates = tx.select({ id: runs.id, triggeredByActionJson: runs.triggeredByActionJson })
+            .from(runs).where(and(
+            inArray(runs.conversationKey, conversationKeysFromEvent(event)),
+            or(
+              inArray(runs.status, ["queued", "assigned", "running"]),
+              and(eq(runs.status, "needs_approval"), isNotNull(runs.currentAttemptId))
+            )
+          )).orderBy(asc(runs.createdAt), asc(runs.id)).all();
+          const active = input.rejectIfActiveConversation
+            ? activeCandidates[0]
+            : activeCandidates.find((candidate) => isAutomaticWorkstreamContinuationActionJson(candidate.triggeredByActionJson));
+          if (active) throw new ActiveConversationRaceError(active.id);
+        }
         const inserted = tx.insert(runs).values({
         id: input.id,
         eventId: event.id,
@@ -4391,7 +4530,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         createdAt,
         updatedAt: createdAt
         }).onConflictDoNothing({ target: runs.eventId }).run();
-        if (inserted.changes === 0) return inserted;
+        if (inserted.changes === 0) {
+          const replay = tx.select().from(runs).where(eq(runs.eventId, event.id)).limit(1).get();
+          if (!replay) throw new Error(`Run already exists for event ${event.id}, but it could not be loaded`);
+          return { outcome: "replay" as const, runRow: replay, replayKind: "source_event" as const };
+        }
         if (sourceDeliveryId) {
           tx.insert(sourceDeliveries).values({ source: event.source, deliveryId: sourceDeliveryId, runId: input.id, eventId: event.id, createdAt })
             .onConflictDoNothing({ target: [sourceDeliveries.source, sourceDeliveries.deliveryId] }).run();
@@ -4413,21 +4556,17 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           }));
         }
         tx.insert(runEvents).values(baseEvents).run();
-        return inserted;
+        return { outcome: "created" as const };
       });
-      if (insertResult.changes === 0) {
-        const existingBySourceEvent = await db.select().from(runs).where(eq(runs.eventId, event.id)).limit(1).get();
-        if (!existingBySourceEvent) {
-          throw new Error(`Run already exists for event ${event.id}, but it could not be loaded`);
-        }
-        reconcileReplayFactoryAttribution(existingBySourceEvent.id);
+      if (insertResult.outcome === "replay") {
+        reconcileReplayFactoryAttribution(insertResult.runRow.id);
         return recordCreateRunReplay({
-          runRow: existingBySourceEvent,
+          runRow: insertResult.runRow,
           requestedRunId: input.id,
           event,
           projectTarget: repoKey,
           expectedRunnerId,
-          replayKind: "source_event",
+          replayKind: insertResult.replayKind,
           sourceDeliveryId,
           createdAt
         });

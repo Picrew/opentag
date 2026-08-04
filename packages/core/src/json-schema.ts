@@ -45,6 +45,9 @@ import {
   SuccessMetricNameSchema,
   VerificationEvidenceSchema,
   WorkItemReferenceSchema,
+  WorkLoopCauseSchema,
+  WorkLoopNextActionSchema,
+  WorkLoopViewSchema,
   WorkThreadSchema
 } from "./schema.js";
 import {
@@ -74,6 +77,9 @@ import {
 import {
   FactoryRecipeSnapshotInputSchema,
   FactoryRecipeSnapshotSchema,
+  WorkstreamContinuationDecisionInputSchema,
+  WorkstreamContinuationDecisionSchema,
+  WorkstreamContinuationPolicySchema,
   WorkstreamAdmissionBatchInputSchema,
   WorkstreamAdmissionBatchReceiptSchema,
   WorkstreamEvaluationSchema,
@@ -111,6 +117,9 @@ export const OpenTagJsonSchemas = {
   CompletionWaiver: zodToJsonSchema(CompletionWaiverSchema, "CompletionWaiver"),
   CompletionAssessment: zodToJsonSchema(CompletionAssessmentSchema, "CompletionAssessment"),
   HumanEscalation: zodToJsonSchema(HumanEscalationSchema, "HumanEscalation"),
+  WorkLoopCause: zodToJsonSchema(WorkLoopCauseSchema, "WorkLoopCause"),
+  WorkLoopNextAction: zodToJsonSchema(WorkLoopNextActionSchema, "WorkLoopNextAction"),
+  WorkLoopView: zodToJsonSchema(WorkLoopViewSchema, "WorkLoopView"),
   ContextPacket: zodToJsonSchema(ContextPacketSchema, "ContextPacket"),
   OpenTagIntegrationManifest: zodToJsonSchema(OpenTagIntegrationManifestSchema, "OpenTagIntegrationManifest"),
   OpenTagActorRef: zodToJsonSchema(OpenTagActorRefSchema, "OpenTagActorRef"),
@@ -149,6 +158,9 @@ export const OpenTagJsonSchemas = {
   AcceptedCompletionMetrics: zodToJsonSchema(AcceptedCompletionMetricsSchema, "AcceptedCompletionMetrics"),
   FactoryRecipeSnapshotInput: zodToJsonSchema(FactoryRecipeSnapshotInputSchema, "FactoryRecipeSnapshotInput"),
   FactoryRecipeSnapshot: zodToJsonSchema(FactoryRecipeSnapshotSchema, "FactoryRecipeSnapshot"),
+  WorkstreamContinuationPolicy: zodToJsonSchema(WorkstreamContinuationPolicySchema, "WorkstreamContinuationPolicy"),
+  WorkstreamContinuationDecisionInput: zodToJsonSchema(WorkstreamContinuationDecisionInputSchema, "WorkstreamContinuationDecisionInput"),
+  WorkstreamContinuationDecision: zodToJsonSchema(WorkstreamContinuationDecisionSchema, "WorkstreamContinuationDecision"),
   WorkstreamInput: zodToJsonSchema(WorkstreamInputSchema, "WorkstreamInput"),
   Workstream: zodToJsonSchema(WorkstreamSchema, "Workstream"),
   WorkstreamAdmissionBatchInput: zodToJsonSchema(WorkstreamAdmissionBatchInputSchema, "WorkstreamAdmissionBatchInput"),

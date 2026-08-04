@@ -6,6 +6,7 @@ import {
   type CompletionAssessment,
   type CompletionGate,
   type CompletionGateResult,
+  type CompletionReasonCode,
   type CompletionWaiver,
   type ResolvedCompletionTarget
 } from "@opentag/core";
@@ -13,6 +14,7 @@ import type {
   CompletionArtifact,
   CompletionEvaluationInput,
   CompletionEvidenceFact,
+  WorkLoopCause,
   WorkLoopView
 } from "./types.js";
 
@@ -417,9 +419,14 @@ export function evaluateCompletion(inputValue: CompletionEvaluationInput): Compl
 export function deriveWorkLoopView(input: {
   contract: CompletionEvaluationInput["contract"];
   runResults: CompletionEvaluationInput["runResults"];
+  materialActionReceipts?: CompletionEvaluationInput["materialActionReceipts"];
+  blockingEscalations?: CompletionEvaluationInput["blockingEscalations"];
   assessment: CompletionAssessment;
 }): WorkLoopView {
-  const latestResult = [...input.runResults].sort((left, right) => left.recordedAt.localeCompare(right.recordedAt)).at(-1)?.result;
+  const latestRunResult = [...input.runResults]
+    .sort((left, right) => left.recordedAt.localeCompare(right.recordedAt) || left.runId.localeCompare(right.runId))
+    .at(-1);
+  const latestResult = latestRunResult?.result;
   const execution = latestResult?.conclusion === "success"
     ? "succeeded"
     : latestResult?.conclusion === "failure"
@@ -428,13 +435,110 @@ export function deriveWorkLoopView(input: {
   const missingGateIds = input.assessment.gateResults.filter((gate) => gate.state === "missing").map((gate) => gate.gateId);
   const failedGateIds = input.assessment.gateResults.filter((gate) => gate.state === "failed").map((gate) => gate.gateId);
   const blockedGateIds = input.assessment.gateResults.filter((gate) => gate.state === "unknown").map((gate) => gate.gateId);
+  const gateCauses: WorkLoopCause[] = input.assessment.gateResults
+    .filter((gate) => gate.state !== "passed" && gate.state !== "waived")
+    .map((gate) => ({
+      kind: "completion_gate",
+      gateId: gate.gateId,
+      state: gate.state,
+      reasonCode: gate.reasonCode
+    }));
+  const activeEscalations = [...(input.blockingEscalations ?? [])]
+    .filter((escalation) => escalation.blocking && (escalation.state === "open" || escalation.state === "acknowledged"))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const escalationCauses: WorkLoopCause[] = activeEscalations.map((escalation) => ({
+    kind: "human_escalation",
+    escalationId: escalation.id,
+    class: escalation.class,
+    audience: escalation.audience,
+    blocking: true
+  }));
+  const receiptsById = new Map((input.materialActionReceipts ?? []).map((receipt) => [receipt.id, receipt]));
+  const materialActionCausesById = new Map<string, Extract<WorkLoopCause, { kind: "material_action" }>>();
+  for (const gate of input.assessment.gateResults) {
+    if (gate.reasonCode !== "material_action_failed" && gate.reasonCode !== "material_action_unknown") continue;
+    const outcome = gate.reasonCode === "material_action_failed" ? "failed" : "unknown";
+    for (const receiptId of gate.evidenceIds) {
+      const receipt = receiptsById.get(receiptId);
+      if (!receipt) continue;
+      const current = materialActionCausesById.get(receipt.actionId);
+      materialActionCausesById.set(receipt.actionId, {
+        kind: "material_action",
+        actionId: receipt.actionId,
+        outcome: current?.outcome === "unknown" || outcome === "unknown" ? "unknown" : "failed",
+        receiptIds: [...new Set([...(current?.receiptIds ?? []), receipt.id])].sort()
+      });
+    }
+  }
+  const materialActionCauses: WorkLoopCause[] = [...materialActionCausesById.values()]
+    .sort((left, right) => left.actionId.localeCompare(right.actionId));
+  const runCauses: WorkLoopCause[] = latestRunResult && latestRunResult.result.conclusion !== "success"
+    ? [{ kind: "run", runId: latestRunResult.runId, conclusion: latestRunResult.result.conclusion }]
+    : [];
+  const causes = [...escalationCauses, ...materialActionCauses, ...gateCauses, ...runCauses];
+
+  const refreshReasonCodes = new Set<CompletionReasonCode>([
+    "verification_missing",
+    "verification_assurance_insufficient",
+    "verification_subject_mismatch",
+    "verification_stale",
+    "external_state_missing",
+    "external_state_assurance_insufficient",
+    "external_state_subject_mismatch",
+    "external_state_stale"
+  ]);
+  const refreshGate = input.assessment.gateResults.find((gate) =>
+    gate.state !== "passed" && gate.state !== "waived" && refreshReasonCodes.has(gate.reasonCode)
+  );
+  const humanGate = input.assessment.gateResults.find((gate) => gate.reasonCode === "human_acceptance_missing");
+  const unknownMaterialAction = materialActionCauses.find((cause) =>
+    cause.kind === "material_action" && cause.outcome === "unknown"
+  );
   const nextAction = input.assessment.state === "satisfied" || input.assessment.state === "waived"
-    ? "No completion action is required."
-    : blockedGateIds.length > 0
-      ? `Reconcile blocked gate(s): ${blockedGateIds.join(", ")}.`
-      : failedGateIds.length > 0
-        ? `Repair failed gate(s): ${failedGateIds.join(", ")}.`
-        : `Provide evidence for gate(s): ${missingGateIds.join(", ")}.`;
+    ? {
+        summary: "No completion action is required.",
+        hint: { kind: "none" as const },
+        causes: []
+      }
+    : activeEscalations[0]
+      ? {
+          summary: `Resolve blocking escalation ${activeEscalations[0].id}.`,
+          hint: { kind: "request_human_decision" as const, targetId: activeEscalations[0].id },
+          causes
+        }
+      : unknownMaterialAction && unknownMaterialAction.kind === "material_action"
+        ? {
+            summary: `Reconcile material action ${unknownMaterialAction.actionId} before retrying.`,
+            hint: { kind: "reconcile_material_action" as const, targetId: unknownMaterialAction.actionId },
+            causes
+          }
+        : humanGate
+          ? {
+              summary: `Record the required human decision for gate ${humanGate.gateId}.`,
+              hint: { kind: "request_human_decision" as const, targetId: humanGate.gateId },
+              causes
+            }
+          : refreshGate
+            ? {
+                summary: `Refresh completion evidence for gate ${refreshGate.gateId}.`,
+                hint: { kind: "refresh_completion_evidence" as const, targetId: refreshGate.gateId },
+                causes
+              }
+            : blockedGateIds.length === 0 && (
+                failedGateIds.length > 0
+                || missingGateIds.length > 0
+                || Boolean(latestRunResult && latestResult?.conclusion !== "success")
+              )
+              ? {
+                  summary: `Resume work on ${input.assessment.workThreadId} to address incomplete completion requirements.`,
+                  hint: { kind: "resume_work_thread" as const, targetId: input.assessment.workThreadId },
+                  causes
+                }
+              : {
+                  summary: `Reassess completion for ${input.assessment.workThreadId}.`,
+                  hint: { kind: "reassess_completion" as const, targetId: input.assessment.workThreadId },
+                  causes
+                };
   return {
     workThreadId: input.assessment.workThreadId,
     execution,

@@ -103,7 +103,7 @@ function waivedResponse() {
       missingGateIds: [],
       failedGateIds: [],
       blockedGateIds: [],
-      nextAction: "No action required.",
+      nextAction: { summary: "No action required.", hint: { kind: "none" }, causes: [] },
       contractSnapshot: contract,
       assessmentHistory: [assessment],
       evidence: [],

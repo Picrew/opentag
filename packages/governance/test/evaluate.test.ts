@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   completionInputDigest,
   createOpenTagGovernance,
+  deriveWorkLoopView,
   evaluateCompletion,
   type CompletionArtifact,
   type CompletionEvaluationSnapshot,
@@ -391,6 +392,147 @@ describe("evaluateCompletion", () => {
     const expired = evaluateCompletion({ ...baseInput(), waivers: [waiver], evaluatedAt: "2026-07-21T12:00:00.000Z" });
     expect(expired.state).toBe("pending");
     expect(expired.waiver).toBeUndefined();
+  });
+});
+
+describe("deriveWorkLoopView", () => {
+  it("turns completion state into structured native action hints and explicit causes", () => {
+    const pendingAssessment = evaluateCompletion(baseInput());
+    const pending = deriveWorkLoopView({
+      contract: strictContract(),
+      runResults: baseInput().runResults,
+      assessment: pendingAssessment
+    });
+    expect(pending.nextAction).toMatchObject({
+      summary: "Refresh completion evidence for gate checks.",
+      hint: { kind: "refresh_completion_evidence", targetId: "checks" },
+      causes: expect.arrayContaining([
+        { kind: "completion_gate", gateId: "checks", state: "missing", reasonCode: "verification_missing" },
+        { kind: "completion_gate", gateId: "merge", state: "missing", reasonCode: "external_state_missing" }
+      ])
+    });
+
+    const actionContract: CompletionContract = {
+      ...strictContract(),
+      gates: [{ id: "publish", kind: "material_action", actionFamily: "release", requiredOutcome: "succeeded" }],
+      targetSelectors: []
+    };
+    const unknownReceipt = {
+      id: "receipt-unknown",
+      actionId: "action-release",
+      provider: "github" as const,
+      receiptRef: "receipt:unknown",
+      outcome: "unknown" as const,
+      observedAt: t2,
+      metadata: { actionFamily: "release" }
+    };
+    const actionInput = {
+      ...baseInput(),
+      contract: actionContract,
+      artifacts: [],
+      materialActionReceipts: [unknownReceipt]
+    };
+    const blockedAssessment = evaluateCompletion(actionInput);
+    const blocked = deriveWorkLoopView({
+      contract: actionContract,
+      runResults: actionInput.runResults,
+      materialActionReceipts: actionInput.materialActionReceipts,
+      assessment: blockedAssessment
+    });
+    expect(blocked.nextAction).toMatchObject({
+      hint: { kind: "reconcile_material_action", targetId: "action-release" },
+      causes: expect.arrayContaining([{
+        kind: "material_action",
+        actionId: "action-release",
+        outcome: "unknown",
+        receiptIds: ["receipt-unknown"]
+      }])
+    });
+
+    const ambiguousArtifactContract: CompletionContract = {
+      ...strictContract(),
+      gates: [{ id: "pr", kind: "artifact", targetKey: "primary_change", artifactKind: "pull_request", minimum: 1 }]
+    };
+    const ambiguousArtifactInput = {
+      ...baseInput(),
+      contract: ambiguousArtifactContract,
+      runResults: [{
+        runId: "run-failed",
+        result: { conclusion: "failure" as const, summary: "The latest Run did not resolve the ambiguity." },
+        recordedAt: t3
+      }],
+      artifacts: [
+        prArtifact({ id: "artifact-a", ref: "github:acme/demo:pull_request:7" }),
+        prArtifact({ id: "artifact-b", ref: "github:acme/demo:pull_request:8" })
+      ]
+    };
+    const ambiguousArtifactAssessment = evaluateCompletion(ambiguousArtifactInput);
+    const ambiguousArtifactView = deriveWorkLoopView({
+      contract: ambiguousArtifactContract,
+      runResults: ambiguousArtifactInput.runResults,
+      assessment: ambiguousArtifactAssessment
+    });
+    expect(ambiguousArtifactView).toMatchObject({
+      completion: "unsatisfied",
+      blockedGateIds: ["pr"],
+      nextAction: { hint: { kind: "reassess_completion", targetId: "thread-1" } }
+    });
+    expect(ambiguousArtifactView.nextAction.hint.kind).not.toBe("resume_work_thread");
+
+    const escalation: HumanEscalation = {
+      id: "escalation-review",
+      workThreadId: "thread-1",
+      class: "verification",
+      audience: "repo_owner",
+      subjectRef: "github:acme/demo:pull_request:7",
+      state: "open",
+      blocking: true,
+      summary: "Repository evidence needs review.",
+      reason: "Equally current observations conflict.",
+      openedAt: t2
+    };
+    const escalatedAssessment = evaluateCompletion({ ...baseInput(), blockingEscalations: [escalation] });
+    const escalated = deriveWorkLoopView({
+      contract: strictContract(),
+      runResults: baseInput().runResults,
+      blockingEscalations: [escalation],
+      assessment: escalatedAssessment
+    });
+    expect(escalated.nextAction).toMatchObject({
+      hint: { kind: "request_human_decision", targetId: escalation.id },
+      causes: expect.arrayContaining([{
+        kind: "human_escalation",
+        escalationId: escalation.id,
+        class: "verification",
+        audience: "repo_owner",
+        blocking: true
+      }])
+    });
+
+    const checks = evidence({
+      id: "checks-terminal",
+      kind: "source_control.required_checks",
+      predicate: "checks",
+      outcome: "passed",
+      observations: { build: "passed", test: "passed" }
+    });
+    const merge = evidence({
+      id: "merge-terminal",
+      kind: "source_control.pull_request_state",
+      predicate: "state",
+      outcome: "merged"
+    });
+    const terminalAssessment = evaluateCompletion({ ...baseInput(), evidence: [checks, merge] });
+    const terminal = deriveWorkLoopView({
+      contract: strictContract(),
+      runResults: baseInput().runResults,
+      assessment: terminalAssessment
+    });
+    expect(terminal.nextAction).toEqual({
+      summary: "No completion action is required.",
+      hint: { kind: "none" },
+      causes: []
+    });
   });
 });
 

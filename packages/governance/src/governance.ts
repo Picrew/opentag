@@ -60,6 +60,8 @@ export function createOpenTagGovernance(input: {
           view: deriveWorkLoopView({
             contract: snapshot.contract,
             runResults: snapshot.runResults,
+            materialActionReceipts: snapshot.materialActionReceipts,
+            blockingEscalations: snapshot.blockingEscalations,
             assessment: snapshot.currentAssessment
           })
         };
@@ -77,7 +79,13 @@ export function createOpenTagGovernance(input: {
       return {
         outcome: appended.outcome,
         assessment: appended.assessment,
-        view: deriveWorkLoopView({ contract: snapshot.contract, runResults: snapshot.runResults, assessment: appended.assessment })
+        view: deriveWorkLoopView({
+          contract: snapshot.contract,
+          runResults: snapshot.runResults,
+          materialActionReceipts: snapshot.materialActionReceipts,
+          blockingEscalations: snapshot.blockingEscalations,
+          assessment: appended.assessment
+        })
       };
     }
     const snapshot = await input.repository.loadEvaluationSnapshot(workThreadId);
@@ -85,7 +93,13 @@ export function createOpenTagGovernance(input: {
     return {
       outcome: "conflict",
       assessment: current,
-      view: deriveWorkLoopView({ contract: snapshot.contract, runResults: snapshot.runResults, assessment: current })
+      view: deriveWorkLoopView({
+        contract: snapshot.contract,
+        runResults: snapshot.runResults,
+        materialActionReceipts: snapshot.materialActionReceipts,
+        blockingEscalations: snapshot.blockingEscalations,
+        assessment: current
+      })
     };
   }
 

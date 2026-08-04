@@ -5360,7 +5360,11 @@ describe("dispatcher API", () => {
     await expect(resolved.json()).resolves.toMatchObject({
       outcome: "resolved",
       escalation: { state: "resolved", resolution: { actor: { providerUserId: "42" } } },
-      resume: { required: true }
+      resume: {
+        required: true,
+        reason: "The recorded resolution has no Workstream continuation policy.",
+        nextAction: "Configure a governed Workstream continuation policy before requesting automatic continuation."
+      }
     });
     const missingAcknowledgement = await app.request(
       "/v1/human-escalations/missing-escalation/acknowledge",
@@ -5436,10 +5440,16 @@ describe("dispatcher API", () => {
     await expect(resolved.json()).resolves.toMatchObject({
       outcome: "resolved",
       escalation: { id: escalationId, state: "resolved", resolution: { optionId: "staging", actor: { providerUserId: "42" } } },
-      resume: { required: true }
+      resume: {
+        required: true,
+        reason: "The recorded resolution has no Workstream continuation policy.",
+        nextAction: "Configure a governed Workstream continuation policy before requesting automatic continuation."
+      }
     });
     expect(delivered.some((message) => message.body.includes(`Resolved human escalation ${escalationId} with Use staging.`))).toBe(true);
-    expect(delivered.some((message) => message.body.includes("did not inject it into the executor process"))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("The recorded resolution has no Workstream continuation policy"))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("Configure a governed Workstream continuation policy"))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("Send a new task"))).toBe(false);
   });
 
   it("deduplicates runner progress retries by idempotency key before callback delivery", async () => {

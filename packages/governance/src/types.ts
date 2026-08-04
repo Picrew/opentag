@@ -5,9 +5,11 @@ import type {
   HumanEscalation,
   MaterialActionReceipt,
   OpenTagRunResult,
-  ResolvedCompletionTarget,
+  WorkLoopView,
   WorkThread
 } from "@opentag/core";
+
+export type { WorkLoopCause, WorkLoopNextAction, WorkLoopView } from "@opentag/core";
 
 export type CompletionArtifact = {
   id: string;
@@ -73,20 +75,6 @@ export type CompletionEvaluationInput = {
 
 export type CompletionEvaluationSnapshot = Omit<CompletionEvaluationInput, "lineage" | "evaluatedAt"> & {
   currentAssessment: CompletionAssessment | null;
-};
-
-export type WorkLoopView = {
-  workThreadId: string;
-  execution: "idle" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted" | "timed_out" | "needs_human";
-  completion: CompletionAssessment["state"];
-  evidenceBacked: boolean;
-  contract: { id: string; version: number; cycle: number; mode: CompletionContract["mode"] };
-  currentAssessment: CompletionAssessment;
-  targetBindings: ResolvedCompletionTarget[];
-  missingGateIds: string[];
-  failedGateIds: string[];
-  blockedGateIds: string[];
-  nextAction: string;
 };
 
 export type IngestRunResultCommand = {

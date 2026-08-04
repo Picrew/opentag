@@ -150,17 +150,41 @@ const cases = [
     requiredCommands: ["corepack"]
   },
   {
+    id: "work-loop-actions",
+    label: "Governed WorkLoop action and attention matrix",
+    command: [
+      "corepack pnpm vitest run",
+      "packages/governance/test/evaluate.test.ts",
+      "packages/dispatcher/test/completion-governance-replay.test.ts",
+      "packages/dispatcher/test/completion-governance.test.ts",
+      "packages/client/test/client.test.ts",
+      "packages/cli/test/status.test.ts"
+    ].join(" "),
+    covers: [
+      "completion gates, human escalations, material actions, and run outcomes produce structured causes",
+      "ActionHint primitives select refresh, reconcile, human decision, resume, reassess, or no action",
+      "WorkThread completion and bounded attention endpoints expose the same canonical WorkLoop view",
+      "active and terminal loops stay out of attention results",
+      "CLI text and JSON preserve human-readable summaries plus machine-readable hints and causes",
+      "the sanitized completion golden loop transitions from evidence refresh to no action"
+    ],
+    requiredCommands: ["corepack"]
+  },
+  {
     id: "privacy-redaction",
     label: "Callback, report, status, and artifact privacy scan",
     command: [
       "node scripts/test/privacy-redaction-scan.mjs",
       "--allow-missing",
       "--path packages/dispatcher/test/fixtures/replay",
+      "--path docs/governance-validation-matrix.md",
+      "--path docs/replay-harness.md",
+      "--path docs/npm-release.md",
       "--path .omx/live-e2e",
       "--path .omx/governance-matrix"
     ].join(" "),
     covers: [
-      "replay fixtures and live/governance reports do not contain token-like values",
+      "replay fixtures, public governance documentation, and live/governance reports do not contain token-like values",
       "private keys, webhook secrets, Slack bot tokens, GitHub/GitLab tokens, full Lark message ids, and local absolute paths are rejected",
       "scan output redacts matched excerpts before printing them"
     ],

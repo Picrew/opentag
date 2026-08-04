@@ -15,8 +15,13 @@ import {
   type ThreadControlCommand
 } from "@opentag/core";
 import type { SlackBlock } from "@opentag/slack";
-import type { createOpenTagRepository } from "@opentag/store";
+import {
+  ChannelBindingCorruptionError,
+  ManagedChannelAuthorityError,
+  type createOpenTagRepository
+} from "@opentag/store";
 import type { CallbackPresentation } from "./presentation.js";
+import { continuationResumePresentation } from "./continuation-presentation.js";
 
 type OpenTagRepository = ReturnType<typeof createOpenTagRepository>;
 
@@ -75,7 +80,22 @@ type SourceThreadControlOptions = {
   deliverAuditedMessage(message: SourceThreadControlCallbackMessage): Promise<unknown>;
   deliverDirectMessage(message: SourceThreadControlCallbackMessage): Promise<unknown>;
   recordControlPlaneEvent: RecordControlPlaneEvent;
-  onHumanEscalationChanged?(escalation: HumanEscalation): Promise<void>;
+  authorizeHumanEscalationChange?(
+    escalation: HumanEscalation,
+    channelPrincipal?: { provider: string; applicationId: string; botId?: string }
+  ): Promise<{ allowed: boolean; reasonCode?: string }>;
+  onHumanEscalationChanged?(
+    escalation: HumanEscalation,
+    actor: ActorIdentity,
+    channelPrincipal?: { provider: string; applicationId: string; botId?: string }
+  ): Promise<{
+    outcome: "not_configured" | "not_eligible" | "ambiguous" | "created" | "replayed" | "deferred" | "needs_human" | "rejected" | "error";
+    reasonCode?: string;
+    activeRunId?: string;
+    notBefore?: string;
+    resumedRunId?: string;
+    humanEscalationId?: string;
+  } | void>;
   now?: () => string;
 };
 
@@ -415,6 +435,7 @@ export function createSourceThreadControlHandler(options: SourceThreadControlOpt
   async function handleHumanEscalation(input: {
     request: SourceThreadControlActionRequest;
     command: ThreadControlCommand;
+    channelPrincipal?: { provider: string; applicationId: string; botId?: string };
   }): Promise<Response> {
     const escalationId = input.command.escalationId;
     if (!escalationId) return jsonResponse({ outcome: "invalid", reason: "escalation_id_required" });
@@ -443,11 +464,24 @@ export function createSourceThreadControlHandler(options: SourceThreadControlOpt
       return jsonResponse({ outcome: "not_found", escalationId });
     }
 
+    const authorization = await options.authorizeHumanEscalationChange?.(escalation, input.channelPrincipal);
+    if (authorization && !authorization.allowed) {
+      const reasonCode = authorization.reasonCode ?? "managed_channel_principal_required";
+      await deliverThreadControlReply({
+        request: input.request,
+        command: input.command,
+        body: `Could not update human escalation ${escalation.id}: the owning managed-channel principal is required (${reasonCode}).`,
+        ...(target ? { auditRunId: target.run.id } : {})
+      });
+      return jsonResponse({ outcome: "rejected", escalationId: escalation.id, reasonCode });
+    }
+
     try {
       const transitioned = await options.repo.transitionHumanEscalation({
         id: escalation.id,
         toState: input.command.verb === "acknowledge" ? "acknowledged" : "resolved",
         actor: input.request.actor,
+        ...(input.channelPrincipal ? { channelPrincipal: input.channelPrincipal } : {}),
         ...(input.command.optionId ? { optionId: input.command.optionId } : {}),
         ...(input.command.reason ? { reason: input.command.reason } : {}),
         at: options.now?.() ?? new Date().toISOString()
@@ -461,20 +495,34 @@ export function createSourceThreadControlHandler(options: SourceThreadControlOpt
         });
         return jsonResponse({ outcome: "conflict", escalation: transitioned.escalation, message: "Human escalation expired." });
       }
-      if (transitioned.changed) {
-        await options.onHumanEscalationChanged?.(transitioned.escalation);
-      }
+      const changeEffect = transitioned.changed
+        ? await options.onHumanEscalationChanged?.(
+            transitioned.escalation,
+            input.request.actor,
+            input.channelPrincipal
+          )
+        : undefined;
+      const automaticallyResumed = input.command.verb === "resolve" && Boolean(changeEffect?.resumedRunId);
       const selected = transitioned.escalation.resolution?.optionId;
       const selectedOption = selected
         ? transitioned.escalation.options?.find((option) => option.id === selected)
         : undefined;
+      const continuationPresentation = changeEffect
+        ? continuationResumePresentation(changeEffect)
+        : undefined;
       const body = input.command.verb === "acknowledge"
         ? `Acknowledged human escalation ${escalation.id}. It remains blocking until it is resolved or expires.`
-        : [
-            `Resolved human escalation ${escalation.id}${selectedOption ? ` with ${selectedOption.label}` : ""}.`,
-            "The resolution is durably attributed; OpenTag did not inject it into the executor process that already stopped.",
-            "Send a new task in this source thread to resume work with the recorded resolution."
-          ].join("\n");
+        : automaticallyResumed
+          ? [
+              `Resolved human escalation ${escalation.id}${selectedOption ? ` with ${selectedOption.label}` : ""}.`,
+              `The resolution is durably attributed and Workstream policy admitted Run ${changeEffect?.resumedRunId}.`,
+              "Follow the new Run for execution evidence."
+            ].join("\n")
+          : [
+              `Resolved human escalation ${escalation.id}${selectedOption ? ` with ${selectedOption.label}` : ""}.`,
+              continuationPresentation?.reason ?? "The resolution was already durably attributed; no new continuation evaluation was required.",
+              continuationPresentation?.nextAction ?? "Follow the existing WorkThread state."
+            ].join("\n");
       await deliverThreadControlReply({
         request: input.request,
         command: input.command,
@@ -485,10 +533,30 @@ export function createSourceThreadControlHandler(options: SourceThreadControlOpt
         outcome: transitioned.changed ? transitioned.escalation.state : "duplicate",
         escalation: transitioned.escalation,
         ...(input.command.verb === "resolve"
-          ? { resume: { required: true, nextAction: "Send a new source-thread task to resume work." } }
+          ? {
+              resume: continuationPresentation ?? {
+                required: false,
+                reason: "The human escalation resolution was already recorded; no continuation was evaluated.",
+                nextAction: "Follow the existing WorkThread state."
+              }
+            }
           : {})
       });
     } catch (error) {
+      if (error instanceof ManagedChannelAuthorityError || error instanceof ChannelBindingCorruptionError) {
+        const corrupt = error instanceof ChannelBindingCorruptionError;
+        const reasonCode = corrupt ? "managed_channel_binding_corrupt" : error.reasonCode;
+        const cause = corrupt
+          ? "the durable managed-channel binding is corrupt and must be repaired"
+          : "the owning managed-channel principal is required";
+        await deliverThreadControlReply({
+          request: input.request,
+          command: input.command,
+          body: `Could not update human escalation ${escalation.id}: ${cause} (${reasonCode}).`,
+          ...(target ? { auditRunId: target.run.id } : {})
+        });
+        return jsonResponse({ outcome: "rejected", escalationId: escalation.id, reasonCode });
+      }
       const message = error instanceof Error ? error.message : "Invalid human escalation transition.";
       await deliverThreadControlReply({
         request: input.request,
@@ -501,7 +569,11 @@ export function createSourceThreadControlHandler(options: SourceThreadControlOpt
   }
 
   return {
-    handle(input: { request: SourceThreadControlActionRequest; command: ThreadControlCommand }): Promise<Response> {
+    handle(input: {
+      request: SourceThreadControlActionRequest;
+      command: ThreadControlCommand;
+      channelPrincipal?: { provider: string; applicationId: string; botId?: string };
+    }): Promise<Response> {
       if (input.command.verb === "status") return handleStatus(input);
       if (input.command.verb === "doctor") return handleDoctor(input);
       if (input.command.verb === "acknowledge" || input.command.verb === "resolve") return handleHumanEscalation(input);

@@ -44,6 +44,7 @@ export type AdmitRunInput = {
   event: OpenTagEvent;
   workstreamId?: string;
   admissionBatchId?: string;
+  activeRunPolicy?: "queue_follow_up" | "wait";
 };
 
 export type AdmitRunResult =
@@ -65,6 +66,10 @@ export type AdmitRunResult =
       outcome: "follow_up_queued";
       decision: RunAdmissionDecision;
       followUpRequest: FollowUpRequest;
+    }
+  | {
+      outcome: "wait_active_run";
+      decision: RunAdmissionDecision;
     }
   | {
       outcome: "needs_human_decision";
@@ -444,6 +449,19 @@ export function createAdmissionRuntime(input: {
         if (activeRun) break;
       }
       if (activeRun) {
+        if (request.activeRunPolicy === "wait") {
+          return {
+            outcome: "wait_active_run",
+            decision: admissionDecision({
+              action: "wait",
+              reason: "A run is already active for this thread; automatic continuation remains deferred.",
+              reasonCode: isWriteCapable(request.event) ? "active_write_run_same_thread" : "active_run_same_thread",
+              event: request.event,
+              activeRunId: activeRun.run.id,
+              decidedAt: admittedAt
+            })
+          };
+        }
         const decision = admissionDecision({
           action: "queue_follow_up",
           reason: "A run is already active for this thread; queue the new request as follow-up work.",
