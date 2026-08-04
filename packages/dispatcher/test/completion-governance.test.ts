@@ -100,12 +100,18 @@ async function startRun(input: {
   databasePath?: string;
   completionNow?: () => string;
   issueNumber?: number;
+  reassessmentObligations?: {
+    autoStart?: boolean;
+    inline?: boolean;
+    pollIntervalMs?: number;
+  };
 }) {
   const delivered: CallbackMessage[] = [];
   const app = createDispatcherApp({
     databasePath: input.databasePath ?? ":memory:",
     ...(input.completionPolicies ? { completionPolicies: input.completionPolicies } : {}),
     ...(input.completionNow ? { completionNow: input.completionNow } : {}),
+    reassessmentObligations: input.reassessmentObligations ?? { autoStart: false },
     callbackSink: {
       async deliver(message) {
         delivered.push(message);
@@ -672,23 +678,24 @@ describe("dispatcher completion governance", () => {
 
   it("reassesses dirty durable completion state and emits the missed semantic transition at startup", async () => {
     const databasePath = temporaryDatabasePath();
-    const setup = await startRun({ runId: "run_startup_recovery", completionPolicies: [strictPolicy], databasePath });
+    const setup = await startRun({
+      runId: "run_startup_recovery",
+      completionPolicies: [strictPolicy],
+      databasePath,
+      reassessmentObligations: { autoStart: false, inline: false }
+    });
     await completeRun({ setup, runId: "run_startup_recovery", conclusion: "success" });
     await setup.app.request(
       "/v1/completion-evidence/github",
       jsonRequest(githubSnapshot({ deliveryId: "delivery-startup-recovery" }))
     );
     const sqlite = new Database(databasePath);
-    sqlite.prepare("DELETE FROM completion_assessments WHERE state = 'satisfied'").run();
-    sqlite.prepare("DELETE FROM callback_deliveries").run();
-    sqlite.prepare(`
-      UPDATE work_threads
-      SET current_assessment_id = (
-        SELECT id FROM completion_assessments
-        WHERE work_thread_id = work_threads.id
-        ORDER BY sequence DESC LIMIT 1
-      )
-    `).run();
+    expect(sqlite.prepare(`
+      SELECT state FROM reassessment_obligations
+      WHERE source_kind = 'verification_evidence_attached'
+    `).get()).toEqual({ state: "pending" });
+    expect(sqlite.prepare("SELECT state FROM completion_assessments ORDER BY sequence DESC LIMIT 1").get())
+      .toEqual({ state: "pending" });
     sqlite.close();
     const recoveredCallbacks: CallbackMessage[] = [];
     createDispatcherApp({
@@ -697,8 +704,8 @@ describe("dispatcher completion governance", () => {
       callbackSink: { async deliver(message) { recoveredCallbacks.push(message); } }
     });
 
-    for (let attempt = 0; attempt < 20 && recoveredCallbacks.length === 0; attempt += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
+    for (let attempt = 0; attempt < 50 && recoveredCallbacks.length === 0; attempt += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
     }
 
     expect(recoveredCallbacks).toEqual(expect.arrayContaining([

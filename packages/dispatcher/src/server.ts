@@ -33,6 +33,7 @@ import {
   type OpenTagEvent,
   type OpenTagRunResult,
   type OpenTagRun,
+  type ReassessmentObligation,
   type PermissionGrant,
   type SuggestedChangesSnapshot,
   type SuggestedActionCandidate,
@@ -125,6 +126,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { createReassessmentObligationWorker } from "./reassessment-obligations.js";
 
 /**
  * Parse and validate a request body, mapping ONLY request-body parse failures to
@@ -2958,10 +2960,23 @@ export function createDispatcherApp(input: {
   };
   completionPolicies?: GitHubCompletionPolicy[];
   completionNow?: () => string;
+  reassessmentObligations?: {
+    autoStart?: boolean;
+    inline?: boolean;
+    pollIntervalMs?: number;
+    leaseSeconds?: number;
+    batchSize?: number;
+    retryBaseMs?: number;
+    retryMaxMs?: number;
+    maxAttempts?: number;
+  };
 }) {
   const sqlite = input.sqlite ?? openDispatcherDatabase(input.databasePath);
   migrateSchema(sqlite);
   const repo = createOpenTagRepository(drizzle(sqlite));
+  const reassessmentOptions = input.reassessmentObligations ?? {};
+  const inlineReassessmentEnabled = reassessmentOptions.inline !== false;
+  const reassessmentDeferralMs = Math.max(100, reassessmentOptions.pollIntervalMs ?? 1_000);
   const workstreamBatchLeaseSeconds = 300;
   const workstreamBatchHeartbeatMs = Math.floor(workstreamBatchLeaseSeconds * 1_000 / 3);
 
@@ -3004,6 +3019,7 @@ export function createDispatcherApp(input: {
   const completionGovernance = createDispatcherCompletionGovernance({
     repo,
     policies: input.completionPolicies ?? [],
+    deferReassessment: !inlineReassessmentEnabled,
     ...(input.completionNow ? { now: input.completionNow } : {})
   });
   const app = new Hono();
@@ -3762,6 +3778,7 @@ export function createDispatcherApp(input: {
     preferredParentRunId?: string;
     continuationActor?: ActorIdentity;
     continuationPrincipal?: ChannelPrincipalIdentity;
+    durableHumanResolution?: HumanEscalation;
     continuationContext?: {
       pointer: OpenTagEvent["context"][number];
       metadata: Record<string, unknown>;
@@ -3983,16 +4000,23 @@ export function createDispatcherApp(input: {
       return { ...base, outcome: "rejected", decisions, reasonCode: "managed_channel_ownership_unverified" };
     }
     if (trigger.kind === "human_escalation_resolved" && ["slack", "lark"].includes(event.source)) {
-      if (!inputValue.continuationPrincipal) {
+      const durableResolutionAuthority = inputValue.durableHumanResolution
+        && inputValue.durableHumanResolution.id === trigger.id.replace(/^human-escalation:/u, "")
+        && inputValue.durableHumanResolution.workThreadId === workThreadId
+        && inputValue.durableHumanResolution.state === "resolved"
+        && inputValue.durableHumanResolution.sourceAuthority?.provider === event.source;
+      if (!inputValue.continuationPrincipal && !durableResolutionAuthority) {
         return { ...base, outcome: "rejected", decisions, reasonCode: "managed_channel_request_principal_missing" };
       }
-      const requestOwnershipVerified = await managedChannelOwnershipVerified({
-        repo,
-        event,
-        principal: inputValue.continuationPrincipal
-      });
-      if (!requestOwnershipVerified) {
-        return { ...base, outcome: "rejected", decisions, reasonCode: "managed_channel_request_principal_mismatch" };
+      if (inputValue.continuationPrincipal) {
+        const requestOwnershipVerified = await managedChannelOwnershipVerified({
+          repo,
+          event,
+          principal: inputValue.continuationPrincipal
+        });
+        if (!requestOwnershipVerified) {
+          return { ...base, outcome: "rejected", decisions, reasonCode: "managed_channel_request_principal_mismatch" };
+        }
       }
     }
 
@@ -4089,6 +4113,7 @@ export function createDispatcherApp(input: {
     preferredParentRunId?: string;
     continuationActor?: ActorIdentity;
     continuationPrincipal?: ChannelPrincipalIdentity;
+    durableHumanResolution?: HumanEscalation;
     continuationContext?: {
       pointer: OpenTagEvent["context"][number];
       metadata: Record<string, unknown>;
@@ -4114,6 +4139,195 @@ export function createDispatcherApp(input: {
       };
     }
   }
+
+  async function processReassessmentObligation(obligation: ReassessmentObligation) {
+    const workThread = await repo.getWorkThread({ workThreadId: obligation.workThreadId });
+    if (!workThread) {
+      return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The obligation WorkThread no longer exists." };
+    }
+
+    let sourceRun: Awaited<ReturnType<typeof repo.getRun>> | null = null;
+    let sourceEscalation: HumanEscalation | null = null;
+    let evidenceDelivery: { provider: string; deliveryId: string } | null = null;
+    if (obligation.sourceKind === "run_result_recorded") {
+      sourceRun = await repo.getRun({ runId: obligation.sourceId });
+      if (!sourceRun?.run.result || sourceRun.run.thread?.id !== obligation.workThreadId) {
+        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The recorded Run result source is unavailable." };
+      }
+    } else if (obligation.sourceKind === "verification_evidence_attached") {
+      const records = await repo.listVerificationEvidence({ workThreadId: obligation.workThreadId });
+      const matching = records.find((record) =>
+        [record.provider, record.deliveryId, record.subjectRef, obligation.workThreadId].join(":") === obligation.sourceId
+      );
+      if (!matching) {
+        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The attached verification evidence source is unavailable." };
+      }
+      evidenceDelivery = { provider: matching.provider, deliveryId: matching.deliveryId };
+    } else if (obligation.sourceKind === "human_escalation_changed") {
+      sourceEscalation = await repo.getHumanEscalation({ id: obligation.sourceId });
+      if (!sourceEscalation || sourceEscalation.workThreadId !== obligation.workThreadId) {
+        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The HumanEscalation source is unavailable." };
+      }
+    } else if (obligation.sourceKind === "completion_waiver_changed") {
+      const waivers = await repo.listCompletionWaivers({ workThreadId: obligation.workThreadId });
+      if (!waivers.some((waiver) => waiver.id === obligation.sourceId)) {
+        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The completion waiver source is unavailable." };
+      }
+    } else if (
+      obligation.sourceKind === "material_action_receipt_recorded"
+      || obligation.sourceKind === "material_action_reconciled"
+    ) {
+      const receipts = await repo.listMaterialActionReceiptsForWorkThread({ workThreadId: obligation.workThreadId });
+      if (!receipts.some((receipt) => receipt.actionId === obligation.sourceId)) {
+        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The material-action receipt source is unavailable." };
+      }
+    }
+
+    const governanceResult = sourceRun
+      ? await completionGovernance.ingestRunResult(sourceRun.run.id)
+      : await completionGovernance.reassessWorkThread(
+          obligation.workThreadId,
+          `reassessment-obligation:${obligation.id}:${obligation.attemptCount}`
+        );
+    if (governanceResult) await deliverCompletionTransition(obligation.workThreadId);
+    const satisfiedAssessmentId = governanceResult?.assessment.id;
+
+    const promotableRunId = sourceRun?.run.result
+      && sourceRun.run.result.conclusion !== "needs_human"
+      && sourceRun.run.result.conclusion !== "cancelled"
+      ? sourceRun.run.id
+      : null;
+    const promotedFollowUp = promotableRunId
+      ? await promoteNextFollowUpAfterTerminalRun({ activeRunId: promotableRunId })
+      : null;
+    if (promotedFollowUp) {
+      return {
+        outcome: "satisfied" as const,
+        reasonCode: "continuation_dispatched" as const,
+        ...(satisfiedAssessmentId ? { satisfiedAssessmentId } : {})
+      };
+    }
+
+    let continuationInput: Parameters<typeof attemptWorkstreamContinuation>[0] | null = null;
+    if (sourceRun?.run.result && ["failure", "interrupted", "timed_out"].includes(sourceRun.run.result.conclusion)) {
+      continuationInput = {
+        workThreadId: obligation.workThreadId,
+        trigger: {
+          id: `run-terminal:${sourceRun.run.id}`,
+          kind: "retryable_run_failure",
+          occurredAt: sourceRun.run.updatedAt
+        },
+        preferredParentRunId: sourceRun.run.id
+      };
+    } else if (evidenceDelivery) {
+      continuationInput = {
+        workThreadId: obligation.workThreadId,
+        trigger: {
+          id: evidenceDelivery.provider === "github"
+            ? `github-evidence:${evidenceDelivery.deliveryId}`
+            : `completion-evidence:${evidenceDelivery.provider}:${evidenceDelivery.deliveryId}`,
+          kind: "completion_evidence_changed",
+          occurredAt: obligation.createdAt
+        }
+      };
+    } else if (sourceEscalation?.state === "resolved" && sourceEscalation.resolution) {
+      const resolutionContext = humanResolutionContinuationContext(sourceEscalation);
+      continuationInput = {
+        workThreadId: obligation.workThreadId,
+        trigger: {
+          id: `human-escalation:${sourceEscalation.id}`,
+          kind: "human_escalation_resolved",
+          occurredAt: sourceEscalation.resolution.resolvedAt
+        },
+        continuationActor: sourceEscalation.resolution.actor,
+        durableHumanResolution: sourceEscalation,
+        ...(resolutionContext ? { continuationContext: resolutionContext } : {}),
+        ...(sourceEscalation.runId ? { preferredParentRunId: sourceEscalation.runId } : {})
+      };
+    } else if (
+      obligation.sourceKind === "material_action_receipt_recorded"
+      || obligation.sourceKind === "material_action_reconciled"
+      || obligation.sourceKind === "completion_waiver_changed"
+    ) {
+      continuationInput = {
+        workThreadId: obligation.workThreadId,
+        trigger: {
+          id: `completion-evidence:${obligation.sourceKind}:${obligation.sourceId}:${obligation.sourceDigest}`,
+          kind: "completion_evidence_changed",
+          occurredAt: obligation.createdAt
+        }
+      };
+    }
+
+    if (!continuationInput) {
+      return satisfiedAssessmentId
+        ? { outcome: "satisfied" as const, reasonCode: "assessment_satisfied" as const, satisfiedAssessmentId }
+        : { outcome: "satisfied" as const, reasonCode: "continuation_terminal" as const };
+    }
+    const continuation = await attemptWorkstreamContinuation(continuationInput);
+    if (continuation.outcome === "error") {
+      throw new Error(continuation.reasonCode ?? "Continuation dispatch failed during reassessment delivery.");
+    }
+    if (continuation.outcome === "deferred") {
+      const notBefore = continuation.notBefore ?? new Date(
+        Date.parse(input.completionNow?.() ?? new Date().toISOString()) + reassessmentDeferralMs
+      ).toISOString();
+      return {
+        outcome: "rescheduled" as const,
+        reasonCode: "continuation_deferred" as const,
+        notBefore
+      };
+    }
+    if (continuation.outcome === "created" || continuation.outcome === "replayed") {
+      return {
+        outcome: "satisfied" as const,
+        reasonCode: "continuation_dispatched" as const,
+        ...(satisfiedAssessmentId ? { satisfiedAssessmentId } : {})
+      };
+    }
+    if (continuation.outcome === "needs_human" || continuation.outcome === "ambiguous") {
+      return {
+        outcome: "blocked" as const,
+        reasonCode: "needs_human" as const,
+        lastError: continuation.reasonCode ?? "Continuation requires an attributed human decision."
+      };
+    }
+    if (continuation.outcome === "rejected") {
+      return {
+        outcome: "blocked" as const,
+        reasonCode: "authority_missing" as const,
+        lastError: continuation.reasonCode ?? "Continuation authority was rejected."
+      };
+    }
+    return {
+      outcome: "satisfied" as const,
+      reasonCode: "continuation_terminal" as const,
+      ...(satisfiedAssessmentId ? { satisfiedAssessmentId } : {})
+    };
+  }
+
+  const reassessmentWorker = createReassessmentObligationWorker({
+    repo,
+    process: processReassessmentObligation,
+    ...(reassessmentOptions.pollIntervalMs ? { pollIntervalMs: reassessmentOptions.pollIntervalMs } : {}),
+    ...(reassessmentOptions.leaseSeconds ? { leaseSeconds: reassessmentOptions.leaseSeconds } : {}),
+    ...(reassessmentOptions.batchSize ? { batchSize: reassessmentOptions.batchSize } : {}),
+    ...(reassessmentOptions.retryBaseMs ? { retryBaseMs: reassessmentOptions.retryBaseMs } : {}),
+    ...(reassessmentOptions.retryMaxMs ? { retryMaxMs: reassessmentOptions.retryMaxMs } : {}),
+    ...(reassessmentOptions.maxAttempts ? { maxAttempts: reassessmentOptions.maxAttempts } : {}),
+    ...(input.completionNow ? { now: () => new Date(input.completionNow!()) } : {}),
+    onError: async (error) => {
+      try {
+        await recordControlPlaneEvent({
+          type: "completion_governance.reassessment_obligation_failed",
+          severity: "error",
+          payload: sanitizeCredentialLikeValue({ error: error instanceof Error ? error.message : String(error) })
+        });
+      } catch {
+        // The process can be shutting down after its SQLite owner has closed.
+      }
+    }
+  });
 
   async function authorizeManagedHumanEscalationChange(
     escalation: HumanEscalation,
@@ -4166,6 +4380,7 @@ export function createDispatcherApp(input: {
           ...(resolutionContext ? { continuationContext: resolutionContext } : {}),
           ...(escalation.runId ? { preferredParentRunId: escalation.runId } : {})
         });
+        reassessmentWorker.wake();
         return {
           outcome: continuation.outcome,
           ...(continuation.reasonCode ? { reasonCode: continuation.reasonCode } : {}),
@@ -4175,35 +4390,11 @@ export function createDispatcherApp(input: {
           ...(continuation.escalation ? { humanEscalationId: continuation.escalation.id } : {})
         };
       }
+      reassessmentWorker.wake();
     },
     ...(input.completionNow ? { now: input.completionNow } : {})
   });
-  queueMicrotask(() => {
-    void (async () => {
-      const completedRuns = await repo.listRunsWithResults();
-      const workThreadIds = [...new Set(completedRuns.flatMap((stored) =>
-        stored.run.thread?.id ? [stored.run.thread.id] : []
-      ))].sort();
-      for (const workThreadId of workThreadIds) {
-        const latest = currentWorkThreadRun(await repo.listRunsForWorkThread({ workThreadId }));
-        if (!latest?.run.result) continue;
-        await completionGovernance.ingestRunResult(latest.run.id);
-        await deliverCompletionTransition(workThreadId);
-      }
-    })().catch(async (error) => {
-      try {
-        await recordControlPlaneEvent({
-          type: "completion_governance.recovery_failed",
-          severity: "error",
-          payload: { error: error instanceof Error ? error.message : String(error) }
-        });
-      } catch {
-        // The owning process may already be shutting down and its SQLite file
-        // may have been removed. Recovery failure reporting must not create an
-        // unhandled rejection during teardown.
-      }
-    });
-  });
+  if (reassessmentOptions.autoStart !== false) reassessmentWorker.start();
   const parseDispatcherBody = async <S extends z.ZodTypeAny>(
     c: Context,
     schema: S,
@@ -4525,7 +4716,8 @@ export function createDispatcherApp(input: {
           ? `Deferred queued follow-up ${next.id} behind the automatic Workstream continuation.`
           : `Could not auto-promote queued follow-up ${next.id}.`
       });
-      return null;
+      if (automaticContinuationRace) return null;
+      throw error;
     }
   }
   const admission = createAdmissionRuntime({
@@ -4886,7 +5078,7 @@ export function createDispatcherApp(input: {
       throw error;
     }
     if (result.workThreadId) await deliverCompletionTransition(result.workThreadId);
-    const continuation = result.outcome === "recorded" && result.workThreadId
+    const continuation = inlineReassessmentEnabled && result.outcome === "recorded" && result.workThreadId
       ? await attemptWorkstreamContinuation({
           workThreadId: result.workThreadId,
           trigger: {
@@ -4894,8 +5086,9 @@ export function createDispatcherApp(input: {
             kind: "completion_evidence_changed",
             occurredAt: new Date().toISOString()
           }
-        })
+      })
       : null;
+    reassessmentWorker.wake();
     return c.json({ ...result, ...(continuation ? { continuation } : {}) }, result.outcome === "recorded" ? 201 : 200);
   });
 
@@ -4913,17 +5106,18 @@ export function createDispatcherApp(input: {
     const continuations: WorkstreamContinuationDispatch[] = [];
     for (const workThreadId of result.workThreadIds) {
       await deliverCompletionTransition(workThreadId);
-      if (result.outcome === "recorded") {
+      if (inlineReassessmentEnabled && result.outcome === "recorded") {
         continuations.push(await attemptWorkstreamContinuation({
           workThreadId,
           trigger: {
-            id: `github-evidence-batch:${result.manifestDigest}:${workThreadId}`,
+            id: `github-evidence:${snapshots[0]!.deliveryId}`,
             kind: "completion_evidence_changed",
             occurredAt: new Date().toISOString()
           }
         }));
       }
     }
+    reassessmentWorker.wake();
     return c.json({ ...result, ...(continuations.length > 0 ? { continuations } : {}) }, result.outcome === "recorded" ? 201 : 200);
   });
 
@@ -6834,6 +7028,7 @@ export function createDispatcherApp(input: {
           preferredParentRunId: runId
         })
       : null;
+    reassessmentWorker.wake();
     return c.json({
       ok: true,
       ...(completionResult ? { completion: completionResult.view } : {}),
@@ -7247,6 +7442,7 @@ export function createDispatcherApp(input: {
           escalation: result.escalation
         }, 409);
       }
+      reassessmentWorker.wake();
       return c.json({ outcome: result.changed ? "acknowledged" : "duplicate", escalation: result.escalation }, result.changed ? 201 : 200);
     } catch (error) {
       if (error instanceof ManagedChannelAuthorityError) {
@@ -7315,6 +7511,7 @@ export function createDispatcherApp(input: {
             ...(result.escalation.runId ? { preferredParentRunId: result.escalation.runId } : {})
           })
         : null;
+      reassessmentWorker.wake();
       const resume = continuation
         ? continuationResumePresentation({
             outcome: continuation.outcome,
@@ -7361,6 +7558,7 @@ export function createDispatcherApp(input: {
       await deliverCompletionTransition(result.assessment.workThreadId);
       const completion = await completionGovernance.explainRun(runId);
       if (!completion || !result.assessment.waiver) return c.json({ error: "completion_not_available" }, 404);
+      reassessmentWorker.wake();
       return c.json({ outcome: result.outcome, completion, waiver: result.assessment.waiver }, result.outcome === "recorded" ? 201 : 200);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Invalid completion waiver.";
@@ -7417,5 +7615,9 @@ export function createDispatcherApp(input: {
     return c.json({ error: "internal_server_error" }, 500);
   });
 
-  return app;
+  return Object.assign(app, {
+    async stopBackgroundWorkers() {
+      await reassessmentWorker.stop();
+    }
+  });
 }

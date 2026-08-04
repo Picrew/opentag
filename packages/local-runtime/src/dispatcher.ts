@@ -61,6 +61,7 @@ export type LocalDispatcherRuntimeInput = {
   githubCallbackToken?: string;
   githubApplyToken?: string | null;
   completionPolicies?: GitHubCompletionPolicy[];
+  reassessmentObligations?: Parameters<typeof createDispatcherApp>[0]["reassessmentObligations"];
   gitlabToken?: string;
   gitlabBaseUrl?: string;
   gitlabWebhookSecret?: string;
@@ -777,6 +778,7 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
   const app = createDispatcherApp({
     databasePath: input.databasePath,
     ...(input.completionPolicies ? { completionPolicies: input.completionPolicies } : {}),
+    ...(input.reassessmentObligations ? { reassessmentObligations: input.reassessmentObligations } : {}),
     ...(input.pairingToken ? { pairingToken: input.pairingToken } : {}),
     ...(input.runnerToken ? { runnerToken: input.runnerToken } : {}),
     ...(input.runnerTokens ? { runnerTokens: input.runnerTokens } : {}),
@@ -1269,8 +1271,9 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
   return {
     url: `http://localhost:${input.port}`,
     server,
-    close() {
-      return new Promise<void>((resolve, reject) => {
+    async close() {
+      await app.stopBackgroundWorkers();
+      await new Promise<void>((resolve, reject) => {
         server.closeIdleConnections?.();
         server.close((error?: Error) => {
           if (error) {
@@ -1280,9 +1283,8 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
           resolve();
         });
         server.closeAllConnections?.();
-      }).then(async () => {
-        await Promise.allSettled([...backgroundHandles].reverse().map((handle) => handle.close()));
       });
+      await Promise.allSettled([...backgroundHandles].reverse().map((handle) => handle.close()));
     }
   };
 }
