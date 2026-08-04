@@ -188,6 +188,26 @@ function evidence(): GitHubFactoryAcceptanceEvidence {
       afterMerge: acceptedProgressMetrics(5),
       afterRestart: acceptedProgressMetrics(5)
     },
+    reassessmentObligation: {
+      sourceKind: "verification_evidence_attached",
+      sourceId: "github:delivery-merge:github:amplifthq/opentag-test:pull_request:7:thread_live_42",
+      sourceDigest: digest,
+      beforeCrash: {
+        state: "pending",
+        assessmentId: null,
+        assessmentCount: 2,
+        evidenceRecordCount: 3
+      },
+      afterRestart: {
+        state: "satisfied",
+        attemptCount: 1,
+        satisfiedAssessmentId: "assessment_live_42",
+        assessmentCount: 3,
+        evidenceRecordCount: 3
+      },
+      afterSecondRestartAssessmentCount: 3,
+      matchingCount: 1
+    },
     assessmentCount: 3,
     sourceReceipt: {
       matchedPhrase: "provider-verified completion requirements are satisfied",
@@ -263,7 +283,7 @@ describe("GitHub factory live acceptance report", () => {
     const report = buildGitHubFactoryAcceptanceReport(evidence());
 
     expect(report).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       case: "github-factory-live",
       factory: {
         workThreadId: "thread_live_42",
@@ -293,6 +313,34 @@ describe("GitHub factory live acceptance report", () => {
     });
     expect(Object.values(report.assertions).every((value) => value === true)).toBe(true);
     expect(JSON.stringify(report)).not.toContain("fencingToken");
+  });
+
+  it("rejects a reassessment obligation that remains pending after restart", () => {
+    const input = evidence();
+    (input.reassessmentObligation.afterRestart as Record<string, unknown>)["state"] = "pending";
+
+    expect(() => buildGitHubFactoryAcceptanceReport(input)).toThrow(/remained pending after restart/u);
+  });
+
+  it("rejects a reassessment obligation linked to the wrong assessment", () => {
+    const input = evidence();
+    input.reassessmentObligation.afterRestart.satisfiedAssessmentId = "assessment_wrong";
+
+    expect(() => buildGitHubFactoryAcceptanceReport(input)).toThrow(/linked to the wrong current assessment/u);
+  });
+
+  it("rejects a duplicate provider-delivery obligation", () => {
+    const input = evidence();
+    input.reassessmentObligation.matchingCount = 2;
+
+    expect(() => buildGitHubFactoryAcceptanceReport(input)).toThrow(/duplicate reassessment obligation/u);
+  });
+
+  it("rejects evidence that was already assessed before the claimed crash", () => {
+    const input = evidence();
+    (input.reassessmentObligation.beforeCrash as Record<string, unknown>)["assessmentId"] = "assessment_live_42";
+
+    expect(() => buildGitHubFactoryAcceptanceReport(input)).toThrow(/already assessed before the claimed crash/u);
   });
 
   it("requires registry artifact identity for a registry-installed proof", () => {

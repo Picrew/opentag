@@ -101,6 +101,26 @@ export type GitHubFactoryAcceptanceEvidence = {
     afterMerge: JsonObject;
     afterRestart: JsonObject;
   };
+  reassessmentObligation: {
+    sourceKind: "verification_evidence_attached";
+    sourceId: string;
+    sourceDigest: string;
+    beforeCrash: {
+      state: "pending";
+      assessmentId: null;
+      assessmentCount: number;
+      evidenceRecordCount: number;
+    };
+    afterRestart: {
+      state: "satisfied";
+      attemptCount: number;
+      satisfiedAssessmentId: string;
+      assessmentCount: number;
+      evidenceRecordCount: number;
+    };
+    afterSecondRestartAssessmentCount: number;
+    matchingCount: number;
+  };
   assessmentCount: number;
   sourceReceipt: {
     matchedPhrase: string;
@@ -123,7 +143,7 @@ export type GitHubFactoryAcceptanceReport = Omit<
   GitHubFactoryAcceptanceEvidence,
   "factory" | "completion" | "metrics" | "acceptedProgress"
 > & {
-  schemaVersion: 1;
+  schemaVersion: 2;
   case: "github-factory-live";
   factory: Omit<GitHubFactoryAcceptanceEvidence["factory"], "batch"> & {
     batch: Omit<GitHubFactoryAcceptanceEvidence["factory"]["batch"], "initialReceipt" | "replayedReceipt"> & {
@@ -150,6 +170,13 @@ export type GitHubFactoryAcceptanceReport = Omit<
     restartPreservedWorkstreamMetrics: true;
     restartReplayedExactBatchReceipt: true;
     restartDidNotDuplicateFinalReceipt: true;
+    providerFactAndObligationCommittedTogether: true;
+    crashOccurredBeforeReassessment: true;
+    restartClaimedPendingObligation: true;
+    restartSatisfiedObligationWithCurrentAssessment: true;
+    providerDeliveryWasNotReplayed: true;
+    restartDidNotDuplicateAssessmentTransition: true;
+    acceptedProgressRemainedAuthoritative: true;
   };
   excludedScope: ["dag", "operator_console"];
 };
@@ -442,6 +469,7 @@ export function buildGitHubFactoryAcceptanceReport(
   const restartedCompletion = completionState(evidence.completion.afterRestart);
   const mergedAssessment = currentAssessment(evidence.completion.afterMerge);
   const restartedAssessment = currentAssessment(evidence.completion.afterRestart);
+  const obligation = evidence.reassessmentObligation;
   const beforeTerminal = metric(evidence.metrics.beforeProviderEvidence, "terminalRunCount");
   const beforeAccepted = metric(evidence.metrics.beforeProviderEvidence, "acceptedWorkThreadCount");
   const mergedTerminal = metric(evidence.metrics.afterMerge, "terminalRunCount");
@@ -516,6 +544,33 @@ export function buildGitHubFactoryAcceptanceReport(
   invariant(evidence.requiredCheck.headSha === evidence.pullRequest.headRefOid, "required check is not bound to the PR head");
   invariant(evidence.requiredCheck.state === "success", `required check state is ${evidence.requiredCheck.state}`);
   invariant(evidence.pullRequest.state.toUpperCase() === "MERGED" && Boolean(evidence.pullRequest.mergedAt), "pull request is not provider-verified merged");
+  invariant(obligation.sourceKind === "verification_evidence_attached", "crash proof is not bound to attached verification evidence");
+  invariant(obligation.sourceId.length > 0, "reassessment obligation source identity is missing");
+  invariant(/^sha256:[0-9a-f]{64}$/u.test(obligation.sourceDigest), "reassessment obligation source digest is invalid");
+  invariant(obligation.beforeCrash.state === "pending", "reassessment obligation was not pending before the crash");
+  invariant(obligation.beforeCrash.assessmentId === null, "provider evidence was already assessed before the claimed crash");
+  invariant(obligation.beforeCrash.assessmentCount > 0, "no pre-crash assessment lineage was retained");
+  invariant(obligation.beforeCrash.evidenceRecordCount > 0, "provider evidence was not committed before the crash");
+  invariant(obligation.afterRestart.state === "satisfied", "reassessment obligation remained pending after restart");
+  invariant(obligation.afterRestart.attemptCount >= 1, "restart did not claim the pending reassessment obligation");
+  invariant(
+    obligation.afterRestart.satisfiedAssessmentId === mergedAssessment["id"],
+    "reassessment obligation is linked to the wrong current assessment"
+  );
+  invariant(obligation.matchingCount === 1, "provider delivery produced a duplicate reassessment obligation");
+  invariant(
+    obligation.beforeCrash.evidenceRecordCount === obligation.afterRestart.evidenceRecordCount,
+    "provider evidence was replayed while recovering the obligation"
+  );
+  invariant(
+    obligation.afterRestart.assessmentCount === obligation.afterSecondRestartAssessmentCount,
+    "second restart duplicated the assessment transition"
+  );
+  invariant(
+    obligation.afterRestart.assessmentCount >= obligation.beforeCrash.assessmentCount
+      && evidence.assessmentCount === obligation.afterSecondRestartAssessmentCount,
+    "retained assessment counts do not match the crash/restart sequence"
+  );
   invariant(mergedCompletion === "satisfied", "merge did not satisfy completion");
   invariant(gateState(evidence.completion.afterMerge, "merge") === "passed", "merge gate did not pass");
   invariant(restartedCompletion === "satisfied", "restart lost the satisfied completion state");
@@ -566,7 +621,7 @@ export function buildGitHubFactoryAcceptanceReport(
   );
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     case: "github-factory-live",
     recordedAt: evidence.recordedAt,
     repository: evidence.repository,
@@ -592,6 +647,7 @@ export function buildGitHubFactoryAcceptanceReport(
     completion: evidence.completion,
     metrics: evidence.metrics,
     acceptedProgress,
+    reassessmentObligation: evidence.reassessmentObligation,
     assessmentCount: evidence.assessmentCount,
     sourceReceipt: evidence.sourceReceipt,
     assertions: {
@@ -608,7 +664,14 @@ export function buildGitHubFactoryAcceptanceReport(
       restartPreservedAcceptedProgress: true,
       restartPreservedWorkstreamMetrics: true,
       restartReplayedExactBatchReceipt: true,
-      restartDidNotDuplicateFinalReceipt: true
+      restartDidNotDuplicateFinalReceipt: true,
+      providerFactAndObligationCommittedTogether: true,
+      crashOccurredBeforeReassessment: true,
+      restartClaimedPendingObligation: true,
+      restartSatisfiedObligationWithCurrentAssessment: true,
+      providerDeliveryWasNotReplayed: true,
+      restartDidNotDuplicateAssessmentTransition: true,
+      acceptedProgressRemainedAuthoritative: true
     },
     excludedScope: ["dag", "operator_console"]
   };

@@ -570,6 +570,141 @@ describe("workstream batch admission", () => {
     }
   });
 
+  it("does not reinterpret an already-promoted follow-up as an automatic continuation after restart", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "opentag-promoted-follow-up-reassessment-"));
+    const databasePath = join(directory, "dispatcher.sqlite");
+    const setup = await factorySetup({
+      databasePath,
+      reassessmentObligations: { autoStart: false },
+      continuation: {
+        mode: "evidence_driven",
+        triggers: ["retryable_run_failure"],
+        maxContinuationsPerWorkThread: 3,
+        minIntervalSeconds: 0,
+        backoff: { initialSeconds: 1, maxSeconds: 1 }
+      }
+    });
+    let restarted: ReturnType<typeof createDispatcherApp> | undefined;
+    let secondRestart: ReturnType<typeof createDispatcherApp> | undefined;
+    try {
+      expect((await setup.app.request("/v1/workstream-batches", post({
+        id: "batch_promoted_follow_up_recovery",
+        workstreamId: "workstream_default",
+        items: [{
+          itemId: "item_promoted_follow_up_recovery",
+          runId: "run_promoted_follow_up_source",
+          workThreadId: setup.workThreadId,
+          event: {
+            ...event,
+            id: "evt_promoted_follow_up_source",
+            sourceEventId: "comment_promoted_follow_up_source",
+            receivedAt: "2026-07-26T00:29:00.000Z"
+          }
+        }]
+      }))).status).toBe(201);
+      const claim = await (await setup.app.request("/v1/runners/runner_1/claim", { method: "POST" })).json() as {
+        attemptId: string;
+        fencingToken: string;
+      };
+      expect((await setup.app.request("/v1/runs", post({
+        runId: "follow_up_already_promoted",
+        event: {
+          ...event,
+          id: "evt_follow_up_already_promoted",
+          sourceEventId: "comment_follow_up_already_promoted",
+          receivedAt: "2026-07-26T00:30:00.000Z"
+        }
+      }))).status).toBe(202);
+
+      const sqlite = new Database(databasePath);
+      migrateSchema(sqlite);
+      const repo = createOpenTagRepository(drizzle(sqlite));
+      await expect(repo.completeRun({
+        runId: "run_promoted_follow_up_source",
+        runnerId: "runner_1",
+        attemptId: claim.attemptId,
+        fencingToken: claim.fencingToken,
+        result: { conclusion: "failure", summary: "The queued human follow-up remains authoritative." }
+      })).resolves.toBe("completed");
+      const promoted = await repo.createRunFromFollowUpRequest({
+        followUpRequestId: "follow_up_already_promoted",
+        runId: "run_follow_up_already_promoted"
+      });
+      expect(promoted.followUpRequest).toMatchObject({
+        status: "promoted",
+        activeRunId: "run_promoted_follow_up_source",
+        createdRunId: "run_follow_up_already_promoted"
+      });
+      expect(sqlite.prepare(`
+        SELECT state, attempt_count AS attemptCount FROM reassessment_obligations
+        WHERE source_kind = 'run_result_recorded' AND source_id = 'run_promoted_follow_up_source'
+      `).get()).toEqual({ state: "pending", attemptCount: 0 });
+      sqlite.close();
+      await setup.app.stopBackgroundWorkers();
+
+      restarted = createDispatcherApp({
+        databasePath,
+        reassessmentObligations: { pollIntervalMs: 10 }
+      });
+      const observer = new Database(databasePath);
+      await waitFor(
+        () => (observer.prepare(`
+          SELECT state FROM reassessment_obligations
+          WHERE source_kind = 'run_result_recorded' AND source_id = 'run_promoted_follow_up_source'
+        `).get() as { state?: string } | undefined)?.state === "satisfied",
+        "restart did not satisfy the source obligation from the durable promoted follow-up"
+      );
+      expect(observer.prepare(`
+        SELECT COUNT(*) AS count FROM runs
+        WHERE json_extract(event_json, '$.metadata.triggerId') = 'run-terminal:run_promoted_follow_up_source'
+      `).get()).toEqual({ count: 0 });
+
+      const promotedClaim = await (await restarted.request("/v1/runners/runner_1/claim", { method: "POST" })).json() as {
+        run: { id: string };
+        attemptId: string;
+        fencingToken: string;
+      };
+      expect(promotedClaim.run.id).toBe("run_follow_up_already_promoted");
+      expect((await restarted.request(
+        "/v1/runners/runner_1/runs/run_follow_up_already_promoted/complete",
+        post({
+          attemptId: promotedClaim.attemptId,
+          fencingToken: promotedClaim.fencingToken,
+          result: { conclusion: "failure", summary: "The promoted follow-up itself now needs retry." }
+        })
+      )).status).toBe(200);
+      await waitFor(
+        () => (observer.prepare(`
+          SELECT COUNT(*) AS count FROM runs
+          WHERE json_extract(event_json, '$.metadata.triggerId') = 'run-terminal:run_follow_up_already_promoted'
+        `).get() as { count: number }).count === 1,
+        "the promoted follow-up did not receive its own governed retry"
+      );
+      await restarted.stopBackgroundWorkers();
+      restarted = undefined;
+
+      secondRestart = createDispatcherApp({
+        databasePath,
+        reassessmentObligations: { pollIntervalMs: 10 }
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      expect(observer.prepare(`
+        SELECT COUNT(*) AS count FROM runs
+        WHERE json_extract(event_json, '$.metadata.triggerId') = 'run-terminal:run_promoted_follow_up_source'
+      `).get()).toEqual({ count: 0 });
+      expect(observer.prepare(`
+        SELECT state, last_reason_code AS reasonCode FROM reassessment_obligations
+        WHERE source_kind = 'run_result_recorded' AND source_id = 'run_promoted_follow_up_source'
+      `).get()).toEqual({ state: "satisfied", reasonCode: "continuation_dispatched" });
+      observer.close();
+    } finally {
+      await secondRestart?.stopBackgroundWorkers();
+      await restarted?.stopBackgroundWorkers();
+      await setup.app.stopBackgroundWorkers();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps an evidence obligation pending behind an active Run and reassesses after it becomes terminal", async () => {
     const directory = mkdtempSync(join(tmpdir(), "opentag-active-run-reassessment-"));
     const databasePath = join(directory, "dispatcher.sqlite");

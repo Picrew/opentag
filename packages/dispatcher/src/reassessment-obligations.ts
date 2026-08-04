@@ -255,6 +255,7 @@ export function createReassessmentObligationWorker(input: {
   function wake(): void {
     if (!active) return;
     queueMicrotask(() => {
+      if (!active) return;
       void drainDue().catch((error) => input.onError?.(error));
     });
   }

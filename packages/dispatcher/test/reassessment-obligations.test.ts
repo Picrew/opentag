@@ -65,6 +65,61 @@ async function waitFor(
 }
 
 describe("dispatcher reassessment obligation worker", () => {
+  it("projects durable queue facts and a concrete next action without exposing the lease fence", async () => {
+    const seeded = repository();
+    const storedThread = (await seeded.repo.upsertWorkThread({ thread: thread("diagnostics") })).thread;
+    await seeded.repo.enqueueReassessmentObligation({
+      workThreadId: storedThread.id,
+      sourceKind: "run_result_recorded",
+      sourceId: "run-diagnostics",
+      sourceDigest: digest("9"),
+      notBefore: timestamp,
+      createdAt: timestamp
+    });
+    await seeded.repo.claimDueReassessmentObligations({
+      leaseOwner: "diagnostic-worker",
+      leaseSeconds: 30,
+      limit: 1,
+      now: new Date(timestamp)
+    });
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      sqlite: seeded.sqlite,
+      completionNow: () => timestamp,
+      reassessmentObligations: { autoStart: false }
+    });
+
+    const response = await app.request(`/v1/work-threads/${storedThread.id}/reassessment-obligations`);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      workThreadId: storedThread.id,
+      summary: {
+        total: 1,
+        pending: 0,
+        leased: 1,
+        satisfied: 0,
+        blocked: 0,
+        oldestDueAt: timestamp,
+        truncated: false
+      },
+      obligations: [{
+        sourceKind: "run_result_recorded",
+        sourceId: "run-diagnostics",
+        state: "leased",
+        attemptCount: 1,
+        nextAction: {
+          kind: "wait_for_current_lease",
+          summary: "Wait for the current fenced reassessment lease to finish or expire."
+        }
+      }]
+    });
+    expect(JSON.stringify(body)).not.toContain("leaseToken");
+    expect(JSON.stringify(body)).not.toContain("diagnostic-worker");
+    await app.stopBackgroundWorkers();
+    seeded.sqlite.close();
+  });
+
   it("isolates a retryable failure and continues with the next obligation", async () => {
     const { repo } = repository();
     const firstThread = (await repo.upsertWorkThread({ thread: thread("1") })).thread;
@@ -151,6 +206,38 @@ describe("dispatcher reassessment obligation worker", () => {
 
     await expect(repo.listReassessmentObligations({ workThreadId: storedThread.id })).resolves.toMatchObject([
       { state: "satisfied", attemptCount: 1 }
+    ]);
+  });
+
+  it("cancels a queued wake before reporting the worker stopped", async () => {
+    const { repo } = repository();
+    const storedThread = (await repo.upsertWorkThread({ thread: thread("queued-stop") })).thread;
+    await repo.enqueueReassessmentObligation({
+      workThreadId: storedThread.id,
+      sourceKind: "run_result_recorded",
+      sourceId: "run-queued-stop",
+      sourceDigest: digest("e"),
+      notBefore: timestamp,
+      createdAt: timestamp
+    });
+    let processed = 0;
+    const worker = createReassessmentObligationWorker({
+      repo,
+      leaseOwner: "dispatcher-queued-stop-test",
+      now: () => new Date(timestamp),
+      async process() {
+        processed += 1;
+        return { outcome: "satisfied", reasonCode: "continuation_terminal" };
+      }
+    });
+
+    worker.start();
+    await worker.stop();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(processed).toBe(0);
+    await expect(repo.listReassessmentObligations({ workThreadId: storedThread.id })).resolves.toMatchObject([
+      { state: "pending", attemptCount: 0 }
     ]);
   });
 

@@ -4676,6 +4676,23 @@ export function createDispatcherApp(input: {
   async function promoteNextFollowUpAfterTerminalRun(input: {
     activeRunId: string;
   }): Promise<{ followUpRequest: import("@opentag/core").FollowUpRequest; run: OpenTagRun } | null> {
+    const existing = (await repo.listFollowUpsForActiveRun({ activeRunId: input.activeRunId }))
+      .find((followUp) => followUp.status === "promoting" || followUp.status === "promoted");
+    if (existing?.status === "promoted") {
+      const createdRun = existing.createdRunId
+        ? await repo.getRun({ runId: existing.createdRunId })
+        : null;
+      if (!createdRun || createdRun.event.id !== existing.sourceEventId) {
+        throw new Error(`Promoted follow-up request ${existing.id} has no matching created Run.`);
+      }
+      return { followUpRequest: existing, run: createdRun.run };
+    }
+    if (existing?.status === "promoting") {
+      return promoteFollowUpRequest({
+        followUpRequestId: existing.id,
+        runId: existing.createdRunId ?? `run_${randomUUID()}`
+      });
+    }
     const [next] = await repo.listQueuedFollowUpsForActiveRun({ activeRunId: input.activeRunId });
     if (!next) return null;
 
@@ -6483,6 +6500,9 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/follow-up-requests/:id/create-run", async (c) => {
     const parsed = await parseDispatcherBody(c, PromoteFollowUpRequestSchema);
+    const requested = await repo.getFollowUpRequest({ id: c.req.param("id") });
+    if (!requested) return c.json({ error: "follow_up_request_not_found" }, 404);
+    if (requested.status !== "queued") return c.json({ error: "follow_up_request_not_queued" }, 409);
     let promoted;
     try {
       promoted = await promoteFollowUpRequest({
@@ -7341,6 +7361,72 @@ export function createDispatcherApp(input: {
     ]);
     if (!completion) return c.json({ error: "completion_not_available" }, 404);
     return c.json({ workThread, completion, acceptedProgress });
+  });
+
+  app.get("/v1/work-threads/:workThreadId/reassessment-obligations", async (c) => {
+    const workThreadId = c.req.param("workThreadId");
+    const workThread = await repo.getWorkThread({ workThreadId });
+    if (!workThread) return c.json({ error: "work_thread_not_found" }, 404);
+    const obligations = await repo.listReassessmentObligations({ workThreadId, limit: 500 });
+    const now = input.completionNow?.() ?? new Date().toISOString();
+    const unresolved = obligations.filter((obligation) => obligation.state === "pending" || obligation.state === "leased");
+    const oldestDueAt = unresolved
+      .map((obligation) => obligation.notBefore)
+      .sort((left, right) => left.localeCompare(right))[0];
+    const counts = {
+      pending: obligations.filter((obligation) => obligation.state === "pending").length,
+      leased: obligations.filter((obligation) => obligation.state === "leased").length,
+      satisfied: obligations.filter((obligation) => obligation.state === "satisfied").length,
+      blocked: obligations.filter((obligation) => obligation.state === "blocked").length
+    };
+    return c.json({
+      workThreadId,
+      summary: {
+        total: obligations.length,
+        ...counts,
+        ...(oldestDueAt ? { oldestDueAt } : {}),
+        truncated: obligations.length === 500
+      },
+      obligations: obligations.map((obligation) => ({
+        id: obligation.id,
+        sourceKind: obligation.sourceKind,
+        sourceId: obligation.sourceId,
+        sourceDigest: obligation.sourceDigest,
+        state: obligation.state,
+        notBefore: obligation.notBefore,
+        attemptCount: obligation.attemptCount,
+        ...(obligation.leaseExpiresAt ? { leaseExpiresAt: obligation.leaseExpiresAt } : {}),
+        ...(obligation.lastReasonCode ? { lastReasonCode: obligation.lastReasonCode } : {}),
+        ...(obligation.lastError ? { lastError: obligation.lastError } : {}),
+        ...(obligation.satisfiedAssessmentId ? { satisfiedAssessmentId: obligation.satisfiedAssessmentId } : {}),
+        createdAt: obligation.createdAt,
+        updatedAt: obligation.updatedAt,
+        nextAction: obligation.state === "blocked"
+          ? {
+              kind: "inspect_blocked_obligation",
+              summary: "Inspect the typed reason and restore the missing durable authority before retrying."
+            }
+          : obligation.state === "leased"
+            ? {
+                kind: "wait_for_current_lease",
+                summary: "Wait for the current fenced reassessment lease to finish or expire."
+              }
+            : obligation.state === "pending" && obligation.notBefore > now
+              ? {
+                  kind: "wait_until_due",
+                  summary: `Wait until ${obligation.notBefore}; no provider replay is required.`
+                }
+              : obligation.state === "pending"
+                ? {
+                    kind: "wait_for_reassessment",
+                    summary: "Wait for the due reassessment worker; inspect this obligation if it remains pending."
+                  }
+                : {
+                    kind: "none",
+                    summary: "This delivery obligation is satisfied; WorkLoop completion remains separately authoritative."
+                  }
+      }))
+    });
   });
 
   app.get("/v1/work-loops", async (c) => {

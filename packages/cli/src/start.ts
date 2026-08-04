@@ -26,6 +26,7 @@ import {
   dispatcherRuntimeHardeningInputFromEnv,
   hermesProfileConfigurationWarning,
   normalizeChannelBindings,
+  reassessmentObligationTestRuntimeInputFromEnv,
   executorsFromConfig,
   runnerExecutorRegistrations,
   serveDaemon,
@@ -404,10 +405,12 @@ export function dispatcherRuntimeInputFromCliConfig(
       "GitHub platform requires daemon.preparePullRequestBranch=true unless legacy daemon.allowAutoCreatePullRequest is enabled. Run `opentag setup` and choose GitHub to update this config."
     );
   }
+  const reassessmentObligations = reassessmentObligationTestRuntimeInputFromEnv(env);
   return {
     port: dispatcherPortFromUrl(config.daemon.dispatcherUrl),
     databasePath: config.state.databasePath,
     ...dispatcherRuntimeHardeningInputFromEnv(input.env ?? process.env),
+    ...(reassessmentObligations ? { reassessmentObligations } : {}),
     ...(config.daemon.pairingToken ? { pairingToken: config.daemon.pairingToken } : {}),
     ...(config.daemon.runnerToken ? { runnerToken: config.daemon.runnerToken } : {}),
     ...(config.daemon.runnerTokens ? { runnerTokens: config.daemon.runnerTokens } : {}),

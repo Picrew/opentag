@@ -283,6 +283,19 @@ describe("OpenTag CLI start wiring", () => {
     });
   });
 
+  it("holds reassessment only behind the explicit live-test crash gate", () => {
+    const built = config();
+
+    expect(dispatcherRuntimeInputFromCliConfig(built, {
+      env: { OPENTAG_REASSESSMENT_OBLIGATION_TEST_HOLD: "true" }
+    })).toMatchObject({
+      reassessmentObligations: { autoStart: false, inline: false }
+    });
+    expect(dispatcherRuntimeInputFromCliConfig(built, {
+      env: { OPENTAG_REASSESSMENT_OBLIGATION_TEST_HOLD: "false" }
+    }).reassessmentObligations).toBeUndefined();
+  });
+
   it("derives dispatcher and ingress input for Slack without Lark", () => {
     const built = slackConfig();
     built.daemon.runTimeoutMs = 30_000;

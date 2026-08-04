@@ -2090,6 +2090,59 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     await db.insert(runEvents).values(runEventValues(safeInput));
   }
 
+  async function appendRunChildCreatedEvent(input: {
+    parentRunId: string;
+    childRunId: string;
+    payload: unknown;
+    message: string;
+    createdAt: string;
+  }): Promise<void> {
+    const eventInput: Parameters<typeof runEventValues>[0] = {
+      runId: input.parentRunId,
+      type: "run.child_created",
+      payload: input.payload,
+      visibility: "audit",
+      importance: "normal",
+      message: input.message,
+      createdAt: input.createdAt
+    };
+    const safeInput = sanitizeRunEventValue(eventInput, await attemptFencingTokensForRun(input.parentRunId));
+    await db.insert(runEvents).values({
+      ...runEventValues(safeInput),
+      progressIdempotencyDigest: sha256Json({ kind: "run_child_created", childRunId: input.childRunId })
+    }).onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] });
+  }
+
+  async function appendFollowUpPromotedEvent(input: {
+    parentRunId: string;
+    followUpRequestId: string;
+    createdRunId: string;
+    sourceEventId: string;
+    createdAt: string;
+  }): Promise<void> {
+    const eventInput: Parameters<typeof runEventValues>[0] = {
+      runId: input.parentRunId,
+      type: "follow_up_request.promoted",
+      payload: {
+        followUpRequestId: input.followUpRequestId,
+        createdRunId: input.createdRunId,
+        sourceEventId: input.sourceEventId
+      },
+      visibility: "audit",
+      importance: "normal",
+      createdAt: input.createdAt
+    };
+    const safeInput = sanitizeRunEventValue(eventInput, await attemptFencingTokensForRun(input.parentRunId));
+    await db.insert(runEvents).values({
+      ...runEventValues(safeInput),
+      progressIdempotencyDigest: sha256Json({
+        kind: "follow_up_request_promoted",
+        followUpRequestId: input.followUpRequestId,
+        createdRunId: input.createdRunId
+      })
+    }).onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] });
+  }
+
   type RoutingDirectorySnapshot = {
     registrations: RunnerRegistration[];
     directory: RunnerDirectoryEntry[];
@@ -4519,29 +4572,88 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return rows.map(followUpRequestFromRow);
     },
 
+    async listFollowUpsForActiveRun(input: { activeRunId: string }): Promise<FollowUpRequest[]> {
+      const rows = await db
+        .select()
+        .from(followUpRequests)
+        .where(eq(followUpRequests.activeRunId, input.activeRunId))
+        .orderBy(asc(followUpRequests.createdAt));
+      return rows.map(followUpRequestFromRow);
+    },
+
     async createRunFromFollowUpRequest(input: { followUpRequestId: string; runId: string }): Promise<{ followUpRequest: FollowUpRequest; run: OpenTagRun }> {
-      const row = await db.select().from(followUpRequests).where(eq(followUpRequests.id, input.followUpRequestId)).limit(1).get();
+      let row = await db.select().from(followUpRequests).where(eq(followUpRequests.id, input.followUpRequestId)).limit(1).get();
       if (!row) {
         throw new Error(`Follow-up request not found: ${input.followUpRequestId}`);
       }
-      if (row.status !== "queued") {
+      if (row.status === "promoted") {
+        if (!row.createdRunId) {
+          throw new Error(`Promoted follow-up request ${input.followUpRequestId} has no created Run.`);
+        }
+        const existing = await this.getRun({ runId: row.createdRunId });
+        if (!existing || existing.event.id !== row.sourceEventId) {
+          throw new Error(`Promoted follow-up request ${input.followUpRequestId} has no matching created Run.`);
+        }
+        if (row.activeRunId) {
+          await appendFollowUpPromotedEvent({
+            parentRunId: row.activeRunId,
+            followUpRequestId: row.id,
+            createdRunId: existing.run.id,
+            sourceEventId: row.sourceEventId,
+            createdAt: row.updatedAt
+          });
+        }
+        return { followUpRequest: followUpRequestFromRow(row), run: existing.run };
+      }
+      if (row.status !== "queued" && row.status !== "promoting") {
         throw new Error(`Follow-up request ${input.followUpRequestId} is not queued.`);
       }
-      const updatedAt = nowIso();
-      const promoteResult = await db
-        .update(followUpRequests)
-        .set({
-          status: "promoting",
-          updatedAt
-        })
-        .where(and(eq(followUpRequests.id, input.followUpRequestId), eq(followUpRequests.status, "queued")));
-      if (promoteResult.changes === 0) {
-        throw new Error(`Follow-up request ${input.followUpRequestId} is not queued.`);
+      let promotionRunId = row.createdRunId ?? input.runId;
+      let updatedAt = nowIso();
+      if (row.status === "queued") {
+        const promoteResult = await db
+          .update(followUpRequests)
+          .set({
+            status: "promoting",
+            createdRunId: promotionRunId,
+            updatedAt
+          })
+          .where(and(eq(followUpRequests.id, input.followUpRequestId), eq(followUpRequests.status, "queued")));
+        if (promoteResult.changes === 0) {
+          row = await db.select().from(followUpRequests).where(eq(followUpRequests.id, input.followUpRequestId)).limit(1).get();
+          if (!row || row.status !== "promoting" || !row.createdRunId) {
+            throw new Error(`Follow-up request ${input.followUpRequestId} is not queued.`);
+          }
+          promotionRunId = row.createdRunId;
+          updatedAt = row.updatedAt;
+        } else {
+          row = { ...row, status: "promoting", createdRunId: promotionRunId, updatedAt };
+        }
+      } else if (!row.createdRunId) {
+        const repairResult = await db
+          .update(followUpRequests)
+          .set({ createdRunId: promotionRunId, updatedAt })
+          .where(and(
+            eq(followUpRequests.id, input.followUpRequestId),
+            eq(followUpRequests.status, "promoting"),
+            isNull(followUpRequests.createdRunId)
+          ));
+        if (repairResult.changes === 0) {
+          row = await db.select().from(followUpRequests).where(eq(followUpRequests.id, input.followUpRequestId)).limit(1).get();
+          if (!row?.createdRunId) {
+            throw new Error(`Promoting follow-up request ${input.followUpRequestId} has no reserved Run identity.`);
+          }
+          promotionRunId = row.createdRunId;
+          updatedAt = row.updatedAt;
+        } else {
+          row = { ...row, createdRunId: promotionRunId, updatedAt };
+        }
       }
-      const followUp = followUpRequestFromRow({ ...row, status: "promoting", updatedAt });
+      const followUp = followUpRequestFromRow({ ...row, status: "promoting", createdRunId: promotionRunId, updatedAt });
+      let run: OpenTagRun;
       try {
-        const { run, created } = await this.createRun({
-          id: input.runId,
+        const createdRun = await this.createRun({
+          id: promotionRunId,
           event: followUp.event,
           rejectIfAutomaticContinuationActive: true,
           ...(followUp.accessProfileSnapshot ? { accessProfileSnapshot: followUp.accessProfileSnapshot } : {}),
@@ -4554,42 +4666,66 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             admissionItemRunId: followUp.id
           } : {})
         });
-        if (!created) {
-          throw new Error(`Run already exists for follow-up request ${input.followUpRequestId}.`);
+        if (!createdRun.created) {
+          const existing = await this.getRun({ runId: promotionRunId });
+          if (!existing || existing.event.id !== followUp.sourceEventId) {
+            throw new Error(`Run already exists for follow-up request ${input.followUpRequestId}.`);
+          }
+          run = existing.run;
+        } else {
+          run = createdRun.run;
         }
-        await db
-          .update(followUpRequests)
-          .set({
-            status: "promoted",
-            createdRunId: run.id,
-            updatedAt
-          })
-          .where(eq(followUpRequests.id, input.followUpRequestId));
-        const updated = await db.select().from(followUpRequests).where(eq(followUpRequests.id, input.followUpRequestId)).limit(1).get();
-        if (!updated) {
-          throw new Error(`Follow-up request ${input.followUpRequestId} was promoted but could not be loaded`);
-        }
-        if (followUp.activeRunId) {
-          await appendRunEvent({
-            runId: followUp.activeRunId,
-            type: "follow_up_request.promoted",
-            payload: { followUpRequestId: followUp.id, createdRunId: run.id, sourceEventId: followUp.sourceEventId },
-            visibility: "audit",
-            importance: "normal",
-            createdAt: updatedAt
-          });
-        }
-        return { followUpRequest: followUpRequestFromRow(updated), run };
       } catch (error) {
-        await db
-          .update(followUpRequests)
-          .set({
-            status: "queued",
-            updatedAt: nowIso()
-          })
-          .where(and(eq(followUpRequests.id, input.followUpRequestId), eq(followUpRequests.status, "promoting")));
-        throw error;
+        const committed = await this.getRun({ runId: promotionRunId });
+        if (committed?.event.id === followUp.sourceEventId) {
+          run = committed.run;
+        } else {
+          if (error instanceof ActiveConversationRaceError && !committed) {
+            await db
+              .update(followUpRequests)
+              .set({
+                status: "queued",
+                createdRunId: null,
+                updatedAt: nowIso()
+              })
+              .where(and(
+                eq(followUpRequests.id, input.followUpRequestId),
+                eq(followUpRequests.status, "promoting"),
+                eq(followUpRequests.createdRunId, promotionRunId)
+              ));
+          }
+          throw error;
+        }
       }
+      if (followUp.activeRunId) {
+        await appendRunChildCreatedEvent({
+          parentRunId: followUp.activeRunId,
+          childRunId: run.id,
+          payload: { childRunId: run.id },
+          message: `Created child run ${run.id}.`,
+          createdAt: run.createdAt
+        });
+        await appendFollowUpPromotedEvent({
+          parentRunId: followUp.activeRunId,
+          followUpRequestId: followUp.id,
+          createdRunId: run.id,
+          sourceEventId: followUp.sourceEventId,
+          createdAt: updatedAt
+        });
+      }
+      await db
+        .update(followUpRequests)
+        .set({ status: "promoted", createdRunId: run.id, updatedAt })
+        .where(and(
+          eq(followUpRequests.id, input.followUpRequestId),
+          eq(followUpRequests.status, "promoting"),
+          eq(followUpRequests.createdRunId, promotionRunId)
+        ));
+      const updated = await db.select().from(followUpRequests).where(eq(followUpRequests.id, input.followUpRequestId)).limit(1).get();
+      if (!updated || updated.status !== "promoted" || updated.createdRunId !== run.id) {
+        throw new Error(`Follow-up request ${input.followUpRequestId} was promoted but could not be loaded`);
+      }
+      return { followUpRequest: followUpRequestFromRow(updated), run };
     },
 
     async registerRunner(input: RunnerRegistrationInput): Promise<void> {
@@ -5281,17 +5417,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         });
       }
       if (input.parentRunId) {
-        await appendRunEvent({
-          runId: input.parentRunId,
-          type: "run.child_created",
+        await appendRunChildCreatedEvent({
+          parentRunId: input.parentRunId,
+          childRunId: input.id,
           payload: {
             childRunId: input.id,
             ...(triggeredByAction ? { triggeredByAction } : {}),
             ...(input.sourceProposalId ? { sourceProposalId: input.sourceProposalId } : {}),
             ...(input.sourceApplyPlanId ? { sourceApplyPlanId: input.sourceApplyPlanId } : {})
           },
-          visibility: "audit",
-          importance: "normal",
           message: `Created child run ${input.id}.`,
           createdAt
         });

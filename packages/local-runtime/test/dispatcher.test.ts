@@ -3,7 +3,12 @@ import { createOpenTagClient } from "@opentag/client";
 import type { OpenTagEvent } from "@opentag/core";
 import { computeLinearSignature } from "@opentag/linear";
 import { describe, expect, it, vi } from "vitest";
-import { dispatcherRuntimeInputFromEnv, startDispatcher, type LocalDispatcherRuntimeInput } from "../src/dispatcher.js";
+import {
+  dispatcherRuntimeInputFromEnv,
+  reassessmentObligationTestRuntimeInputFromEnv,
+  startDispatcher,
+  type LocalDispatcherRuntimeInput
+} from "../src/dispatcher.js";
 
 async function listenOnRandomPort(): Promise<{ server: Server; port: number }> {
   const server = createServer();
@@ -79,6 +84,21 @@ function managedChannelEvent(input: {
 }
 
 describe("local dispatcher runtime", () => {
+  it("holds reassessment only for the exact live-test switch", () => {
+    expect(reassessmentObligationTestRuntimeInputFromEnv({
+      OPENTAG_REASSESSMENT_OBLIGATION_TEST_HOLD: "true"
+    })).toEqual({ autoStart: false, inline: false });
+    expect(reassessmentObligationTestRuntimeInputFromEnv({
+      OPENTAG_REASSESSMENT_OBLIGATION_TEST_HOLD: "TRUE"
+    })).toBeUndefined();
+    expect(reassessmentObligationTestRuntimeInputFromEnv({
+      OPENTAG_REASSESSMENT_OBLIGATION_TEST_HOLD: "false"
+    })).toBeUndefined();
+    expect(dispatcherRuntimeInputFromEnv({
+      OPENTAG_REASSESSMENT_OBLIGATION_TEST_HOLD: "true"
+    }).reassessmentObligations).toEqual({ autoStart: false, inline: false });
+  });
+
   it("parses explicit GitHub completion policies from env", () => {
     expect(dispatcherRuntimeInputFromEnv({
       OPENTAG_GITHUB_COMPLETION_POLICIES_JSON: JSON.stringify([{
