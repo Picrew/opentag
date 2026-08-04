@@ -904,6 +904,157 @@ export const CompletionAssessmentSchema = z
     }
   });
 
+export const ReassessmentObligationSourceKindSchema = z.enum([
+  "run_result_recorded",
+  "verification_evidence_attached",
+  "material_action_receipt_recorded",
+  "material_action_reconciled",
+  "human_escalation_changed",
+  "completion_waiver_changed",
+  "continuation_not_before"
+]);
+
+export const ReassessmentObligationStateSchema = z.enum([
+  "pending",
+  "leased",
+  "satisfied",
+  "blocked"
+]);
+
+export const ReassessmentObligationReasonCodeSchema = z.enum([
+  "assessment_satisfied",
+  "continuation_dispatched",
+  "continuation_terminal",
+  "continuation_deferred",
+  "source_missing",
+  "authority_missing",
+  "reassessment_failed",
+  "needs_human"
+]);
+
+const ReassessmentPendingReasonCodes = new Set([
+  "continuation_deferred",
+  "reassessment_failed"
+]);
+const ReassessmentSatisfiedReasonCodes = new Set([
+  "assessment_satisfied",
+  "continuation_dispatched",
+  "continuation_terminal"
+]);
+const ReassessmentBlockedReasonCodes = new Set([
+  "source_missing",
+  "authority_missing",
+  "needs_human"
+]);
+
+export const ReassessmentObligationSchema = z
+  .object({
+    id: z.string().min(1),
+    workThreadId: z.string().min(1),
+    sourceKind: ReassessmentObligationSourceKindSchema,
+    sourceId: z.string().min(1),
+    sourceDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+    notBefore: z.string().datetime(),
+    state: ReassessmentObligationStateSchema,
+    leaseOwner: z.string().min(1).optional(),
+    leaseExpiresAt: z.string().datetime().optional(),
+    leaseToken: z.string().min(1).optional(),
+    attemptCount: z.number().int().nonnegative(),
+    lastReasonCode: ReassessmentObligationReasonCodeSchema.optional(),
+    lastError: z.string().min(1).max(4096).optional(),
+    satisfiedAssessmentId: z.string().min(1).optional(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime()
+  })
+  .strict()
+  .superRefine((obligation, ctx) => {
+    const activeLeaseFields = [obligation.leaseOwner, obligation.leaseExpiresAt, obligation.leaseToken];
+    if (obligation.state === "leased") {
+      if (activeLeaseFields.some((field) => !field)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "A leased reassessment obligation requires lease owner, expiry, and fencing token.",
+          path: ["leaseToken"]
+        });
+      }
+      if (obligation.attemptCount < 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "A leased reassessment obligation must record at least one attempt.",
+          path: ["attemptCount"]
+        });
+      }
+    } else if (activeLeaseFields.some((field) => field !== undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Active lease fields are allowed only while a reassessment obligation is leased.",
+        path: ["leaseOwner"]
+      });
+    }
+
+    if (obligation.satisfiedAssessmentId && obligation.state !== "satisfied") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Only a satisfied reassessment obligation may reference a satisfying assessment.",
+        path: ["satisfiedAssessmentId"]
+      });
+    }
+    if (obligation.state === "satisfied" && !obligation.lastReasonCode) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A satisfied reassessment obligation requires a terminal reason.",
+        path: ["lastReasonCode"]
+      });
+    }
+    if (obligation.state === "blocked" && !obligation.lastReasonCode) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A blocked reassessment obligation requires a terminal reason.",
+        path: ["lastReasonCode"]
+      });
+    }
+    if (obligation.lastReasonCode === "assessment_satisfied" && !obligation.satisfiedAssessmentId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "An assessment-backed satisfaction requires its assessment id.",
+        path: ["satisfiedAssessmentId"]
+      });
+    }
+    if (
+      obligation.state === "pending"
+      && obligation.lastReasonCode
+      && !ReassessmentPendingReasonCodes.has(obligation.lastReasonCode)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "The pending obligation reason must describe deferral or a retryable reassessment failure.",
+        path: ["lastReasonCode"]
+      });
+    }
+    if (
+      obligation.state === "satisfied"
+      && obligation.lastReasonCode
+      && !ReassessmentSatisfiedReasonCodes.has(obligation.lastReasonCode)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "The satisfied obligation reason must describe completed governance delivery.",
+        path: ["lastReasonCode"]
+      });
+    }
+    if (
+      obligation.state === "blocked"
+      && obligation.lastReasonCode
+      && !ReassessmentBlockedReasonCodes.has(obligation.lastReasonCode)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "The blocked obligation reason must describe missing authority or required human action.",
+        path: ["lastReasonCode"]
+      });
+    }
+  });
+
 export const HumanEscalationOptionSchema = z
   .object({
     id: z.string().min(1),
@@ -1509,6 +1660,10 @@ export type CompletionReasonCode = z.infer<typeof CompletionReasonCodeSchema>;
 export type CompletionGateResult = z.infer<typeof CompletionGateResultSchema>;
 export type CompletionWaiver = z.infer<typeof CompletionWaiverSchema>;
 export type CompletionAssessment = z.infer<typeof CompletionAssessmentSchema>;
+export type ReassessmentObligationSourceKind = z.infer<typeof ReassessmentObligationSourceKindSchema>;
+export type ReassessmentObligationState = z.infer<typeof ReassessmentObligationStateSchema>;
+export type ReassessmentObligationReasonCode = z.infer<typeof ReassessmentObligationReasonCodeSchema>;
+export type ReassessmentObligation = z.infer<typeof ReassessmentObligationSchema>;
 export type HumanEscalation = z.infer<typeof HumanEscalationSchema>;
 export type HumanEscalationOption = z.infer<typeof HumanEscalationOptionSchema>;
 export type WorkLoopCause = z.infer<typeof WorkLoopCauseSchema>;
