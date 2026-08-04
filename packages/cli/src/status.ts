@@ -17,6 +17,7 @@ import {
   RoutingDecisionSchema,
   type OpenTagEvent,
   type OpenTagRun,
+  type AcceptedProgressAttributionView,
   type AcceptedProgressMetrics,
   type FactoryRecipeSnapshot,
   type RunnerDirectoryEntry,
@@ -127,6 +128,7 @@ export type WorkThreadStatusSummary = {
   dispatcherUrl: string;
   workThread: EnsuredWorkThread;
   completion: CompletionExplanation;
+  acceptedProgress: AcceptedProgressAttributionView | null;
 };
 
 export type WorkLoopAttentionStatusSummary = {
@@ -1073,6 +1075,16 @@ function workThreadReference(workThread: EnsuredWorkThread): string {
 }
 
 export function formatWorkThreadStatus(summary: WorkThreadStatusSummary): string {
+  const progressLines = summary.acceptedProgress
+    ? [
+        "Accepted Progress:",
+        `  gate advances: ${summary.acceptedProgress.acceptedGateAdvanceCount} (${summary.acceptedProgress.attributedGateAdvanceCount} attributed, ${summary.acceptedProgress.unresolvedGateAdvanceCount} unresolved)`,
+        `  contributing runs: ${summary.acceptedProgress.runIdsWithAcceptedProgress.join(", ") || "none"}`,
+        ...summary.acceptedProgress.advances.map((advance) => advance.resolution.status === "attributed"
+          ? `  ${advance.gateId}: run=${advance.resolution.sourceRunId}; artifact=${advance.resolution.artifactId}; assessment=${advance.assessmentId}`
+          : `  ${advance.gateId}: unresolved=${advance.resolution.reasonCode}; assessment=${advance.assessmentId}`)
+      ]
+    : ["Accepted Progress:", "  unavailable (no current CompletionAssessment attribution)"];
   return [
     `Config: ${summary.configPath}`,
     `Dispatcher: ${summary.dispatcherUrl}`,
@@ -1081,12 +1093,17 @@ export function formatWorkThreadStatus(summary: WorkThreadStatusSummary): string
     `Control anchor: ${summary.workThread.primaryAnchor.provider}:${summary.workThread.primaryAnchor.kind}:${summary.workThread.primaryAnchor.externalId}`,
     ...formatCompletionExplanation(summary.completion),
     `  Action hint: ${summary.completion.nextAction.hint.kind}${summary.completion.nextAction.hint.targetId ? ` target=${summary.completion.nextAction.hint.targetId}` : ""}`,
-    `  Causes: ${summary.completion.nextAction.causes.length ? summary.completion.nextAction.causes.map(workLoopCauseLabel).join(", ") : "none"}`
+    `  Causes: ${summary.completion.nextAction.causes.length ? summary.completion.nextAction.causes.map(workLoopCauseLabel).join(", ") : "none"}`,
+    ...progressLines
   ].join("\n");
 }
 
 export function workThreadStatusJson(summary: WorkThreadStatusSummary): Record<string, unknown> {
-  return { workThread: summary.workThread, completion: summary.completion };
+  return {
+    workThread: summary.workThread,
+    completion: summary.completion,
+    acceptedProgress: summary.acceptedProgress
+  };
 }
 
 export function formatWorkLoopAttentionStatus(summary: WorkLoopAttentionStatusSummary): string {
@@ -1150,8 +1167,11 @@ export function formatWorkstreamStatus(summary: WorkstreamStatusSummary): string
     `Workstream: ${summary.workstream.id} (${summary.workstream.name})`,
     `State: ${summary.evaluation.status}`,
     `Next action: ${workstreamNextAction(summary)}`,
-    "Accepted Outcomes:",
-    `  work threads: ${metrics.acceptedWorkThreadCount}/${metrics.workThreadCount}`,
+    "Completion Authority:",
+    `  accepted work threads: ${metrics.acceptedWorkThreadCount}/${metrics.workThreadCount}`,
+    "Accepted Progress:",
+    `  gate advances: ${metrics.acceptedGateAdvanceCount} (${metrics.attributedGateAdvanceCount} attributed, ${metrics.unresolvedGateAdvanceCount} unresolved)`,
+    `  contributing runs: ${metrics.runsWithAcceptedProgressCount}`,
     "Budget:",
     `  concurrency: ${metrics.activeRunCount}/${budgets.maxConcurrentRuns}; blocked runs=${metrics.budgetBlockedRunCount}`,
     `  attempts: ${metrics.totalAttempts}; per-run limit=${budgets.maxAttemptsPerRun}; exceeded runs=${metrics.attemptsPerRunExceededCount}`,

@@ -495,6 +495,16 @@ describe("@opentag/client", () => {
       }
     };
     const requests: string[] = [];
+    const acceptedProgress = {
+      workThreadId: workThread.id,
+      contract: { id: "contract_client_1", version: 1, cycle: 1 },
+      currentAssessmentId: "assessment_client_1",
+      advances: [],
+      acceptedGateAdvanceCount: 0,
+      attributedGateAdvanceCount: 0,
+      unresolvedGateAdvanceCount: 0,
+      runIdsWithAcceptedProgress: []
+    };
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
       pairingToken: "pair_1",
@@ -502,7 +512,7 @@ describe("@opentag/client", () => {
         const href = String(url);
         requests.push(href);
         if (href.endsWith("/v1/work-threads/thread-client-1/completion")) {
-          return jsonResponse({ workThread, completion: fixture.completion });
+          return jsonResponse({ workThread, completion: fixture.completion, acceptedProgress });
         }
         if (href.endsWith("/v1/work-loops?attention=required&limit=10")) {
           return jsonResponse({ attention: "required", workLoops: [], scanned: 1, scanLimitReached: false });
@@ -513,7 +523,8 @@ describe("@opentag/client", () => {
 
     await expect(client.getWorkThreadCompletion({ workThreadId: workThread.id })).resolves.toMatchObject({
       workThread: { id: workThread.id },
-      completion: { completion: "waived", nextAction: { hint: { kind: "none" } } }
+      completion: { completion: "waived", nextAction: { hint: { kind: "none" } } },
+      acceptedProgress: { currentAssessmentId: "assessment_client_1", acceptedGateAdvanceCount: 0 }
     });
     await expect(client.listWorkLoopsRequiringAttention({ limit: 10 })).resolves.toEqual({
       attention: "required",

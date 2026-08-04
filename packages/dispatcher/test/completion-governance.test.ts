@@ -292,6 +292,20 @@ describe("dispatcher completion governance", () => {
         workThreadId,
         completion: "pending",
         nextAction: { hint: { kind: "refresh_completion_evidence", targetId: "required_checks" } }
+      },
+      acceptedProgress: {
+        workThreadId,
+        acceptedGateAdvanceCount: 1,
+        attributedGateAdvanceCount: 1,
+        unresolvedGateAdvanceCount: 0,
+        runIdsWithAcceptedProgress: ["run_work_loop_status"],
+        advances: [{
+          gateId: "pull_request",
+          resolution: {
+            status: "attributed",
+            sourceRunId: "run_work_loop_status"
+          }
+        }]
       }
     });
 
@@ -308,6 +322,69 @@ describe("dispatcher completion governance", () => {
     });
     expect((await setup.app.request("/v1/work-loops?attention=required&limit=0")).status).toBe(400);
     expect((await setup.app.request("/v1/work-loops")).status).toBe(400);
+  });
+
+  it("keeps the completion endpoint available across a completion-cycle authority boundary", async () => {
+    const databasePath = temporaryDatabasePath();
+    const setup = await startRun({
+      runId: "run_completion_cycle_boundary",
+      completionPolicies: [strictPolicy],
+      databasePath
+    });
+    expect((await completeRun({
+      setup,
+      runId: "run_completion_cycle_boundary",
+      conclusion: "success"
+    })).status).toBe(200);
+    const stored = await (await setup.app.request("/v1/runs/run_completion_cycle_boundary")).json() as {
+      run: { thread?: { id?: string } };
+    };
+    const workThreadId = stored.run.thread?.id;
+    expect(workThreadId).toBeTruthy();
+
+    const sqlite = new Database(databasePath);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const currentContract = await repo.getLatestCompletionContractForWorkThread({ workThreadId: workThreadId! });
+    if (!currentContract) throw new Error("expected current completion contract");
+    const currentAssessment = await repo.getCurrentCompletionAssessment({ workThreadId: workThreadId! });
+    if (!currentAssessment) throw new Error("expected current completion assessment");
+    await repo.recordCompletionContract({
+      contract: {
+        ...currentContract,
+        version: currentContract.version + 1,
+        cycle: currentContract.cycle + 1
+      }
+    });
+    await expect(repo.appendCompletionAssessment({
+      expectedCurrentAssessmentId: currentAssessment.id,
+      assessment: {
+        ...currentAssessment,
+        id: "assessment_completion_cycle_boundary",
+        contractVersion: currentContract.version + 1,
+        cycle: currentContract.cycle + 1,
+        sequence: 1,
+        supersedesAssessmentId: currentAssessment.id,
+        inputDigest: `sha256:${"9".repeat(64)}`,
+        assessedAt: "2026-07-21T10:06:00.000Z"
+      }
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    sqlite.close();
+
+    const firstRead = await setup.app.request(`/v1/work-threads/${encodeURIComponent(workThreadId!)}/completion`);
+    expect(firstRead.status).toBe(200);
+    const currentRead = await setup.app.request(`/v1/work-threads/${encodeURIComponent(workThreadId!)}/completion`);
+    expect(currentRead.status).toBe(200);
+    await expect(currentRead.json()).resolves.toMatchObject({
+      workThread: { id: workThreadId },
+      acceptedProgress: {
+        contract: {
+          id: currentContract.id,
+          version: currentContract.version + 1,
+          cycle: currentContract.cycle + 1
+        },
+        currentAssessmentId: expect.any(String)
+      }
+    });
   });
 
   it("keeps the work-loop attention listing read-only when no assessment has been persisted", async () => {

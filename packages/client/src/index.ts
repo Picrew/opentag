@@ -5,6 +5,7 @@ import {
   CompletionAssessmentSchema,
   CompletionContractSchema,
   CompletionWaiverSchema,
+  AcceptedProgressAttributionViewSchema,
   HumanEscalationSchema,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
@@ -31,6 +32,7 @@ import {
   type CompletionAssessment,
   type CompletionContract,
   type CompletionWaiver,
+  type AcceptedProgressAttributionView,
   type HumanEscalation,
   type ActionHint,
   type AdapterMutationMapping,
@@ -557,6 +559,7 @@ export type OpenTagClient = {
   getWorkThreadCompletion(input: { workThreadId: string }): Promise<{
     workThread: EnsuredWorkThread;
     completion: CompletionExplanation;
+    acceptedProgress: AcceptedProgressAttributionView | null;
   }>;
   listWorkLoopsRequiringAttention(input?: { limit?: number }): Promise<WorkLoopAttentionResult>;
   listHumanEscalations(input: { runId: string }): Promise<{
@@ -1318,10 +1321,13 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         headers: authHeaders(options.pairingToken)
       });
       await assertOk(response, "getWorkThreadCompletion");
-      const body = (await response.json()) as { workThread?: unknown; completion?: unknown };
+      const body = (await response.json()) as { workThread?: unknown; completion?: unknown; acceptedProgress?: unknown };
       return {
         workThread: parseEnsuredWorkThread(body.workThread),
-        completion: parseCompletionExplanation(body.completion)
+        completion: parseCompletionExplanation(body.completion),
+        acceptedProgress: body.acceptedProgress === null
+          ? null
+          : AcceptedProgressAttributionViewSchema.parse(body.acceptedProgress)
       };
     },
 

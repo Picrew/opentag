@@ -4241,6 +4241,27 @@ describe("explainable multi-runner routing", () => {
         { id: "hermes", completedRuns: 1, runsWithAcceptedProgress: 0, acceptedGateAdvances: 0 }
       ]
     });
+    await expect(repo.getAcceptedProgressAttribution({ workThreadId: threadId })).resolves.toMatchObject({
+      workThreadId: threadId,
+      acceptedGateAdvanceCount: 1,
+      attributedGateAdvanceCount: 1,
+      unresolvedGateAdvanceCount: 0,
+      runIdsWithAcceptedProgress: [oldRun.run.id],
+      advances: [{
+        gateId: "checks",
+        resolution: {
+          status: "attributed",
+          artifactId: "artifact_metric_old",
+          sourceRunId: oldRun.run.id
+        }
+      }]
+    });
+    await expect(repo.getAcceptedProgressAttribution({ workThreadId: compatibilityThreadId })).resolves.toMatchObject({
+      acceptedGateAdvanceCount: 1,
+      attributedGateAdvanceCount: 0,
+      unresolvedGateAdvanceCount: 1,
+      runIdsWithAcceptedProgress: []
+    });
     expect(aggregateReadStatements).toBe(4);
 
     sqlite.prepare("UPDATE work_threads SET current_assessment_id = ? WHERE id = ?")
@@ -4269,6 +4290,8 @@ describe("explainable multi-runner routing", () => {
       assessedBy: "human"
     }), "assessment_metric_current");
     await expect(repo.getAcceptedProgressMetrics())
+      .rejects.toThrow(/Accepted progress authority is invalid/iu);
+    await expect(repo.getAcceptedProgressAttribution({ workThreadId: threadId }))
       .rejects.toThrow(/Accepted progress authority is invalid/iu);
 
     sqlite.prepare("UPDATE completion_assessments SET assessment_json = ? WHERE id = ?")

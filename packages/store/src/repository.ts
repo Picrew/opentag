@@ -64,6 +64,7 @@ import {
   type ApplyIntentOutcome,
   type ApplyPlan,
   type ActionHint,
+  type AcceptedProgressAttributionView,
   type AdapterMutationMapping,
   type CompletionAssessment,
   type CompletionContract,
@@ -2378,6 +2379,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     unresolvedGateAdvanceCount: number;
     runIdsWithAcceptedProgress: string[];
     acceptedGateAdvancesByRunId: Map<string, number>;
+    projectionsByWorkThreadId: Map<string, AcceptedProgressAttributionView>;
   };
 
   async function acceptedProgressSnapshot(input: { workThreadIds?: string[] } = {}): Promise<AcceptedProgressSnapshot> {
@@ -2388,7 +2390,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         attributedGateAdvanceCount: 0,
         unresolvedGateAdvanceCount: 0,
         runIdsWithAcceptedProgress: [],
-        acceptedGateAdvancesByRunId: new Map()
+        acceptedGateAdvancesByRunId: new Map(),
+        projectionsByWorkThreadId: new Map()
       };
     }
     const currentRows = await db.select({
@@ -2404,7 +2407,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         attributedGateAdvanceCount: 0,
         unresolvedGateAdvanceCount: 0,
         runIdsWithAcceptedProgress: [],
-        acceptedGateAdvancesByRunId: new Map()
+        acceptedGateAdvancesByRunId: new Map(),
+        projectionsByWorkThreadId: new Map()
       };
     }
     const [assessmentRows, progressRunRows] = await Promise.all([
@@ -2464,6 +2468,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     let attributedGateAdvanceCount = 0;
     let unresolvedGateAdvanceCount = 0;
     const acceptedGateAdvancesByRunId = new Map<string, number>();
+    const projectionsByWorkThreadId = new Map<string, AcceptedProgressAttributionView>();
     for (const row of currentRows) {
       const currentAssessment = CompletionAssessmentSchema.safeParse(recordFromJson(row.assessmentJson));
       if (!currentAssessment.success || currentAssessment.data.workThreadId !== row.workThreadId) {
@@ -2476,6 +2481,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           artifacts: artifactsByWorkThread.get(row.workThreadId) ?? [],
           workThreadRunIds: runIdsByWorkThread.get(row.workThreadId) ?? []
         });
+        projectionsByWorkThreadId.set(row.workThreadId, projection);
         acceptedGateAdvanceCount += projection.acceptedGateAdvanceCount;
         attributedGateAdvanceCount += projection.attributedGateAdvanceCount;
         unresolvedGateAdvanceCount += projection.unresolvedGateAdvanceCount;
@@ -2496,7 +2502,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       attributedGateAdvanceCount,
       unresolvedGateAdvanceCount,
       runIdsWithAcceptedProgress: [...acceptedGateAdvancesByRunId.keys()].sort(),
-      acceptedGateAdvancesByRunId
+      acceptedGateAdvancesByRunId,
+      projectionsByWorkThreadId
     };
   }
 
@@ -3255,6 +3262,17 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       if (!thread?.currentAssessmentId) return null;
       const row = await db.select().from(completionAssessments).where(eq(completionAssessments.id, thread.currentAssessmentId)).limit(1).get();
       return row ? completionAssessmentFromRow(row) : null;
+    },
+
+    async getAcceptedProgressAttribution(input: { workThreadId: string }): Promise<AcceptedProgressAttributionView | null> {
+      const thread = await db.select({ currentAssessmentId: workThreads.currentAssessmentId })
+        .from(workThreads)
+        .where(eq(workThreads.id, input.workThreadId))
+        .limit(1)
+        .get();
+      if (!thread?.currentAssessmentId) return null;
+      const snapshot = await acceptedProgressSnapshot({ workThreadIds: [input.workThreadId] });
+      return snapshot.projectionsByWorkThreadId.get(input.workThreadId) ?? null;
     },
 
     async recordCompletionWaiver(input: { waiver: CompletionWaiver }): Promise<{ waiver: CompletionWaiver; created: boolean }> {

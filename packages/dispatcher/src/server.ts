@@ -7140,9 +7140,12 @@ export function createDispatcherApp(input: {
     const workThreadId = c.req.param("workThreadId");
     const workThread = await repo.getWorkThread({ workThreadId });
     if (!workThread) return c.json({ error: "work_thread_not_found" }, 404);
-    const completion = await completionGovernance.explainWorkThread(workThreadId);
+    const [completion, acceptedProgress] = await Promise.all([
+      completionGovernance.explainWorkThread(workThreadId),
+      repo.getAcceptedProgressAttribution({ workThreadId })
+    ]);
     if (!completion) return c.json({ error: "completion_not_available" }, 404);
-    return c.json({ workThread, completion });
+    return c.json({ workThread, completion, acceptedProgress });
   });
 
   app.get("/v1/work-loops", async (c) => {

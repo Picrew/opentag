@@ -375,6 +375,37 @@ function governedWorkThreadFixture() {
   };
 }
 
+function acceptedProgressFixture() {
+  const acceptedAt = "2026-07-27T00:02:00.000Z";
+  return {
+    workThreadId: "thread-cli-1",
+    contract: { id: "contract-cli-1", version: 1, cycle: 1 },
+    currentAssessmentId: "assessment-cli-1",
+    advances: [{
+      workThreadId: "thread-cli-1",
+      contractId: "contract-cli-1",
+      contractVersion: 1,
+      cycle: 1,
+      assessmentId: "assessment-cli-1",
+      assessmentSequence: 1,
+      gateId: "pull_request",
+      targetKey: "primary_change",
+      acceptedState: "passed" as const,
+      evidenceIds: [],
+      acceptedAt,
+      resolution: {
+        status: "attributed" as const,
+        artifactId: "artifact-cli-1",
+        sourceRunId: "run-cli-1"
+      }
+    }],
+    acceptedGateAdvanceCount: 1,
+    attributedGateAdvanceCount: 1,
+    unresolvedGateAdvanceCount: 0,
+    runIdsWithAcceptedProgress: ["run-cli-1"]
+  };
+}
+
 function workLoopViewFixture() {
   const completion = completionExplanationFixture();
   return {
@@ -1657,7 +1688,8 @@ describe("OpenTag CLI status", () => {
       "State: healthy",
       "Next action: No action required; continue monitoring accepted outcomes."
     ]);
-    expect(formatted).toContain("Accepted Outcomes:\n  work threads: 2/2\nBudget:");
+    expect(formatted).toContain("Completion Authority:\n  accepted work threads: 2/2");
+    expect(formatted).toContain("Accepted Progress:\n  gate advances: 2 (2 attributed, 0 unresolved)\n  contributing runs: 2\nBudget:");
     expect(formatted).toContain("cost units: 4/20; per attempt=2");
     expect(formatted).not.toContain("Exceptions:");
   });
@@ -1807,10 +1839,11 @@ describe("OpenTag CLI status", () => {
     const completion = completionExplanationFixture();
     const workThread = governedWorkThreadFixture();
     const view = workLoopViewFixture();
+    const acceptedProgress = acceptedProgressFixture();
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const href = String(url);
       if (href.endsWith("/v1/work-threads/thread-cli-1/completion")) {
-        return Response.json({ workThread, completion });
+        return Response.json({ workThread, completion, acceptedProgress });
       }
       if (href.endsWith("/v1/work-loops?attention=required&limit=25")) {
         return Response.json({
@@ -1837,9 +1870,12 @@ describe("OpenTag CLI status", () => {
 
     expect(formatWorkThreadStatus(detail)).toContain("WorkThread: thread-cli-1");
     expect(formatWorkThreadStatus(detail)).toContain("Action hint: request_human_decision target=escalation-cli-1");
+    expect(formatWorkThreadStatus(detail)).toContain("gate advances: 1 (1 attributed, 0 unresolved)");
+    expect(formatWorkThreadStatus(detail)).toContain("pull_request: run=run-cli-1; artifact=artifact-cli-1");
     expect(workThreadStatusJson(detail)).toMatchObject({
       workThread: { id: "thread-cli-1" },
-      completion: { nextAction: { hint: { kind: "request_human_decision" } } }
+      completion: { nextAction: { hint: { kind: "request_human_decision" } } },
+      acceptedProgress: { runIdsWithAcceptedProgress: ["run-cli-1"] }
     });
     expect(formatWorkLoopAttentionStatus(attention)).toContain("Work loops requiring attention: 1 (scanned 3)");
     expect(formatWorkLoopAttentionStatus(attention)).toContain("gate:required_checks/unknown/verification_assurance_insufficient");
@@ -1854,12 +1890,13 @@ describe("OpenTag CLI status", () => {
     const completion = completionExplanationFixture();
     const workThread = governedWorkThreadFixture();
     const view = workLoopViewFixture();
+    const acceptedProgress = acceptedProgressFixture();
     const configPath = join(tempDir(), "config.json");
     writeFileSync(configPath, JSON.stringify(config()), { mode: 0o600 });
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const href = String(url);
       if (href.endsWith("/v1/work-threads/thread-cli-1/completion")) {
-        return Response.json({ workThread, completion });
+        return Response.json({ workThread, completion, acceptedProgress });
       }
       if (href.endsWith("/v1/work-loops?attention=required&limit=25")) {
         return Response.json({
@@ -1877,7 +1914,10 @@ describe("OpenTag CLI status", () => {
     try {
       await runStatusCommand({ config: configPath, workThread: workThread.id, json: true });
       await runStatusCommand({ config: configPath, attention: true, json: true });
-      expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({ workThread: { id: workThread.id } });
+      expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
+        workThread: { id: workThread.id },
+        acceptedProgress: { acceptedGateAdvanceCount: 1 }
+      });
       expect(JSON.parse(String(log.mock.calls[1]?.[0]))).toMatchObject({
         attention: "required",
         workLoops: [{ workThread: { id: workThread.id } }]
