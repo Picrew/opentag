@@ -376,6 +376,10 @@ export const WorkstreamMetricsSchema = z.object({
   workstreamId: z.string().min(1),
   workThreadCount: NonNegativeIntegerSchema,
   acceptedWorkThreadCount: NonNegativeIntegerSchema,
+  acceptedGateAdvanceCount: NonNegativeIntegerSchema,
+  attributedGateAdvanceCount: NonNegativeIntegerSchema,
+  unresolvedGateAdvanceCount: NonNegativeIntegerSchema,
+  runsWithAcceptedProgressCount: NonNegativeIntegerSchema,
   runCount: NonNegativeIntegerSchema,
   queuedRunCount: NonNegativeIntegerSchema,
   activeRunCount: NonNegativeIntegerSchema,
@@ -391,6 +395,12 @@ export const WorkstreamMetricsSchema = z.object({
 }).strict().superRefine((metrics, ctx) => {
   if (metrics.acceptedWorkThreadCount > metrics.workThreadCount) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "acceptedWorkThreadCount cannot exceed workThreadCount.", path: ["acceptedWorkThreadCount"] });
+  }
+  if (metrics.attributedGateAdvanceCount + metrics.unresolvedGateAdvanceCount !== metrics.acceptedGateAdvanceCount) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Attributed and unresolved gate advances must equal acceptedGateAdvanceCount.", path: ["acceptedGateAdvanceCount"] });
+  }
+  if (metrics.runsWithAcceptedProgressCount > metrics.attributedGateAdvanceCount) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runsWithAcceptedProgressCount cannot exceed attributedGateAdvanceCount.", path: ["runsWithAcceptedProgressCount"] });
   }
   if (metrics.attemptsPerRunExceededCount > metrics.runCount) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "attemptsPerRunExceededCount cannot exceed runCount.", path: ["attemptsPerRunExceededCount"] });

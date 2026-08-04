@@ -15,7 +15,7 @@ pnpm add @opentag/core
 - `OpenTagEventSchema`, `OpenTagRunSchema`, `OpenTagRunResultSchema`: Zod schemas for protocol objects.
 - `OpenTagEvent`, `OpenTagRun`, `OpenTagRunResult`: TypeScript types inferred from the schemas.
 - `CompletionContract`, `CompletionAssessment`, `HumanEscalation`: additive completion-governance protocol objects that keep executor outcome separate from accepted work completion.
-- `RunnerDirectoryEntry`, `RoutingDecision`, `AcceptedCompletionMetrics`: additive schemas for current runner readiness, explainable placement, and accepted outcomes by runner or executor.
+- `RunnerDirectoryEntry`, `RoutingDecision`, `AcceptedProgressMetrics`: additive schemas for current runner readiness, explainable placement, and evidence-attributed progress by runner or executor.
 - `FactoryRecipeSnapshot`, `Workstream`, `WorkstreamAdmissionBatchReceipt`, `WorkstreamMetrics`, `WorkstreamEvaluation`: immutable factory grouping, replay-safe batch receipt, and accepted-outcome evaluation contracts.
 - `WorkstreamContinuationPolicy`, `WorkstreamContinuationDecision`: an opt-in recipe policy and explainable eligibility result for bounded evidence-driven WorkThread continuation.
 - `parseOpenTagMention`: extracts an `@opentag` command from workspace text.

@@ -2840,7 +2840,7 @@ function isRunnerOperatorEndpoint(method: string, path: string): boolean {
   if (method === "GET") {
     if (path === "/v1/control-plane-alerts") return true;
     if (path === "/v1/runners") return true;
-    if (path === "/v1/routing/accepted-completion-metrics") return true;
+    if (path === "/v1/routing/accepted-progress-metrics") return true;
     if (/^\/v1\/runners\/[^/]+$/.test(path)) return true;
     if (/^\/v1\/repo-bindings\/[^/]+\/[^/]+\/[^/]+$/.test(path)) return true;
     if (/^\/v1\/channel-bindings\/[^/]+\/[^/]+\/[^/]+(?:\/status)?$/.test(path)) return true;
@@ -5266,8 +5266,8 @@ export function createDispatcherApp(input: {
     return c.json({ metrics });
   });
 
-  app.get("/v1/routing/accepted-completion-metrics", async (c) => {
-    return c.json({ metrics: await repo.getAcceptedCompletionMetrics() });
+  app.get("/v1/routing/accepted-progress-metrics", async (c) => {
+    return c.json({ metrics: await repo.getAcceptedProgressMetrics() });
   });
 
   app.post("/v1/channel-bindings", async (c) => {

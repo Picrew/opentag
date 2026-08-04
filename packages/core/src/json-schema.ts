@@ -70,7 +70,7 @@ import {
   OpenTagWorkItemRefSchema
 } from "./integration-protocol.js";
 import {
-  AcceptedCompletionMetricsSchema,
+  AcceptedProgressMetricsSchema,
   FrozenRoutingPolicySchema,
   RoutingDecisionSchema,
   RunnerDirectoryEntrySchema,
@@ -159,7 +159,7 @@ export const OpenTagJsonSchemas = {
   RunnerRegistration: zodToJsonSchema(RunnerRegistrationInputSchema, "RunnerRegistration"),
   RunnerDirectoryEntry: zodToJsonSchema(RunnerDirectoryEntrySchema, "RunnerDirectoryEntry"),
   RoutingDecision: zodToJsonSchema(RoutingDecisionSchema, "RoutingDecision"),
-  AcceptedCompletionMetrics: zodToJsonSchema(AcceptedCompletionMetricsSchema, "AcceptedCompletionMetrics"),
+  AcceptedProgressMetrics: zodToJsonSchema(AcceptedProgressMetricsSchema, "AcceptedProgressMetrics"),
   FactoryRecipeSnapshotInput: zodToJsonSchema(FactoryRecipeSnapshotInputSchema, "FactoryRecipeSnapshotInput"),
   FactoryRecipeSnapshot: zodToJsonSchema(FactoryRecipeSnapshotSchema, "FactoryRecipeSnapshot"),
   WorkstreamContinuationPolicy: zodToJsonSchema(WorkstreamContinuationPolicySchema, "WorkstreamContinuationPolicy"),

@@ -216,6 +216,10 @@ describe("@opentag/client", () => {
       workstreamId: workstream.id,
       workThreadCount: 1,
       acceptedWorkThreadCount: 1,
+      acceptedGateAdvanceCount: 1,
+      attributedGateAdvanceCount: 1,
+      unresolvedGateAdvanceCount: 0,
+      runsWithAcceptedProgressCount: 1,
       runCount: 1,
       queuedRunCount: 0,
       activeRunCount: 0,
@@ -383,9 +387,12 @@ describe("@opentag/client", () => {
         return jsonResponse({
           metrics: {
             completedRuns: 2,
-            acceptedCompletions: 1,
-            byRunner: [{ id: "runner_private", completedRuns: 2, acceptedCompletions: 1, acceptanceRate: 0.5 }],
-            byExecutor: [{ id: "codex", completedRuns: 2, acceptedCompletions: 1, acceptanceRate: 0.5 }]
+            runsWithAcceptedProgress: 1,
+            acceptedGateAdvances: 2,
+            attributedAcceptedGateAdvances: 1,
+            unresolvedAcceptedGateAdvances: 1,
+            byRunner: [{ id: "runner_private", completedRuns: 2, runsWithAcceptedProgress: 1, acceptedGateAdvances: 1 }],
+            byExecutor: [{ id: "codex", completedRuns: 2, runsWithAcceptedProgress: 1, acceptedGateAdvances: 1 }]
           }
         });
       }
@@ -402,14 +409,14 @@ describe("@opentag/client", () => {
     await expect(client.listRunners()).resolves.toMatchObject({
       runners: [{ runnerId: "runner_private", readiness: { state: "ready" }, capacity: { active: 1, limit: 2 } }]
     });
-    await expect(client.getAcceptedCompletionMetrics()).resolves.toMatchObject({
-      metrics: { completedRuns: 2, acceptedCompletions: 1, byExecutor: [{ id: "codex", acceptanceRate: 0.5 }] }
+    await expect(client.getAcceptedProgressMetrics()).resolves.toMatchObject({
+      metrics: { completedRuns: 2, runsWithAcceptedProgress: 1, byExecutor: [{ id: "codex", acceptedGateAdvances: 1 }] }
     });
 
     expect(requests.map((request) => request.url)).toEqual([
       "http://dispatcher.test/v1/runners",
       "http://dispatcher.test/v1/runners",
-      "http://dispatcher.test/v1/routing/accepted-completion-metrics"
+      "http://dispatcher.test/v1/routing/accepted-progress-metrics"
     ]);
     expect(JSON.parse(String(requests[0]?.init?.body))).toMatchObject({
       runnerId: "runner_private",

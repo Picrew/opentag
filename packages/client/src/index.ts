@@ -9,7 +9,7 @@ import {
   OpenTagEventSchema,
   OpenTagRunResultSchema,
   OpenTagRunSchema,
-  AcceptedCompletionMetricsSchema,
+  AcceptedProgressMetricsSchema,
   FactoryRecipeSnapshotInputSchema,
   FactoryRecipeSnapshotSchema,
   RoutingDecisionSchema,
@@ -41,7 +41,7 @@ import {
   type OpenTagManagedChannelBindingOwnership,
   type OpenTagRun,
   type OpenTagRunResult,
-  type AcceptedCompletionMetrics,
+  type AcceptedProgressMetrics,
   type FactoryRecipeSnapshot,
   type FactoryRecipeSnapshotInput,
   type PolicyRule,
@@ -578,7 +578,7 @@ export type OpenTagClient = {
   getRunMetrics(input: { runId: string }): Promise<{ metrics: RunMetrics }>;
   getRepoMetrics(input: { provider: string; owner: string; repo: string }): Promise<{ metrics: AggregateMetrics }>;
   getWorkThreadMetrics(input: { threadId: string }): Promise<{ metrics: AggregateMetrics }>;
-  getAcceptedCompletionMetrics(): Promise<{ metrics: AcceptedCompletionMetrics }>;
+  getAcceptedProgressMetrics(): Promise<{ metrics: AcceptedProgressMetrics }>;
   getProposal(input: { proposalId: string }): Promise<{ runId: string; snapshot: SuggestedChangesSnapshot }>;
   getProposalLineage(input: { proposalId: string }): Promise<{ lineage: ProposalLineage }>;
   listCurrentMutationIntents(input: { proposalId: string }): Promise<{ intents: MutationIntentActionability[] }>;
@@ -1484,13 +1484,13 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       return (await response.json()) as { metrics: AggregateMetrics };
     },
 
-    async getAcceptedCompletionMetrics() {
-      const response = await fetchImpl(`${baseUrl}/v1/routing/accepted-completion-metrics`, {
+    async getAcceptedProgressMetrics() {
+      const response = await fetchImpl(`${baseUrl}/v1/routing/accepted-progress-metrics`, {
         headers: authHeaders(options.pairingToken)
       });
-      await assertOk(response, "getAcceptedCompletionMetrics");
+      await assertOk(response, "getAcceptedProgressMetrics");
       const body = (await response.json()) as { metrics?: unknown };
-      return { metrics: AcceptedCompletionMetricsSchema.parse(body.metrics) };
+      return { metrics: AcceptedProgressMetricsSchema.parse(body.metrics) };
     },
 
     async getProposal(input) {

@@ -17,7 +17,7 @@ import {
   RoutingDecisionSchema,
   type OpenTagEvent,
   type OpenTagRun,
-  type AcceptedCompletionMetrics,
+  type AcceptedProgressMetrics,
   type FactoryRecipeSnapshot,
   type RunnerDirectoryEntry,
   type RoutingDecision,
@@ -72,8 +72,8 @@ export type StatusSummary = {
   capabilities: string[];
   runnerDirectory?: RunnerDirectoryEntry[];
   runnerDirectoryError?: string;
-  acceptedCompletionMetrics?: AcceptedCompletionMetrics;
-  acceptedCompletionMetricsError?: string;
+  acceptedProgressMetrics?: AcceptedProgressMetrics;
+  acceptedProgressMetricsError?: string;
 };
 
 type RunAuditEvent = {
@@ -240,8 +240,8 @@ export async function statusFromConfig(input: {
     }),
     runnerDirectory: routingState.runners,
     ...(routingState.runnersError ? { runnerDirectoryError: routingState.runnersError } : {}),
-    ...(routingState.metrics ? { acceptedCompletionMetrics: routingState.metrics } : {}),
-    ...(routingState.metricsError ? { acceptedCompletionMetricsError: routingState.metricsError } : {})
+    ...(routingState.metrics ? { acceptedProgressMetrics: routingState.metrics } : {}),
+    ...(routingState.metricsError ? { acceptedProgressMetricsError: routingState.metricsError } : {})
   };
 }
 
@@ -252,7 +252,7 @@ async function loadRoutingState(input: {
 }): Promise<{
   runners: RunnerDirectoryEntry[];
   runnersError?: string;
-  metrics?: AcceptedCompletionMetrics;
+  metrics?: AcceptedProgressMetrics;
   metricsError?: string;
 }> {
   if (input.dispatcher !== "online") return { runners: [] };
@@ -264,7 +264,7 @@ async function loadRoutingState(input: {
   });
   const [runners, metrics] = await Promise.allSettled([
     client.listRunners(),
-    client.getAcceptedCompletionMetrics()
+    client.getAcceptedProgressMetrics()
   ]);
   return {
     runners: runners.status === "fulfilled" ? runners.value.runners : [],
@@ -532,7 +532,7 @@ export function formatStatus(summary: StatusSummary): string {
     ...formatControlPlaneAlerts(summary),
     `Runner: ${summary.runnerId}`,
     ...formatRunnerDirectory(summary),
-    ...formatAcceptedCompletionMetrics(summary),
+    ...formatAcceptedProgressMetrics(summary),
     `Run Timeout: ${summary.runTimeoutPolicy}`,
     ...summary.secrets,
     ...summary.agentSessionProfile,
@@ -556,24 +556,24 @@ function formatRunnerDirectory(summary: StatusSummary): string[] {
   ];
 }
 
-function formatAcceptedCompletionMetrics(summary: StatusSummary): string[] {
+function formatAcceptedProgressMetrics(summary: StatusSummary): string[] {
   if (summary.dispatcher !== "online") {
-    return ["Accepted Completion:", "  unavailable (dispatcher offline)"];
+    return ["Accepted Progress:", "  unavailable (dispatcher offline)"];
   }
-  if (summary.acceptedCompletionMetricsError) {
-    return ["Accepted Completion:", `  unavailable: ${summary.acceptedCompletionMetricsError}`];
+  if (summary.acceptedProgressMetricsError) {
+    return ["Accepted Progress:", `  unavailable: ${summary.acceptedProgressMetricsError}`];
   }
-  const metrics = summary.acceptedCompletionMetrics;
+  const metrics = summary.acceptedProgressMetrics;
   if (!metrics) return [];
-  const segment = (label: string, values: AcceptedCompletionMetrics["byRunner"]): string[] => [
+  const segment = (label: string, values: AcceptedProgressMetrics["byRunner"]): string[] => [
     `  ${label}:`,
     ...(values.length
-      ? values.map((value) => `    ${value.id}: ${value.acceptedCompletions}/${value.completedRuns} (${(value.acceptanceRate * 100).toFixed(1)}%)`)
+      ? values.map((value) => `    ${value.id}: runs=${value.runsWithAcceptedProgress}; gate advances=${value.acceptedGateAdvances}; completed runs=${value.completedRuns}`)
       : ["    none"])
   ];
   return [
-    "Accepted Completion:",
-    `  total: ${metrics.acceptedCompletions}/${metrics.completedRuns}`,
+    "Accepted Progress:",
+    `  total: runs=${metrics.runsWithAcceptedProgress}; gate advances=${metrics.acceptedGateAdvances} (${metrics.attributedAcceptedGateAdvances} attributed, ${metrics.unresolvedAcceptedGateAdvances} unresolved); completed runs=${metrics.completedRuns}`,
     ...segment("by runner", metrics.byRunner),
     ...segment("by executor", metrics.byExecutor)
   ];

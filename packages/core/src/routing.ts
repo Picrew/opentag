@@ -189,48 +189,51 @@ export const RoutingDecisionSchema = z
     }
   });
 
-export const AcceptedCompletionSegmentSchema = z
+export const AcceptedProgressSegmentSchema = z
   .object({
     id: z.string().min(1),
     completedRuns: z.number().int().nonnegative(),
-    acceptedCompletions: z.number().int().nonnegative(),
-    acceptanceRate: z.number().min(0).max(1)
+    runsWithAcceptedProgress: z.number().int().nonnegative(),
+    acceptedGateAdvances: z.number().int().nonnegative()
   })
   .strict()
   .superRefine((segment, ctx) => {
-    if (segment.acceptedCompletions > segment.completedRuns) {
+    if (segment.runsWithAcceptedProgress > segment.acceptedGateAdvances) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "acceptedCompletions cannot exceed completedRuns.",
-        path: ["acceptedCompletions"]
-      });
-    }
-    const expectedRate = segment.completedRuns === 0
-      ? 0
-      : segment.acceptedCompletions / segment.completedRuns;
-    if (Math.abs(segment.acceptanceRate - expectedRate) > Number.EPSILON) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "acceptanceRate must equal acceptedCompletions divided by completedRuns.",
-        path: ["acceptanceRate"]
+        message: "runsWithAcceptedProgress cannot exceed acceptedGateAdvances.",
+        path: ["runsWithAcceptedProgress"]
       });
     }
   });
 
-export const AcceptedCompletionMetricsSchema = z
+export const AcceptedProgressMetricsSchema = z
   .object({
     completedRuns: z.number().int().nonnegative(),
-    acceptedCompletions: z.number().int().nonnegative(),
-    byRunner: z.array(AcceptedCompletionSegmentSchema),
-    byExecutor: z.array(AcceptedCompletionSegmentSchema)
+    runsWithAcceptedProgress: z.number().int().nonnegative(),
+    acceptedGateAdvances: z.number().int().nonnegative(),
+    attributedAcceptedGateAdvances: z.number().int().nonnegative(),
+    unresolvedAcceptedGateAdvances: z.number().int().nonnegative(),
+    byRunner: z.array(AcceptedProgressSegmentSchema),
+    byExecutor: z.array(AcceptedProgressSegmentSchema)
   })
   .strict()
   .superRefine((metrics, ctx) => {
-    if (metrics.acceptedCompletions > metrics.completedRuns) {
+    if (metrics.runsWithAcceptedProgress > metrics.attributedAcceptedGateAdvances) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "acceptedCompletions cannot exceed completedRuns.",
-        path: ["acceptedCompletions"]
+        message: "runsWithAcceptedProgress cannot exceed attributedAcceptedGateAdvances.",
+        path: ["runsWithAcceptedProgress"]
+      });
+    }
+    if (
+      metrics.attributedAcceptedGateAdvances + metrics.unresolvedAcceptedGateAdvances
+      !== metrics.acceptedGateAdvances
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Attributed and unresolved accepted gate advances must equal acceptedGateAdvances.",
+        path: ["acceptedGateAdvances"]
       });
     }
     for (const [field, segments] of [
@@ -249,11 +252,22 @@ export const AcceptedCompletionMetricsSchema = z
         seenIds.add(segment.id);
       });
       const completedRuns = segments.reduce((sum, segment) => sum + segment.completedRuns, 0);
-      const acceptedCompletions = segments.reduce((sum, segment) => sum + segment.acceptedCompletions, 0);
-      if (completedRuns !== metrics.completedRuns || acceptedCompletions !== metrics.acceptedCompletions) {
+      const runsWithAcceptedProgress = segments.reduce((sum, segment) => sum + segment.runsWithAcceptedProgress, 0);
+      const acceptedGateAdvances = segments.reduce((sum, segment) => sum + segment.acceptedGateAdvances, 0);
+      if (completedRuns !== metrics.completedRuns) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `${field} totals must equal the aggregate metrics.`,
+          message: `${field} completedRuns must equal the aggregate metrics.`,
+          path: [field]
+        });
+      }
+      if (
+        runsWithAcceptedProgress > metrics.runsWithAcceptedProgress
+        || acceptedGateAdvances > metrics.attributedAcceptedGateAdvances
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${field} accepted progress cannot exceed the attributed aggregate metrics.`,
           path: [field]
         });
       }
@@ -273,5 +287,5 @@ export type RunnerRegistrationConfig = z.infer<typeof RunnerRegistrationInputSch
 export type RunnerDirectoryEntry = z.infer<typeof RunnerDirectoryEntrySchema>;
 export type RoutingCandidate = z.infer<typeof RoutingCandidateSchema>;
 export type RoutingDecision = z.infer<typeof RoutingDecisionSchema>;
-export type AcceptedCompletionSegment = z.infer<typeof AcceptedCompletionSegmentSchema>;
-export type AcceptedCompletionMetrics = z.infer<typeof AcceptedCompletionMetricsSchema>;
+export type AcceptedProgressSegment = z.infer<typeof AcceptedProgressSegmentSchema>;
+export type AcceptedProgressMetrics = z.infer<typeof AcceptedProgressMetricsSchema>;

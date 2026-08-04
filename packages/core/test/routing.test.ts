@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  AcceptedCompletionMetricsSchema,
-  AcceptedCompletionSegmentSchema,
+  AcceptedProgressMetricsSchema,
+  AcceptedProgressSegmentSchema,
   ExecutorCapabilityContractSchema,
   FrozenRoutingPolicySchema,
   RoutingDecisionSchema,
@@ -112,51 +112,57 @@ describe("explainable routing contracts", () => {
     expect(entry.capacity).toEqual({ active: 1, limit: 2 });
   });
 
-  it("rejects internally inconsistent accepted-completion metrics", () => {
-    expect(AcceptedCompletionSegmentSchema.parse({
+  it("rejects internally inconsistent accepted-progress metrics", () => {
+    expect(AcceptedProgressSegmentSchema.parse({
       id: "runner_local",
       completedRuns: 0,
-      acceptedCompletions: 0,
-      acceptanceRate: 0
-    })).toMatchObject({ acceptanceRate: 0 });
-    expect(() => AcceptedCompletionSegmentSchema.parse({
+      runsWithAcceptedProgress: 0,
+      acceptedGateAdvances: 0
+    })).toMatchObject({ acceptedGateAdvances: 0 });
+    expect(() => AcceptedProgressSegmentSchema.parse({
       id: "runner_local",
       completedRuns: 2,
-      acceptedCompletions: 3,
-      acceptanceRate: 1
-    })).toThrow(/cannot exceed completedRuns/iu);
-    expect(() => AcceptedCompletionSegmentSchema.parse({
-      id: "runner_local",
+      runsWithAcceptedProgress: 2,
+      acceptedGateAdvances: 1
+    })).toThrow(/cannot exceed acceptedGateAdvances/iu);
+    expect(() => AcceptedProgressMetricsSchema.parse({
       completedRuns: 2,
-      acceptedCompletions: 1,
-      acceptanceRate: 0.75
-    })).toThrow(/must equal acceptedCompletions divided by completedRuns/iu);
-    expect(() => AcceptedCompletionSegmentSchema.parse({
-      id: "runner_local",
-      completedRuns: 0,
-      acceptedCompletions: 0,
-      acceptanceRate: 1
-    })).toThrow(/must equal acceptedCompletions divided by completedRuns/iu);
-    expect(() => AcceptedCompletionMetricsSchema.parse({
-      completedRuns: 1,
-      acceptedCompletions: 2,
+      runsWithAcceptedProgress: 1,
+      acceptedGateAdvances: 1,
+      attributedAcceptedGateAdvances: 0,
+      unresolvedAcceptedGateAdvances: 1,
       byRunner: [],
       byExecutor: []
-    })).toThrow(/cannot exceed completedRuns/iu);
-    expect(() => AcceptedCompletionMetricsSchema.parse({
+    })).toThrow(/cannot exceed attributedAcceptedGateAdvances/iu);
+    expect(() => AcceptedProgressMetricsSchema.parse({
       completedRuns: 1,
-      acceptedCompletions: 1,
-      byRunner: [{ id: "runner_local", completedRuns: 2, acceptedCompletions: 0, acceptanceRate: 0 }],
-      byExecutor: [{ id: "codex", completedRuns: 1, acceptedCompletions: 1, acceptanceRate: 1 }]
-    })).toThrow(/byRunner totals must equal the aggregate metrics/iu);
-    expect(() => AcceptedCompletionMetricsSchema.parse({
+      runsWithAcceptedProgress: 0,
+      acceptedGateAdvances: 1,
+      attributedAcceptedGateAdvances: 0,
+      unresolvedAcceptedGateAdvances: 0,
+      byRunner: [{ id: "runner_local", completedRuns: 1, runsWithAcceptedProgress: 0, acceptedGateAdvances: 0 }],
+      byExecutor: [{ id: "codex", completedRuns: 1, runsWithAcceptedProgress: 0, acceptedGateAdvances: 0 }]
+    })).toThrow(/must equal acceptedGateAdvances/iu);
+    expect(() => AcceptedProgressMetricsSchema.parse({
+      completedRuns: 1,
+      runsWithAcceptedProgress: 1,
+      acceptedGateAdvances: 1,
+      attributedAcceptedGateAdvances: 1,
+      unresolvedAcceptedGateAdvances: 0,
+      byRunner: [{ id: "runner_local", completedRuns: 2, runsWithAcceptedProgress: 0, acceptedGateAdvances: 0 }],
+      byExecutor: [{ id: "codex", completedRuns: 1, runsWithAcceptedProgress: 1, acceptedGateAdvances: 1 }]
+    })).toThrow(/byRunner completedRuns must equal/iu);
+    expect(() => AcceptedProgressMetricsSchema.parse({
       completedRuns: 2,
-      acceptedCompletions: 1,
+      runsWithAcceptedProgress: 1,
+      acceptedGateAdvances: 1,
+      attributedAcceptedGateAdvances: 1,
+      unresolvedAcceptedGateAdvances: 0,
       byRunner: [
-        { id: "runner_local", completedRuns: 1, acceptedCompletions: 1, acceptanceRate: 1 },
-        { id: "runner_local", completedRuns: 1, acceptedCompletions: 0, acceptanceRate: 0 }
+        { id: "runner_local", completedRuns: 1, runsWithAcceptedProgress: 1, acceptedGateAdvances: 1 },
+        { id: "runner_local", completedRuns: 1, runsWithAcceptedProgress: 0, acceptedGateAdvances: 0 }
       ],
-      byExecutor: [{ id: "codex", completedRuns: 2, acceptedCompletions: 1, acceptanceRate: 0.5 }]
+      byExecutor: [{ id: "codex", completedRuns: 2, runsWithAcceptedProgress: 1, acceptedGateAdvances: 1 }]
     })).toThrow(/byRunner ids must be unique/iu);
   });
 });

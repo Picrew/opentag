@@ -209,6 +209,10 @@ function workstreamStatusFixture(overrides: {
       workstreamId,
       workThreadCount: 2,
       acceptedWorkThreadCount,
+      acceptedGateAdvanceCount: acceptedWorkThreadCount,
+      attributedGateAdvanceCount: acceptedWorkThreadCount,
+      unresolvedGateAdvanceCount: 0,
+      runsWithAcceptedProgressCount: acceptedWorkThreadCount,
       runCount: 2,
       queuedRunCount: 0,
       activeRunCount: 0,
@@ -581,7 +585,7 @@ describe("OpenTag CLI status", () => {
     expect(summary.dispatcher).toBe("offline");
     expect(formatted).toContain("Dispatcher: offline");
     expect(formatted).toContain("Runner Directory:\n  unavailable (dispatcher offline)");
-    expect(formatted).toContain("Accepted Completion:\n  unavailable (dispatcher offline)");
+    expect(formatted).toContain("Accepted Progress:\n  unavailable (dispatcher offline)");
     expect(formatted).toContain("Run Timeout: disabled");
     expect(formatted).toContain("Secrets:");
     expect(formatted).toContain("daemon.pairingToken: inline (redacted)");
@@ -851,13 +855,16 @@ describe("OpenTag CLI status", () => {
             }]
           });
         }
-        if (href.endsWith("/v1/routing/accepted-completion-metrics")) {
+        if (href.endsWith("/v1/routing/accepted-progress-metrics")) {
           return Response.json({
             metrics: {
               completedRuns: 2,
-              acceptedCompletions: 1,
-              byRunner: [{ id: "runner_local", completedRuns: 2, acceptedCompletions: 1, acceptanceRate: 0.5 }],
-              byExecutor: [{ id: "codex", completedRuns: 2, acceptedCompletions: 1, acceptanceRate: 0.5 }]
+              runsWithAcceptedProgress: 1,
+              acceptedGateAdvances: 2,
+              attributedAcceptedGateAdvances: 1,
+              unresolvedAcceptedGateAdvances: 1,
+              byRunner: [{ id: "runner_local", completedRuns: 2, runsWithAcceptedProgress: 1, acceptedGateAdvances: 1 }],
+              byExecutor: [{ id: "codex", completedRuns: 2, runsWithAcceptedProgress: 1, acceptedGateAdvances: 1 }]
             }
           });
         }
@@ -870,7 +877,7 @@ describe("OpenTag CLI status", () => {
       "http://localhost:3030/healthz",
       "http://localhost:3030/v1/control-plane-alerts?limit=5",
       "http://localhost:3030/v1/runners",
-      "http://localhost:3030/v1/routing/accepted-completion-metrics"
+      "http://localhost:3030/v1/routing/accepted-progress-metrics"
     ]);
     expect(requests[1]?.init?.headers).toMatchObject({ authorization: "Bearer runner_token" });
     expect(requests[2]?.init?.headers).toMatchObject({ authorization: "Bearer runner_token" });
@@ -884,10 +891,11 @@ describe("OpenTag CLI status", () => {
     expect(formatted).toContain("Next: Rotate or replace the affected token, then restart or re-pair the ingress or runner that owns it.");
     expect(formatted).toContain("Runner Directory:");
     expect(formatted).toContain("runner_local: ready; locality=local; capacity=1/2; executors=codex");
-    expect(formatted).toContain("Accepted Completion:");
-    expect(formatted).toContain("total: 1/2");
-    expect(formatted).toContain("runner_local: 1/2 (50.0%)");
-    expect(formatted).toContain("codex: 1/2 (50.0%)");
+    expect(formatted).toContain("Accepted Progress:");
+    expect(formatted).toContain("gate advances=2 (1 attributed, 1 unresolved)");
+    expect(formatted).toContain("total: runs=1; gate advances=2");
+    expect(formatted).toContain("runner_local: runs=1; gate advances=1; completed runs=2");
+    expect(formatted).toContain("codex: runs=1; gate advances=1; completed runs=2");
     expect(formatted).not.toContain("xapp-");
   });
 
