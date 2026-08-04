@@ -558,6 +558,7 @@ export function createDispatcherCompletionGovernance(input: {
   repo: OpenTagRepository;
   policies?: readonly GitHubCompletionPolicy[];
   now?: () => string;
+  deferReassessment?: boolean;
 }) {
   const policies = validatePolicies(input.policies ?? []);
   const governanceRepository: GovernanceRepository = {
@@ -786,8 +787,10 @@ export function createDispatcherCompletionGovernance(input: {
         ? [record.workThreadId]
         : []
     ))].sort();
-    for (const workThreadId of attachedWorkThreadIds) {
-      await reassess(workThreadId, `github-evidence-set:${first.deliveryId}:${snapshotSet.manifestDigest}`);
+    if (!input.deferReassessment) {
+      for (const workThreadId of attachedWorkThreadIds) {
+        await reassess(workThreadId, `github-evidence-set:${first.deliveryId}:${snapshotSet.manifestDigest}`);
+      }
     }
     return {
       outcome: existingDelivery.length > 0 ? "duplicate" : "recorded",
@@ -901,7 +904,9 @@ export function createDispatcherCompletionGovernance(input: {
       const batch = await ingestGitHubSnapshotSetWithCorrelationIndex([snapshot], correlationIndex);
       const workThreadId = batch.workThreadIds.length === 1 ? batch.workThreadIds[0] : undefined;
       if (!workThreadId) return { outcome: candidates.length > 1 ? "ambiguous" : "uncorrelated" };
-      const completion = await this.getWorkLoop(workThreadId);
+      const completion = input.deferReassessment
+        ? await this.readWorkLoop(workThreadId)
+        : await this.getWorkLoop(workThreadId);
       return { outcome: batch.outcome, workThreadId, ...(completion ? { completion } : {}) };
     },
 
@@ -960,7 +965,9 @@ export function createDispatcherCompletionGovernance(input: {
             }
           }
         });
-        await reassess(workThreadId, `github-reconciliation-resolve:${request.escalation.dedupeKey}`);
+        if (!input.deferReassessment) {
+          await reassess(workThreadId, `github-reconciliation-resolve:${request.escalation.dedupeKey}`);
+        }
         return { outcome: result.resolved ? "resolved" : "already_resolved", workThreadId };
       }
       const openedAt = input.now?.() ?? new Date().toISOString();
@@ -985,7 +992,9 @@ export function createDispatcherCompletionGovernance(input: {
           openedAt
         }
       });
-      await reassess(workThreadId, `github-reconciliation-open:${request.escalation.dedupeKey}`);
+      if (!input.deferReassessment) {
+        await reassess(workThreadId, `github-reconciliation-open:${request.escalation.dedupeKey}`);
+      }
       return { outcome: result.created ? "opened" : "duplicate", workThreadId };
     },
 
@@ -993,6 +1002,12 @@ export function createDispatcherCompletionGovernance(input: {
       const contract = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
       if (!contract) return null;
       return (await reassess(workThreadId, `read-work-loop:${workThreadId}`)).view;
+    },
+
+    async reassessWorkThread(workThreadId: string, commandId: string): Promise<GovernanceCommandResult | null> {
+      const contract = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
+      if (!contract) return null;
+      return reassess(workThreadId, commandId);
     },
 
     async readWorkLoop(workThreadId: string): Promise<WorkLoopView | null> {

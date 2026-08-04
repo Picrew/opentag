@@ -613,6 +613,47 @@ export const governanceEvents = sqliteTable(
   })
 );
 
+export const reassessmentObligations = sqliteTable(
+  "reassessment_obligations",
+  {
+    id: text("id").primaryKey(),
+    workThreadId: text("work_thread_id").notNull(),
+    sourceKind: text("source_kind").notNull(),
+    sourceId: text("source_id").notNull(),
+    sourceDigest: text("source_digest").notNull(),
+    notBefore: text("not_before").notNull(),
+    state: text("state").notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: text("lease_expires_at"),
+    leaseToken: text("lease_token"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastReasonCode: text("last_reason_code"),
+    lastError: text("last_error"),
+    satisfiedAssessmentId: text("satisfied_assessment_id"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => ({
+    sourceIdentityIdx: uniqueIndex("reassessment_obligations_source_identity_idx").on(
+      table.sourceKind,
+      table.sourceId,
+      table.sourceDigest
+    ),
+    dueIdx: index("reassessment_obligations_due_idx").on(
+      table.state,
+      table.notBefore,
+      table.leaseExpiresAt,
+      table.createdAt,
+      table.id
+    ),
+    threadStateIdx: index("reassessment_obligations_thread_state_idx").on(
+      table.workThreadId,
+      table.state,
+      table.createdAt
+    )
+  })
+);
+
 function migrateCompletionGovernanceSchema(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS opentag_schema_migrations (
@@ -876,6 +917,44 @@ function migrateFactoryWorkstreamSchema(sqlite: Database.Database): void {
     }
     sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS control_plane_events_idempotency_key_idx ON control_plane_events(idempotency_key)");
     sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(migrationId, new Date().toISOString());
+  })();
+}
+
+function migrateReassessmentObligationSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-04-reassessment-obligations-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS reassessment_obligations (
+        id TEXT PRIMARY KEY,
+        work_thread_id TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        source_digest TEXT NOT NULL,
+        not_before TEXT NOT NULL,
+        state TEXT NOT NULL,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        lease_token TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_reason_code TEXT,
+        last_error TEXT,
+        satisfied_assessment_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS reassessment_obligations_source_identity_idx
+        ON reassessment_obligations(source_kind, source_id, source_digest);
+      CREATE INDEX IF NOT EXISTS reassessment_obligations_due_idx
+        ON reassessment_obligations(state, not_before, lease_expires_at, created_at, id);
+      CREATE INDEX IF NOT EXISTS reassessment_obligations_thread_state_idx
+        ON reassessment_obligations(work_thread_id, state, created_at);
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
   })();
 }
 
@@ -1476,4 +1555,5 @@ export function migrateSchema(sqlite: Database.Database): void {
   migrateCompletionWaiverSchema(sqlite);
   migrateHumanEscalationAccessIdentitySchema(sqlite);
   migrateFactoryWorkstreamSchema(sqlite);
+  migrateReassessmentObligationSchema(sqlite);
 }

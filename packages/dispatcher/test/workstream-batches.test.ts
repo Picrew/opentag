@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import type { OpenTagEvent } from "@opentag/core";
+import { createOpenTagRepository, migrateSchema } from "@opentag/store";
+import { drizzle } from "drizzle-orm/better-sqlite3";
 import { createDispatcherApp, type CallbackMessage, type SourceReceipt } from "../src/server.js";
 
 const event = {
@@ -31,6 +33,14 @@ function post(body: unknown) {
   return { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
 }
 
+async function waitFor(predicate: () => boolean, message: string, attempts = 100): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+
 async function factorySetup(input: {
   callbackMessages?: CallbackMessage[];
   sourceReceipts?: SourceReceipt[];
@@ -40,6 +50,7 @@ async function factorySetup(input: {
   databasePath?: string;
   seedEvent?: OpenTagEvent;
   channelPrincipals?: Parameters<typeof createDispatcherApp>[0]["channelPrincipals"];
+  reassessmentObligations?: Parameters<typeof createDispatcherApp>[0]["reassessmentObligations"];
   managedChannel?: {
     binding: {
       provider: string;
@@ -62,6 +73,7 @@ async function factorySetup(input: {
 } = {}) {
   const app = createDispatcherApp({
     databasePath: input.databasePath ?? ":memory:",
+    reassessmentObligations: input.reassessmentObligations ?? { autoStart: false },
     callbackSink: { async deliver(message) { input.callbackMessages?.push(message); } },
     sourceReceiptSink: { async deliver(receipt) { input.sourceReceipts?.push(receipt); return { delivered: true }; } },
     ...(input.agentAccessProfileCheck ? { agentAccessProfileCheck: input.agentAccessProfileCheck } : {}),
@@ -473,6 +485,357 @@ describe("workstream batch admission", () => {
     await expect((await app.request("/v1/control-plane-events?type=workstream.continuation.dispatched")).json()).resolves.toMatchObject({
       events: []
     });
+  });
+
+  it("recovers queued-follow-up priority after a crash between terminal commit and promotion", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "opentag-follow-up-reassessment-"));
+    const databasePath = join(directory, "dispatcher.sqlite");
+    const setup = await factorySetup({
+      databasePath,
+      reassessmentObligations: { autoStart: false },
+      continuation: {
+        mode: "evidence_driven",
+        triggers: ["retryable_run_failure"],
+        maxContinuationsPerWorkThread: 2,
+        minIntervalSeconds: 0,
+        backoff: { initialSeconds: 1, maxSeconds: 1 }
+      }
+    });
+    let restarted: ReturnType<typeof createDispatcherApp> | undefined;
+    try {
+      expect((await setup.app.request("/v1/workstream-batches", post({
+        id: "batch_follow_up_crash_recovery",
+        workstreamId: "workstream_default",
+        items: [{
+          itemId: "item_follow_up_crash_recovery",
+          runId: "run_follow_up_crash_recovery",
+          workThreadId: setup.workThreadId,
+          event: {
+            ...event,
+            id: "evt_follow_up_crash_recovery",
+            sourceEventId: "comment_follow_up_crash_recovery",
+            receivedAt: "2026-07-26T00:27:00.000Z"
+          }
+        }]
+      }))).status).toBe(201);
+      const claim = await (await setup.app.request("/v1/runners/runner_1/claim", { method: "POST" })).json() as {
+        attemptId: string;
+        fencingToken: string;
+      };
+      expect((await setup.app.request("/v1/runs", post({
+        runId: "follow_up_crash_recovery",
+        event: {
+          ...event,
+          id: "evt_queued_follow_up_crash_recovery",
+          sourceEventId: "comment_queued_follow_up_crash_recovery",
+          receivedAt: "2026-07-26T00:28:00.000Z"
+        }
+      }))).status).toBe(202);
+
+      const sqlite = new Database(databasePath);
+      migrateSchema(sqlite);
+      const repo = createOpenTagRepository(drizzle(sqlite));
+      await expect(repo.completeRun({
+        runId: "run_follow_up_crash_recovery",
+        runnerId: "runner_1",
+        attemptId: claim.attemptId,
+        fencingToken: claim.fencingToken,
+        result: { conclusion: "failure", summary: "Committed immediately before the dispatcher crash." }
+      })).resolves.toBe("completed");
+      sqlite.close();
+      await setup.app.stopBackgroundWorkers();
+
+      restarted = createDispatcherApp({
+        databasePath,
+        reassessmentObligations: { pollIntervalMs: 10 }
+      });
+      const observer = new Database(databasePath);
+      await waitFor(
+        () => (observer.prepare("SELECT status FROM follow_up_requests WHERE id = 'follow_up_crash_recovery'").get() as { status?: string } | undefined)?.status === "promoted",
+        "restart did not promote the queued follow-up before automatic continuation"
+      );
+      expect(observer.prepare(`
+        SELECT COUNT(*) AS count FROM runs
+        WHERE json_extract(event_json, '$.metadata.workstreamContinuation') = 1
+      `).get()).toEqual({ count: 0 });
+      expect(observer.prepare(`
+        SELECT state, last_reason_code AS reasonCode FROM reassessment_obligations
+        WHERE source_kind = 'run_result_recorded' AND source_id = 'run_follow_up_crash_recovery'
+      `).get()).toEqual({ state: "satisfied", reasonCode: "continuation_dispatched" });
+      observer.close();
+    } finally {
+      await restarted?.stopBackgroundWorkers();
+      await setup.app.stopBackgroundWorkers();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not reinterpret an already-promoted follow-up as an automatic continuation after restart", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "opentag-promoted-follow-up-reassessment-"));
+    const databasePath = join(directory, "dispatcher.sqlite");
+    const setup = await factorySetup({
+      databasePath,
+      reassessmentObligations: { autoStart: false },
+      continuation: {
+        mode: "evidence_driven",
+        triggers: ["retryable_run_failure"],
+        maxContinuationsPerWorkThread: 3,
+        minIntervalSeconds: 0,
+        backoff: { initialSeconds: 1, maxSeconds: 1 }
+      }
+    });
+    let restarted: ReturnType<typeof createDispatcherApp> | undefined;
+    let secondRestart: ReturnType<typeof createDispatcherApp> | undefined;
+    try {
+      expect((await setup.app.request("/v1/workstream-batches", post({
+        id: "batch_promoted_follow_up_recovery",
+        workstreamId: "workstream_default",
+        items: [{
+          itemId: "item_promoted_follow_up_recovery",
+          runId: "run_promoted_follow_up_source",
+          workThreadId: setup.workThreadId,
+          event: {
+            ...event,
+            id: "evt_promoted_follow_up_source",
+            sourceEventId: "comment_promoted_follow_up_source",
+            receivedAt: "2026-07-26T00:29:00.000Z"
+          }
+        }]
+      }))).status).toBe(201);
+      const claim = await (await setup.app.request("/v1/runners/runner_1/claim", { method: "POST" })).json() as {
+        attemptId: string;
+        fencingToken: string;
+      };
+      expect((await setup.app.request("/v1/runs", post({
+        runId: "follow_up_already_promoted",
+        event: {
+          ...event,
+          id: "evt_follow_up_already_promoted",
+          sourceEventId: "comment_follow_up_already_promoted",
+          receivedAt: "2026-07-26T00:30:00.000Z"
+        }
+      }))).status).toBe(202);
+
+      const sqlite = new Database(databasePath);
+      migrateSchema(sqlite);
+      const repo = createOpenTagRepository(drizzle(sqlite));
+      await expect(repo.completeRun({
+        runId: "run_promoted_follow_up_source",
+        runnerId: "runner_1",
+        attemptId: claim.attemptId,
+        fencingToken: claim.fencingToken,
+        result: { conclusion: "failure", summary: "The queued human follow-up remains authoritative." }
+      })).resolves.toBe("completed");
+      const promoted = await repo.createRunFromFollowUpRequest({
+        followUpRequestId: "follow_up_already_promoted",
+        runId: "run_follow_up_already_promoted"
+      });
+      expect(promoted.followUpRequest).toMatchObject({
+        status: "promoted",
+        activeRunId: "run_promoted_follow_up_source",
+        createdRunId: "run_follow_up_already_promoted"
+      });
+      expect(sqlite.prepare(`
+        SELECT state, attempt_count AS attemptCount FROM reassessment_obligations
+        WHERE source_kind = 'run_result_recorded' AND source_id = 'run_promoted_follow_up_source'
+      `).get()).toEqual({ state: "pending", attemptCount: 0 });
+      sqlite.close();
+      await setup.app.stopBackgroundWorkers();
+
+      restarted = createDispatcherApp({
+        databasePath,
+        reassessmentObligations: { pollIntervalMs: 10 }
+      });
+      const observer = new Database(databasePath);
+      await waitFor(
+        () => (observer.prepare(`
+          SELECT state FROM reassessment_obligations
+          WHERE source_kind = 'run_result_recorded' AND source_id = 'run_promoted_follow_up_source'
+        `).get() as { state?: string } | undefined)?.state === "satisfied",
+        "restart did not satisfy the source obligation from the durable promoted follow-up"
+      );
+      expect(observer.prepare(`
+        SELECT COUNT(*) AS count FROM runs
+        WHERE json_extract(event_json, '$.metadata.triggerId') = 'run-terminal:run_promoted_follow_up_source'
+      `).get()).toEqual({ count: 0 });
+
+      const promotedClaim = await (await restarted.request("/v1/runners/runner_1/claim", { method: "POST" })).json() as {
+        run: { id: string };
+        attemptId: string;
+        fencingToken: string;
+      };
+      expect(promotedClaim.run.id).toBe("run_follow_up_already_promoted");
+      expect((await restarted.request(
+        "/v1/runners/runner_1/runs/run_follow_up_already_promoted/complete",
+        post({
+          attemptId: promotedClaim.attemptId,
+          fencingToken: promotedClaim.fencingToken,
+          result: { conclusion: "failure", summary: "The promoted follow-up itself now needs retry." }
+        })
+      )).status).toBe(200);
+      await waitFor(
+        () => (observer.prepare(`
+          SELECT COUNT(*) AS count FROM runs
+          WHERE json_extract(event_json, '$.metadata.triggerId') = 'run-terminal:run_follow_up_already_promoted'
+        `).get() as { count: number }).count === 1,
+        "the promoted follow-up did not receive its own governed retry"
+      );
+      await restarted.stopBackgroundWorkers();
+      restarted = undefined;
+
+      secondRestart = createDispatcherApp({
+        databasePath,
+        reassessmentObligations: { pollIntervalMs: 10 }
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      expect(observer.prepare(`
+        SELECT COUNT(*) AS count FROM runs
+        WHERE json_extract(event_json, '$.metadata.triggerId') = 'run-terminal:run_promoted_follow_up_source'
+      `).get()).toEqual({ count: 0 });
+      expect(observer.prepare(`
+        SELECT state, last_reason_code AS reasonCode FROM reassessment_obligations
+        WHERE source_kind = 'run_result_recorded' AND source_id = 'run_promoted_follow_up_source'
+      `).get()).toEqual({ state: "satisfied", reasonCode: "continuation_dispatched" });
+      observer.close();
+    } finally {
+      await secondRestart?.stopBackgroundWorkers();
+      await restarted?.stopBackgroundWorkers();
+      await setup.app.stopBackgroundWorkers();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an evidence obligation pending behind an active Run and reassesses after it becomes terminal", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "opentag-active-run-reassessment-"));
+    const databasePath = join(directory, "dispatcher.sqlite");
+    const setup = await factorySetup({
+      databasePath,
+      completionPolicies: [{ provider: "github", owner: "acme", repo: "demo", requiredChecks: ["build", "test"] }],
+      reassessmentObligations: { autoStart: false, inline: false, pollIntervalMs: 10 },
+      continuation: {
+        mode: "evidence_driven",
+        triggers: ["completion_evidence_changed"],
+        maxContinuationsPerWorkThread: 1,
+        minIntervalSeconds: 0,
+        backoff: { initialSeconds: 1, maxSeconds: 1 }
+      }
+    });
+    const observer = new Database(databasePath);
+    let recovery: ReturnType<typeof createDispatcherApp> | undefined;
+    try {
+      expect((await setup.app.request("/v1/workstream-batches", post({
+        id: "batch_active_run_reassessment",
+        workstreamId: "workstream_default",
+        items: [{
+          itemId: "item_active_run_reassessment",
+          runId: "run_evidence_before_active",
+          workThreadId: setup.workThreadId,
+          event: {
+            ...event,
+            id: "evt_evidence_before_active",
+            sourceEventId: "comment_evidence_before_active",
+            receivedAt: "2026-07-26T00:32:00.000Z"
+          }
+        }]
+      }))).status).toBe(201);
+      const parentClaim = await (await setup.app.request("/v1/runners/runner_1/claim", { method: "POST" })).json() as {
+        attemptId: string;
+        fencingToken: string;
+      };
+      expect((await setup.app.request(
+        "/v1/runners/runner_1/runs/run_evidence_before_active/complete",
+        post({
+          ...parentClaim,
+          result: {
+            conclusion: "failure",
+            summary: "Wait for provider evidence.",
+            createdPullRequestUrl: "https://github.com/acme/demo/pull/7"
+          }
+        })
+      )).status).toBe(200);
+      expect((await setup.app.request("/v1/completion-evidence/github", post({
+        provider: "github",
+        deliveryId: "delivery-active-run-reassessment",
+        eventName: "check_run",
+        repository: { owner: "acme", repo: "demo" },
+        pullRequest: {
+          number: 7,
+          resourceRef: "github:acme/demo:pull_request:7",
+          headSha: "b".repeat(40),
+          baseSha: "c".repeat(40),
+          baseBranch: "main",
+          state: "open"
+        },
+        checks: { build: "failed", test: "passed" },
+        observedAt: "2099-07-26T00:34:00.000Z",
+        payloadDigest: `sha256:${"e".repeat(64)}`
+      }))).status).toBe(201);
+      expect((await setup.app.request("/v1/runs", post({
+        runId: "run_active_during_evidence",
+        event: {
+          ...event,
+          id: "evt_active_during_evidence",
+          sourceEventId: "comment_active_during_evidence",
+          receivedAt: "2026-07-26T00:33:00.000Z"
+        }
+      }))).status).toBe(201);
+      const activeClaim = await (await setup.app.request("/v1/runners/runner_1/claim", { method: "POST" })).json() as {
+        attemptId: string;
+        fencingToken: string;
+      };
+      recovery = createDispatcherApp({
+        databasePath,
+        completionPolicies: [{ provider: "github", owner: "acme", repo: "demo", requiredChecks: ["build", "test"] }],
+        reassessmentObligations: { inline: false, pollIntervalMs: 10 }
+      });
+      await waitFor(
+        () => {
+          const row = observer.prepare(`
+            SELECT state, last_reason_code AS reasonCode, attempt_count AS attemptCount
+            FROM reassessment_obligations
+            WHERE source_kind = 'verification_evidence_attached'
+          `).get() as { state?: string; reasonCode?: string; attemptCount?: number } | undefined;
+          return row?.state === "pending" && row.reasonCode === "continuation_deferred" && (row.attemptCount ?? 0) >= 1;
+        },
+        "active Run did not durably defer the evidence obligation"
+      );
+
+      expect((await setup.app.request(
+        "/v1/runners/runner_1/runs/run_active_during_evidence/complete",
+        post({
+          ...activeClaim,
+          result: {
+            conclusion: "failure",
+            summary: "The active Run is now terminal and retryable.",
+            createdPullRequestUrl: "https://github.com/acme/demo/pull/7"
+          }
+        })
+      )).status).toBe(200);
+      await waitFor(
+        () => (observer.prepare(`
+          SELECT state FROM reassessment_obligations
+          WHERE source_kind = 'verification_evidence_attached'
+        `).get() as { state?: string } | undefined)?.state !== "pending",
+        "due evidence obligation remained pending after the active Run became terminal"
+      );
+      expect(observer.prepare(`
+        SELECT state, last_reason_code AS reasonCode, attempt_count AS attemptCount FROM reassessment_obligations
+        WHERE source_kind = 'verification_evidence_attached'
+      `).get()).toMatchObject({ state: "satisfied", reasonCode: "continuation_terminal", attemptCount: expect.any(Number) });
+      expect((observer.prepare(`
+        SELECT attempt_count AS attemptCount FROM reassessment_obligations
+        WHERE source_kind = 'verification_evidence_attached'
+      `).get() as { attemptCount: number }).attemptCount).toBeGreaterThanOrEqual(2);
+      expect(observer.prepare(`
+        SELECT COUNT(*) AS count FROM runs
+        WHERE json_extract(event_json, '$.metadata.workstreamContinuation') = 1
+      `).get()).toEqual({ count: 0 });
+    } finally {
+      observer.close();
+      await recovery?.stopBackgroundWorkers();
+      await setup.app.stopBackgroundWorkers();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("resumes from a durable human resolution only when the Workstream policy enables it", async () => {

@@ -11,7 +11,10 @@ import { createDefaultCallbackPresentation } from "../src/presentation.js";
 import { createDispatcherApp as createRawDispatcherApp, type CallbackMessage } from "../src/server.js";
 
 function createDispatcherApp(input: Parameters<typeof createRawDispatcherApp>[0]): ReturnType<typeof createRawDispatcherApp> {
-  const app = createRawDispatcherApp(input);
+  const app = createRawDispatcherApp({
+    ...input,
+    reassessmentObligations: input.reassessmentObligations ?? { autoStart: false }
+  });
   const leases = new Map<string, { attemptId: string; fencingToken: string }>();
   const request = app.request.bind(app);
   app.request = (async (requestInput: Request | string, requestInit?: RequestInit) => {

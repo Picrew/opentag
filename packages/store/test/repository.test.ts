@@ -3573,6 +3573,127 @@ describe("explainable multi-runner routing", () => {
     });
   });
 
+  it("resumes a reserved follow-up Run after the Run commit outlives its parent audit write", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const parentEvent = larkEvent({ id: "event_follow_up_parent", sourceEventId: "source_follow_up_parent" });
+    const followUpEvent = larkEvent({ id: "event_follow_up_reserved", sourceEventId: "source_follow_up_reserved" });
+    await repo.createRun({ id: "run_follow_up_parent", event: parentEvent });
+    await repo.createFollowUpRequest({
+      id: "follow_up_reserved",
+      event: followUpEvent,
+      decision: {
+        action: "queue_follow_up",
+        reason: "An active run owns this conversation.",
+        reasonCode: "active_run_same_thread",
+        eventId: followUpEvent.id,
+        activeRunId: "run_follow_up_parent",
+        decidedAt: "2026-07-25T00:00:00.000Z"
+      },
+      activeRunId: "run_follow_up_parent"
+    });
+    sqlite.exec(`
+      CREATE TRIGGER fail_follow_up_child_audit
+      BEFORE INSERT ON run_events
+      WHEN NEW.type = 'run.child_created'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected child audit failure');
+      END;
+    `);
+
+    await expect(repo.createRunFromFollowUpRequest({
+      followUpRequestId: "follow_up_reserved",
+      runId: "run_follow_up_reserved"
+    })).rejects.toThrow(/injected child audit failure/u);
+    expect(await repo.getFollowUpRequest({ id: "follow_up_reserved" })).toMatchObject({
+      status: "promoting",
+      createdRunId: "run_follow_up_reserved"
+    });
+    await expect(repo.getRun({ runId: "run_follow_up_reserved" })).resolves.toMatchObject({
+      event: { id: followUpEvent.id }
+    });
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM runs WHERE event_id = ?").get(followUpEvent.id)).toEqual({ count: 1 });
+
+    sqlite.exec("DROP TRIGGER fail_follow_up_child_audit");
+    const recovered = await repo.createRunFromFollowUpRequest({
+      followUpRequestId: "follow_up_reserved",
+      runId: "run_follow_up_reserved_retry_must_not_win"
+    });
+    expect(recovered).toMatchObject({
+      followUpRequest: { status: "promoted", createdRunId: "run_follow_up_reserved" },
+      run: { id: "run_follow_up_reserved" }
+    });
+    await expect(repo.createRunFromFollowUpRequest({
+      followUpRequestId: "follow_up_reserved",
+      runId: "run_follow_up_reserved_second_retry"
+    })).resolves.toMatchObject({ run: { id: "run_follow_up_reserved" } });
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM runs WHERE event_id = ?").get(followUpEvent.id)).toEqual({ count: 1 });
+
+    const parentEvents = await repo.listRunEvents({ runId: "run_follow_up_parent" });
+    expect(parentEvents.filter((event) => event.type === "run.child_created")).toHaveLength(1);
+    expect(parentEvents.filter((event) => event.type === "follow_up_request.promoted")).toHaveLength(1);
+  });
+
+  it("retries the promotion audit before finalizing a reserved follow-up Run", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const parentEvent = larkEvent({ id: "event_promotion_audit_parent", sourceEventId: "source_promotion_audit_parent" });
+    const followUpEvent = larkEvent({ id: "event_promotion_audit", sourceEventId: "source_promotion_audit" });
+    await repo.createRun({ id: "run_promotion_audit_parent", event: parentEvent });
+    await repo.createFollowUpRequest({
+      id: "follow_up_promotion_audit",
+      event: followUpEvent,
+      decision: {
+        action: "queue_follow_up",
+        reason: "An active run owns this conversation.",
+        reasonCode: "active_run_same_thread",
+        eventId: followUpEvent.id,
+        activeRunId: "run_promotion_audit_parent",
+        decidedAt: "2026-07-25T00:00:00.000Z"
+      },
+      activeRunId: "run_promotion_audit_parent"
+    });
+    sqlite.exec(`
+      CREATE TRIGGER fail_follow_up_promoted_audit
+      BEFORE INSERT ON run_events
+      WHEN NEW.type = 'follow_up_request.promoted'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected promotion audit failure');
+      END;
+    `);
+
+    await expect(repo.createRunFromFollowUpRequest({
+      followUpRequestId: "follow_up_promotion_audit",
+      runId: "run_promotion_audit"
+    })).rejects.toThrow(/injected promotion audit failure/u);
+    expect(await repo.getFollowUpRequest({ id: "follow_up_promotion_audit" })).toMatchObject({
+      status: "promoting",
+      createdRunId: "run_promotion_audit"
+    });
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM runs WHERE event_id = ?").get(followUpEvent.id)).toEqual({ count: 1 });
+
+    sqlite.exec("DROP TRIGGER fail_follow_up_promoted_audit");
+    await expect(repo.createRunFromFollowUpRequest({
+      followUpRequestId: "follow_up_promotion_audit",
+      runId: "run_promotion_audit_retry_must_not_win"
+    })).resolves.toMatchObject({
+      followUpRequest: { status: "promoted", createdRunId: "run_promotion_audit" },
+      run: { id: "run_promotion_audit" }
+    });
+    await expect(repo.createRunFromFollowUpRequest({
+      followUpRequestId: "follow_up_promotion_audit",
+      runId: "run_promotion_audit_second_retry"
+    })).resolves.toMatchObject({ run: { id: "run_promotion_audit" } });
+
+    const parentEvents = await repo.listRunEvents({ runId: "run_promotion_audit_parent" });
+    expect(parentEvents.filter((event) => event.type === "run.child_created")).toHaveLength(1);
+    expect(parentEvents.filter((event) => event.type === "follow_up_request.promoted")).toHaveLength(1);
+  });
+
   it("preserves explicit directory capability when an older runner sends a minimal heartbeat", async () => {
     const { repo } = routingRepository();
     await repo.registerRunner({

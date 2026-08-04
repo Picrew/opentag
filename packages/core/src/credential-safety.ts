@@ -2,10 +2,79 @@ const CREDENTIAL_NAME_PATTERN = /(?:^|[_-])(?:auth(?:orization|entication)?|bear
 const KNOWN_TOKEN_PATTERN = /(?:\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{8,}\b|\bglpat-[A-Za-z0-9_-]{8,}\b|\b(?:xox[a-z]|xapp)-[A-Za-z0-9-]{8,}\b|\bsk_(?:live|test)_[A-Za-z0-9_-]{8,}\b|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bAIza[0-9A-Za-z_-]{20,}\b)/u;
 const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/u;
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/iu;
-const PRIVATE_KEY_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/u;
-const PRIVATE_KEY_HEADER_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/u;
 const CREDENTIAL_ASSIGNMENT_PATTERN = /(?:authorization|authentication|cookie|credential|password|passphrase|private[ _-]?key|secret|token|api[ _-]?key|access[ _-]?key|client[ _-]?secret|refresh[ _-]?token|signature)\s*[:=]\s*\S+/iu;
 const SAFE_DISPLAY_RESOURCE_PROTOCOLS = new Set(["http:", "https:", "ssh:", "git:", "git+http:", "git+https:", "git+ssh:"]);
+const PRIVATE_KEY_BEGIN_PREFIX = "-----BEGIN ";
+const PRIVATE_KEY_END_PREFIX = "-----END ";
+
+type PrivateKeyBoundary = {
+  kind: "begin" | "end";
+  start: number;
+  end: number;
+};
+
+function isPrivateKeyLabel(value: string): boolean {
+  if (!value.endsWith("PRIVATE KEY")) return false;
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (character !== " " && !(code >= 48 && code <= 57) && !(code >= 65 && code <= 90)) return false;
+  }
+  return true;
+}
+
+function privateKeyBoundaryAt(value: string, start: number, kind: "begin" | "end"): PrivateKeyBoundary | null {
+  const prefix = kind === "begin" ? PRIVATE_KEY_BEGIN_PREFIX : PRIVATE_KEY_END_PREFIX;
+  const labelStart = start + prefix.length;
+  const labelEnd = value.indexOf("-----", labelStart);
+  if (labelEnd < 0 || !isPrivateKeyLabel(value.slice(labelStart, labelEnd))) return null;
+  return { kind, start, end: labelEnd + 5 };
+}
+
+function privateKeyBoundaries(value: string): PrivateKeyBoundary[] {
+  const boundaries: PrivateKeyBoundary[] = [];
+  let searchFrom = 0;
+  let nextBegin = value.indexOf(PRIVATE_KEY_BEGIN_PREFIX, searchFrom);
+  let nextEnd = value.indexOf(PRIVATE_KEY_END_PREFIX, searchFrom);
+  while (nextBegin >= 0 || nextEnd >= 0) {
+    const kind = nextEnd < 0 || (nextBegin >= 0 && nextBegin < nextEnd) ? "begin" : "end";
+    const start = kind === "begin" ? nextBegin : nextEnd;
+    const boundary = privateKeyBoundaryAt(value, start, kind);
+    searchFrom = boundary?.end ?? start + 5;
+    if (boundary) boundaries.push(boundary);
+    if (nextBegin >= 0 && nextBegin < searchFrom) nextBegin = value.indexOf(PRIVATE_KEY_BEGIN_PREFIX, searchFrom);
+    if (nextEnd >= 0 && nextEnd < searchFrom) nextEnd = value.indexOf(PRIVATE_KEY_END_PREFIX, searchFrom);
+  }
+  return boundaries;
+}
+
+function redactPrivateKeyMaterial(value: string): string {
+  const boundaries = privateKeyBoundaries(value);
+  const nextEndByIndex = new Array<number>(boundaries.length).fill(-1);
+  let nextEnd = -1;
+  for (let index = boundaries.length - 1; index >= 0; index -= 1) {
+    nextEndByIndex[index] = nextEnd;
+    if (boundaries[index]!.kind === "end") nextEnd = index;
+  }
+
+  const output: string[] = [];
+  let cursor = 0;
+  for (let index = 0; index < boundaries.length; index += 1) {
+    const boundary = boundaries[index]!;
+    if (boundary.kind !== "begin" || boundary.start < cursor) continue;
+    const endIndex = nextEndByIndex[index]!;
+    output.push(value.slice(cursor, boundary.start));
+    if (endIndex >= 0) {
+      const endBoundary = boundaries[endIndex]!;
+      output.push("[redacted private key]");
+      cursor = endBoundary.end;
+    } else {
+      output.push("[redacted private key]");
+      cursor = value.length;
+    }
+  }
+  output.push(value.slice(cursor));
+  return output.join("");
+}
 
 export function isCredentialFieldName(value: string): boolean {
   const normalized = value.trim().replace(/([a-z0-9])([A-Z])/gu, "$1_$2").toLowerCase();
@@ -14,7 +83,7 @@ export function isCredentialFieldName(value: string): boolean {
 
 export function containsCredentialLikeData(value: string): boolean {
   if (KNOWN_TOKEN_PATTERN.test(value) || JWT_PATTERN.test(value) || BEARER_PATTERN.test(value) ||
-    PRIVATE_KEY_PATTERN.test(value) || PRIVATE_KEY_HEADER_PATTERN.test(value) || CREDENTIAL_ASSIGNMENT_PATTERN.test(value)) return true;
+    privateKeyBoundaries(value).some((boundary) => boundary.kind === "begin") || CREDENTIAL_ASSIGNMENT_PATTERN.test(value)) return true;
   try {
     const url = new URL(value);
     if (url.username || url.password) return true;
@@ -59,9 +128,7 @@ export function isCredentialSafeValue(value: unknown): boolean {
 }
 
 export function redactCredentialLikeData(value: string): string {
-  return value
-    .replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/gu, "[redacted private key]")
-    .replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/gu, "[redacted private key header]")
+  return redactPrivateKeyMaterial(value)
     .replace(/\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{8,}\b/gu, "[redacted]")
     .replace(/\bglpat-[A-Za-z0-9_-]{8,}\b/gu, "[redacted]")
     .replace(/\b(?:xox[a-z]|xapp)-[A-Za-z0-9-]{8,}\b/gu, "[redacted]")

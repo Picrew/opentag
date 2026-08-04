@@ -23,6 +23,7 @@ describe("OpenTagJsonSchemas", () => {
     expect(OpenTagJsonSchemas.CompletionGateResult).toHaveProperty("definitions.CompletionGateResult");
     expect(OpenTagJsonSchemas.CompletionWaiver).toHaveProperty("definitions.CompletionWaiver");
     expect(OpenTagJsonSchemas.CompletionAssessment).toHaveProperty("definitions.CompletionAssessment");
+    expect(OpenTagJsonSchemas.ReassessmentObligation).toHaveProperty("definitions.ReassessmentObligation");
     expect(OpenTagJsonSchemas.HumanEscalation).toHaveProperty("definitions.HumanEscalation");
     expect(OpenTagJsonSchemas.ContextPacket).toHaveProperty("definitions.ContextPacket");
     expect(OpenTagJsonSchemas.RunAdmissionDecision).toHaveProperty("definitions.RunAdmissionDecision");

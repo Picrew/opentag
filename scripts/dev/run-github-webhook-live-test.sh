@@ -39,6 +39,11 @@ Helpful env:
                                      GitHub issue comment through WorkThread
                                      ensure, recipe, workstream, and durable
                                      batch admission before local execution.
+  OPENTAG_GH_LIVE_REASSESSMENT_CRASH
+                                     true/false, default false. Holds the
+                                     obligation worker until real merge evidence
+                                     is durably committed, terminates the first
+                                     stack, then proves restart-only recovery.
   OPENTAG_GH_LIVE_REPORT          optional structured evidence JSON path
   OPENTAG_GH_LIVE_CLI_BIN         optional installed `opentag` executable;
                                      defaults to the source CLI through tsx
@@ -79,6 +84,7 @@ fi
 : "${OPENTAG_GH_LIVE_STRICT_COMPLETION:=true}"
 : "${OPENTAG_GH_LIVE_REQUIRED_CHECK:=opentag-phase1-live}"
 : "${OPENTAG_GH_LIVE_FACTORY:=false}"
+: "${OPENTAG_GH_LIVE_REASSESSMENT_CRASH:=false}"
 
 cd "$ROOT_DIR"
 
@@ -108,6 +114,14 @@ BATCH_INPUT_DIGEST=""
 INITIAL_BATCH_RECEIPT_PATH=""
 REPLAYED_BATCH_RECEIPT_PATH=""
 RUNTIME_ARTIFACT_PATH=""
+REASSESSMENT_HOLD_ACTIVE="false"
+REASSESSMENT_OBLIGATION_BEFORE_CRASH_PATH=""
+REASSESSMENT_OBLIGATION_AFTER_RESTART_PATH=""
+ASSESSMENT_COUNT_BEFORE_CRASH=""
+ASSESSMENT_COUNT_AFTER_RECOVERY=""
+ASSESSMENT_COUNT_AFTER_SECOND_RESTART=""
+EVIDENCE_RECORD_COUNT_BEFORE_CRASH=""
+EVIDENCE_RECORD_COUNT_AFTER_RECOVERY=""
 
 bool_true() {
   case "${1:-}" in
@@ -172,6 +186,7 @@ trap cleanup EXIT INT TERM
 require_cmd curl
 require_cmd corepack
 require_cmd gh
+require_cmd git
 require_cmd lsof
 require_cmd node
 require_cmd python3
@@ -195,10 +210,18 @@ if [[ "$PERMISSION" != "ADMIN" && "$PERMISSION" != "MAINTAIN" ]]; then
 fi
 GITHUB_TOKEN="$(gh auth token)"
 export GITHUB_TOKEN
-export OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN OPENTAG_GH_LIVE_STRICT_COMPLETION OPENTAG_GH_LIVE_REQUIRED_CHECK OPENTAG_GH_LIVE_FACTORY
+export OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN OPENTAG_GH_LIVE_STRICT_COMPLETION OPENTAG_GH_LIVE_REQUIRED_CHECK OPENTAG_GH_LIVE_FACTORY OPENTAG_GH_LIVE_REASSESSMENT_CRASH
 
 if bool_true "$OPENTAG_GH_LIVE_FACTORY" && ! bool_true "$OPENTAG_GH_LIVE_STRICT_COMPLETION"; then
   echo "Factory acceptance requires OPENTAG_GH_LIVE_STRICT_COMPLETION=true." >&2
+  exit 1
+fi
+if bool_true "$OPENTAG_GH_LIVE_REASSESSMENT_CRASH" && ! bool_true "$OPENTAG_GH_LIVE_FACTORY"; then
+  echo "Reassessment crash acceptance requires OPENTAG_GH_LIVE_FACTORY=true." >&2
+  exit 1
+fi
+if bool_true "$OPENTAG_GH_LIVE_FACTORY" && ! bool_true "$OPENTAG_GH_LIVE_REASSESSMENT_CRASH"; then
+  echo "Factory acceptance requires OPENTAG_GH_LIVE_REASSESSMENT_CRASH=true." >&2
   exit 1
 fi
 
@@ -496,9 +519,11 @@ start_cli_stack() {
       echo "OPENTAG_GH_LIVE_CLI_BIN is not executable: $OPENTAG_GH_LIVE_CLI_BIN" >&2
       exit 1
     fi
-    "$OPENTAG_GH_LIVE_CLI_BIN" start --config "$CONFIG_PATH" &
+    OPENTAG_REASSESSMENT_OBLIGATION_TEST_HOLD="$REASSESSMENT_HOLD_ACTIVE" \
+      "$OPENTAG_GH_LIVE_CLI_BIN" start --config "$CONFIG_PATH" &
   else
-    NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../packages/cli/src/index.ts start --config "$CONFIG_PATH" &
+    OPENTAG_REASSESSMENT_OBLIGATION_TEST_HOLD="$REASSESSMENT_HOLD_ACTIVE" \
+      NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../packages/cli/src/index.ts start --config "$CONFIG_PATH" &
   fi
   CLI_PID=$!
   wait_for_http "http://localhost:${OPENTAG_DISPATCHER_PORT}/healthz"
@@ -535,7 +560,10 @@ latest_apply_plan_for_run() {
 
 if [[ ! -d "$CHECKOUT_PATH/.git" ]]; then
   echo "Cloning $OWNER/$REPO into temporary checkout..."
-  gh repo clone "$OWNER/$REPO" "$CHECKOUT_PATH" >/dev/null
+  git \
+    -c credential.helper= \
+    -c 'credential.helper=!gh auth git-credential' \
+    clone --depth=1 "https://github.com/${OWNER}/${REPO}.git" "$CHECKOUT_PATH" >/dev/null
 fi
 if [[ -n "$(git -C "$CHECKOUT_PATH" status --porcelain)" ]]; then
   echo "Checkout is dirty: $CHECKOUT_PATH" >&2
@@ -989,15 +1017,110 @@ PY
   printf '%s\n' "$COMPLETION_PAYLOAD" >"$CHECKED_COMPLETION_PATH"
   echo "Required check passed for the current head; completion remains unsatisfied until merge."
 
+  if bool_true "$OPENTAG_GH_LIVE_REASSESSMENT_CRASH"; then
+    echo "Restarting once to arm the deterministic pre-reassessment crash gate..."
+    stop_cli_stack
+    REASSESSMENT_HOLD_ACTIVE="true"
+    deadline=$((SECONDS + 30))
+    while (( SECONDS < deadline )); do
+      if [[ -z "$(lsof -ti "tcp:${OPENTAG_DISPATCHER_PORT}" 2>/dev/null || true)" && -z "$(lsof -ti "tcp:${OPENTAG_GITHUB_PORT}" 2>/dev/null || true)" ]]; then
+        break
+      fi
+      sleep 1
+    done
+    ensure_port_free "$OPENTAG_DISPATCHER_PORT" "dispatcher"
+    ensure_port_free "$OPENTAG_GITHUB_PORT" "GitHub ingress"
+    start_cli_stack
+  fi
+
   echo "Merging governed PR #$PR_NUMBER after OpenTag observed the required check..."
+  ASSESSMENT_COUNT_BEFORE_CRASH="$(sqlite_one "select count(*) from completion_assessments where work_thread_id = (select work_thread_id from runs where id = '$(sql_escape "$RUN_ID")');")"
   gh pr merge "$PR_URL" --merge --delete-branch
+
+  gh pr view "$PR_URL" \
+    --json number,state,headRefName,headRefOid,baseRefName,url,mergedAt,mergeCommit \
+    >"$PR_INFO_PATH"
+  if bool_true "$OPENTAG_GH_LIVE_REASSESSMENT_CRASH"; then
+    echo "Waiting for real merged-provider evidence and its pending durable reassessment obligation..."
+    deadline=$((SECONDS + OPENTAG_GH_LIVE_TIMEOUT_SECONDS))
+    OBLIGATION_SOURCE_ID=""
+    while (( SECONDS < deadline )); do
+      OBLIGATION_SOURCE_ID="$(sqlite_one "
+        select ro.source_id
+        from reassessment_obligations ro
+        where ro.work_thread_id = '$(sql_escape "$WORK_THREAD_ID")'
+          and ro.source_kind = 'verification_evidence_attached'
+          and ro.state = 'pending'
+          and exists (
+            select 1 from verification_evidence ve
+            where ve.work_thread_id = ro.work_thread_id
+              and ve.kind = 'source_control.pull_request_state'
+              and lower(json_extract(ve.evidence_json, '$.metadata.completionFactTemplate.claim.outcome')) = 'merged'
+              and ro.source_id = ve.provider || ':' || ve.delivery_id || ':' || ve.subject_ref || ':' || ve.work_thread_id
+          )
+        order by ro.created_at desc, ro.id desc
+        limit 1;
+      ")"
+      CURRENT_ASSESSMENT_COUNT="$(sqlite_one "select count(*) from completion_assessments where work_thread_id = '$(sql_escape "$WORK_THREAD_ID")';")"
+      if [[ -n "$OBLIGATION_SOURCE_ID" && "$CURRENT_ASSESSMENT_COUNT" == "$ASSESSMENT_COUNT_BEFORE_CRASH" ]]; then
+        break
+      fi
+      sleep 1
+    done
+    if [[ -z "$OBLIGATION_SOURCE_ID" ]]; then
+      echo "Merged-provider evidence did not commit a pending reassessment obligation before timeout." >&2
+      exit 1
+    fi
+    if [[ "$CURRENT_ASSESSMENT_COUNT" != "$ASSESSMENT_COUNT_BEFORE_CRASH" ]]; then
+      echo "Merge evidence was assessed before the deterministic crash gate ($ASSESSMENT_COUNT_BEFORE_CRASH -> $CURRENT_ASSESSMENT_COUNT)." >&2
+      exit 1
+    fi
+    OBLIGATION_SOURCE_DIGEST="$(sqlite_one "select source_digest from reassessment_obligations where source_id = '$(sql_escape "$OBLIGATION_SOURCE_ID")' order by created_at desc limit 1;")"
+    REASSESSMENT_OBLIGATION_BEFORE_CRASH_PATH="$TMP_ROOT/reassessment-obligation-before-crash.json"
+    sqlite3 -json -cmd ".timeout 5000" "$DATABASE_PATH" "
+      select source_kind as sourceKind, source_id as sourceId, source_digest as sourceDigest,
+        state, satisfied_assessment_id as assessmentId, attempt_count as attemptCount,
+        (select count(*) from reassessment_obligations matching
+          where matching.source_kind = ro.source_kind
+            and matching.source_id = ro.source_id
+            and matching.source_digest = ro.source_digest) as matchingCount
+      from reassessment_obligations ro
+      where source_kind = 'verification_evidence_attached'
+        and source_id = '$(sql_escape "$OBLIGATION_SOURCE_ID")'
+        and source_digest = '$(sql_escape "$OBLIGATION_SOURCE_DIGEST")';
+    " >"$REASSESSMENT_OBLIGATION_BEFORE_CRASH_PATH"
+    EVIDENCE_RECORD_COUNT_BEFORE_CRASH="$(sqlite_one "select count(*) from verification_evidence where work_thread_id = '$(sql_escape "$WORK_THREAD_ID")';")"
+
+    echo "Terminating the first stack inside the committed-fact / pre-reassessment crash window..."
+    stop_cli_stack
+    REASSESSMENT_HOLD_ACTIVE="false"
+    deadline=$((SECONDS + 30))
+    while (( SECONDS < deadline )); do
+      if [[ -z "$(lsof -ti "tcp:${OPENTAG_DISPATCHER_PORT}" 2>/dev/null || true)" && -z "$(lsof -ti "tcp:${OPENTAG_GITHUB_PORT}" 2>/dev/null || true)" ]]; then
+        break
+      fi
+      sleep 1
+    done
+    ensure_port_free "$OPENTAG_DISPATCHER_PORT" "dispatcher"
+    ensure_port_free "$OPENTAG_GITHUB_PORT" "GitHub ingress"
+    start_cli_stack
+    deadline=$((SECONDS + OPENTAG_GH_LIVE_TIMEOUT_SECONDS))
+    while (( SECONDS < deadline )); do
+      OBLIGATION_STATE="$(sqlite_one "select state from reassessment_obligations where source_kind = 'verification_evidence_attached' and source_id = '$(sql_escape "$OBLIGATION_SOURCE_ID")' and source_digest = '$(sql_escape "$OBLIGATION_SOURCE_DIGEST")';")"
+      if [[ "$OBLIGATION_STATE" == "satisfied" ]]; then
+        break
+      fi
+      sleep 1
+    done
+    if [[ "$OBLIGATION_STATE" != "satisfied" ]]; then
+      echo "Restart did not satisfy the pending merge-evidence reassessment obligation; state=$OBLIGATION_STATE." >&2
+      exit 1
+    fi
+  fi
 
   wait_for_completion "$RUN_ID" "satisfied" "merge" "passed"
   FINAL_COMPLETION_PATH="$TMP_ROOT/completion-final.json"
   printf '%s\n' "$COMPLETION_PAYLOAD" >"$FINAL_COMPLETION_PATH"
-  gh pr view "$PR_URL" \
-    --json number,state,headRefName,headRefOid,baseRefName,url,mergedAt,mergeCommit \
-    >"$PR_INFO_PATH"
   wait_for_issue_comment "provider-verified completion requirements are satisfied"
   RECEIPTS_BEFORE_RESTART="$(completion_receipt_count)"
   SOURCE_COMMENTS_PATH="$TMP_ROOT/source-comments-before-restart.json"
@@ -1009,6 +1132,35 @@ PY
     ACCEPTED_PROGRESS_AFTER_MERGE_PATH="$TMP_ROOT/accepted-progress-after-merge.json"
     capture_workstream_metrics "$METRICS_AFTER_MERGE_PATH"
     capture_accepted_progress_metrics "$ACCEPTED_PROGRESS_AFTER_MERGE_PATH"
+  fi
+  if bool_true "$OPENTAG_GH_LIVE_REASSESSMENT_CRASH"; then
+    deadline=$((SECONDS + OPENTAG_GH_LIVE_TIMEOUT_SECONDS))
+    while (( SECONDS < deadline )); do
+      UNRESOLVED_OBLIGATION_COUNT="$(sqlite_one "select count(*) from reassessment_obligations where work_thread_id = '$(sql_escape "$WORK_THREAD_ID")' and state in ('pending', 'leased');")"
+      if [[ "$UNRESOLVED_OBLIGATION_COUNT" == "0" ]]; then
+        break
+      fi
+      sleep 1
+    done
+    if [[ "$UNRESOLVED_OBLIGATION_COUNT" != "0" ]]; then
+      echo "Restart left $UNRESOLVED_OBLIGATION_COUNT unresolved reassessment obligations for the WorkThread." >&2
+      exit 1
+    fi
+    REASSESSMENT_OBLIGATION_AFTER_RESTART_PATH="$TMP_ROOT/reassessment-obligation-after-restart.json"
+    sqlite3 -json -cmd ".timeout 5000" "$DATABASE_PATH" "
+      select source_kind as sourceKind, source_id as sourceId, source_digest as sourceDigest,
+        state, satisfied_assessment_id as satisfiedAssessmentId, attempt_count as attemptCount,
+        (select count(*) from reassessment_obligations matching
+          where matching.source_kind = ro.source_kind
+            and matching.source_id = ro.source_id
+            and matching.source_digest = ro.source_digest) as matchingCount
+      from reassessment_obligations ro
+      where source_kind = 'verification_evidence_attached'
+        and source_id = '$(sql_escape "$OBLIGATION_SOURCE_ID")'
+        and source_digest = '$(sql_escape "$OBLIGATION_SOURCE_DIGEST")';
+    " >"$REASSESSMENT_OBLIGATION_AFTER_RESTART_PATH"
+    ASSESSMENT_COUNT_AFTER_RECOVERY="$(sqlite_one "select count(*) from completion_assessments where work_thread_id = '$(sql_escape "$WORK_THREAD_ID")';")"
+    EVIDENCE_RECORD_COUNT_AFTER_RECOVERY="$(sqlite_one "select count(*) from verification_evidence where work_thread_id = '$(sql_escape "$WORK_THREAD_ID")';")"
   fi
 
   echo "Restarting the CLI stack to verify durable satisfied completion and callback deduplication..."
@@ -1055,6 +1207,9 @@ PY
   fi
   mkdir -p "$(dirname "$REPORT_PATH")"
   ASSESSMENT_COUNT="$(sqlite_one "select count(*) from completion_assessments where work_thread_id = (select work_thread_id from runs where id = '$(sql_escape "$RUN_ID")');")"
+  if bool_true "$OPENTAG_GH_LIVE_REASSESSMENT_CRASH"; then
+    ASSESSMENT_COUNT_AFTER_SECOND_RESTART="$ASSESSMENT_COUNT"
+  fi
   RUNTIME_SOURCE="source_checkout"
   if [[ -n "${OPENTAG_GH_LIVE_CLI_BIN:-}" ]]; then
     RUNTIME_SOURCE="registry_install"
@@ -1075,6 +1230,9 @@ PY
       "$INITIAL_BATCH_RECEIPT_PATH" "$REPLAYED_BATCH_RECEIPT_PATH" "$RUN_EVIDENCE_PATH" "$ATTEMPT_EVIDENCE_PATH" \
       "$METRICS_BEFORE_PROVIDER_PATH" "$METRICS_AFTER_MERGE_PATH" "$METRICS_AFTER_RESTART_PATH" "$SOURCE_COMMENTS_PATH" "$SOURCE_COMMENTS_AFTER_RESTART_PATH" "$SOURCE_ISSUE_PATH" \
       "$ACCEPTED_PROGRESS_BEFORE_PROVIDER_PATH" "$ACCEPTED_PROGRESS_AFTER_MERGE_PATH" "$ACCEPTED_PROGRESS_AFTER_RESTART_PATH" \
+      "$REASSESSMENT_OBLIGATION_BEFORE_CRASH_PATH" "$REASSESSMENT_OBLIGATION_AFTER_RESTART_PATH" \
+      "$ASSESSMENT_COUNT_BEFORE_CRASH" "$ASSESSMENT_COUNT_AFTER_RECOVERY" "$ASSESSMENT_COUNT_AFTER_SECOND_RESTART" \
+      "$EVIDENCE_RECORD_COUNT_BEFORE_CRASH" "$EVIDENCE_RECORD_COUNT_AFTER_RECOVERY" \
       "$OWNER/$REPO" "$ISSUE_URL" "$MENTION_URL" "$ISSUE_NUMBER" "$COMMENT_ID" "$EVENT_ID" "$WORK_THREAD_ID" \
       "$RECIPE_ID" "$WORKSTREAM_ID" "$BATCH_ID" "$BATCH_INPUT_DIGEST" "$ASSESSMENT_COUNT" \
       "$RECEIPTS_BEFORE_RESTART" "$RECEIPTS_AFTER_RESTART" "$RUNTIME_SOURCE" "$RUNTIME_ARTIFACT_PATH" "$OPENTAG_GH_LIVE_REQUIRED_CHECK" <<'PY'
@@ -1107,6 +1265,13 @@ from pathlib import Path
     accepted_progress_before_path,
     accepted_progress_merged_path,
     accepted_progress_restarted_path,
+    obligation_before_crash_path,
+    obligation_after_restart_path,
+    assessment_count_before_crash,
+    assessment_count_after_recovery,
+    assessment_count_after_second_restart,
+    evidence_record_count_before_crash,
+    evidence_record_count_after_recovery,
     repository,
     issue_url,
     mention_url,
@@ -1173,6 +1338,18 @@ receipt_after_restart = receipt_observation(
 recipe = read(recipe_path)["recipe"]
 workstream = read(workstream_path)["workstream"]
 source_issue = read(source_issue_path)
+obligation_before_rows = read(obligation_before_crash_path)
+obligation_after_rows = read(obligation_after_restart_path)
+if len(obligation_before_rows) != 1 or len(obligation_after_rows) != 1:
+    raise SystemExit("Factory acceptance requires exactly one retained reassessment obligation before and after restart.")
+obligation_before = obligation_before_rows[0]
+obligation_after = obligation_after_rows[0]
+if (
+    obligation_before["sourceKind"] != obligation_after["sourceKind"]
+    or obligation_before["sourceId"] != obligation_after["sourceId"]
+    or obligation_before["sourceDigest"] != obligation_after["sourceDigest"]
+):
+    raise SystemExit("Reassessment obligation identity changed across restart.")
 evidence = {
     "recordedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     "repository": repository,
@@ -1220,6 +1397,26 @@ evidence = {
         "beforeProviderEvidence": read(accepted_progress_before_path),
         "afterMerge": read(accepted_progress_merged_path),
         "afterRestart": read(accepted_progress_restarted_path),
+    },
+    "reassessmentObligation": {
+        "sourceKind": obligation_before["sourceKind"],
+        "sourceId": obligation_before["sourceId"],
+        "sourceDigest": obligation_before["sourceDigest"],
+        "beforeCrash": {
+            "state": obligation_before["state"],
+            "assessmentId": obligation_before.get("assessmentId"),
+            "assessmentCount": int(assessment_count_before_crash),
+            "evidenceRecordCount": int(evidence_record_count_before_crash),
+        },
+        "afterRestart": {
+            "state": obligation_after["state"],
+            "attemptCount": int(obligation_after["attemptCount"]),
+            "satisfiedAssessmentId": obligation_after["satisfiedAssessmentId"],
+            "assessmentCount": int(assessment_count_after_recovery),
+            "evidenceRecordCount": int(evidence_record_count_after_recovery),
+        },
+        "afterSecondRestartAssessmentCount": int(assessment_count_after_second_restart),
+        "matchingCount": int(obligation_after["matchingCount"]),
     },
     "assessmentCount": int(assessment_count),
     "sourceReceipt": {

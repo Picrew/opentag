@@ -50,6 +50,23 @@ describe("credential safety", () => {
     expect(redacted).not.toMatch(/operator|password/iu);
   });
 
+  it("redacts repeated private-key headers with a linear boundary scan", () => {
+    const repeated = "-----BEGIN PRIVATE KEY-----".repeat(10_000);
+    const redacted = redactCredentialLikeData(repeated);
+
+    expect(containsCredentialLikeData(repeated)).toBe(true);
+    expect(redacted).not.toContain("-----BEGIN PRIVATE KEY-----");
+    expect(redacted).toBe("[redacted private key]");
+  });
+
+  it("fails closed when private-key material has no end boundary", () => {
+    const truncated = "prefix\n-----BEGIN PRIVATE KEY-----\nSUPERSECRETBASE64\nnext log line";
+    const redacted = redactCredentialLikeData(truncated);
+
+    expect(redacted).toBe("prefix\n[redacted private key]");
+    expect(redacted).not.toMatch(/SUPERSECRETBASE64|next log line/u);
+  });
+
   it("recursively sanitizes credential fields, detected tokens, and active runtime secrets without changing shape", () => {
     const activeFencingToken = "opaque-fence-value-not-detectable-by-pattern";
     const input = {
