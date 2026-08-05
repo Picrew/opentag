@@ -24,7 +24,7 @@
   "dependencies": {
     "@opentag/core": "workspace:*",
     "hono": "^4.12.27",
-    "jose": "^5.9.6"
+    "jose": "^6.2.7"
   },
   "devDependencies": {
     "tsup": "^8.5.1",
