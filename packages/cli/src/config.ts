@@ -13,7 +13,7 @@ import {
   type LocalDispatcherRuntimeInput,
   type OpenTagDaemonConfig
 } from "@opentag/local-runtime";
-import { z } from "zod";
+import { z } from "zod/v3";
 import type { CliLanguage } from "./catalogs/languages.js";
 import type { PlatformId } from "./catalogs/platforms.js";
 

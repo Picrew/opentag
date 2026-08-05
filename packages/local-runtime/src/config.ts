@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { OpenTagManagedChannelBindingOwnershipSchema } from "@opentag/core";
-import { z } from "zod";
+import { z } from "zod/v3";
 
 const BUILT_IN_EXECUTOR_IDS = ["echo", "codex", "claude-code", "cursor", "opencode", "hermes", "openclaw"] as const;
 

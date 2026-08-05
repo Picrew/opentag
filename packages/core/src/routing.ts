@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 
 export const RunnerLocalitySchema = z.enum(["local", "private", "hosted"]);
 export const RunnerDeclaredStateSchema = z.enum(["ready", "draining"]);

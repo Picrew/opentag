@@ -125,7 +125,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { z } from "zod";
+import { z } from "zod/v3";
 import { createReassessmentObligationWorker } from "./reassessment-obligations.js";
 
 /**
