@@ -29,6 +29,18 @@ function clackOptions<Value extends string>(options: Array<PromptOption<Value>>)
   });
 }
 
+function clackValidation(validate: ((value: string) => string | undefined) | undefined): {
+  validate?: (value: string | undefined) => string | undefined;
+} {
+  return validate
+    ? {
+        validate(value) {
+          return validate(value ?? "");
+        }
+      }
+    : {};
+}
+
 export function createClackPromptAdapter(): PromptAdapter {
   return {
     intro(message) {
@@ -55,10 +67,12 @@ export function createClackPromptAdapter(): PromptAdapter {
       return selected as Value;
     },
     async text(input) {
-      return unwrapPromptResult(await p.text(input));
+      const { validate, ...options } = input;
+      return unwrapPromptResult(await p.text({ ...options, ...clackValidation(validate) }));
     },
     async password(input) {
-      return unwrapPromptResult(await p.password({ ...input, mask: "*" }));
+      const { validate, ...options } = input;
+      return unwrapPromptResult(await p.password({ ...options, ...clackValidation(validate), mask: "*" }));
     },
     async confirm(input) {
       return unwrapPromptResult(await p.confirm(input));

@@ -45,7 +45,7 @@
     "@opentag/linear": "workspace:*",
     "@opentag/local-runtime": "workspace:*",
     "@opentag/slack": "workspace:*",
-    "@clack/prompts": "^0.11.0",
+    "@clack/prompts": "^1.7.0",
     "commander": "^12.1.0",
     "qrcode-terminal": "^0.12.0",
     "zod": "^3.24.1"
