@@ -8,7 +8,7 @@ describe("Teams transitive dependency compatibility", () => {
     ) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
 
     expect(packageJson.dependencies?.["botframework-connector"]).toBeUndefined();
-    expect(packageJson.dependencies?.jose).toBe("^5.9.6");
+    expect(packageJson.dependencies?.jose).toBe("^6.2.7");
     expect(packageJson.devDependencies?.jose).toBeUndefined();
   });
 });
