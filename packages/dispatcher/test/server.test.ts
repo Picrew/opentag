@@ -6,7 +6,7 @@ import Database from "better-sqlite3";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { computeLinearSignature } from "@opentag/linear";
 import { parseSlackSuggestedActionButtonValue, type SlackBlock } from "@opentag/slack";
-import { z } from "zod/v3";
+import { z } from "zod";
 import { createDefaultCallbackPresentation } from "../src/presentation.js";
 import { createDispatcherApp as createRawDispatcherApp, type CallbackMessage } from "../src/server.js";
 

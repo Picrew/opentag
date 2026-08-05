@@ -194,6 +194,54 @@ function checkInstalledCompletionGovernance(installDir) {
   run(commandPath(installDir, "opentag"), ["completion", "waive", "--help"], { cwd: installDir });
 }
 
+function checkInstalledCoreZodCompatibility(installDir) {
+  const consumerPath = path.join(installDir, "zod-consumer.mts");
+  const consumerConfigPath = path.join(installDir, "zod-consumer-tsconfig.json");
+  writeFileSync(consumerPath, `
+    import { RunnerLocalitySchema } from "@opentag/core";
+    import { z } from "zod";
+
+    const composed = z.object({ locality: RunnerLocalitySchema });
+    const fixture: z.infer<typeof composed> = { locality: "local" };
+    void fixture;
+  `);
+  writeFileSync(consumerConfigPath, `${JSON.stringify({
+    compilerOptions: {
+      lib: ["ES2022", "DOM"],
+      module: "NodeNext",
+      moduleResolution: "NodeNext",
+      noEmit: true,
+      skipLibCheck: false,
+      strict: true,
+      target: "ES2022",
+      types: []
+    },
+    files: [consumerPath]
+  }, null, 2)}\n`);
+  run(commandPath(repoRoot, "tsc"), ["--project", consumerConfigPath], { cwd: installDir });
+
+  const probe = `
+    import { RunnerLocalitySchema } from "@opentag/core";
+    import { z } from "zod";
+
+    const composed = z.object({ locality: RunnerLocalitySchema });
+    const parsed = composed.parse({ locality: "local" });
+    if (parsed.locality !== "local") {
+      throw new Error("Installed @opentag/core schema composition is incorrect: " + JSON.stringify(parsed));
+    }
+
+    try {
+      RunnerLocalitySchema.parse("invalid");
+      throw new Error("Installed @opentag/core schema accepted an invalid locality.");
+    } catch (error) {
+      if (!(error instanceof z.ZodError)) {
+        throw new Error("Installed @opentag/core emitted a non-Zod-4 error: " + String(error));
+      }
+    }
+  `;
+  run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });
+}
+
 function checkInstalledTeamsAuthDependencies(installDir) {
   const probe = `
     import { readFileSync } from "node:fs";
@@ -258,6 +306,9 @@ try {
 
   console.log("Checking installed completion governance...");
   checkInstalledCompletionGovernance(installDir);
+
+  console.log("Checking installed Zod schema compatibility...");
+  checkInstalledCoreZodCompatibility(installDir);
 
   console.log("Checking installed Teams authentication dependencies...");
   checkInstalledTeamsAuthDependencies(installDir);

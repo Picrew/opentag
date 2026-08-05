@@ -1,6 +1,6 @@
-import { z } from "zod/v3";
+import { z } from "zod";
 
-const ProviderDataSchema = z.record(z.unknown());
+const ProviderDataSchema = z.record(z.string(), z.unknown());
 
 export const OpenTagIntegrationProtocolVersionSchema = z.literal("opentag.integration.v1");
 export const OpenTagAgentProtocolSchema = z.literal("agent-client-protocol");
@@ -78,14 +78,14 @@ export const OpenTagResourceCapabilitySchema = z
   })
   .strict();
 
-export const OpenTagIntegrationResourcesSchema = z.record(OpenTagResourceCapabilitySchema).default({});
+export const OpenTagIntegrationResourcesSchema = z.record(z.string(), OpenTagResourceCapabilitySchema).default({});
 
 export const OpenTagIntegrationManifestSchema = z
   .object({
     protocol: OpenTagIntegrationProtocolVersionSchema,
     id: z.string().trim().min(1),
     label: z.string().trim().min(1),
-    bindings: z.record(OpenTagIntegrationBindingSchema),
+    bindings: z.record(z.string(), OpenTagIntegrationBindingSchema),
     roles: OpenTagIntegrationRolesSchema,
     resources: OpenTagIntegrationResourcesSchema
   })

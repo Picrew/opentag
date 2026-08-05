@@ -1,5 +1,5 @@
 import { createOpenTagClient, type SourceDeliveryPruneResult } from "@opentag/client";
-import { z } from "zod/v3";
+import { z } from "zod";
 import { defaultConfigPath, readCliConfig, runnerDispatcherToken, type OpenTagCliConfig } from "./config.js";
 
 export type MaintenancePruneSourceDeliveriesOptions = {

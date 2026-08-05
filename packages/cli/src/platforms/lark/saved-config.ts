@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { z } from "zod/v3";
+import { z } from "zod";
 import type { LarkDomain } from "@opentag/lark";
 import { assertPrivateConfigFile, type OpenTagCliConfig } from "../../config.js";
 

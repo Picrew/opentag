@@ -1,4 +1,4 @@
-import { zodToJsonSchema } from "zod-to-json-schema";
+import { z } from "zod";
 import {
   AgentAccessProfileSnapshotSchema,
   AcceptedGateAdvanceSchema,
@@ -91,86 +91,149 @@ import {
   WorkstreamSchema
 } from "./factory.js";
 
+type JsonSchemaValue = null | boolean | number | string | JsonSchemaValue[] | { [key: string]: JsonSchemaValue };
+type OpenTagJsonSchema = {
+  $ref: string;
+  definitions: Record<string, JsonSchemaValue>;
+  $schema?: string;
+};
+
+function rewriteRootReferences(value: JsonSchemaValue, rootReference: string): JsonSchemaValue {
+  if (Array.isArray(value)) {
+    return value.map((entry) => rewriteRootReferences(entry, rootReference));
+  }
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      key === "$ref" && entry === "#" ? rootReference : rewriteRootReferences(entry, rootReference)
+    ])
+  );
+}
+
+function preserveClosedObjectContract(value: JsonSchemaValue): JsonSchemaValue {
+  if (Array.isArray(value)) {
+    return value.map(preserveClosedObjectContract);
+  }
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+
+  const schema = Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, preserveClosedObjectContract(entry)])
+  );
+  if (schema.type === "object" && schema.additionalProperties === undefined) {
+    schema.additionalProperties = false;
+  }
+  return schema;
+}
+
+function toOpenTagJsonSchema(schema: z.ZodType, name: string): OpenTagJsonSchema {
+  const rootReference = `#/definitions/${name}`;
+  const generated = rewriteRootReferences(
+    preserveClosedObjectContract(
+      z.toJSONSchema(schema, {
+        io: "input",
+        reused: "ref",
+        target: "draft-7"
+      }) as JsonSchemaValue
+    ),
+    rootReference
+  ) as Record<string, JsonSchemaValue>;
+  const { $schema, definitions, ...definition } = generated;
+
+  return {
+    $ref: rootReference,
+    definitions: {
+      [name]: definition,
+      ...(definitions && typeof definitions === "object" && !Array.isArray(definitions) ? definitions : {})
+    },
+    ...(typeof $schema === "string" ? { $schema } : {})
+  };
+}
+
 export const OpenTagJsonSchemas = {
-  OpenTagEvent: zodToJsonSchema(OpenTagEventSchema, "OpenTagEvent"),
-  AcceptedGateAdvance: zodToJsonSchema(AcceptedGateAdvanceSchema, "AcceptedGateAdvance"),
-  AcceptedProgressAttributionView: zodToJsonSchema(AcceptedProgressAttributionViewSchema, "AcceptedProgressAttributionView"),
-  OpenTagRun: zodToJsonSchema(OpenTagRunSchema, "OpenTagRun"),
-  OpenTagRunResult: zodToJsonSchema(OpenTagRunResultSchema, "OpenTagRunResult"),
-  ConnectionRef: zodToJsonSchema(ConnectionRefSchema, "ConnectionRef"),
-  AgentAccessProfileSnapshot: zodToJsonSchema(AgentAccessProfileSnapshotSchema, "AgentAccessProfileSnapshot"),
-  PolicySnapshotProvenance: zodToJsonSchema(PolicySnapshotProvenanceSchema, "PolicySnapshotProvenance"),
-  Attempt: zodToJsonSchema(AttemptSchema, "Attempt"),
-  AttemptStatus: zodToJsonSchema(AttemptStatusSchema, "AttemptStatus"),
-  Grant: zodToJsonSchema(GrantSchema, "Grant"),
-  Action: zodToJsonSchema(ActionSchema, "Action"),
-  MaterialActionReceipt: zodToJsonSchema(MaterialActionReceiptSchema, "MaterialActionReceipt"),
-  ActionPermissionRequest: zodToJsonSchema(ActionPermissionRequestSchema, "ActionPermissionRequest"),
-  ActionPermissionResolution: zodToJsonSchema(ActionPermissionResolutionSchema, "ActionPermissionResolution"),
-  Artifact: zodToJsonSchema(ArtifactSchema, "Artifact"),
-  VerificationEvidence: zodToJsonSchema(VerificationEvidenceSchema, "VerificationEvidence"),
-  RunAdmissionDecision: zodToJsonSchema(RunAdmissionDecisionSchema, "RunAdmissionDecision"),
-  FollowUpRequest: zodToJsonSchema(FollowUpRequestSchema, "FollowUpRequest"),
-  WorkItemReference: zodToJsonSchema(WorkItemReferenceSchema, "WorkItemReference"),
-  ConversationAnchor: zodToJsonSchema(ConversationAnchorSchema, "ConversationAnchor"),
-  WorkThread: zodToJsonSchema(WorkThreadSchema, "WorkThread"),
-  CompletionGate: zodToJsonSchema(CompletionGateSchema, "CompletionGate"),
-  CompletionTargetSelector: zodToJsonSchema(CompletionTargetSelectorSchema, "CompletionTargetSelector"),
-  ResolvedCompletionTarget: zodToJsonSchema(ResolvedCompletionTargetSchema, "ResolvedCompletionTarget"),
-  CompletionContract: zodToJsonSchema(CompletionContractSchema, "CompletionContract"),
-  CompletionGateResult: zodToJsonSchema(CompletionGateResultSchema, "CompletionGateResult"),
-  CompletionWaiver: zodToJsonSchema(CompletionWaiverSchema, "CompletionWaiver"),
-  CompletionAssessment: zodToJsonSchema(CompletionAssessmentSchema, "CompletionAssessment"),
-  ReassessmentObligation: zodToJsonSchema(ReassessmentObligationSchema, "ReassessmentObligation"),
-  HumanEscalation: zodToJsonSchema(HumanEscalationSchema, "HumanEscalation"),
-  WorkLoopCause: zodToJsonSchema(WorkLoopCauseSchema, "WorkLoopCause"),
-  WorkLoopNextAction: zodToJsonSchema(WorkLoopNextActionSchema, "WorkLoopNextAction"),
-  WorkLoopView: zodToJsonSchema(WorkLoopViewSchema, "WorkLoopView"),
-  ContextPacket: zodToJsonSchema(ContextPacketSchema, "ContextPacket"),
-  OpenTagIntegrationManifest: zodToJsonSchema(OpenTagIntegrationManifestSchema, "OpenTagIntegrationManifest"),
-  OpenTagActorRef: zodToJsonSchema(OpenTagActorRefSchema, "OpenTagActorRef"),
-  OpenTagChannelRef: zodToJsonSchema(OpenTagChannelRefSchema, "OpenTagChannelRef"),
-  OpenTagThreadRef: zodToJsonSchema(OpenTagThreadRefSchema, "OpenTagThreadRef"),
-  OpenTagRepoRef: zodToJsonSchema(OpenTagRepoRefSchema, "OpenTagRepoRef"),
-  OpenTagChangeRequestRef: zodToJsonSchema(OpenTagChangeRequestRefSchema, "OpenTagChangeRequestRef"),
-  OpenTagWorkItemRef: zodToJsonSchema(OpenTagWorkItemRefSchema, "OpenTagWorkItemRef"),
-  OpenTagContextRef: zodToJsonSchema(OpenTagContextRefSchema, "OpenTagContextRef"),
-  OpenTagRunSourceRef: zodToJsonSchema(OpenTagRunSourceRefSchema, "OpenTagRunSourceRef"),
-  OpenTagRunTargets: zodToJsonSchema(OpenTagRunTargetsSchema, "OpenTagRunTargets"),
-  OpenTagReplyTargetRef: zodToJsonSchema(OpenTagReplyTargetRefSchema, "OpenTagReplyTargetRef"),
-  OpenTagChannelInboundMessage: zodToJsonSchema(OpenTagChannelInboundMessageSchema, "OpenTagChannelInboundMessage"),
-  OpenTagChannelPresentationCommand: zodToJsonSchema(OpenTagChannelPresentationCommandSchema, "OpenTagChannelPresentationCommand"),
-  RunEventVisibility: zodToJsonSchema(RunEventVisibilitySchema, "RunEventVisibility"),
-  RunEventImportance: zodToJsonSchema(RunEventImportanceSchema, "RunEventImportance"),
-  RunEvent: zodToJsonSchema(RunEventSchema, "RunEvent"),
-  ArtifactKind: zodToJsonSchema(ArtifactKindSchema, "ArtifactKind"),
-  RunArtifactType: zodToJsonSchema(RunArtifactTypeSchema, "RunArtifactType"),
-  AdapterMutationMapping: zodToJsonSchema(AdapterMutationMappingSchema, "AdapterMutationMapping"),
-  CapabilityContract: zodToJsonSchema(CapabilityContractSchema, "CapabilityContract"),
-  PolicyResolution: zodToJsonSchema(PolicyResolutionSchema, "PolicyResolution"),
-  ProposalLineage: zodToJsonSchema(ProposalLineageSchema, "ProposalLineage"),
-  SuccessMetricName: zodToJsonSchema(SuccessMetricNameSchema, "SuccessMetricName"),
-  ActionHint: zodToJsonSchema(ActionHintSchema, "ActionHint"),
-  CanonicalMutationDomain: zodToJsonSchema(CanonicalMutationDomainSchema, "CanonicalMutationDomain"),
-  MutationIntent: zodToJsonSchema(MutationIntentSchema, "MutationIntent"),
-  SuggestedChangesSnapshot: zodToJsonSchema(SuggestedChangesSnapshotSchema, "SuggestedChangesSnapshot"),
-  ApprovalDecision: zodToJsonSchema(ApprovalDecisionSchema, "ApprovalDecision"),
-  ApplyPlan: zodToJsonSchema(ApplyPlanSchema, "ApplyPlan"),
-  ApplyIntentOutcome: zodToJsonSchema(ApplyIntentOutcomeSchema, "ApplyIntentOutcome"),
-  FrozenRoutingPolicy: zodToJsonSchema(FrozenRoutingPolicySchema, "FrozenRoutingPolicy"),
-  RunnerRegistration: zodToJsonSchema(RunnerRegistrationInputSchema, "RunnerRegistration"),
-  RunnerDirectoryEntry: zodToJsonSchema(RunnerDirectoryEntrySchema, "RunnerDirectoryEntry"),
-  RoutingDecision: zodToJsonSchema(RoutingDecisionSchema, "RoutingDecision"),
-  AcceptedProgressMetrics: zodToJsonSchema(AcceptedProgressMetricsSchema, "AcceptedProgressMetrics"),
-  FactoryRecipeSnapshotInput: zodToJsonSchema(FactoryRecipeSnapshotInputSchema, "FactoryRecipeSnapshotInput"),
-  FactoryRecipeSnapshot: zodToJsonSchema(FactoryRecipeSnapshotSchema, "FactoryRecipeSnapshot"),
-  WorkstreamContinuationPolicy: zodToJsonSchema(WorkstreamContinuationPolicySchema, "WorkstreamContinuationPolicy"),
-  WorkstreamContinuationDecisionInput: zodToJsonSchema(WorkstreamContinuationDecisionInputSchema, "WorkstreamContinuationDecisionInput"),
-  WorkstreamContinuationDecision: zodToJsonSchema(WorkstreamContinuationDecisionSchema, "WorkstreamContinuationDecision"),
-  WorkstreamInput: zodToJsonSchema(WorkstreamInputSchema, "WorkstreamInput"),
-  Workstream: zodToJsonSchema(WorkstreamSchema, "Workstream"),
-  WorkstreamAdmissionBatchInput: zodToJsonSchema(WorkstreamAdmissionBatchInputSchema, "WorkstreamAdmissionBatchInput"),
-  WorkstreamAdmissionBatchReceipt: zodToJsonSchema(WorkstreamAdmissionBatchReceiptSchema, "WorkstreamAdmissionBatchReceipt"),
-  WorkstreamMetrics: zodToJsonSchema(WorkstreamMetricsSchema, "WorkstreamMetrics"),
-  WorkstreamEvaluation: zodToJsonSchema(WorkstreamEvaluationSchema, "WorkstreamEvaluation")
+  OpenTagEvent: toOpenTagJsonSchema(OpenTagEventSchema, "OpenTagEvent"),
+  AcceptedGateAdvance: toOpenTagJsonSchema(AcceptedGateAdvanceSchema, "AcceptedGateAdvance"),
+  AcceptedProgressAttributionView: toOpenTagJsonSchema(AcceptedProgressAttributionViewSchema, "AcceptedProgressAttributionView"),
+  OpenTagRun: toOpenTagJsonSchema(OpenTagRunSchema, "OpenTagRun"),
+  OpenTagRunResult: toOpenTagJsonSchema(OpenTagRunResultSchema, "OpenTagRunResult"),
+  ConnectionRef: toOpenTagJsonSchema(ConnectionRefSchema, "ConnectionRef"),
+  AgentAccessProfileSnapshot: toOpenTagJsonSchema(AgentAccessProfileSnapshotSchema, "AgentAccessProfileSnapshot"),
+  PolicySnapshotProvenance: toOpenTagJsonSchema(PolicySnapshotProvenanceSchema, "PolicySnapshotProvenance"),
+  Attempt: toOpenTagJsonSchema(AttemptSchema, "Attempt"),
+  AttemptStatus: toOpenTagJsonSchema(AttemptStatusSchema, "AttemptStatus"),
+  Grant: toOpenTagJsonSchema(GrantSchema, "Grant"),
+  Action: toOpenTagJsonSchema(ActionSchema, "Action"),
+  MaterialActionReceipt: toOpenTagJsonSchema(MaterialActionReceiptSchema, "MaterialActionReceipt"),
+  ActionPermissionRequest: toOpenTagJsonSchema(ActionPermissionRequestSchema, "ActionPermissionRequest"),
+  ActionPermissionResolution: toOpenTagJsonSchema(ActionPermissionResolutionSchema, "ActionPermissionResolution"),
+  Artifact: toOpenTagJsonSchema(ArtifactSchema, "Artifact"),
+  VerificationEvidence: toOpenTagJsonSchema(VerificationEvidenceSchema, "VerificationEvidence"),
+  RunAdmissionDecision: toOpenTagJsonSchema(RunAdmissionDecisionSchema, "RunAdmissionDecision"),
+  FollowUpRequest: toOpenTagJsonSchema(FollowUpRequestSchema, "FollowUpRequest"),
+  WorkItemReference: toOpenTagJsonSchema(WorkItemReferenceSchema, "WorkItemReference"),
+  ConversationAnchor: toOpenTagJsonSchema(ConversationAnchorSchema, "ConversationAnchor"),
+  WorkThread: toOpenTagJsonSchema(WorkThreadSchema, "WorkThread"),
+  CompletionGate: toOpenTagJsonSchema(CompletionGateSchema, "CompletionGate"),
+  CompletionTargetSelector: toOpenTagJsonSchema(CompletionTargetSelectorSchema, "CompletionTargetSelector"),
+  ResolvedCompletionTarget: toOpenTagJsonSchema(ResolvedCompletionTargetSchema, "ResolvedCompletionTarget"),
+  CompletionContract: toOpenTagJsonSchema(CompletionContractSchema, "CompletionContract"),
+  CompletionGateResult: toOpenTagJsonSchema(CompletionGateResultSchema, "CompletionGateResult"),
+  CompletionWaiver: toOpenTagJsonSchema(CompletionWaiverSchema, "CompletionWaiver"),
+  CompletionAssessment: toOpenTagJsonSchema(CompletionAssessmentSchema, "CompletionAssessment"),
+  ReassessmentObligation: toOpenTagJsonSchema(ReassessmentObligationSchema, "ReassessmentObligation"),
+  HumanEscalation: toOpenTagJsonSchema(HumanEscalationSchema, "HumanEscalation"),
+  WorkLoopCause: toOpenTagJsonSchema(WorkLoopCauseSchema, "WorkLoopCause"),
+  WorkLoopNextAction: toOpenTagJsonSchema(WorkLoopNextActionSchema, "WorkLoopNextAction"),
+  WorkLoopView: toOpenTagJsonSchema(WorkLoopViewSchema, "WorkLoopView"),
+  ContextPacket: toOpenTagJsonSchema(ContextPacketSchema, "ContextPacket"),
+  OpenTagIntegrationManifest: toOpenTagJsonSchema(OpenTagIntegrationManifestSchema, "OpenTagIntegrationManifest"),
+  OpenTagActorRef: toOpenTagJsonSchema(OpenTagActorRefSchema, "OpenTagActorRef"),
+  OpenTagChannelRef: toOpenTagJsonSchema(OpenTagChannelRefSchema, "OpenTagChannelRef"),
+  OpenTagThreadRef: toOpenTagJsonSchema(OpenTagThreadRefSchema, "OpenTagThreadRef"),
+  OpenTagRepoRef: toOpenTagJsonSchema(OpenTagRepoRefSchema, "OpenTagRepoRef"),
+  OpenTagChangeRequestRef: toOpenTagJsonSchema(OpenTagChangeRequestRefSchema, "OpenTagChangeRequestRef"),
+  OpenTagWorkItemRef: toOpenTagJsonSchema(OpenTagWorkItemRefSchema, "OpenTagWorkItemRef"),
+  OpenTagContextRef: toOpenTagJsonSchema(OpenTagContextRefSchema, "OpenTagContextRef"),
+  OpenTagRunSourceRef: toOpenTagJsonSchema(OpenTagRunSourceRefSchema, "OpenTagRunSourceRef"),
+  OpenTagRunTargets: toOpenTagJsonSchema(OpenTagRunTargetsSchema, "OpenTagRunTargets"),
+  OpenTagReplyTargetRef: toOpenTagJsonSchema(OpenTagReplyTargetRefSchema, "OpenTagReplyTargetRef"),
+  OpenTagChannelInboundMessage: toOpenTagJsonSchema(OpenTagChannelInboundMessageSchema, "OpenTagChannelInboundMessage"),
+  OpenTagChannelPresentationCommand: toOpenTagJsonSchema(OpenTagChannelPresentationCommandSchema, "OpenTagChannelPresentationCommand"),
+  RunEventVisibility: toOpenTagJsonSchema(RunEventVisibilitySchema, "RunEventVisibility"),
+  RunEventImportance: toOpenTagJsonSchema(RunEventImportanceSchema, "RunEventImportance"),
+  RunEvent: toOpenTagJsonSchema(RunEventSchema, "RunEvent"),
+  ArtifactKind: toOpenTagJsonSchema(ArtifactKindSchema, "ArtifactKind"),
+  RunArtifactType: toOpenTagJsonSchema(RunArtifactTypeSchema, "RunArtifactType"),
+  AdapterMutationMapping: toOpenTagJsonSchema(AdapterMutationMappingSchema, "AdapterMutationMapping"),
+  CapabilityContract: toOpenTagJsonSchema(CapabilityContractSchema, "CapabilityContract"),
+  PolicyResolution: toOpenTagJsonSchema(PolicyResolutionSchema, "PolicyResolution"),
+  ProposalLineage: toOpenTagJsonSchema(ProposalLineageSchema, "ProposalLineage"),
+  SuccessMetricName: toOpenTagJsonSchema(SuccessMetricNameSchema, "SuccessMetricName"),
+  ActionHint: toOpenTagJsonSchema(ActionHintSchema, "ActionHint"),
+  CanonicalMutationDomain: toOpenTagJsonSchema(CanonicalMutationDomainSchema, "CanonicalMutationDomain"),
+  MutationIntent: toOpenTagJsonSchema(MutationIntentSchema, "MutationIntent"),
+  SuggestedChangesSnapshot: toOpenTagJsonSchema(SuggestedChangesSnapshotSchema, "SuggestedChangesSnapshot"),
+  ApprovalDecision: toOpenTagJsonSchema(ApprovalDecisionSchema, "ApprovalDecision"),
+  ApplyPlan: toOpenTagJsonSchema(ApplyPlanSchema, "ApplyPlan"),
+  ApplyIntentOutcome: toOpenTagJsonSchema(ApplyIntentOutcomeSchema, "ApplyIntentOutcome"),
+  FrozenRoutingPolicy: toOpenTagJsonSchema(FrozenRoutingPolicySchema, "FrozenRoutingPolicy"),
+  RunnerRegistration: toOpenTagJsonSchema(RunnerRegistrationInputSchema, "RunnerRegistration"),
+  RunnerDirectoryEntry: toOpenTagJsonSchema(RunnerDirectoryEntrySchema, "RunnerDirectoryEntry"),
+  RoutingDecision: toOpenTagJsonSchema(RoutingDecisionSchema, "RoutingDecision"),
+  AcceptedProgressMetrics: toOpenTagJsonSchema(AcceptedProgressMetricsSchema, "AcceptedProgressMetrics"),
+  FactoryRecipeSnapshotInput: toOpenTagJsonSchema(FactoryRecipeSnapshotInputSchema, "FactoryRecipeSnapshotInput"),
+  FactoryRecipeSnapshot: toOpenTagJsonSchema(FactoryRecipeSnapshotSchema, "FactoryRecipeSnapshot"),
+  WorkstreamContinuationPolicy: toOpenTagJsonSchema(WorkstreamContinuationPolicySchema, "WorkstreamContinuationPolicy"),
+  WorkstreamContinuationDecisionInput: toOpenTagJsonSchema(WorkstreamContinuationDecisionInputSchema, "WorkstreamContinuationDecisionInput"),
+  WorkstreamContinuationDecision: toOpenTagJsonSchema(WorkstreamContinuationDecisionSchema, "WorkstreamContinuationDecision"),
+  WorkstreamInput: toOpenTagJsonSchema(WorkstreamInputSchema, "WorkstreamInput"),
+  Workstream: toOpenTagJsonSchema(WorkstreamSchema, "Workstream"),
+  WorkstreamAdmissionBatchInput: toOpenTagJsonSchema(WorkstreamAdmissionBatchInputSchema, "WorkstreamAdmissionBatchInput"),
+  WorkstreamAdmissionBatchReceipt: toOpenTagJsonSchema(WorkstreamAdmissionBatchReceiptSchema, "WorkstreamAdmissionBatchReceipt"),
+  WorkstreamMetrics: toOpenTagJsonSchema(WorkstreamMetricsSchema, "WorkstreamMetrics"),
+  WorkstreamEvaluation: toOpenTagJsonSchema(WorkstreamEvaluationSchema, "WorkstreamEvaluation")
 } as const;

@@ -13,7 +13,7 @@ import {
   type LocalDispatcherRuntimeInput,
   type OpenTagDaemonConfig
 } from "@opentag/local-runtime";
-import { z } from "zod/v3";
+import { z } from "zod";
 import type { CliLanguage } from "./catalogs/languages.js";
 import type { PlatformId } from "./catalogs/platforms.js";
 
@@ -237,7 +237,7 @@ const DaemonConfigSchema = z
     runnerId: z.string().min(1),
     dispatcherUrl: z.string().url(),
     repositories: z.array(RepositoryBindingSchema).default([]),
-    agents: z.record(AcpAgentSchema).optional(),
+    agents: z.record(z.string(), AcpAgentSchema).optional(),
     scratchRoot: z.string().min(1).optional(),
     keepScratch: KeepWorktreeSchema.optional(),
     approvalMode: z.enum(["ask", "auto", "autonomous"]).optional(),
@@ -572,8 +572,8 @@ export function defaultStateDirectory(env: PathEnvironment = process.env, home =
   return join(home, ".local", "state", "opentag");
 }
 
-function formatPath(path: Array<string | number>): string {
-  return path.length ? path.join(".") : "config";
+function formatPath(path: PropertyKey[]): string {
+  return path.length ? path.map(String).join(".") : "config";
 }
 
 export function formatCliConfigError(error: unknown): string {

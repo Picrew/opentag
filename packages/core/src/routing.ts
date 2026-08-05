@@ -1,4 +1,4 @@
-import { z } from "zod/v3";
+import { z } from "zod";
 
 export const RunnerLocalitySchema = z.enum(["local", "private", "hosted"]);
 export const RunnerDeclaredStateSchema = z.enum(["ready", "draining"]);
@@ -83,15 +83,15 @@ const RunnerRegistrationShape = {
 };
 
 export const RunnerRegistrationRequestSchema = z
-  .object(RunnerRegistrationShape)
-  .strict()
-  .partial({
-    locality: true,
-    declaredState: true,
-    executors: true,
-    maxConcurrentRuns: true,
-    preference: true
-  });
+  .object({
+    ...RunnerRegistrationShape,
+    locality: RunnerRegistrationShape.locality.removeDefault().optional(),
+    declaredState: RunnerRegistrationShape.declaredState.removeDefault().optional(),
+    executors: RunnerRegistrationShape.executors.removeDefault().optional(),
+    maxConcurrentRuns: RunnerRegistrationShape.maxConcurrentRuns.removeDefault().optional(),
+    preference: RunnerRegistrationShape.preference.removeDefault().optional()
+  })
+  .strict();
 
 export const RunnerRegistrationInputSchema = z
   .object(RunnerRegistrationShape)
