@@ -194,7 +194,7 @@ function requestBodyTooLarge(c: Context, maxBytes: number): HTTPException {
   });
 }
 
-async function parseBody<S extends z.ZodTypeAny>(
+async function parseBody<S extends z.ZodType>(
   c: Context,
   schema: S,
   options: { maxBytes?: number; invalidBodyError?: string } = {}
@@ -4395,7 +4395,7 @@ export function createDispatcherApp(input: {
     ...(input.completionNow ? { now: input.completionNow } : {})
   });
   if (reassessmentOptions.autoStart !== false) reassessmentWorker.start();
-  const parseDispatcherBody = async <S extends z.ZodTypeAny>(
+  const parseDispatcherBody = async <S extends z.ZodType>(
     c: Context,
     schema: S,
     options: { invalidBodyError?: string } = {}

@@ -31,7 +31,7 @@ export const CommandParseDiagnosticSchema = z.object({
 export const ParsedOpenTagCommandSchema = z.object({
   version: z.literal("v1"),
   prompt: z.string(),
-  flags: z.record(CommandFlagValueSchema),
+  flags: z.record(z.string(), CommandFlagValueSchema),
   references: z.array(CommandReferenceSchema),
   requestedScopes: z.array(PermissionScopeSchema),
   approval: z.enum(["auto", "required", "never"]).optional(),
@@ -62,7 +62,7 @@ export const AgentTargetSchema = z.object({
 export const OpenTagCommandSchema = z.object({
   rawText: z.string(),
   intent: z.enum(["fix", "review", "investigate", "explain", "run", "unknown"]),
-  args: z.record(CommandArgValueSchema),
+  args: z.record(z.string(), CommandArgValueSchema),
   parsed: ParsedOpenTagCommandSchema.optional()
 });
 
@@ -157,7 +157,7 @@ export const VerificationEvidenceSchema = z
     summary: z.string().min(1),
     sourceRef: z.string().min(1).optional(),
     createdAt: z.string().datetime(),
-    metadata: z.record(z.unknown()).optional()
+    metadata: z.record(z.string(), z.unknown()).optional()
   })
   .strict();
 
@@ -194,11 +194,11 @@ export const GrantSchema = z
     id: z.string().min(1),
     connectionId: z.string().min(1),
     capability: z.string().min(1),
-    resourceScope: z.record(z.unknown()),
+    resourceScope: z.record(z.string(), z.unknown()),
     runId: z.string().min(1),
     attemptId: z.string().min(1).optional(),
     expiresAt: z.string().datetime().optional(),
-    constraints: z.record(z.unknown()).optional(),
+    constraints: z.record(z.string(), z.unknown()).optional(),
     revokedAt: z.string().datetime().optional()
   })
   .strict();
@@ -206,7 +206,7 @@ export const GrantSchema = z
 export const ApprovalModeSchema = z.enum(["ask", "auto", "autonomous"]);
 export const PermissionDecisionKindSchema = z.enum(["allow_once", "allow_run", "deny"]);
 export const ActionRiskTierSchema = z.enum(["low", "medium", "high", "critical"]);
-const CredentialSafeRecordSchema = z.record(z.unknown()).refine(isCredentialSafeValue, {
+const CredentialSafeRecordSchema = z.record(z.string(), z.unknown()).refine(isCredentialSafeValue, {
   message: "Record must not contain credential-like keys or values."
 });
 const CredentialSafeActionTitleSchema = z.string().min(1).max(240)
@@ -238,7 +238,7 @@ export const MaterialActionReceiptSchema = z
     externalUri: z.string().url().optional(),
     observedAt: z.string().datetime(),
     evidence: z.array(VerificationEvidenceSchema).optional(),
-    metadata: z.record(z.unknown()).optional()
+    metadata: z.record(z.string(), z.unknown()).optional()
   })
   .strict();
 
@@ -303,7 +303,7 @@ export const ArtifactSchema = z
     summary: z.string().min(1).optional(),
     evidence: z.array(VerificationEvidenceSchema).optional(),
     createdAt: z.string().datetime(),
-    metadata: z.record(z.unknown()).optional()
+    metadata: z.record(z.string(), z.unknown()).optional()
   })
   .strict();
 
@@ -410,7 +410,7 @@ export const AdapterMutationMappingSchema = z.object({
   adapter: z.string().min(1),
   domain: z.string().min(1),
   strategy: z.string().min(1),
-  values: z.record(z.string().min(1)),
+  values: z.record(z.string(), z.string().min(1)),
   description: z.string().min(1).optional()
 });
 
@@ -442,7 +442,7 @@ export const WorkItemReferenceSchema = z.object({
       uri: z.string().min(1).optional()
     })
     .optional(),
-  metadata: z.record(z.unknown()).optional()
+  metadata: z.record(z.string(), z.unknown()).optional()
 });
 
 export const ConversationAnchorSchema = z.object({
@@ -453,7 +453,7 @@ export const ConversationAnchorSchema = z.object({
   threadKey: z.string().min(1).optional(),
   controlPlane: z.boolean().optional(),
   canApprove: z.boolean().optional(),
-  metadata: z.record(z.unknown()).optional()
+  metadata: z.record(z.string(), z.unknown()).optional()
 });
 
 export const WorkThreadSchema = z.object({
@@ -603,7 +603,7 @@ export const ActionHintSchema = z.object({
   ]),
   targetId: z.string().min(1).optional(),
   selectedIntentIds: z.array(z.string().min(1)).optional(),
-  metadata: z.record(z.unknown()).optional()
+  metadata: z.record(z.string(), z.unknown()).optional()
 });
 
 export const NextActionSchema = z.union([
@@ -1439,7 +1439,7 @@ export const MutationIntentSchema = z.object({
   domain: z.union([CanonicalMutationDomainSchema, z.string().min(1)]),
   action: z.string().min(1),
   summary: z.string().min(1),
-  params: z.record(z.unknown()).optional(),
+  params: z.record(z.string(), z.unknown()).optional(),
   supersedesIntentIds: z.array(z.string().min(1)).optional(),
   sourcePointer: ContextPointerSchema.optional()
 });
@@ -1453,7 +1453,7 @@ export const SuggestedChangesSnapshotSchema = z.object({
   intents: z.array(MutationIntentSchema).min(1),
   preconditions: z.array(z.string().min(1)).optional(),
   supersedesProposalIds: z.array(z.string().min(1)).optional(),
-  metadata: z.record(z.unknown()).optional()
+  metadata: z.record(z.string(), z.unknown()).optional()
 });
 
 export const MutationIntentActionabilitySchema = z.object({
@@ -1480,7 +1480,7 @@ export const ApprovalDecisionSchema = z.object({
   approvedAt: z.string().datetime(),
   scope: z.enum(["manual", "policy"]),
   reason: z.string().min(1).optional(),
-  metadata: z.record(z.unknown()).optional()
+  metadata: z.record(z.string(), z.unknown()).optional()
 });
 
 export const ApplyIntentOutcomeSchema = z.object({
@@ -1515,7 +1515,7 @@ export const OpenTagEventSchema = z.object({
   workItem: WorkItemReferenceSchema.optional(),
   permissions: z.array(PermissionGrantSchema),
   callback: CallbackRouteSchema,
-  metadata: z.record(z.unknown())
+  metadata: z.record(z.string(), z.unknown())
 });
 
 export const ResultArtifactSchema = z.object({
@@ -1528,7 +1528,7 @@ export const ResultArtifactSchema = z.object({
   sourceRunId: z.string().min(1).optional(),
   createdAt: z.string().datetime().optional(),
   relatedIds: z.array(z.string().min(1)).optional(),
-  metadata: z.record(z.unknown()).optional()
+  metadata: z.record(z.string(), z.unknown()).optional()
 });
 
 export const OpenTagRunResultSchema = z.object({

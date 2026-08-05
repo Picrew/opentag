@@ -59,7 +59,7 @@ export const OpenTagApprovalPromptPresentationSchema = z
       resource: CredentialSafePresentationTextSchema,
       resourceVersion: CredentialSafePresentationTextSchema.optional()
     }).strict(),
-    runScope: z.record(z.unknown()).refine(isCredentialSafeValue),
+    runScope: z.record(z.string(), z.unknown()).refine(isCredentialSafeValue),
     decisions: z.array(z.enum(["allow_once", "allow_run", "deny"])).min(1)
   })
   .strict();

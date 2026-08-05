@@ -188,7 +188,7 @@ export const OpenTagDaemonConfigSchema = z
     runnerId: z.string().min(1).default("runner_local"),
     dispatcherUrl: z.string().url().default("http://localhost:3030"),
     repositories: z.array(RepositoryBindingConfigSchema).default([]),
-    agents: z.record(AcpAgentConfigSchema).default({}),
+    agents: z.record(z.string(), AcpAgentConfigSchema).default({}),
     scratchRoot: AbsolutePathSchema.default(() => join(defaultLocalStateDirectory(), "scratch")),
     keepScratch: KeepWorktreeSchema.default("on_failure"),
     approvalMode: z.enum(["ask", "auto", "autonomous"]).default("auto"),
@@ -334,8 +334,8 @@ function stringListFromJsonEnv(name: string): string[] | undefined {
   return values.length ? values : undefined;
 }
 
-function formatPath(path: Array<string | number>): string {
-  return path.length ? path.join(".") : "config";
+function formatPath(path: PropertyKey[]): string {
+  return path.length ? path.map(String).join(".") : "config";
 }
 
 export function formatConfigError(error: unknown): string {
