@@ -12,7 +12,7 @@ the dispatcher, daemon, and Lark ingress in separate terminals.
 
 ## What You Need
 
-- Node 22.x
+- Node 22.14 or newer
 - Git
 - A Lark or Feishu account
 - A local git checkout for the project the agent should run in

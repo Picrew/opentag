@@ -78,7 +78,7 @@ human-readable Linear issue key as well as the model UUID or issue URL.
 
 ## Shared Local Prerequisites
 
-- Node 22.x
+- Node 22.14 or newer
 - pnpm 9.x
 - A clean local checkout for any repository you want to bind
 - `pnpm install`

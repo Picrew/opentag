@@ -97,7 +97,7 @@ The setup wizard links to the matching guide for each platform:
 
 ## Requirements
 
-- Node.js 22 or newer.
+- Node.js 22.14 or newer.
 - An existing local login or provider configuration for the selected Codex, Claude Code, Cursor, OpenCode, Hermes, or OpenClaw ACP agent.
 - Platform credentials for the platform you connect.
 

@@ -4,7 +4,7 @@
   "description": "SQLite and Drizzle persistence primitives for OpenTag runs and leases.",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.14.0"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -262,6 +262,51 @@ function checkInstalledTeamsAuthDependencies(installDir) {
   run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });
 }
 
+function checkInstalledSqliteRuntime(installDir) {
+  const probe = `
+    import { readFileSync } from "node:fs";
+    import { createRequire } from "node:module";
+    import { resolve } from "node:path";
+    import { migrateSchema } from "@opentag/store";
+
+    const storePackagePath = resolve("node_modules/@opentag/store/package.json");
+    const dispatcherPackagePath = resolve("node_modules/@opentag/dispatcher/package.json");
+    const localRuntimePackagePath = resolve("node_modules/@opentag/local-runtime/package.json");
+    const cliPackagePath = resolve("node_modules/@opentag/cli/package.json");
+    for (const packagePath of [storePackagePath, dispatcherPackagePath, localRuntimePackagePath, cliPackagePath]) {
+      const manifest = JSON.parse(readFileSync(packagePath, "utf8"));
+      if (manifest.engines?.node !== ">=22.14.0") {
+        throw new Error(
+          \`Packed \${manifest.name} advertises \${manifest.engines?.node ?? "no Node engine"}; expected >=22.14.0 for better-sqlite3 13.\`
+        );
+      }
+    }
+
+    const requireFromDispatcher = createRequire(dispatcherPackagePath);
+    const sqlitePackagePath = requireFromDispatcher.resolve("better-sqlite3/package.json");
+    const sqliteManifest = JSON.parse(readFileSync(sqlitePackagePath, "utf8"));
+    if (!sqliteManifest.version.startsWith("13.")) {
+      throw new Error(\`Packed runtime installed better-sqlite3 \${sqliteManifest.version}; expected version 13.\`);
+    }
+
+    const Database = requireFromDispatcher("better-sqlite3");
+    const sqlite = new Database(":memory:");
+    try {
+      migrateSchema(sqlite);
+      migrateSchema(sqlite);
+      const reassessmentTable = sqlite
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reassessment_obligations'")
+        .get();
+      if (reassessmentTable?.name !== "reassessment_obligations") {
+        throw new Error("Packed SQLite runtime did not apply the reassessment-obligation migration.");
+      }
+    } finally {
+      sqlite.close();
+    }
+  `;
+  run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });
+}
+
 function checkInstalledPublicPackagePrivacy(installDir) {
   const privacyScanner = path.join(repoRoot, "scripts", "test", "privacy-redaction-scan.mjs");
   const packageRoots = packagePlan.map(({ packageJson }) =>
@@ -289,6 +334,9 @@ try {
   mkdirSync(installDir, { recursive: true });
   writeFileSync(path.join(installDir, "package.json"), "{\"private\":true,\"type\":\"module\"}\n");
   run("npm", ["install", "--no-audit", "--no-fund", ...tarballs], { cwd: installDir });
+
+  console.log("Checking the installed SQLite runtime...");
+  checkInstalledSqliteRuntime(installDir);
 
   console.log("Auditing installed production dependencies...");
   run("npm", ["audit", "--omit=dev", "--audit-level=high"], {

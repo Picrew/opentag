@@ -47,7 +47,7 @@ Each run also keeps a local agent work ledger: the source event, admission decis
 
 ## Quick Start
 
-Requires Node.js 22 or newer.
+Requires Node.js 22.14 or newer.
 
 ```bash
 npm install -g @opentag/cli@latest
@@ -101,7 +101,7 @@ If you use Codex or Claude Code and do not want to set this up by hand, start a 
 Help me set up OpenTag from https://github.com/amplifthq/opentag.
 
 Use the published OpenTag CLI. Please:
-1. Check that Node.js 22 or newer is available.
+1. Check that Node.js 22.14 or newer is available.
 2. Install or run the published OpenTag CLI.
 3. Run opentag setup and help me choose Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, Discord, or Microsoft Teams, a coding agent, and a local project.
 4. When platform credentials are needed, open the matching setup guide in the repository and walk me through it.

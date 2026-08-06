@@ -4,7 +4,7 @@
   "description": "Embeddable OpenTag dispatcher Hono app and callback sinks.",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.14.0"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

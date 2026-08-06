@@ -12,6 +12,7 @@ import {
 } from "../../../scripts/test/github-registry-artifact.js";
 
 const integrity = `sha512-${createHash("sha512").update("registry-artifact-fixture").digest("base64")}`;
+const expectedBetterSqliteVersion = "13.0.2";
 
 async function createRegistryInstall(
   version = "0.8.0",
@@ -94,7 +95,7 @@ async function createRegistryInstall(
 
   await writeFile(join(sqliteRoot, "package.json"), JSON.stringify({
     name: "better-sqlite3",
-    version: "11.10.0",
+    version: expectedBetterSqliteVersion,
     main: "./lib/index.js"
   }));
   await writeFile(join(sqliteRoot, "lib", "index.js"), "module.exports = {};\n");
@@ -130,8 +131,8 @@ async function createRegistryInstall(
         integrity
       },
       [`${lockPackageRoot}/better-sqlite3`]: {
-        version: "11.10.0",
-        resolved: `${registryOrigin}/better-sqlite3/-/better-sqlite3-11.10.0.tgz`,
+        version: expectedBetterSqliteVersion,
+        resolved: `${registryOrigin}/better-sqlite3/-/better-sqlite3-${expectedBetterSqliteVersion}.tgz`,
         integrity
       }
     }
@@ -214,11 +215,11 @@ describe("GitHub registry artifact acceptance", () => {
       inspectRegistryInstalledDependency({
         cliBin: fixture.cliBin,
         packageName: "better-sqlite3",
-        expectedVersion: "11.10.0"
+        expectedVersion: expectedBetterSqliteVersion
       })
     ).resolves.toMatchObject({
       package: "better-sqlite3",
-      version: "11.10.0",
+      version: expectedBetterSqliteVersion,
       registry: "https://registry.npmjs.org",
       integrity
     });
@@ -231,9 +232,9 @@ describe("GitHub registry artifact acceptance", () => {
       inspectRegistryInstalledDependency({
         cliBin: fixture.cliBin,
         packageName: "better-sqlite3",
-        expectedVersion: "11.9.0"
+        expectedVersion: "13.0.1"
       })
-    ).rejects.toThrow(/better-sqlite3 is 11\.10\.0; expected 11\.9\.0/u);
+    ).rejects.toThrow(/better-sqlite3 is 13\.0\.2; expected 13\.0\.1/u);
   });
 
   it("fails closed for a stale installed candidate", async () => {
