@@ -29,7 +29,7 @@ semantics, audit visibility, and runner-scoped authentication.
 
 ## Fast Path
 
-1. Confirm Node.js 22 or newer is available:
+1. Confirm Node.js 22.14 or newer is available:
 
 ```bash
 node --version

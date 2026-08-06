@@ -30,7 +30,7 @@ const execFile = promisify(execFileCallback);
 const DEFAULT_LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const DEFAULT_WAIT_SECONDS = 300;
 const REPLY_DUPLICATE_OBSERVATION_MS = 10_000;
-const EXPECTED_BETTER_SQLITE3_VERSION = "11.10.0";
+const EXPECTED_BETTER_SQLITE3_VERSION = "13.0.2";
 const MAX_LOG_BYTES = 64 * 1024;
 
 type JsonObject = Record<string, unknown>;

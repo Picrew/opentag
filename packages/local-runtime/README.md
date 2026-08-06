@@ -29,7 +29,7 @@ import { runDoctor } from "@opentag/local-runtime/doctor";
 
 ## Requirements
 
-- Node.js 22 or newer.
+- Node.js 22.14 or newer.
 - A writable SQLite database path for the dispatcher.
 - A local checkout for any Project Target you bind.
 

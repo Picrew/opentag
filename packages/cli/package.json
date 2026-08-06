@@ -4,7 +4,7 @@
   "description": "OpenTag command line interface.",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.14.0"
   },
   "bin": {
     "opentag": "./dist/index.js"
