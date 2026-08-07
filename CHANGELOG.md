@@ -12,9 +12,11 @@ executor-success semantics.
 ### Added
 
 - A default `governed` completion contract for GitHub-backed pull-request runs
-  without a configured completion policy, gating completion on a verified
-  pull-request artifact and an all-observed-checks-passing rollup, without
-  requiring merge.
+  without a configured completion policy, gating completion on a
+  provider-verified pull-request existence fact and an
+  all-observed-checks-passing rollup, without requiring merge. An
+  executor-reported pull request URL resolves the delivery target but never
+  satisfies completion on its own.
 - Slack mentions bound to a repository now carry a durable `workItem` for the
   source thread (with the bound repo as `ownerContainer`), so WorkThread-backed
   completion governance applies to the Slack → GitHub PR path.

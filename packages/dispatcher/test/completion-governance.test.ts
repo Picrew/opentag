@@ -472,10 +472,11 @@ describe("dispatcher completion governance", () => {
         completion: "pending",
         evidenceBacked: true,
         contract: { mode: "governed", cycle: 1, version: 1 },
-        missingGateIds: ["observed_checks"],
+        missingGateIds: ["verified_pull_request", "observed_checks"],
         currentAssessment: {
           gateResults: [
             { gateId: "pull_request", state: "passed" },
+            { gateId: "verified_pull_request", state: "missing" },
             { gateId: "observed_checks", state: "missing" }
           ]
         }
@@ -561,7 +562,7 @@ describe("dispatcher completion governance", () => {
         completion: "pending",
         evidenceBacked: true,
         contract: { mode: "governed", cycle: 1, version: 2 },
-        missingGateIds: ["observed_checks"]
+        missingGateIds: ["verified_pull_request", "observed_checks"]
       }
     });
   });

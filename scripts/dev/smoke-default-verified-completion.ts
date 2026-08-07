@@ -146,6 +146,10 @@ async function main() {
   assert(afterExec.completion.completion === "pending", "expected completion pending");
   assert(afterExec.completion.evidenceBacked === true, "expected evidence-backed");
   assert(afterExec.completion.contract.mode === "governed", "expected default governed contract");
+  assert(
+    afterExec.completion.missingGateIds.includes("verified_pull_request"),
+    "expected verified_pull_request missing until GitHub confirms the pull request"
+  );
   assert(afterExec.completion.missingGateIds.includes("observed_checks"), "expected observed_checks missing");
   assert(
     delivered.at(-1)?.body?.includes("waiting for verified repository evidence")

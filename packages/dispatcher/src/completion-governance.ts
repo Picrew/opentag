@@ -152,6 +152,16 @@ function defaultVerifiedContract(input: {
     resolvedFrom: [{ scope: "organization_default", ref: `github-default:${input.repository.owner}/${input.repository.repo}`, version: "1" }],
     gates: [
       { id: "pull_request", kind: "artifact", targetKey: "primary_change", artifactKind: "pull_request", minimum: 1 },
+      // The artifact gate only proves the executor reported a pull request URL.
+      // Existence must still be confirmed by provider-verified evidence.
+      {
+        id: "verified_pull_request",
+        kind: "verification",
+        targetKey: "primary_change",
+        evidenceKind: "source_control.pull_request",
+        requiredOutcome: "passed",
+        minimumAssurance: "verified"
+      },
       {
         id: "observed_checks",
         kind: "verification",
