@@ -15,7 +15,7 @@
 
 **[opentag.im](https://opentag.im)**
 
-**Turn an existing work thread into a governed agent work loop.**
+**Mention any coding agent. Get proof, not promises.**
 
 [![Release](https://img.shields.io/github/v/release/amplifthq/opentag?include_prereleases&label=release)](https://github.com/amplifthq/opentag/releases)
 [![npm](https://img.shields.io/npm/v/@opentag/cli?label=%40opentag%2Fcli)](https://www.npmjs.com/package/@opentag/cli)
@@ -25,9 +25,13 @@
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-339933)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
-OpenTag lets your team mention a coding agent from the collaboration platforms they already use. It turns that source thread into a bounded, auditable run: OpenTag curates the context packet, checks permissions and executor capability, runs an ACP coding agent locally, records an agent work ledger, and returns concise artifacts and safe next actions to the same thread.
+OpenTag is the open, local-first gateway between your team's threads and coding agents. Mention `@opentag` in Slack or GitHub, and it runs Claude Code, Codex, Cursor, or any [Agent Client Protocol](https://agentclientprotocol.com) agent on your own machine — then replies in the same thread with evidence, not just a summary.
 
-The concrete setup still connects Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, Discord, or Microsoft Teams to a local coding agent. The product boundary is broader than a connector: OpenTag is source-thread-native, local-first, and executor-neutral, so work stays where it already has context while the agent's inputs, authority, outputs, and callbacks remain reviewable.
+- **Any agent, one protocol.** Six built-in executors — Codex, Claude Code, Cursor, OpenCode, Hermes, OpenClaw — and custom runners all speak ACP. The mention is never tied to one vendor.
+- **Local-first by default.** Your code, credentials, and full execution traces stay on your machine. Platforms receive only the messages needed to acknowledge, reply, and apply actions you approve.
+- **"Done" requires evidence.** An executor reporting success is not completion. OpenTag can hold a run open until verifiable evidence — a pull request, green checks, a merge — satisfies configured completion gates, with the whole trail recorded in a local audit ledger.
+
+Slack, GitHub, GitLab, Linear, and Lark / Feishu are fully supported today; Telegram, Discord, and Microsoft Teams ship as previews.
 
 ## Demo
 
@@ -116,16 +120,16 @@ Agents can also follow the full agent-readable setup checklist in [Agent-readabl
 
 Use the guide for the platform you choose in `opentag setup`.
 
-| Platform | Best first path | Guide |
-| --- | --- | --- |
-| Slack | Use Socket Mode for local development | [Slack setup](docs/platforms/slack.en.md) |
-| GitHub | Use a repository webhook and GitHub token | [GitHub setup](docs/platforms/github.en.md) |
-| GitLab | Use a project Note Hook and GitLab access token | [GitLab setup](docs/platforms/gitlab.en.md) |
-| Linear | Use a workspace webhook and OAuth App install | [Linear setup](docs/platforms/linear.en.md) |
-| Lark / Feishu | Scan the Personal Agent QR code from setup | [Lark / Feishu setup](docs/platforms/lark.en.md) |
-| Telegram | Use BotFather token with local getUpdates polling | [Telegram setup](docs/platforms/telegram.en.md) |
-| Discord | Use a bot token with local Gateway delivery | [Discord setup](docs/platforms/discord.en.md) |
-| Microsoft Teams | Use an Azure Bot and public HTTPS tunnel to the local dispatcher (relay mode is not supported) | [Microsoft Teams setup](docs/platforms/teams.en.md) |
+| Platform | Status | Best first path | Guide |
+| --- | --- | --- | --- |
+| Slack | ✅ Full | Use Socket Mode for local development | [Slack setup](docs/platforms/slack.en.md) |
+| GitHub | ✅ Full | Use a repository webhook and GitHub token | [GitHub setup](docs/platforms/github.en.md) |
+| GitLab | ✅ Full | Use a project Note Hook and GitLab access token | [GitLab setup](docs/platforms/gitlab.en.md) |
+| Linear | ✅ Full | Use a workspace webhook and OAuth App install | [Linear setup](docs/platforms/linear.en.md) |
+| Lark / Feishu | ✅ Full | Scan the Personal Agent QR code from setup | [Lark / Feishu setup](docs/platforms/lark.en.md) |
+| Telegram | 🧪 Preview | Use BotFather token with local getUpdates polling | [Telegram setup](docs/platforms/telegram.en.md) |
+| Discord | 🧪 Preview | Use a bot token with local Gateway delivery (slash command only) | [Discord setup](docs/platforms/discord.en.md) |
+| Microsoft Teams | 🧪 Preview | Use an Azure Bot and public HTTPS tunnel to the local dispatcher (relay mode is not supported) | [Microsoft Teams setup](docs/platforms/teams.en.md) |
 
 ## What Runs Locally
 

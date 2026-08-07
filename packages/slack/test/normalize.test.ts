@@ -97,6 +97,21 @@ describe("Slack normalization", () => {
       webhookSignatureVerified: true,
       signatureState: "verified"
     });
+    expect(event?.workItem).toEqual({
+      provider: "slack",
+      kind: "thread",
+      externalId: encodeSlackThreadKey({
+        teamId: "T123",
+        channelId: "C123",
+        threadTs: "1710000000.000100"
+      }),
+      uri: "slack://team/T123/channel/C123/thread/1710000000.000100",
+      ownerContainer: {
+        provider: "gitlab",
+        id: "acme/demo",
+        uri: "https://gitlab.com/acme/demo"
+      }
+    });
     expect(event?.permissions.map((permission) => permission.scope)).toContain("chat:postMessage");
     expect(event?.permissions.map((permission) => permission.scope)).toContain("reactions:write");
     expect(event?.callback.uri).toBe("http://127.0.0.1:3102/github-comment");

@@ -265,6 +265,8 @@ that Gateway-owned tool subprocesses have stopped.
 | `security` | none | Runner security policy |
 | `githubToken` | none | GitHub token for callback comments, dispatcher GitHub apply helpers, and optional legacy PR creation |
 | `githubApplyToken` | `githubToken` | Optional dispatcher direct-apply token override. Set to `null` to keep GitHub callbacks enabled while rendering direct-apply actions as setup-required. |
+| `completionPolicies` | none | Per-repository strict GitHub completion policies (`owner`, `repo`, `requiredChecks`, optional `baseBranch` and `requireMerge`) that gate completion on named checks and merge evidence |
+| `defaultGitHubCompletion` | `governed` | Zero-config completion tier for GitHub-backed runs without a matching completion policy. `governed` holds a run that ships a pull request open until the PR exists and every observed check passes on the current head; `compat` preserves legacy executor-success semantics. Runs that ship no pull request keep executor-success semantics in both modes. |
 | `preparePullRequestBranch` | `false` | Commits and pushes executor run branches so a later source-thread `apply 1` can create the PR through an ApplyPlan |
 | `allowAutoCreatePullRequest` | `false` | Legacy mode that creates a PR immediately when executor results include changes |
 | `pollIntervalMs` | `5000` | Poll interval for `serve` |
@@ -703,6 +705,8 @@ executor startup.
 | `OPENTAG_GITHUB_CALLBACK_TOKEN` | `OPENTAG_GITHUB_TOKEN` | Optional token override for GitHub callback posting |
 | `OPENTAG_GITHUB_APPLY_TOKEN` | `OPENTAG_GITHUB_TOKEN` | Optional token override for GitHub direct apply |
 | `OPENTAG_GITHUB_APPLY_DISABLED` | `false` | Set to `true` to disable GitHub direct apply while keeping callbacks enabled |
+| `OPENTAG_GITHUB_COMPLETION_POLICIES_JSON` | none | JSON array of per-repository strict GitHub completion policies (`provider`, `owner`, `repo`, `requiredChecks`, optional `baseBranch` and `requireMerge`) |
+| `OPENTAG_GITHUB_DEFAULT_COMPLETION` | `governed` | Zero-config completion tier for GitHub-backed runs without a matching policy: `governed` gates pull-request runs on verified PR existence plus all observed checks passing; `compat` preserves legacy executor-success semantics |
 | `OPENTAG_SLACK_BOT_TOKEN` | none | Single Slack bot token for callback posting |
 | `OPENTAG_SLACK_BOT_TOKENS_JSON` | none | JSON object mapping `agentId` to Slack bot token |
 | `LARK_APP_ID` | none | Lark app id for the callback sink that posts replies via the Lark API |

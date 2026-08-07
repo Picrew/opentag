@@ -15,7 +15,7 @@
 
 **[opentag.im](https://opentag.im)**
 
-**把现有协作线程变成一个可授权、可审计、可回放的 agent 工作回路。**
+**@ 任何 coding agent，拿到的是证据，不是口头汇报。**
 
 [![Release](https://img.shields.io/github/v/release/amplifthq/opentag?include_prereleases&label=release)](https://github.com/amplifthq/opentag/releases)
 [![npm](https://img.shields.io/npm/v/@opentag/cli?label=%40opentag%2Fcli)](https://www.npmjs.com/package/@opentag/cli)
@@ -25,9 +25,13 @@
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-339933)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#许可证)
 
-OpenTag 让团队可以在已经使用的协作软件里提及一个 coding agent。它会把这个源线程变成一个有边界、可审计的 run：OpenTag 组装 context packet，检查权限和 executor capability，在你的电脑上运行 ACP coding agent，记录 agent work ledger，然后把简洁的产物和安全下一步回复回同一个 thread。
+OpenTag 是团队协作线程和 coding agent 之间的开源、本地优先网关。在 Slack 或 GitHub 里 @opentag，它会在你自己的电脑上运行 Claude Code、Codex、Cursor 或任何 [Agent Client Protocol](https://agentclientprotocol.com) agent，然后把带证据的结果回复到同一个 thread——而不只是一段总结。
 
-具体 setup 仍然会把 Slack、GitHub、GitLab、Linear、Lark / 飞书、Telegram、Discord 或 Microsoft Teams 连接到本地 coding agent。但 OpenTag 不只是 connector：它保持 source-thread-native、local-first、executor-neutral，让工作留在已有上下文里，同时让 agent 看到了什么、被允许做什么、产出了什么、回调到了哪里都可以复盘。
+- **任何 agent，一个协议。** Codex、Claude Code、Cursor、OpenCode、Hermes、OpenClaw 六个内置执行器和自定义 runner 全部通过 ACP 运行。提及不绑定任何一家厂商。
+- **默认本地优先。** 代码、凭据和完整执行轨迹留在你的机器上。平台只收到确认、回复和你批准执行的动作所需的消息。
+- **「完成」需要证据。** executor 报告成功不等于工作完成。OpenTag 可以让 run 保持打开，直到可验证的证据——pull request、绿色 checks、merge——满足配置的 completion gates，全程记录在本地审计账本里。
+
+Slack、GitHub、GitLab、Linear、Lark / 飞书今天已完整支持；Telegram、Discord、Microsoft Teams 为预览状态。
 
 ## 演示
 
@@ -114,16 +118,16 @@ OpenTag 会在本地运行你选择的 coding agent，并通过对应的平台�
 
 在 `opentag setup` 里选择哪个平台，就看对应教程。
 
-| 平台 | 推荐首选路径 | 教程 |
-| --- | --- | --- |
-| Slack | 本地开发优先使用 Socket Mode | [Slack 配置](docs/platforms/slack.zh-CN.md) |
-| GitHub | 使用 repository webhook 和 GitHub token | [GitHub 配置](docs/platforms/github.zh-CN.md) |
-| GitLab | 使用 project Note Hook 和 GitLab access token | [GitLab 配置](docs/platforms/gitlab.zh-CN.md) |
-| Linear | 使用 workspace webhook 和 OAuth App 安装 | [Linear 配置](docs/platforms/linear.zh-CN.md) |
-| Lark / 飞书 | 在 setup 里扫码创建 Personal Agent | [Lark / 飞书配置](docs/platforms/lark.zh-CN.md) |
-| Telegram | 使用 BotFather token 和本地 getUpdates polling | [Telegram 配置](docs/platforms/telegram.zh-CN.md) |
-| Discord | 使用 bot token 和本地 Gateway 接收 | [Discord 配置](docs/platforms/discord.zh-CN.md) |
-| Microsoft Teams | 使用 Azure Bot 和公网 HTTPS tunnel 连接本地 dispatcher（暂不支持 relay 模式） | [Microsoft Teams 配置](docs/platforms/teams.zh-CN.md) |
+| 平台 | 状态 | 推荐首选路径 | 教程 |
+| --- | --- | --- | --- |
+| Slack | ✅ 完整 | 本地开发优先使用 Socket Mode | [Slack 配置](docs/platforms/slack.zh-CN.md) |
+| GitHub | ✅ 完整 | 使用 repository webhook 和 GitHub token | [GitHub 配置](docs/platforms/github.zh-CN.md) |
+| GitLab | ✅ 完整 | 使用 project Note Hook 和 GitLab access token | [GitLab 配置](docs/platforms/gitlab.zh-CN.md) |
+| Linear | ✅ 完整 | 使用 workspace webhook 和 OAuth App 安装 | [Linear 配置](docs/platforms/linear.zh-CN.md) |
+| Lark / 飞书 | ✅ 完整 | 在 setup 里扫码创建 Personal Agent | [Lark / 飞书配置](docs/platforms/lark.zh-CN.md) |
+| Telegram | 🧪 预览 | 使用 BotFather token 和本地 getUpdates polling | [Telegram 配置](docs/platforms/telegram.zh-CN.md) |
+| Discord | 🧪 预览 | 使用 bot token 和本地 Gateway 接收（仅 slash 命令） | [Discord 配置](docs/platforms/discord.zh-CN.md) |
+| Microsoft Teams | 🧪 预览 | 使用 Azure Bot 和公网 HTTPS tunnel 连接本地 dispatcher（暂不支持 relay 模式） | [Microsoft Teams 配置](docs/platforms/teams.zh-CN.md) |
 
 ## 本地会运行什么
 
