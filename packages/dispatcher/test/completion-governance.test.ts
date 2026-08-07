@@ -97,6 +97,7 @@ function jsonRequest(body: unknown) {
 async function startRun(input: {
   runId: string;
   completionPolicies?: GitHubCompletionPolicy[];
+  defaultGitHubCompletion?: "governed" | "compat";
   databasePath?: string;
   completionNow?: () => string;
   issueNumber?: number;
@@ -110,6 +111,7 @@ async function startRun(input: {
   const app = createDispatcherApp({
     databasePath: input.databasePath ?? ":memory:",
     ...(input.completionPolicies ? { completionPolicies: input.completionPolicies } : {}),
+    ...(input.defaultGitHubCompletion ? { defaultGitHubCompletion: input.defaultGitHubCompletion } : {}),
     ...(input.completionNow ? { completionNow: input.completionNow } : {}),
     reassessmentObligations: input.reassessmentObligations ?? { autoStart: false },
     callbackSink: {
@@ -152,6 +154,7 @@ async function completeRun(input: {
   conclusion: "success" | "failure" | "cancelled" | "timed_out";
   idempotencyKey?: string;
   pullRequestNumber?: number;
+  omitPullRequest?: boolean;
 }) {
   return input.setup.app.request(`/v1/runners/runner_1/runs/${input.runId}/complete`, jsonRequest({
     ...input.setup.claim,
@@ -159,7 +162,7 @@ async function completeRun(input: {
     result: {
       conclusion: input.conclusion,
       summary: `${input.conclusion} result`,
-      ...(input.conclusion === "success"
+      ...(input.conclusion === "success" && !input.omitPullRequest
         ? { createdPullRequestUrl: `https://github.com/acme/demo/pull/${input.pullRequestNumber ?? 7}` }
         : {})
     }
@@ -424,9 +427,9 @@ describe("dispatcher completion governance", () => {
     expect(after).toEqual(before);
   });
 
-  it("preserves executor-success semantics for repositories without a strict policy", async () => {
+  it("preserves executor-success semantics for a run that ships no pull request", async () => {
     const setup = await startRun({ runId: "run_compat" });
-    const response = await completeRun({ setup, runId: "run_compat", conclusion: "success" });
+    const response = await completeRun({ setup, runId: "run_compat", conclusion: "success", omitPullRequest: true });
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
@@ -439,6 +442,128 @@ describe("dispatcher completion governance", () => {
       }
     });
     expect(setup.delivered.at(-1)?.body).toContain("success result");
+  });
+
+  it("preserves executor-success semantics for a pull request run when the default is opted out", async () => {
+    const setup = await startRun({ runId: "run_compat_opt_out", defaultGitHubCompletion: "compat" });
+    const response = await completeRun({ setup, runId: "run_compat_opt_out", conclusion: "success" });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      completion: {
+        execution: "succeeded",
+        completion: "satisfied",
+        evidenceBacked: false,
+        contract: { mode: "execution_compat" }
+      }
+    });
+  });
+
+  it("gates a zero-config pull request run on verified PR existence and observed checks", async () => {
+    const setup = await startRun({ runId: "run_default_verified" });
+    const response = await completeRun({ setup, runId: "run_default_verified", conclusion: "success" });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      completion: {
+        execution: "succeeded",
+        completion: "pending",
+        evidenceBacked: true,
+        contract: { mode: "governed", cycle: 1, version: 1 },
+        missingGateIds: ["observed_checks"],
+        currentAssessment: {
+          gateResults: [
+            { gateId: "pull_request", state: "passed" },
+            { gateId: "observed_checks", state: "missing" }
+          ]
+        }
+      }
+    });
+    expect(setup.delivered.at(-1)?.body).toContain("Execution succeeded");
+    expect(setup.delivered.at(-1)?.body).toContain("verified repository evidence");
+
+    const evidence = await setup.app.request(
+      "/v1/completion-evidence/github",
+      jsonRequest(githubSnapshot({ deliveryId: "delivery-default-verified", state: "open" }))
+    );
+    expect(evidence.status).toBe(201);
+    await expect(evidence.json()).resolves.toMatchObject({
+      outcome: "recorded",
+      completion: {
+        execution: "succeeded",
+        completion: "satisfied",
+        evidenceBacked: true,
+        missingGateIds: [],
+        failedGateIds: []
+      }
+    });
+  });
+
+  it("keeps the zero-config observed-checks gate unsatisfied while any check is failing", async () => {
+    const setup = await startRun({ runId: "run_default_failing_check" });
+    await completeRun({ setup, runId: "run_default_failing_check", conclusion: "success" });
+
+    const failing = await setup.app.request(
+      "/v1/completion-evidence/github",
+      jsonRequest(githubSnapshot({
+        deliveryId: "delivery-default-failing",
+        state: "open",
+        checks: { build: "passed", test: "failed" },
+        observedAt: "2026-07-21T10:05:00.000Z"
+      }))
+    );
+    expect(failing.status).toBe(201);
+    await expect(failing.json()).resolves.toMatchObject({
+      completion: {
+        completion: "unsatisfied",
+        failedGateIds: ["observed_checks"]
+      }
+    });
+
+    const green = await setup.app.request(
+      "/v1/completion-evidence/github",
+      jsonRequest(githubSnapshot({
+        deliveryId: "delivery-default-green",
+        state: "open",
+        checks: { build: "passed", test: "passed" },
+        observedAt: "2026-07-21T10:06:00.000Z"
+      }))
+    );
+    expect(green.status).toBe(201);
+    await expect(green.json()).resolves.toMatchObject({
+      completion: { completion: "satisfied", failedGateIds: [] }
+    });
+  });
+
+  it("upgrades a compatibility thread to the default verified contract once a run ships a pull request", async () => {
+    const setup = await startRun({ runId: "run_upgrade_1" });
+    const first = await completeRun({ setup, runId: "run_upgrade_1", conclusion: "success", omitPullRequest: true });
+    expect(first.status).toBe(200);
+    await expect(first.json()).resolves.toMatchObject({
+      completion: { completion: "satisfied", contract: { mode: "execution_compat", version: 1 } }
+    });
+
+    expect((await setup.app.request("/v1/runs", jsonRequest({
+      runId: "run_upgrade_2",
+      event: githubIssueEvent({ id: "event_run_upgrade_2", sourceEventId: "comment_run_upgrade_2" })
+    }))).status).toBe(201);
+    setup.claim = await (await setup.app.request("/v1/runners/runner_1/claim", { method: "POST" })).json() as {
+      attemptId: string;
+      fencingToken: string;
+    };
+    const second = await completeRun({ setup, runId: "run_upgrade_2", conclusion: "success" });
+
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({
+      completion: {
+        completion: "pending",
+        evidenceBacked: true,
+        contract: { mode: "governed", cycle: 1, version: 2 },
+        missingGateIds: ["observed_checks"]
+      }
+    });
   });
 
   it("returns the current assessment without duplicating side effects on completion replay", async () => {
@@ -1181,7 +1306,7 @@ describe("dispatcher completion governance", () => {
     await expect(first.json()).resolves.toMatchObject({ outcome: "recorded", workThreadIds: [expect.any(String)] });
     const sqlite = new Database(databasePath);
     expect((sqlite.prepare("SELECT COUNT(*) AS count FROM verification_evidence WHERE delivery_id = ?")
-      .get("delivery-multi-pr") as { count: number }).count).toBe(7);
+      .get("delivery-multi-pr") as { count: number }).count).toBe(9);
 
     const replay = await setup.app.request("/v1/completion-evidence/github/batch", jsonRequest({ snapshots: [...snapshots].reverse() }));
     expect(replay.status).toBe(200);
@@ -1192,7 +1317,7 @@ describe("dispatcher completion governance", () => {
     expect((await setup.app.request("/v1/completion-evidence/github/batch", jsonRequest({ snapshots: changedFacts }))).status).toBe(409);
     expect((await setup.app.request("/v1/completion-evidence/github/batch", jsonRequest({ snapshots: [snapshots[0]] }))).status).toBe(409);
     expect((sqlite.prepare("SELECT COUNT(*) AS count FROM verification_evidence WHERE delivery_id = ?")
-      .get("delivery-multi-pr") as { count: number }).count).toBe(7);
+      .get("delivery-multi-pr") as { count: number }).count).toBe(9);
     sqlite.close();
   });
 

@@ -249,6 +249,7 @@ const DaemonConfigSchema = z
     githubToken: SecretStringSchema.optional(),
     githubApplyToken: SecretStringSchema.nullable().optional(),
     completionPolicies: z.array(GitHubCompletionPolicySchema).optional(),
+    defaultGitHubCompletion: z.enum(["governed", "compat"]).optional(),
     preparePullRequestBranch: z.boolean().optional(),
     allowAutoCreatePullRequest: z.boolean().optional(),
     runnerToken: SecretStringSchema.optional(),
@@ -541,7 +542,10 @@ export const OpenTagCliConfigSchema = z
   .strict();
 
 export type OpenTagCliConfig = Omit<z.infer<typeof OpenTagCliConfigSchema>, "daemon"> & {
-  daemon: OpenTagDaemonConfig & { completionPolicies?: GitHubCompletionPolicyConfig[] };
+  daemon: OpenTagDaemonConfig & {
+    completionPolicies?: GitHubCompletionPolicyConfig[];
+    defaultGitHubCompletion?: "governed" | "compat";
+  };
 };
 
 export type OpenTagCliPreferences = NonNullable<OpenTagCliConfig["preferences"]>;
@@ -591,6 +595,9 @@ export function parseCliConfig(value: unknown): OpenTagCliConfig {
       ...parseDaemonConfig(parsed.daemon),
       ...(parsed.daemon.completionPolicies !== undefined
         ? { completionPolicies: parsed.daemon.completionPolicies }
+        : {}),
+      ...(parsed.daemon.defaultGitHubCompletion !== undefined
+        ? { defaultGitHubCompletion: parsed.daemon.defaultGitHubCompletion }
         : {})
     }
   };

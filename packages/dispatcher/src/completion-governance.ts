@@ -38,6 +38,14 @@ export type GitHubCompletionPolicy = {
   requireMerge?: boolean;
 };
 
+/**
+ * Zero-config completion behavior for GitHub-backed runs without an explicit
+ * completion policy. "governed" gates runs that produce a pull request on
+ * verified PR existence plus all observed checks passing; "compat" preserves
+ * the legacy executor-success semantics.
+ */
+export type GitHubDefaultCompletionMode = "governed" | "compat";
+
 export type BoundedCompletionWaiverInput = Pick<
   CompletionWaiver,
   "actor" | "reason" | "scope" | "policyScope" | "gateIds" | "waivedAt" | "expiresAt"
@@ -121,6 +129,37 @@ function strictContract(input: {
             requiredState: "merged",
             minimumAssurance: "verified" as const
           }])
+    ],
+    maxAutomaticRetries: 1,
+    onSatisfied: "report_only",
+    createdAt: input.createdAt
+  });
+}
+
+function defaultVerifiedContract(input: {
+  workThreadId: string;
+  repository: { owner: string; repo: string };
+  createdAt: string;
+  version?: number;
+}): CompletionContract {
+  return CompletionContractSchema.parse({
+    id: `completion:${input.workThreadId}:github-pr-default`,
+    version: input.version ?? 1,
+    workThreadId: input.workThreadId,
+    cycle: 1,
+    mode: "governed",
+    targetSelectors: [{ key: "primary_change", kind: "change_request", lineage: "current_cycle", cardinality: "exactly_one" }],
+    resolvedFrom: [{ scope: "organization_default", ref: `github-default:${input.repository.owner}/${input.repository.repo}`, version: "1" }],
+    gates: [
+      { id: "pull_request", kind: "artifact", targetKey: "primary_change", artifactKind: "pull_request", minimum: 1 },
+      {
+        id: "observed_checks",
+        kind: "verification",
+        targetKey: "primary_change",
+        evidenceKind: "source_control.observed_checks_rollup",
+        requiredOutcome: "passed",
+        minimumAssurance: "verified"
+      }
     ],
     maxAutomaticRetries: 1,
     onSatisfied: "report_only",
@@ -223,6 +262,13 @@ function githubCompletionSemanticDigest(snapshot: GitHubVerifiedPullRequestSnaps
     .digest("hex")}`;
 }
 
+function observedChecksRollupOutcome(checks: Record<string, "passed" | "failed" | "pending">): "passed" | "failed" | "pending" {
+  const states = Object.values(checks);
+  if (states.some((state) => state === "failed")) return "failed";
+  if (states.some((state) => state === "pending")) return "pending";
+  return "passed";
+}
+
 function githubFactTemplates(input: {
   snapshot: GitHubVerifiedPullRequestSnapshot;
   receivedAt: string;
@@ -275,6 +321,17 @@ function githubFactTemplates(input: {
       kind: "source_control.pull_request_state",
       claim: { predicate: "state", outcome: input.snapshot.pullRequest.state },
       provenance: provenance("source_control.pull_request_state")
+    },
+    {
+      ...common,
+      id: `${idPrefix}:checks-rollup`,
+      kind: "source_control.observed_checks_rollup",
+      claim: {
+        predicate: "checks_rollup",
+        outcome: observedChecksRollupOutcome(input.snapshot.checks),
+        observations: input.snapshot.checks
+      },
+      provenance: provenance("source_control.observed_checks_rollup")
     }
   ];
 }
@@ -516,15 +573,42 @@ async function ensureContract(input: {
   run: OpenTagRun;
   event: OpenTagEvent;
   policies: readonly GitHubCompletionPolicy[];
+  defaultGitHubCompletion: GitHubDefaultCompletionMode;
 }): Promise<CompletionContract> {
   const workThreadId = input.run.thread?.id;
   if (!workThreadId) throw new Error(`Run ${input.run.id} has no durable WorkThread.`);
-  const existing = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
-  if (existing) return existing;
   const policy = matchingPolicy(input.event, input.policies);
+  const repository = repositoryIdentity(input.event);
+  const defaultVerifiedEligible = !policy
+    && input.defaultGitHubCompletion === "governed"
+    && repository?.provider === "github"
+    && githubPullRequestResourceRefs({ run: input.run, event: input.event }).size > 0;
+  const existing = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
+  if (existing) {
+    // A thread that started with informational runs holds the compatibility
+    // contract; once a later run ships a pull request, upgrade it to the
+    // default verified contract so the new change is evidence-gated.
+    const upgradeable = existing.mode === "execution_compat"
+      && existing.id === `completion:${workThreadId}:compat`
+      && defaultVerifiedEligible;
+    if (!upgradeable) return existing;
+    const upgraded = defaultVerifiedContract({
+      workThreadId,
+      repository: { owner: repository!.owner, repo: repository!.repo },
+      createdAt: input.run.createdAt,
+      version: existing.version + 1
+    });
+    return (await input.repo.recordCompletionContract({ contract: upgraded })).contract;
+  }
   const contract = policy
     ? strictContract({ workThreadId, policy, createdAt: input.run.createdAt })
-    : compatibilityContract({ workThreadId, createdAt: input.run.createdAt });
+    : defaultVerifiedEligible
+      ? defaultVerifiedContract({
+          workThreadId,
+          repository: { owner: repository!.owner, repo: repository!.repo },
+          createdAt: input.run.createdAt
+        })
+      : compatibilityContract({ workThreadId, createdAt: input.run.createdAt });
   return (await input.repo.recordCompletionContract({ contract })).contract;
 }
 
@@ -557,10 +641,12 @@ export type CompletionSourceThreadTransition = {
 export function createDispatcherCompletionGovernance(input: {
   repo: OpenTagRepository;
   policies?: readonly GitHubCompletionPolicy[];
+  defaultGitHubCompletion?: GitHubDefaultCompletionMode;
   now?: () => string;
   deferReassessment?: boolean;
 }) {
   const policies = validatePolicies(input.policies ?? []);
+  const defaultGitHubCompletion = input.defaultGitHubCompletion ?? "governed";
   const governanceRepository: GovernanceRepository = {
     async loadEvaluationSnapshot(workThreadId): Promise<CompletionEvaluationSnapshot> {
       const contract = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
@@ -803,7 +889,7 @@ export function createDispatcherCompletionGovernance(input: {
     async ingestRunResult(runId: string): Promise<GovernanceCommandResult | null> {
       const stored = await input.repo.getRun({ runId });
       if (!stored?.run.thread?.id || !stored.run.result) return null;
-      await ensureContract({ repo: input.repo, run: stored.run, event: stored.event, policies });
+      await ensureContract({ repo: input.repo, run: stored.run, event: stored.event, policies, defaultGitHubCompletion });
       const correlationIndex = await loadCurrentWorkThreadCorrelationIndex({ repo: input.repo });
       await attachCorrelatableEvidence({
         repo: input.repo,

@@ -2,7 +2,39 @@
 
 ## Unreleased
 
-No changes yet.
+OpenTag now applies a zero-config verified completion tier to GitHub-backed
+runs. When a run ships a pull request and the repository has no explicit
+completion policy, the run stays open after executor success until GitHub
+webhook evidence verifies that the pull request exists and every observed
+check passes on the current head. Runs that ship no pull request keep
+executor-success semantics.
+
+### Added
+
+- A default `governed` completion contract for GitHub-backed pull-request runs
+  without a configured completion policy, gating completion on a verified
+  pull-request artifact and an all-observed-checks-passing rollup, without
+  requiring merge.
+- A `source_control.observed_checks_rollup` verified evidence fact derived
+  from every reconciled GitHub pull-request snapshot, aggregating observed
+  check states into one passed/failed/pending outcome.
+- A compatibility thread that starts with informational runs upgrades to the
+  default verified contract when a later run in the same WorkThread ships a
+  pull request.
+- Opt-out and plumbing: `defaultGitHubCompletion` on the dispatcher app and
+  local runtime, the daemon config field `daemon.defaultGitHubCompletion`, and
+  the `OPENTAG_GITHUB_DEFAULT_COMPLETION` environment variable (`governed`
+  default, `compat` preserves legacy executor-success semantics).
+
+### Compatibility and migration
+
+- Existing explicit completion policies are unchanged and still take
+  precedence for their repositories.
+- Runs that do not produce a pull request, non-GitHub runs, and threads with
+  an existing governed contract behave exactly as before.
+- To restore the previous default for pull-request runs, set
+  `OPENTAG_GITHUB_DEFAULT_COMPLETION=compat` or
+  `daemon.defaultGitHubCompletion: "compat"`.
 
 ## v0.9.0 - 2026-07-28
 
