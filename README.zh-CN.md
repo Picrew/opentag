@@ -303,4 +303,6 @@ OpenTag 基于 MIT License 开源。详见 [LICENSE](LICENSE)。
 
 我们会在群里同步项目进展和版本更新。欢迎大家一起玩、一起提 issue、一起把 OpenTag 做得更好！👏
 
-<img width="939" height="1455" alt="OpenTag 交流微信群二维码" src="./assets/wechat-group-qr.jpg" />
+扫码加我微信（备注 OpenTag），我拉你进群：
+
+<img width="803" height="1024" alt="添加 OpenTag 维护者明佑的微信" src="./assets/wechat-contact-qr.jpg" />
