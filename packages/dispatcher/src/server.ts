@@ -352,7 +352,8 @@ import { createDefaultCallbackPresentation, type CallbackPresentation, type Lark
 import {
   createDispatcherCompletionGovernance,
   currentWorkThreadRun,
-  type GitHubCompletionPolicy
+  type GitHubCompletionPolicy,
+  type GitHubDefaultCompletionMode
 } from "./completion-governance.js";
 import { createSourceThreadControlHandler } from "./source-thread-control.js";
 
@@ -2959,6 +2960,7 @@ export function createDispatcherApp(input: {
     platforms?: RelayPlatformCapability[];
   };
   completionPolicies?: GitHubCompletionPolicy[];
+  defaultGitHubCompletion?: GitHubDefaultCompletionMode;
   completionNow?: () => string;
   reassessmentObligations?: {
     autoStart?: boolean;
@@ -3019,6 +3021,7 @@ export function createDispatcherApp(input: {
   const completionGovernance = createDispatcherCompletionGovernance({
     repo,
     policies: input.completionPolicies ?? [],
+    ...(input.defaultGitHubCompletion ? { defaultGitHubCompletion: input.defaultGitHubCompletion } : {}),
     deferReassessment: !inlineReassessmentEnabled,
     ...(input.completionNow ? { now: input.completionNow } : {})
   });

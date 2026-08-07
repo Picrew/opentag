@@ -130,6 +130,22 @@ describe("local dispatcher runtime", () => {
     })).toThrow("requiredChecks must be a non-empty string array");
   });
 
+  it("parses the zero-config GitHub completion tier from env", () => {
+    expect(dispatcherRuntimeInputFromEnv({}).defaultGitHubCompletion).toBeUndefined();
+    expect(dispatcherRuntimeInputFromEnv({
+      OPENTAG_GITHUB_DEFAULT_COMPLETION: "compat"
+    }).defaultGitHubCompletion).toBe("compat");
+    expect(dispatcherRuntimeInputFromEnv({
+      OPENTAG_GITHUB_DEFAULT_COMPLETION: " Governed "
+    }).defaultGitHubCompletion).toBe("governed");
+  });
+
+  it("rejects an unknown zero-config GitHub completion tier", () => {
+    expect(() => dispatcherRuntimeInputFromEnv({
+      OPENTAG_GITHUB_DEFAULT_COMPLETION: "strict"
+    })).toThrow('OPENTAG_GITHUB_DEFAULT_COMPLETION must be "governed" or "compat", received "strict".');
+  });
+
   it("registers matching standalone Slack and Lark channel principals from env", () => {
     expect(
       dispatcherRuntimeInputFromEnv({

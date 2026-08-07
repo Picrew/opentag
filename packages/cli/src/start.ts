@@ -423,6 +423,9 @@ export function dispatcherRuntimeInputFromCliConfig(
     ...(config.daemon.completionPolicies !== undefined
       ? { completionPolicies: config.daemon.completionPolicies }
       : {}),
+    ...(config.daemon.defaultGitHubCompletion !== undefined
+      ? { defaultGitHubCompletion: config.daemon.defaultGitHubCompletion }
+      : {}),
     ...(config.daemon.githubApplyToken !== undefined
       ? { githubApplyToken: config.daemon.githubApplyToken }
       : config.daemon.githubToken

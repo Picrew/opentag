@@ -17,6 +17,7 @@ import {
   createTelegramCallbackSink,
   type ChannelPrincipalCredential,
   type GitHubCompletionPolicy,
+  type GitHubDefaultCompletionMode,
   type LinearTokenProvider
 } from "@opentag/dispatcher";
 import type { DispatcherRateLimitOptions, LinearOAuthInstallOptions, RelayPlatformCapability } from "@opentag/dispatcher";
@@ -61,6 +62,7 @@ export type LocalDispatcherRuntimeInput = {
   githubCallbackToken?: string;
   githubApplyToken?: string | null;
   completionPolicies?: GitHubCompletionPolicy[];
+  defaultGitHubCompletion?: GitHubDefaultCompletionMode;
   reassessmentObligations?: Parameters<typeof createDispatcherApp>[0]["reassessmentObligations"];
   gitlabToken?: string;
   gitlabBaseUrl?: string;
@@ -283,6 +285,13 @@ function parseGitHubCompletionPolicies(raw: string | undefined): GitHubCompletio
   } catch (error) {
     throw new Error(`Failed to parse OPENTAG_GITHUB_COMPLETION_POLICIES_JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+function parseGitHubDefaultCompletion(raw: string | undefined): GitHubDefaultCompletionMode | undefined {
+  if (!raw) return undefined;
+  const value = raw.trim().toLowerCase();
+  if (value === "governed" || value === "compat") return value;
+  throw new Error(`OPENTAG_GITHUB_DEFAULT_COMPLETION must be "governed" or "compat", received "${raw}".`);
 }
 
 function parseCsvList(raw: string | undefined): string[] | undefined {
@@ -612,6 +621,7 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
         ? env.OPENTAG_GITHUB_APPLY_TOKEN
         : undefined;
   const completionPolicies = parseGitHubCompletionPolicies(env.OPENTAG_GITHUB_COMPLETION_POLICIES_JSON);
+  const defaultGitHubCompletion = parseGitHubDefaultCompletion(env.OPENTAG_GITHUB_DEFAULT_COMPLETION);
   const reassessmentObligations = reassessmentObligationTestRuntimeInputFromEnv(env);
 
   return {
@@ -626,6 +636,7 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(env.OPENTAG_GITHUB_CALLBACK_TOKEN ? { githubCallbackToken: env.OPENTAG_GITHUB_CALLBACK_TOKEN } : {}),
     ...(githubApplyToken !== undefined ? { githubApplyToken } : {}),
     ...(completionPolicies ? { completionPolicies } : {}),
+    ...(defaultGitHubCompletion ? { defaultGitHubCompletion } : {}),
     ...(reassessmentObligations ? { reassessmentObligations } : {}),
     ...(env.OPENTAG_GITLAB_TOKEN ? { gitlabToken: env.OPENTAG_GITLAB_TOKEN } : {}),
     ...(env.OPENTAG_GITLAB_BASE_URL ? { gitlabBaseUrl: env.OPENTAG_GITLAB_BASE_URL } : {}),
@@ -790,6 +801,7 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
   const app = createDispatcherApp({
     databasePath: input.databasePath,
     ...(input.completionPolicies ? { completionPolicies: input.completionPolicies } : {}),
+    ...(input.defaultGitHubCompletion ? { defaultGitHubCompletion: input.defaultGitHubCompletion } : {}),
     ...(reassessmentObligations ? { reassessmentObligations } : {}),
     ...(input.pairingToken ? { pairingToken: input.pairingToken } : {}),
     ...(input.runnerToken ? { runnerToken: input.runnerToken } : {}),
