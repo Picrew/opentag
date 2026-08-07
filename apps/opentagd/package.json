@@ -18,7 +18,7 @@
     "@opentag/github": "workspace:*",
     "@opentag/local-runtime": "workspace:*",
     "@opentag/runner": "workspace:*",
-    "commander": "^12.1.0",
+    "commander": "^15.0.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
