@@ -9,6 +9,14 @@ updates:
       timezone: Asia/Shanghai
     open-pull-requests-limit: 10
     versioning-strategy: increase-if-necessary
+    ignore:
+      # Must track the lowest Node version in `engines`, not the newest release,
+      # so typecheck cannot accept APIs that are missing on the Node we support.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # Majors need a migration pass rather than a bump. See issue #129.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     groups:
       production-dependencies:
         dependency-type: production
