@@ -15,6 +15,9 @@ executor-success semantics.
   without a configured completion policy, gating completion on a verified
   pull-request artifact and an all-observed-checks-passing rollup, without
   requiring merge.
+- Slack mentions bound to a repository now carry a durable `workItem` for the
+  source thread (with the bound repo as `ownerContainer`), so WorkThread-backed
+  completion governance applies to the Slack → GitHub PR path.
 - A `source_control.observed_checks_rollup` verified evidence fact derived
   from every reconciled GitHub pull-request snapshot, aggregating observed
   check states into one passed/failed/pending outcome.

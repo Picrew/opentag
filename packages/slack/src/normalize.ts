@@ -115,6 +115,35 @@ function repositoryMetadataFromBinding(
   };
 }
 
+function ownerContainerUri(repository: { repoProvider: string; owner: string; repo: string }): string | undefined {
+  const id = `${repository.owner}/${repository.repo}`;
+  if (repository.repoProvider === "github") return `https://github.com/${id}`;
+  if (repository.repoProvider === "gitlab") return `https://gitlab.com/${id}`;
+  return undefined;
+}
+
+function workItemFromBoundSlackThread(input: {
+  teamId: string;
+  channelId: string;
+  threadTs: string;
+  threadKey: string;
+  repository: { repoProvider: string; owner: string; repo: string };
+}): NonNullable<OpenTagEvent["workItem"]> {
+  const ownerContainerId = `${input.repository.owner}/${input.repository.repo}`;
+  const ownerContainerUriValue = ownerContainerUri(input.repository);
+  return {
+    provider: "slack",
+    kind: "thread",
+    externalId: input.threadKey,
+    uri: `slack://team/${input.teamId}/channel/${input.channelId}/thread/${input.threadTs}`,
+    ownerContainer: {
+      provider: input.repository.repoProvider,
+      id: ownerContainerId,
+      ...(ownerContainerUriValue ? { uri: ownerContainerUriValue } : {})
+    }
+  };
+}
+
 function commandLooksRepoWriteCapable(command: OpenTagCommand): boolean {
   return UNKNOWN_WRITE_VERB_PATTERN.test(command.rawText) && REPO_WRITE_TARGET_PATTERN.test(command.rawText);
 }
@@ -232,6 +261,11 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
   const replyThreadTs = input.threadTs ?? input.ts;
   const agentId = input.agentId ?? "opentag";
   const repositoryMetadata = repositoryMetadataFromBinding(input.binding);
+  const threadKey = encodeSlackThreadKey({
+    teamId: input.teamId,
+    channelId: input.channelId,
+    threadTs: replyThreadTs
+  });
 
   return {
     id: `evt_slack_app_mention_${input.eventId}`,
@@ -266,15 +300,22 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
       },
       ...contextPointersForCommand(command)
     ],
+    ...(repositoryMetadata
+      ? {
+          workItem: workItemFromBoundSlackThread({
+            teamId: input.teamId,
+            channelId: input.channelId,
+            threadTs: replyThreadTs,
+            threadKey,
+            repository: repositoryMetadata
+          })
+        }
+      : {}),
     permissions: permissionsForCommand(command, repositoryMetadata !== undefined),
     callback: {
       provider: "slack",
       uri: input.callbackUri ?? "https://slack.com/api/chat.postMessage",
-      threadKey: encodeSlackThreadKey({
-        teamId: input.teamId,
-        channelId: input.channelId,
-        threadTs: replyThreadTs
-      })
+      threadKey
     },
     metadata: {
       teamId: input.teamId,
