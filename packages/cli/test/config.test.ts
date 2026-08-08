@@ -1,8 +1,20 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  CLI_CONFIG_DIRECTORY_DURABILITY,
   defaultConfigPath,
   defaultStateDirectory,
   formatCliConfigError,
@@ -154,6 +166,44 @@ describe("OpenTag CLI config", () => {
     expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 
+  it("reports the platform-specific config directory durability contract", () => {
+    expect(CLI_CONFIG_DIRECTORY_DURABILITY).toBe(
+      process.platform === "win32" ? "atomic_replace" : "directory_fsync"
+    );
+  });
+
+  it("serializes every config writer with the same adjacent lock", () => {
+    const path = join(tempDir(), "config.json");
+    const source = config();
+    writeCliConfigAtomic(path, source);
+    const before = readFileSync(path, "utf8");
+    const lockPath = `${path}.lock`;
+    const lockFile = openSync(lockPath, "wx", 0o600);
+    try {
+      expect(() => writeCliConfigAtomic(path, { ...source, language: "zh-CN" })).toThrow(
+        /locked by another writer/iu
+      );
+      expect(() =>
+        writeHostedControlConfigAtomic(path, {
+          dispatcherUrl: "https://control.example",
+          relayUrl: "https://control.example",
+          controlRegistration: {
+            kind: "hosted_control_v1",
+            state: "unpaired",
+            flow: "registration",
+            operationId: "operation_locked",
+            reason: "pending"
+          }
+        })
+      ).toThrow(/locked by another writer/iu);
+      expect(readFileSync(path, "utf8")).toBe(before);
+      expect(statSync(lockPath).isFile()).toBe(true);
+    } finally {
+      closeSync(lockFile);
+      rmSync(lockPath, { force: true });
+    }
+  });
+
   it("patches hosted control state without materializing unrelated SecretRefs", () => {
     const path = join(tempDir(), "config.json");
     const source = config();
@@ -216,6 +266,71 @@ describe("OpenTag CLI config", () => {
       if (previousPairingToken === undefined) delete process.env.OPENTAG_TEST_PAIRING_TOKEN;
       else process.env.OPENTAG_TEST_PAIRING_TOKEN = previousPairingToken;
     }
+  });
+
+  it("does not resolve unrelated unavailable SecretRef backends during a raw hosted patch", () => {
+    const path = join(tempDir(), "config.json");
+    const raw = JSON.parse(JSON.stringify(config())) as {
+      daemon: Record<string, unknown>;
+      platforms: { lark: { appSecret: unknown } };
+    };
+    delete process.env.OPENTAG_TEST_UNAVAILABLE_SECRET;
+    raw.platforms.lark.appSecret = {
+      kind: "keychain",
+      service: "opentag-test-unavailable",
+      account: "missing"
+    };
+    raw.daemon.pairingToken = {
+      kind: "file",
+      path: join(tempDir(), "missing-secret")
+    };
+    raw.daemon.runnerTokens = [
+      { kind: "env", name: "OPENTAG_TEST_UNAVAILABLE_SECRET" }
+    ];
+    writeFileSync(path, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+    chmodSync(path, 0o600);
+
+    expect(() =>
+      writeHostedControlConfigAtomic(path, {
+        dispatcherUrl: "https://control.example",
+        relayUrl: "https://control.example",
+        controlRegistration: {
+          kind: "hosted_control_v1",
+          state: "unpaired",
+          flow: "registration",
+          operationId: "operation_raw_refs",
+          reason: "pending"
+        },
+        runnerToken: null
+      })
+    ).not.toThrow();
+
+    const persisted = JSON.parse(readFileSync(path, "utf8")) as typeof raw;
+    expect(persisted.platforms.lark.appSecret).toEqual(raw.platforms.lark.appSecret);
+    expect(persisted.daemon.pairingToken).toEqual(raw.daemon.pairingToken);
+    expect(persisted.daemon.runnerTokens).toEqual(raw.daemon.runnerTokens);
+  });
+
+  it("rejects non-inline hosted runner credentials before replacing the destination", () => {
+    const path = join(tempDir(), "config.json");
+    writeCliConfigAtomic(path, config());
+    const before = readFileSync(path, "utf8");
+
+    expect(() =>
+      writeHostedControlConfigAtomic(path, {
+        dispatcherUrl: "https://control.example",
+        relayUrl: "https://control.example",
+        controlRegistration: {
+          kind: "hosted_control_v1",
+          state: "unpaired",
+          flow: "registration",
+          operationId: "operation_inline_only",
+          reason: "pending"
+        },
+        runnerToken: { kind: "env", name: "OPENTAG_RUNNER_TOKEN" } as unknown as string
+      })
+    ).toThrow();
+    expect(readFileSync(path, "utf8")).toBe(before);
   });
 
   it("parses explicit relay runtime without dropping daemon fields", () => {
