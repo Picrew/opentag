@@ -630,6 +630,33 @@ export class OpenTagClientHttpError extends Error {
   }
 }
 
+type RunnerCredentialControlV1HttpResponse = ReturnType<
+  typeof RunnerCredentialHttpResponseV1Schema.parse
+>;
+type RunnerCredentialControlV1ErrorResponse = Exclude<
+  RunnerCredentialControlV1HttpResponse,
+  { status: 200 | 201 }
+>;
+
+export class OpenTagControlV1HttpError extends Error {
+  readonly status: RunnerCredentialControlV1ErrorResponse["status"];
+  readonly code: RunnerCredentialControlV1ErrorResponse["body"]["error"];
+  readonly requestId: string;
+
+  constructor(
+    action: string,
+    status: RunnerCredentialControlV1ErrorResponse["status"],
+    code: RunnerCredentialControlV1ErrorResponse["body"]["error"],
+    requestId: string
+  ) {
+    super(`${action} failed: ${status} ${code} requestId=${requestId}`);
+    this.name = "OpenTagControlV1HttpError";
+    this.status = status;
+    this.code = code;
+    this.requestId = requestId;
+  }
+}
+
 function baseUrlFrom(dispatcherUrl: string): string {
   return dispatcherUrl.replace(/\/$/, "");
 }
@@ -691,7 +718,13 @@ async function assertOk(response: Response, action: string): Promise<void> {
 async function parseRunnerCredentialControlV1Response(
   response: Response,
   action: string,
-  expected: { operationId: string; runnerId: string }
+  expected: {
+    requestId: string;
+    operationId: string;
+    runnerId: string;
+    registrationGeneration: number;
+    credentialGeneration: number;
+  }
 ): Promise<RunnerCredentialResponseV1> {
   let body: unknown;
   try {
@@ -709,13 +742,18 @@ async function parseRunnerCredentialControlV1Response(
   }
 
   if (envelope.data.status !== 200 && envelope.data.status !== 201) {
-    throw new OpenTagClientHttpError(
+    if (envelope.data.body.requestId !== expected.requestId) {
+      throw new OpenTagClientHttpError(
+        action,
+        response.status,
+        "response_identity_mismatch"
+      );
+    }
+    throw new OpenTagControlV1HttpError(
       action,
       envelope.data.status,
-      JSON.stringify({
-        error: envelope.data.body.error,
-        requestId: envelope.data.body.requestId
-      })
+      envelope.data.body.error,
+      envelope.data.body.requestId
     );
   }
 
@@ -724,6 +762,12 @@ async function parseRunnerCredentialControlV1Response(
     || envelope.data.body.runnerId !== expected.runnerId
   ) {
     throw new OpenTagClientHttpError(action, response.status, "response_identity_mismatch");
+  }
+  if (
+    envelope.data.body.registrationGeneration !== expected.registrationGeneration
+    || envelope.data.body.credentialGeneration !== expected.credentialGeneration
+  ) {
+    throw new OpenTagClientHttpError(action, response.status, "response_generation_mismatch");
   }
   return envelope.data.body;
 }
@@ -801,7 +845,15 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         headers: jsonHeaders(options.pairingToken),
         body: JSON.stringify(request)
       });
-      return parseRunnerCredentialControlV1Response(response, "registerRunnerControlV1", request);
+      return parseRunnerCredentialControlV1Response(
+        response,
+        "registerRunnerControlV1",
+        {
+          ...request,
+          registrationGeneration: 1,
+          credentialGeneration: 1
+        }
+      );
     },
 
     async reprovisionRunnerControlV1(input) {
@@ -814,7 +866,15 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
           body: JSON.stringify(request)
         }
       );
-      return parseRunnerCredentialControlV1Response(response, "reprovisionRunnerControlV1", request);
+      return parseRunnerCredentialControlV1Response(
+        response,
+        "reprovisionRunnerControlV1",
+        {
+          ...request,
+          registrationGeneration: request.expectedRegistrationGeneration + 1,
+          credentialGeneration: request.expectedCredentialGeneration + 1
+        }
+      );
     },
 
     async getRunner(input) {

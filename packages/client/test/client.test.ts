@@ -1,6 +1,10 @@
 import type { OpenTagEvent } from "@opentag/core";
 import { describe, expect, it } from "vitest";
-import { createOpenTagClient, type ChannelBindingInput } from "../src/index.js";
+import {
+  createOpenTagClient,
+  OpenTagControlV1HttpError,
+  type ChannelBindingInput
+} from "../src/index.js";
 
 const event: OpenTagEvent = {
   id: "evt_1",
@@ -1958,6 +1962,28 @@ describe("@opentag/client", () => {
   });
 
   it.each([
+    ["fresh registration generation", 201, { registrationGeneration: 2 }],
+    ["fresh credential generation", 201, { credentialGeneration: 2 }],
+    ["replayed registration generation", 200, { registrationGeneration: 2 }],
+    ["replayed credential generation", 200, { credentialGeneration: 2 }]
+  ])("fails closed for an invalid %s", async (_caseName, status, override) => {
+    const input = runnerRegistrationRequest();
+    const baseResponse = status === 201
+      ? freshRunnerCredentialResponse(input)
+      : replayedRunnerCredentialResponse(input);
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => jsonResponse({ ...baseResponse, ...override }, status)
+    });
+
+    await expect(client.registerRunnerControlV1(input)).rejects.toMatchObject({
+      name: "OpenTagClientHttpError",
+      status,
+      responseBody: "response_generation_mismatch"
+    });
+  });
+
+  it.each([
     ["status-body mismatch", replayedRunnerCredentialResponse(), 201],
     ["unknown response field", { ...freshRunnerCredentialResponse(), unexpected: true }, 201],
     ["legacy response body", { ok: true }, 201]
@@ -2046,6 +2072,72 @@ describe("@opentag/client", () => {
     expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(input);
   });
 
+  it("accepts a metadata-only re-provision replay with the exact next generations", async () => {
+    const input = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.credential-reprovision.v1"] as const,
+      requestId: "request_reprovision_replay",
+      operationId: "operation_reprovision_replay",
+      runnerId: "runner_private_1",
+      recoveryCredentialId: "recovery_credential_1",
+      expectedRegistrationGeneration: 4,
+      expectedCredentialGeneration: 7
+    };
+    const responseBody = {
+      ...replayedRunnerCredentialResponse(input),
+      registrationGeneration: 5,
+      credentialGeneration: 8,
+      credentialId: "credential_runtime_8"
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => jsonResponse(responseBody, 200)
+    });
+
+    await expect(client.reprovisionRunnerControlV1(input)).resolves.toEqual(responseBody);
+    expect(responseBody).not.toHaveProperty("runnerToken");
+  });
+
+  it.each([
+    ["stale registration in a 201", 201, { registrationGeneration: 4, credentialGeneration: 8 }],
+    ["rolled-back registration in a 201", 201, { registrationGeneration: 3, credentialGeneration: 8 }],
+    ["stale credential in a 201", 201, { registrationGeneration: 5, credentialGeneration: 7 }],
+    ["stale registration in a 200 replay", 200, { registrationGeneration: 4, credentialGeneration: 8 }],
+    ["advanced credential in a 200 replay", 200, { registrationGeneration: 5, credentialGeneration: 9 }]
+  ])("fails closed for a %s", async (_caseName, status, generations) => {
+    const input = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.credential-reprovision.v1"] as const,
+      requestId: "request_reprovision_generation_mismatch",
+      operationId: "operation_reprovision_generation_mismatch",
+      runnerId: "runner_private_1",
+      recoveryCredentialId: "recovery_credential_1",
+      expectedRegistrationGeneration: 4,
+      expectedCredentialGeneration: 7
+    };
+    const baseResponse = status === 201
+      ? freshRunnerCredentialResponse(input)
+      : replayedRunnerCredentialResponse(input);
+    const responseBody = {
+      ...baseResponse,
+      ...generations,
+      runnerToken: "must_not_escape_generation_failure"
+    };
+    if (status === 200) delete (responseBody as { runnerToken?: string }).runnerToken;
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => jsonResponse(responseBody, status)
+    });
+
+    await expect(client.reprovisionRunnerControlV1(input)).rejects.toMatchObject({
+      name: "OpenTagClientHttpError",
+      status,
+      responseBody: "response_generation_mismatch"
+    });
+  });
+
   it.each([
     [400, "invalid_request_body", {}],
     [401, "invalid_credential", {}],
@@ -2060,12 +2152,13 @@ describe("@opentag/client", () => {
       nextAction: "upgrade_client"
     }]
   ])("maps typed Control V1 error status %i without retaining its raw body", async (status, error, extra) => {
+    const input = runnerRegistrationRequest();
     const body = {
       schemaVersion: 1,
       protocolVersion: "1.0",
       error,
-      message: "Diagnostic detail must not be retained with response content.",
-      requestId: `request_error_${status}`,
+      message: "Diagnostic raw_runtime_secret_value must not be retained.",
+      requestId: input.requestId,
       ...extra
     };
     const client = createOpenTagClient({
@@ -2073,11 +2166,41 @@ describe("@opentag/client", () => {
       fetchImpl: async () => jsonResponse(body, status)
     });
 
-    await expect(client.registerRunnerControlV1(runnerRegistrationRequest())).rejects.toMatchObject({
-      name: "OpenTagClientHttpError",
+    const failure = await client.registerRunnerControlV1(input).catch((caught: unknown) => caught);
+    expect(failure).toBeInstanceOf(OpenTagControlV1HttpError);
+    expect(failure).toMatchObject({
+      name: "OpenTagControlV1HttpError",
       status,
-      responseBody: JSON.stringify({ error, requestId: `request_error_${status}` })
+      code: error,
+      requestId: input.requestId
     });
+    expect(String(failure)).not.toContain("Diagnostic");
+    expect(String(failure)).not.toContain("raw_runtime_secret_value");
+    expect(failure).not.toHaveProperty("responseBody");
+  });
+
+  it("fails closed when a valid Control V1 error has a mismatched request identity", async () => {
+    const input = runnerRegistrationRequest();
+    const body = {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      error: "invalid_credential",
+      message: "raw_runtime_secret_value",
+      requestId: "request_from_another_operation"
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => jsonResponse(body, 401)
+    });
+
+    const failure = await client.registerRunnerControlV1(input).catch((caught: unknown) => caught);
+    expect(failure).toMatchObject({
+      name: "OpenTagClientHttpError",
+      status: 401,
+      responseBody: "response_identity_mismatch"
+    });
+    expect(String(failure)).not.toContain("raw_runtime_secret_value");
+    expect(String(failure)).not.toContain("request_from_another_operation");
   });
 
   it("reports invalid JSON without retaining response content", async () => {
