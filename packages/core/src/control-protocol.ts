@@ -102,11 +102,14 @@ export const CallbackObservationReasonCodeV1Schema = z.enum([
 export const CallbackProviderV1Schema = z.literal("github");
 export const CallbackNextActionV1Schema = z.literal("reconcile-provider");
 
-function isCallbackCredentialSafeStableReference(value: string): boolean {
+function isCredentialSafeDelimitedStableReference(value: string): boolean {
   if (!isCredentialSafeText(value)) return false;
   for (let index = 0; index < value.length; index += 1) {
     if (
-      (value[index] === "-" || value[index] === "_" || value[index] === ".") &&
+      (value[index] === "-" ||
+        value[index] === "_" ||
+        value[index] === "." ||
+        value[index] === ":") &&
       !isCredentialSafeText(value.slice(index + 1))
     ) {
       return false;
@@ -115,16 +118,35 @@ function isCallbackCredentialSafeStableReference(value: string): boolean {
   return true;
 }
 
-const CallbackSafeStableReferenceSchema = z
+export const GovernedProjectionStableReferenceV1Schema = z
   .string()
   .min(1)
   .max(128)
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u,
+    "Governed projection reference must contain only stable identifier characters.",
+  )
   .refine(
-    isCallbackCredentialSafeStableReference,
-    "Callback reference must not contain credential-like data.",
+    isCredentialSafeDelimitedStableReference,
+    "Governed projection reference must not contain credential-like data.",
   );
 
-export const CallbackOpaqueStableIdV1Schema = CallbackSafeStableReferenceSchema.regex(
+const GovernedProjectionRunIdV1Schema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(
+    /^run(?:[-_:][A-Za-z0-9][A-Za-z0-9._:-]*|\/[A-Za-z0-9][A-Za-z0-9._:-]*)$/u,
+    "Governed projection Run ID must use a stable run reference.",
+  )
+  .refine(
+    isCredentialSafeDelimitedStableReference,
+    "Governed projection Run ID must not contain credential-like data.",
+  );
+
+const CallbackSafeStableReferenceSchema = GovernedProjectionStableReferenceV1Schema;
+
+export const CallbackOpaqueStableIdV1Schema = GovernedProjectionStableReferenceV1Schema.regex(
   /^[A-Za-z0-9][A-Za-z0-9._-]*$/u,
   "Callback opaque ID must contain only stable identifier characters.",
 );
@@ -152,7 +174,7 @@ export const CallbackResourceIdentityV1Schema = z
     "Callback resource identity must be a stable GitHub issue or comment identity.",
   )
   .refine(
-    isCallbackCredentialSafeStableReference,
+    isCredentialSafeDelimitedStableReference,
     "Callback resource identity must not contain credential-like data.",
   );
 
@@ -1461,32 +1483,50 @@ export const AdmissionPolicySnapshotReceiptEnvelopeV1Schema = z
 
 export const WorkThreadRefPayloadV1Schema = z
   .object({
-    workThreadId: NonEmptyIdSchema,
+    workThreadId: GovernedProjectionStableReferenceV1Schema,
     sourceIdentityDigest: ReceiptDigestSchema,
-    localCreationReceiptId: NonEmptyIdSchema,
+    localCreationReceiptId: GovernedProjectionStableReferenceV1Schema,
     localCreationReceiptDigest: ReceiptDigestSchema,
-    lineageKind: NonEmptyIdSchema,
+    lineageKind: GovernedProjectionStableReferenceV1Schema,
     createdAt: ControlTimestampSchema,
   })
   .strict();
 
 export const CompletionContractRefPayloadV1Schema = z
   .object({
-    contractId: NonEmptyIdSchema,
+    contractId: GovernedProjectionStableReferenceV1Schema,
     version: z.number().int().positive(),
     cycle: z.number().int().positive(),
     mode: z.enum(["execution_compat", "governed"]),
     contentDigest: ReceiptDigestSchema,
     resolvedTargetDigests: DigestSetSchema,
-    requiredGateIds: sortedUniqueArray(NonEmptyIdSchema),
+    requiredGateIds: sortedUniqueArray(GovernedProjectionStableReferenceV1Schema),
     createdAt: ControlTimestampSchema,
-    supersedesContractId: NonEmptyIdSchema.optional(),
+    supersedesContractId: GovernedProjectionStableReferenceV1Schema.optional(),
   })
   .strict();
 
+const GovernedProjectionAttemptRefV1Schema = z
+  .object({
+    attemptId: GovernedProjectionStableReferenceV1Schema,
+    attemptNumber: z.number().int().positive(),
+    epoch: z.number().int().positive(),
+    fencingTokenDigest: ReceiptDigestSchema,
+  })
+  .strict()
+  .superRefine((attempt, ctx) => {
+    if (attempt.epoch !== attempt.attemptNumber) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["epoch"],
+        message: "Attempt epoch must equal the Run-scoped attempt number.",
+      });
+    }
+  });
+
 const ContractAssessmentRefV1Schema = z
   .object({
-    contractId: NonEmptyIdSchema,
+    contractId: GovernedProjectionStableReferenceV1Schema,
     version: z.number().int().positive(),
     cycle: z.number().int().positive(),
     contentDigest: ReceiptDigestSchema,
@@ -1495,18 +1535,23 @@ const ContractAssessmentRefV1Schema = z
 
 export const CompletionAssessmentPayloadV1Schema = z
   .object({
-    assessmentId: NonEmptyIdSchema,
-    workThreadId: NonEmptyIdSchema,
+    assessmentId: GovernedProjectionStableReferenceV1Schema,
+    workThreadId: GovernedProjectionStableReferenceV1Schema,
     contract: ContractAssessmentRefV1Schema,
-    admissionPolicySnapshot: z.object({ snapshotId: NonEmptyIdSchema, digest: ReceiptDigestSchema }).strict(),
-    runId: NonEmptyIdSchema,
-    attempt: ReceiptAttemptRefV1Schema,
+    admissionPolicySnapshot: z
+      .object({
+        snapshotId: GovernedProjectionStableReferenceV1Schema,
+        digest: ReceiptDigestSchema,
+      })
+      .strict(),
+    runId: GovernedProjectionRunIdV1Schema,
+    attempt: GovernedProjectionAttemptRefV1Schema,
     assessmentInputDigest: ReceiptDigestSchema,
     evidenceReceiptDigests: DigestSetSchema,
     gateResults: z.array(
       z
         .object({
-          gateId: NonEmptyIdSchema,
+          gateId: GovernedProjectionStableReferenceV1Schema,
           state: z.enum(["pending", "satisfied", "unsatisfied", "blocked", "waived"]),
           reasonCode: CompletionReasonCodeSchema,
           evidenceReceiptDigests: DigestSetSchema,
@@ -1515,12 +1560,12 @@ export const CompletionAssessmentPayloadV1Schema = z
     ),
     conclusion: z.enum(["pending", "satisfied", "unsatisfied", "blocked", "waived"]),
     assessedAt: ControlTimestampSchema,
-    assessedBy: NonEmptyIdSchema,
-    supersedesAssessmentId: NonEmptyIdSchema.optional(),
+    assessedBy: GovernedProjectionStableReferenceV1Schema,
+    supersedesAssessmentId: GovernedProjectionStableReferenceV1Schema.optional(),
     waiver: z
       .object({
-        ref: NonEmptyIdSchema,
-        actorRef: NonEmptyIdSchema,
+        ref: GovernedProjectionStableReferenceV1Schema,
+        actorRef: GovernedProjectionStableReferenceV1Schema,
         reasonDigest: ReceiptDigestSchema,
       })
       .strict()
@@ -1536,10 +1581,33 @@ export const CompletionAssessmentPayloadV1Schema = z
     }
   });
 
+const GovernedProjectionProducerV1Schema = z
+  .object({
+    kind: z.enum(["cloud", "runner", "local_opentag"]),
+    id: GovernedProjectionStableReferenceV1Schema,
+    credentialId: GovernedProjectionStableReferenceV1Schema.optional(),
+    registrationGeneration: z.number().int().positive().optional(),
+  })
+  .strict();
+
+const GovernedProjectionReceiptIdentityV1Schema = z
+  .object({
+    namespace: z.string().regex(/^opentag\.control\.receipt\/[a-z0-9-]+\/v1$/u),
+    parts: z
+      .array(z.union([GovernedProjectionStableReferenceV1Schema, GovernedProjectionRunIdV1Schema]))
+      .min(2),
+  })
+  .strict();
+
 const GovernedReceiptEnvelopeShape = {
   ...ReceiptEnvelopeBaseShape,
-  runId: NonEmptyIdSchema,
-  workThreadId: NonEmptyIdSchema,
+  receiptId: GovernedProjectionStableReferenceV1Schema,
+  organizationId: GovernedProjectionStableReferenceV1Schema,
+  operationId: GovernedProjectionStableReferenceV1Schema,
+  producer: GovernedProjectionProducerV1Schema,
+  identity: GovernedProjectionReceiptIdentityV1Schema,
+  runId: GovernedProjectionRunIdV1Schema,
+  workThreadId: GovernedProjectionStableReferenceV1Schema,
 };
 
 export const WorkThreadRefReceiptEnvelopeV1Schema = z
@@ -1595,7 +1663,7 @@ export const CompletionAssessmentReceiptEnvelopeV1Schema = z
   .object({
     ...GovernedReceiptEnvelopeShape,
     receiptKind: z.literal("completion_assessment"),
-    attempt: ReceiptAttemptRefV1Schema,
+    attempt: GovernedProjectionAttemptRefV1Schema,
     payload: CompletionAssessmentPayloadV1Schema,
   })
   .strict()
@@ -1626,11 +1694,11 @@ export const CompletionAssessmentReceiptEnvelopeV1Schema = z
 export const CallbackIntentObservationPayloadV1Schema = z
   .object({
     localIntentId: CallbackLocalIntentIdV1Schema,
-    assessmentRef: NonEmptyIdSchema,
+    assessmentRef: GovernedProjectionStableReferenceV1Schema,
     assessmentDigest: ReceiptDigestSchema,
     provider: CallbackProviderV1Schema,
     sourceThreadIdentityDigest: ReceiptDigestSchema,
-    operationId: NonEmptyIdSchema,
+    operationId: GovernedProjectionStableReferenceV1Schema,
     payloadDigest: ReceiptDigestSchema,
     createdAt: ControlTimestampSchema,
   })
@@ -1645,7 +1713,7 @@ export const CallbackAttemptObservationPayloadV1Schema = z
     outcome: z.enum(["accepted", "rejected", "outcome_unknown"]),
     reasonCode: CallbackObservationReasonCodeV1Schema,
     nextAction: CallbackNextActionV1Schema.optional(),
-    owner: NonEmptyIdSchema.optional(),
+    owner: GovernedProjectionStableReferenceV1Schema.optional(),
     attemptedAt: ControlTimestampSchema,
     observedAt: ControlTimestampSchema,
   })
@@ -1689,7 +1757,7 @@ export const CallbackProviderObservationPayloadV1Schema = z
     observedAt: ControlTimestampSchema,
     reasonCode: CallbackObservationReasonCodeV1Schema.optional(),
     nextAction: CallbackNextActionV1Schema.optional(),
-    owner: NonEmptyIdSchema.optional(),
+    owner: GovernedProjectionStableReferenceV1Schema.optional(),
   })
   .strict()
   .superRefine((observation, ctx) => {

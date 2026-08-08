@@ -401,23 +401,51 @@ describe("Control V1 typed receipt transport", () => {
       .rejects.toMatchObject({ responseBody: "invalid_control_v1_response" });
   });
 
-  it("rejects unsafe callback receipt and operation IDs before transport", async () => {
+  it("rejects unsafe governed projection references before transport", async () => {
     let fetchCalls = 0;
     const sdk = client(async () => {
       fetchCalls += 1;
       return jsonResponse({}, 500);
     });
-    for (const receipt of [
-      {
-        ...callbackProvider(),
+    const projections = [
+      () => sdk.projectWorkThreadRefControlV1({
+        ...workThreadRef(),
         receiptId: "receipt_github_pat_abcdefghijklmnopqrstuvwxyz123456"
+      }),
+      () => sdk.projectCompletionContractRefControlV1({
+        ...contractRef(),
+        operationId: "/tmp/contract-operation"
+      }),
+      () => {
+        const receipt = assessment();
+        return sdk.projectCompletionAssessmentControlV1({
+          ...receipt,
+          payload: {
+            ...receipt.payload,
+            assessedBy:
+              "actor_nested_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk"
+          }
+        });
       },
-      {
+      () => {
+        const receipt = callbackIntent();
+        return sdk.projectCallbackObservationControlV1({
+          ...receipt,
+          payload: { ...receipt.payload, assessmentRef: "../assessment" }
+        });
+      },
+      () => sdk.projectCallbackObservationControlV1({
+        ...callbackUnknown(),
+        operationId:
+          "operation_nested_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk"
+      }),
+      () => sdk.projectCallbackObservationControlV1({
         ...callbackProvider(),
-        operationId: "operation_nested_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk"
-      }
-    ]) {
-      await expect(sdk.projectCallbackObservationControlV1(receipt)).rejects.toBeInstanceOf(Error);
+        receiptId: "https://example.test/callback?token=secret"
+      })
+    ];
+    for (const project of projections) {
+      await expect(project()).rejects.toBeInstanceOf(Error);
     }
     expect(fetchCalls).toBe(0);
   });

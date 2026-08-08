@@ -19,6 +19,11 @@ function withProjectionDigests<T extends { payload: unknown }>(value: T) {
   return { ...withPayloadDigest, receiptDigest: canonicalSha256Json(withPayloadDigest) };
 }
 
+function refreshProjectionDigests(value: Record<string, unknown>) {
+  const { receiptDigest: _receiptDigest, payloadDigest: _payloadDigest, ...base } = value;
+  return withProjectionDigests(base as { payload: unknown });
+}
+
 function workThreadReceipt(overrides: Record<string, unknown> = {}) {
   return withProjectionDigests({
     schemaVersion: 1,
@@ -1044,6 +1049,72 @@ describe("control_plane_projection_outbox", () => {
       })).rejects.toMatchObject({ code: "projection_envelope_invalid" });
     }
     expect(sqlite.prepare("SELECT count(*) AS count FROM control_plane_projection_outbox").get()).toEqual({ count: 0 });
+    sqlite.close();
+  });
+
+  it("rejects fresh-digest unsafe references across every governed projection before writing", async () => {
+    const { sqlite, repo } = repository();
+    const governed = allowedReceipts().filter((receipt) => receipt.receiptKind !== "runner_readiness");
+    expect(governed).toHaveLength(6);
+
+    for (const receipt of governed) {
+      for (const [field, unsafeValue] of [
+        ["receiptId", "receipt_github_pat_abcdefghijklmnopqrstuvwxyz123456"],
+        ["operationId", "/tmp/governed-operation"],
+      ] as const) {
+        await expect(repo.enqueueControlPlaneProjection({
+          destinationId: "cloud",
+          envelope: refreshProjectionDigests({ ...receipt, [field]: unsafeValue }),
+          now: NOW,
+        })).rejects.toMatchObject({ code: "projection_envelope_invalid" });
+      }
+    }
+
+    const payloadMutations = governed.map((receipt) => {
+      const payload = receipt.payload as Record<string, unknown>;
+      switch (receipt.receiptKind) {
+        case "work_thread_ref":
+          return { ...receipt, payload: { ...payload, localCreationReceiptId: "../local-receipt" } };
+        case "completion_contract_ref":
+          return {
+            ...receipt,
+            payload: { ...payload, contractId: "contract_github_pat_abcdefghijklmnopqrstuvwxyz123456" },
+          };
+        case "completion_assessment":
+          return {
+            ...receipt,
+            payload: {
+              ...payload,
+              assessedBy:
+                "actor_nested_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk",
+            },
+          };
+        case "callback_intent_observation":
+          return { ...receipt, payload: { ...payload, assessmentRef: "/tmp/assessment" } };
+        case "callback_attempt_observation":
+          return {
+            ...receipt,
+            payload: { ...payload, owner: "owner_github_pat_abcdefghijklmnopqrstuvwxyz123456" },
+          };
+        case "callback_provider_observation":
+          return {
+            ...receipt,
+            payload: { ...payload, providerReceiptId: "provider_receipt_../credential" },
+          };
+        default:
+          throw new Error(`Unexpected governed receipt kind: ${receipt.receiptKind}`);
+      }
+    });
+    for (const receipt of payloadMutations) {
+      await expect(repo.enqueueControlPlaneProjection({
+        destinationId: "cloud",
+        envelope: refreshProjectionDigests(receipt),
+        now: NOW,
+      })).rejects.toMatchObject({ code: "projection_envelope_invalid" });
+    }
+
+    expect(sqlite.prepare("SELECT count(*) AS count FROM control_plane_projection_outbox").get())
+      .toEqual({ count: 0 });
     sqlite.close();
   });
 });

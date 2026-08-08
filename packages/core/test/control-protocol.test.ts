@@ -1645,6 +1645,63 @@ describe("governed projection fixture vectors", () => {
       expect(receipt.payloadDigest, `${name} payloadDigest`).toBe(digestCanonical(payload));
       expect(receiptDigest, `${name} receiptDigest`).toBe(digestCanonical(receiptDigestInput));
     }
+
+    const refreshDigests = (receipt: Record<string, unknown>) => {
+      const { receiptDigest: _receiptDigest, payloadDigest: _payloadDigest, ...base } = receipt;
+      const payload = base.payload;
+      const withPayloadDigest = { ...base, payloadDigest: digestCanonical(payload) };
+      return { ...withPayloadDigest, receiptDigest: digestCanonical(withPayloadDigest) };
+    };
+    const governedFixtures = fixtureSchemas.map(([name, schema]) => [
+      name,
+      schema,
+      artifact.fixtures[name] as Record<string, unknown>,
+    ] as const);
+    for (const [name, schema, fixture] of governedFixtures) {
+      for (const [field, unsafeValue] of [
+        ["receiptId", "receipt_github_pat_abcdefghijklmnopqrstuvwxyz123456"],
+        ["operationId", "/tmp/governed-operation"],
+      ] as const) {
+        const changed = refreshDigests({ ...fixture, [field]: unsafeValue });
+        expect(schema.safeParse(changed).success, `${name} ${field}: ${unsafeValue}`).toBe(false);
+      }
+    }
+
+    const payloadMutations = {
+      workThreadRef: (payload: Record<string, unknown>) => ({
+        ...payload,
+        localCreationReceiptId: "local_github_pat_abcdefghijklmnopqrstuvwxyz123456",
+      }),
+      completionContractRef: (payload: Record<string, unknown>) => ({
+        ...payload,
+        contractId: "../private-contract",
+      }),
+      completionAssessment: (payload: Record<string, unknown>) => ({
+        ...payload,
+        admissionPolicySnapshot: {
+          ...(payload.admissionPolicySnapshot as Record<string, unknown>),
+          snapshotId:
+            "snapshot_nested_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk",
+        },
+      }),
+      callbackIntentObservation: (payload: Record<string, unknown>) => ({
+        ...payload,
+        assessmentRef: "/tmp/assessment",
+      }),
+      callbackAttemptObservation: (payload: Record<string, unknown>) => ({
+        ...payload,
+        owner: "owner_github_pat_abcdefghijklmnopqrstuvwxyz123456",
+      }),
+      callbackProviderObservation: (payload: Record<string, unknown>) => ({
+        ...payload,
+        providerReceiptId: "provider_receipt_github_pat_abcdefghijklmnopqrstuvwxyz123456",
+      }),
+    } satisfies Record<keyof typeof artifact.fixtures, (payload: Record<string, unknown>) => Record<string, unknown>>;
+    for (const [name, schema, fixture] of governedFixtures) {
+      const payload = payloadMutations[name](fixture.payload as Record<string, unknown>);
+      const changed = refreshDigests({ ...fixture, payload });
+      expect(schema.safeParse(changed).success, `${name} unsafe payload reference`).toBe(false);
+    }
   });
 });
 
