@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { formatProjectTargetRef } from "@opentag/core";
 import { nodeCommandRunner, type CommandRunner, type ExecutorAdapter, type ExecutorCapabilityContract } from "@opentag/runner";
 import { createOpenTagClient } from "@opentag/client";
-import { normalizeChannelBindings, runnerDispatcherToken } from "./config.js";
+import { hostedRunnerAuthProblem, normalizeChannelBindings, runnerDispatcherToken } from "./config.js";
 import type { OpenTagDaemonConfig, RepositoryBindingConfig } from "./config.js";
 import { hermesProfileConfigurationWarning } from "./runtime.js";
 
@@ -118,6 +118,17 @@ function shouldCheckCodexConfig(config: OpenTagDaemonConfig): boolean {
 }
 
 function checkRunnerApiAuth(config: OpenTagDaemonConfig): DoctorCheck {
+  const hostedAuthProblem = hostedRunnerAuthProblem(config);
+  if (hostedAuthProblem) {
+    return check("fail", "hosted runner auth", hostedAuthProblem);
+  }
+  if (config.controlRegistration) {
+    return check(
+      "ok",
+      "hosted runner auth",
+      "Hosted Control V1 paired runtime credential is valid for this runner; pairing credentials are not used."
+    );
+  }
   if (config.runnerToken) {
     return check(
       "ok",
@@ -367,12 +378,15 @@ export async function runDoctor(input: {
   if (hermesProfileWarning) {
     checks.push(check("warn", "Hermes profile configuration", hermesProfileWarning));
   }
+  const hostedAuthProblem = hostedRunnerAuthProblem(input.config);
   const token = runnerDispatcherToken(input.config);
-  const client = createOpenTagClient({
-    dispatcherUrl: input.config.dispatcherUrl,
-    ...(token ? { pairingToken: token } : {}),
-    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
-  });
+  const client = hostedAuthProblem
+    ? undefined
+    : createOpenTagClient({
+        dispatcherUrl: input.config.dispatcherUrl,
+        ...(token ? { pairingToken: token } : {}),
+        ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+      });
 
   try {
     const response = await (input.fetchImpl ?? fetch)(`${input.config.dispatcherUrl.replace(/\/$/, "")}/healthz`);
@@ -381,19 +395,23 @@ export async function runDoctor(input: {
     checks.push(check("fail", "dispatcher health", error instanceof Error ? error.message : String(error)));
   }
 
-  try {
-    const { runner } = await client.getRunner({ runnerId: input.config.runnerId });
-    checks.push(check("ok", "runner registration", `${runner.runnerId} (${runner.name})`));
-    checks.push(
-      checkRunnerHeartbeat({
-        ...(runner.heartbeatAt ? { heartbeatAt: runner.heartbeatAt } : {}),
-        config: input.config,
-        ...(input.now ? { now: input.now } : {})
-      })
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    checks.push(check(message.includes("runner_not_found") ? "fail" : "warn", "runner registration", message));
+  if (client) {
+    try {
+      const { runner } = await client.getRunner({ runnerId: input.config.runnerId });
+      checks.push(check("ok", "runner registration", `${runner.runnerId} (${runner.name})`));
+      checks.push(
+        checkRunnerHeartbeat({
+          ...(runner.heartbeatAt ? { heartbeatAt: runner.heartbeatAt } : {}),
+          config: input.config,
+          ...(input.now ? { now: input.now } : {})
+        })
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      checks.push(check(message.includes("runner_not_found") ? "fail" : "warn", "runner registration", message));
+    }
+  } else {
+    checks.push(check("fail", "runner registration", hostedAuthProblem ?? "Hosted runner authentication is invalid."));
   }
 
   checks.push(checkRunnerApiAuth(input.config));
@@ -426,6 +444,10 @@ export async function runDoctor(input: {
       }))
     );
 
+    if (!client) {
+      checks.push(check("fail", `${repository.owner}/${repository.repo} binding`, hostedAuthProblem ?? "Hosted runner authentication is invalid."));
+      continue;
+    }
     try {
       const { binding } = await client.getRepositoryBinding({
         provider: repository.provider,
@@ -467,6 +489,16 @@ export async function runDoctor(input: {
   }
 
   for (const binding of normalizeChannelBindings(input.config)) {
+    if (!client) {
+      checks.push(
+        check(
+          "fail",
+          `${binding.provider}:${binding.accountId}/${binding.conversationId} binding`,
+          hostedAuthProblem ?? "Hosted runner authentication is invalid."
+        )
+      );
+      continue;
+    }
     try {
       const { binding: remoteBinding } = await client.getChannelBinding({
         provider: binding.provider,

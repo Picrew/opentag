@@ -3,13 +3,36 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfigFromEnv, parseDaemonConfig, readKeychainSecret, runnerDispatcherToken } from "../src/config.js";
-import { builtInAcpOptionsFromConfig, executorsFromConfig } from "../src/runtime.js";
+import { builtInAcpOptionsFromConfig, createDaemonClient, executorsFromConfig } from "../src/runtime.js";
 
 const baseRepository = {
   owner: "acme",
   repo: "widgets",
   checkoutPath: "/tmp/acme-widgets"
 };
+
+const hostedRegistration = {
+  schemaVersion: 1 as const,
+  protocolVersion: "1.0" as const,
+  runnerId: "runner_hosted",
+  registrationGeneration: 1,
+  credentialGeneration: 1,
+  credentialId: "credential_runtime_1",
+  credentialPurpose: "runtime" as const,
+  createdAt: "2026-08-08T00:00:00.000Z"
+};
+
+function hostedControl(
+  state: "credential_staged" | "paired",
+  registration = hostedRegistration
+) {
+  return {
+    kind: "hosted_control_v1" as const,
+    state,
+    operationId: "operation_pair_1",
+    registration
+  };
+}
 
 function acpAgent(input: {
   label: string;
@@ -363,6 +386,103 @@ describe("parseDaemonConfig run timeout", () => {
         runTimeoutMs: 0
       })
     ).toThrow();
+  });
+});
+
+describe("Hosted Control V1 credential state", () => {
+  it("keeps marker-free legacy token resolution unchanged", () => {
+    const config = parseDaemonConfig({
+      runnerId: "runner_legacy",
+      pairingToken: "legacy_pairing"
+    });
+
+    expect(config.controlRegistration).toBeUndefined();
+    expect(runnerDispatcherToken(config)).toBe("legacy_pairing");
+  });
+
+  it("strictly parses all hosted states and only authenticates a paired runner", () => {
+    const unpaired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      pairingToken: "pairing_bootstrap",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        operationId: "operation_pair_1",
+        reason: "pending"
+      }
+    });
+    const recoveryRequired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        operationId: "operation_pair_1",
+        reason: "recovery_required",
+        registration: hostedRegistration
+      }
+    });
+    const staged = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_staged",
+      controlRegistration: hostedControl("credential_staged")
+    });
+    const paired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_committed",
+      controlRegistration: hostedControl("paired")
+    });
+
+    expect(runnerDispatcherToken(unpaired)).toBeUndefined();
+    expect(runnerDispatcherToken(recoveryRequired)).toBeUndefined();
+    expect(runnerDispatcherToken(staged)).toBeUndefined();
+    expect(runnerDispatcherToken(paired)).toBe("runtime_committed");
+    expect(() => createDaemonClient(unpaired)).toThrow(/not paired/iu);
+    expect(() => createDaemonClient(staged)).toThrow(/staged but not committed/iu);
+    expect(() => createDaemonClient(paired)).not.toThrow();
+  });
+
+  it("rejects unknown hosted fields and invalid metadata", () => {
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        operationId: "operation_pair_1",
+        reason: "pending",
+        unexpected: true
+      }
+    })).toThrow(/unrecognized/iu);
+
+    for (const registration of [
+      { ...hostedRegistration, createdAt: "not-a-timestamp" },
+      { ...hostedRegistration, registrationGeneration: 0 },
+      { ...hostedRegistration, credentialGeneration: -1 },
+      { ...hostedRegistration, unexpected: true }
+    ]) {
+      expect(() => parseDaemonConfig({
+        runnerId: "runner_hosted",
+        runnerToken: "runtime_staged",
+        controlRegistration: hostedControl("credential_staged", registration as typeof hostedRegistration)
+      })).toThrow();
+    }
+  });
+
+  it("rejects unsafe hosted credential persistence combinations", () => {
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_staged",
+      pairingToken: "pairing_must_be_deleted",
+      controlRegistration: hostedControl("credential_staged")
+    })).toThrow(/must not retain/iu);
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      controlRegistration: hostedControl("paired")
+    })).toThrow(/requires a staged runtime runner token/iu);
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_other",
+      runnerToken: "runtime_committed",
+      controlRegistration: hostedControl("paired")
+    })).toThrow(/must match daemon runnerId/iu);
   });
 });
 

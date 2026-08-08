@@ -13,6 +13,57 @@ const ExecutorSchema = z.string().trim().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
 
+export const HostedControlRegistrationMetadataSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    protocolVersion: z.literal("1.0"),
+    runnerId: z.string().trim().min(1),
+    registrationGeneration: PositiveIntegerSchema,
+    credentialGeneration: PositiveIntegerSchema,
+    credentialId: z.string().trim().min(1),
+    credentialPurpose: z.literal("runtime"),
+    createdAt: z.string().datetime({ offset: true })
+  })
+  .strict();
+
+export type HostedControlRegistrationMetadata = z.infer<typeof HostedControlRegistrationMetadataSchema>;
+
+const HostedControlUnpairedRegistrationSchema = z
+  .object({
+    kind: z.literal("hosted_control_v1"),
+    state: z.literal("unpaired"),
+    operationId: z.string().trim().min(1),
+    reason: z.enum(["pending", "outcome_unknown"])
+  })
+  .strict();
+
+const HostedControlRecoveryRequiredRegistrationSchema = z
+  .object({
+    kind: z.literal("hosted_control_v1"),
+    state: z.literal("unpaired"),
+    operationId: z.string().trim().min(1),
+    reason: z.literal("recovery_required"),
+    registration: HostedControlRegistrationMetadataSchema.optional()
+  })
+  .strict();
+
+const HostedControlCredentialRegistrationSchema = z
+  .object({
+    kind: z.literal("hosted_control_v1"),
+    state: z.enum(["credential_staged", "paired"]),
+    operationId: z.string().trim().min(1),
+    registration: HostedControlRegistrationMetadataSchema
+  })
+  .strict();
+
+export const HostedControlRegistrationSchema = z.union([
+  HostedControlUnpairedRegistrationSchema,
+  HostedControlRecoveryRequiredRegistrationSchema,
+  HostedControlCredentialRegistrationSchema
+]);
+
+export type HostedControlRegistration = z.infer<typeof HostedControlRegistrationSchema>;
+
 function defaultLocalStateDirectory(): string {
   if (process.env.OPENTAG_STATE_DIR) return resolve(process.env.OPENTAG_STATE_DIR);
   if (process.env.XDG_STATE_HOME) return resolve(process.env.XDG_STATE_HOME, "opentag");
@@ -209,6 +260,7 @@ export const OpenTagDaemonConfigSchema = z
     runnerTokens: z.array(SecretStringSchema).optional(),
     revokedRunnerTokenFingerprints: z.array(z.string().trim().min(1)).optional(),
     pairingToken: SecretStringSchema.optional(),
+    controlRegistration: HostedControlRegistrationSchema.optional(),
     pollIntervalMs: PositiveIntegerSchema.default(5000),
     heartbeatIntervalMs: PositiveIntegerSchema.default(15000),
     runTimeoutMs: PositiveIntegerSchema.optional()
@@ -222,6 +274,43 @@ export const OpenTagDaemonConfigSchema = z
           message: `Configured ACP agent '${name}' cannot replace the built-in executor with the same id.`
         });
       }
+    }
+
+    const control = config.controlRegistration;
+    if (!control) return;
+
+    if (control.state === "credential_staged" || control.state === "paired") {
+      if (config.pairingToken) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["pairingToken"],
+          message: `Hosted Control V1 ${control.state} configuration must not retain the pairing token.`
+        });
+      }
+      if (!config.runnerToken) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["runnerToken"],
+          message: `Hosted Control V1 ${control.state} configuration requires a staged runtime runner token.`
+        });
+      }
+      if (control.registration.runnerId !== config.runnerId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["controlRegistration", "registration", "runnerId"],
+          message: "Hosted Control V1 registration runnerId must match daemon runnerId."
+        });
+      }
+    } else if (
+      "registration" in control
+      && control.registration
+      && control.registration.runnerId !== config.runnerId
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "registration", "runnerId"],
+        message: "Hosted Control V1 recovery registration runnerId must match daemon runnerId."
+      });
     }
   });
 
@@ -352,7 +441,37 @@ export function parseDaemonConfig(value: unknown): OpenTagDaemonConfig {
   return parsed;
 }
 
-export function runnerDispatcherToken(config: Pick<OpenTagDaemonConfig, "runnerToken" | "pairingToken">): string | undefined {
+export function hostedRunnerAuthProblem(
+  config: Pick<OpenTagDaemonConfig, "runnerId" | "runnerToken" | "pairingToken" | "controlRegistration">
+): string | undefined {
+  const control = config.controlRegistration;
+  if (!control) return undefined;
+  if (control.state === "unpaired") {
+    return control.reason === "recovery_required"
+      ? "Hosted Control V1 runner credential recovery is required; re-provision the runner before starting it."
+      : `Hosted Control V1 runner is ${control.reason === "pending" ? "not paired" : "in an outcome-unknown pairing state"}; complete pairing or recovery before starting it.`;
+  }
+  if (control.state === "credential_staged") {
+    return "Hosted Control V1 runner credential is staged but not committed as paired; finish local credential verification before starting it.";
+  }
+  if (config.pairingToken) {
+    return "Hosted Control V1 paired configuration retains a pairing token; remove it before starting the runner.";
+  }
+  if (!config.runnerToken) {
+    return "Hosted Control V1 paired configuration is missing its runtime runner token; re-provision the runner before starting it.";
+  }
+  if (!control.registration || control.registration.runnerId !== config.runnerId) {
+    return "Hosted Control V1 registration identity does not match daemon runnerId; correct or re-provision the runner before starting it.";
+  }
+  return undefined;
+}
+
+export function runnerDispatcherToken(
+  config: Pick<OpenTagDaemonConfig, "runnerId" | "runnerToken" | "pairingToken" | "controlRegistration">
+): string | undefined {
+  if (config.controlRegistration) {
+    return hostedRunnerAuthProblem(config) ? undefined : config.runnerToken;
+  }
   return config.runnerToken ?? config.pairingToken;
 }
 

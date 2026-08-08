@@ -44,6 +44,26 @@ function tokenFingerprint(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
+const hostedRegistration = {
+  schemaVersion: 1 as const,
+  protocolVersion: "1.0" as const,
+  runnerId: "runner_local",
+  registrationGeneration: 1,
+  credentialGeneration: 1,
+  credentialId: "credential_runtime_1",
+  credentialPurpose: "runtime" as const,
+  createdAt: "2026-08-08T00:00:00.000Z"
+};
+
+function hostedControl(state: "credential_staged" | "paired", runnerId = "runner_local") {
+  return {
+    kind: "hosted_control_v1" as const,
+    state,
+    operationId: "operation_pair_1",
+    registration: { ...hostedRegistration, runnerId }
+  };
+}
+
 async function runCodexDoctor(
   codexConfig: string,
   configOverrides: Partial<OpenTagDaemonConfig> = {},
@@ -51,6 +71,7 @@ async function runCodexDoctor(
     executors?: Record<string, ExecutorAdapter>;
     env?: Record<string, string | undefined>;
     repositoryDefaultExecutor?: string;
+    requestObserver?: (url: string, init?: RequestInit) => void;
   } = {}
 ) {
   const root = mkdtempSync(join(tmpdir(), "opentag-local-runtime-doctor-"));
@@ -86,8 +107,9 @@ async function runCodexDoctor(
       commandRunner,
       codexConfigPath,
       ...(options.env ? { env: options.env } : {}),
-      fetchImpl: async (url) => {
+      fetchImpl: async (url, init) => {
         const stringUrl = String(url);
+        options.requestObserver?.(stringUrl, init);
         if (stringUrl.endsWith("/healthz")) {
           return Response.json({ ok: true });
         }
@@ -464,6 +486,107 @@ describe("local-runtime doctor", () => {
     expect(formatDoctorChecks(checks)).toContain(
       "OK   hook ingest auth: Runner-scoped dispatcher token is configured separately from the pairing token"
     );
+  });
+
+  it("fails closed for an unpaired hosted runner without sending pairing auth", async () => {
+    const requests: Array<{ url: string; authorization?: string }> = [];
+    const checks = await runCodexDoctor(
+      'service_tier = "fast"\n',
+      {
+        pairingToken: "pairing_secret_must_not_leak",
+        controlRegistration: {
+          kind: "hosted_control_v1",
+          state: "unpaired",
+          operationId: "operation_pair_1",
+          reason: "pending"
+        }
+      },
+      {
+        requestObserver(url, init) {
+          const authorization = new Headers(init?.headers).get("authorization") ?? undefined;
+          requests.push({ url, ...(authorization ? { authorization } : {}) });
+        }
+      }
+    );
+
+    const formatted = formatDoctorChecks(checks);
+    expect(doctorHasFailures(checks)).toBe(true);
+    expect(formatted).toContain("FAIL hosted runner auth: Hosted Control V1 runner is not paired");
+    expect(formatted).not.toContain("pairing_secret_must_not_leak");
+    expect(requests.filter(({ url }) => url.includes("/v1/"))).toEqual([]);
+  });
+
+  it("does not authenticate a staged hosted credential", async () => {
+    const runnerRequests: string[] = [];
+    const checks = await runCodexDoctor(
+      'service_tier = "fast"\n',
+      {
+        runnerToken: "runtime_staged_secret",
+        controlRegistration: hostedControl("credential_staged")
+      },
+      {
+        requestObserver(url) {
+          if (url.includes("/v1/")) runnerRequests.push(url);
+        }
+      }
+    );
+
+    const formatted = formatDoctorChecks(checks);
+    expect(doctorHasFailures(checks)).toBe(true);
+    expect(formatted).toContain("FAIL hosted runner auth: Hosted Control V1 runner credential is staged");
+    expect(formatted).not.toContain("runtime_staged_secret");
+    expect(runnerRequests).toEqual([]);
+  });
+
+  it("uses the runtime token for a valid paired hosted runner", async () => {
+    const authorizations: string[] = [];
+    const checks = await runCodexDoctor(
+      'service_tier = "fast"\n',
+      {
+        runnerToken: "runtime_paired_secret",
+        controlRegistration: hostedControl("paired")
+      },
+      {
+        requestObserver(url, init) {
+          if (!url.includes("/v1/")) return;
+          const authorization = new Headers(init?.headers).get("authorization");
+          if (authorization) authorizations.push(authorization);
+        }
+      }
+    );
+
+    expect(doctorHasFailures(checks)).toBe(false);
+    expect(formatDoctorChecks(checks)).toContain("OK   hosted runner auth: Hosted Control V1 paired runtime credential is valid");
+    expect(authorizations).toContain("Bearer runtime_paired_secret");
+  });
+
+  it("fails closed on hosted identity mismatch and pairing-token residue without leaking secrets", async () => {
+    for (const configOverrides of [
+      {
+        runnerToken: "runtime_mismatch_secret",
+        controlRegistration: hostedControl("paired", "runner_other")
+      },
+      {
+        pairingToken: "pairing_residue_secret",
+        runnerToken: "runtime_paired_secret",
+        controlRegistration: hostedControl("paired")
+      }
+    ]) {
+      const runnerRequests: string[] = [];
+      const checks = await runCodexDoctor('service_tier = "fast"\n', configOverrides, {
+        requestObserver(url) {
+          if (url.includes("/v1/")) runnerRequests.push(url);
+        }
+      });
+      const formatted = formatDoctorChecks(checks);
+
+      expect(doctorHasFailures(checks)).toBe(true);
+      expect(formatted).toContain("FAIL hosted runner auth:");
+      expect(formatted).not.toContain("runtime_mismatch_secret");
+      expect(formatted).not.toContain("pairing_residue_secret");
+      expect(formatted).not.toContain("runtime_paired_secret");
+      expect(runnerRequests).toEqual([]);
+    }
   });
 
   it("reports runner token rotation and revocation readiness", async () => {

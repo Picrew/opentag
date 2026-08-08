@@ -9,7 +9,7 @@ import {
   type RunnerSecurityPolicy
 } from "@opentag/runner";
 import type { RunnerExecutorRegistration } from "@opentag/core";
-import { runnerDispatcherToken, type OpenTagDaemonConfig } from "./config.js";
+import { hostedRunnerAuthProblem, runnerDispatcherToken, type OpenTagDaemonConfig } from "./config.js";
 import type { DaemonClient } from "./daemon.js";
 import type { PullRequestOptions } from "./pr.js";
 
@@ -103,6 +103,10 @@ export function runnerExecutorRegistrations(
 }
 
 export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
+  const hostedAuthProblem = hostedRunnerAuthProblem(config);
+  if (hostedAuthProblem) {
+    throw new Error(hostedAuthProblem);
+  }
   const token = runnerDispatcherToken(config);
   return createDispatcherClient({
     dispatcherUrl: config.dispatcherUrl,
