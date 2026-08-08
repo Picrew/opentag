@@ -1061,6 +1061,11 @@ describe("control_plane_projection_outbox", () => {
       for (const [field, unsafeValue] of [
         ["receiptId", "receipt_github_pat_abcdefghijklmnopqrstuvwxyz123456"],
         ["operationId", "/tmp/governed-operation"],
+        ["receiptId", "xgithub_pat_abcdefghijklmnopqrstuvwxyz123456"],
+        [
+          "operationId",
+          "xeyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk",
+        ],
       ] as const) {
         await expect(repo.enqueueControlPlaneProjection({
           destinationId: "cloud",

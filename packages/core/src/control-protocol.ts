@@ -102,18 +102,9 @@ export const CallbackObservationReasonCodeV1Schema = z.enum([
 export const CallbackProviderV1Schema = z.literal("github");
 export const CallbackNextActionV1Schema = z.literal("reconcile-provider");
 
-function isCredentialSafeDelimitedStableReference(value: string): boolean {
-  if (!isCredentialSafeText(value)) return false;
+function isCredentialSafeStableReference(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
-    if (
-      (value[index] === "-" ||
-        value[index] === "_" ||
-        value[index] === "." ||
-        value[index] === ":") &&
-      !isCredentialSafeText(value.slice(index + 1))
-    ) {
-      return false;
-    }
+    if (!isCredentialSafeText(value.slice(index))) return false;
   }
   return true;
 }
@@ -127,7 +118,7 @@ export const GovernedProjectionStableReferenceV1Schema = z
     "Governed projection reference must contain only stable identifier characters.",
   )
   .refine(
-    isCredentialSafeDelimitedStableReference,
+    isCredentialSafeStableReference,
     "Governed projection reference must not contain credential-like data.",
   );
 
@@ -140,7 +131,7 @@ const GovernedProjectionRunIdV1Schema = z
     "Governed projection Run ID must use a stable run reference.",
   )
   .refine(
-    isCredentialSafeDelimitedStableReference,
+    isCredentialSafeStableReference,
     "Governed projection Run ID must not contain credential-like data.",
   );
 
@@ -174,7 +165,7 @@ export const CallbackResourceIdentityV1Schema = z
     "Callback resource identity must be a stable GitHub issue or comment identity.",
   )
   .refine(
-    isCredentialSafeDelimitedStableReference,
+    isCredentialSafeStableReference,
     "Callback resource identity must not contain credential-like data.",
   );
 

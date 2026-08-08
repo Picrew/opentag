@@ -410,11 +410,12 @@ describe("Control V1 typed receipt transport", () => {
     const projections = [
       () => sdk.projectWorkThreadRefControlV1({
         ...workThreadRef(),
-        receiptId: "receipt_github_pat_abcdefghijklmnopqrstuvwxyz123456"
+        receiptId: "xgithub_pat_abcdefghijklmnopqrstuvwxyz123456"
       }),
       () => sdk.projectCompletionContractRefControlV1({
         ...contractRef(),
-        operationId: "/tmp/contract-operation"
+        operationId:
+          "xeyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk"
       }),
       () => {
         const receipt = assessment();
@@ -422,8 +423,7 @@ describe("Control V1 typed receipt transport", () => {
           ...receipt,
           payload: {
             ...receipt.payload,
-            assessedBy:
-              "actor_nested_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk"
+            assessedBy: "xgithub_pat_abcdefghijklmnopqrstuvwxyz123456"
           }
         });
       },
@@ -431,17 +431,21 @@ describe("Control V1 typed receipt transport", () => {
         const receipt = callbackIntent();
         return sdk.projectCallbackObservationControlV1({
           ...receipt,
-          payload: { ...receipt.payload, assessmentRef: "../assessment" }
+          payload: {
+            ...receipt.payload,
+            assessmentRef:
+              "xeyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk"
+          }
         });
       },
       () => sdk.projectCallbackObservationControlV1({
         ...callbackUnknown(),
-        operationId:
-          "operation_nested_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk"
+        operationId: "xgithub_pat_abcdefghijklmnopqrstuvwxyz123456"
       }),
       () => sdk.projectCallbackObservationControlV1({
         ...callbackProvider(),
-        receiptId: "https://example.test/callback?token=secret"
+        receiptId:
+          "xeyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk"
       })
     ];
     for (const project of projections) {

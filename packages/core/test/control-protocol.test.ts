@@ -1661,6 +1661,11 @@ describe("governed projection fixture vectors", () => {
       for (const [field, unsafeValue] of [
         ["receiptId", "receipt_github_pat_abcdefghijklmnopqrstuvwxyz123456"],
         ["operationId", "/tmp/governed-operation"],
+        ["receiptId", "xgithub_pat_abcdefghijklmnopqrstuvwxyz123456"],
+        [
+          "operationId",
+          "xeyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk",
+        ],
       ] as const) {
         const changed = refreshDigests({ ...fixture, [field]: unsafeValue });
         expect(schema.safeParse(changed).success, `${name} ${field}: ${unsafeValue}`).toBe(false);
