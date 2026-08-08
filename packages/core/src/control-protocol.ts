@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CompletionReasonCodeSchema } from "./schema.js";
 
 export const CONTROL_SCHEMA_VERSION = 1 as const;
 export const CONTROL_PROTOCOL_VERSION = "1.0" as const;
@@ -73,9 +74,28 @@ export const NpmPackageVersionSchema = z
     /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u,
   );
 
-const NonEmptyIdSchema = z.string().trim().min(1);
-const ReasonCodeSchema = z.string().regex(/^[a-z0-9]+(?:_[a-z0-9]+)*$/u);
+const UnpaddedNonEmptyStringSchema = z
+  .string()
+  .min(1)
+  .refine((value) => value === value.trim(), "Value must not contain leading or trailing whitespace.");
+const NonEmptyIdSchema = UnpaddedNonEmptyStringSchema;
 const DigestSetSchema = sortedUniqueArray(ReceiptDigestSchema);
+
+export const RunnerReadinessReasonCodeV1Schema = z.enum([
+  "credential_unavailable",
+  "executor_unavailable",
+  "registration_stale",
+  "target_binding_stale",
+  "target_unavailable",
+]);
+
+export const CallbackObservationReasonCodeV1Schema = z.enum([
+  "provider_accepted",
+  "provider_error",
+  "provider_receipt_missing",
+  "provider_rejected",
+  "provider_timeout",
+]);
 
 export const ControlVersionNegotiationV1Schema = z
   .object({
@@ -86,7 +106,7 @@ export const ControlVersionNegotiationV1Schema = z
 
 export const ArtifactIdentityV1Schema = z
   .object({
-    packageName: z.string().trim().min(1),
+    packageName: UnpaddedNonEmptyStringSchema,
     packageVersion: NpmPackageVersionSchema,
   })
   .strict();
@@ -100,7 +120,7 @@ export const RelayCapabilitiesResponseV1Schema = z
     minimumClient: ControlVersionNegotiationV1Schema,
     deployment: z
       .object({
-        environment: z.string().trim().min(1),
+        environment: UnpaddedNonEmptyStringSchema,
         releaseSha: WorkerReleaseShaSchema,
       })
       .strict(),
@@ -133,6 +153,37 @@ export const ControlWaitingResponseV1Schema = z
   })
   .strict();
 
+export const ControlWaitingHttpResponseV1Schema = z
+  .object({ status: z.literal(202), body: ControlWaitingResponseV1Schema })
+  .strict();
+
+export const ControlInvalidRequestResponseV1Schema = z
+  .object({
+    ...VersionedResponseShape,
+    error: z.enum(["invalid_request_body", "digest_mismatch"]),
+    message: z.string().min(1),
+    requestId: NonEmptyIdSchema,
+  })
+  .strict();
+
+export const ControlInvalidCredentialResponseV1Schema = z
+  .object({
+    ...VersionedResponseShape,
+    error: z.literal("invalid_credential"),
+    message: z.string().min(1),
+    requestId: NonEmptyIdSchema,
+  })
+  .strict();
+
+export const ControlInsufficientScopeResponseV1Schema = z
+  .object({
+    ...VersionedResponseShape,
+    error: z.literal("insufficient_scope"),
+    message: z.string().min(1),
+    requestId: NonEmptyIdSchema,
+  })
+  .strict();
+
 export const ControlConcealedNotFoundResponseV1Schema = z
   .object({
     ...VersionedResponseShape,
@@ -161,6 +212,24 @@ export const ControlCapabilityRequiredResponseV1Schema = z
   })
   .strict();
 
+export const ControlRequestBodyTooLargeResponseV1Schema = z
+  .object({
+    ...VersionedResponseShape,
+    error: z.literal("request_body_too_large"),
+    message: z.string().min(1),
+    requestId: NonEmptyIdSchema,
+  })
+  .strict();
+
+export const ControlObservationPolicyMismatchResponseV1Schema = z
+  .object({
+    ...VersionedResponseShape,
+    error: z.literal("observation_policy_mismatch"),
+    message: z.string().min(1),
+    requestId: NonEmptyIdSchema,
+  })
+  .strict();
+
 export const ControlProtocolUpgradeResponseV1Schema = z
   .object({
     ...VersionedResponseShape,
@@ -177,27 +246,56 @@ export const ControlProtocolUpgradeResponseV1Schema = z
   })
   .strict();
 
-export const ControlHttpStatusSchema = z.union([
-  z.literal(202),
-  z.literal(404),
-  z.literal(409),
-  z.literal(412),
-  z.literal(426),
-]);
+const ControlInvalidRequestHttpResponseV1Schema = z
+  .object({ status: z.literal(400), body: ControlInvalidRequestResponseV1Schema })
+  .strict();
+const ControlInvalidCredentialHttpResponseV1Schema = z
+  .object({ status: z.literal(401), body: ControlInvalidCredentialResponseV1Schema })
+  .strict();
+const ControlInsufficientScopeHttpResponseV1Schema = z
+  .object({ status: z.literal(403), body: ControlInsufficientScopeResponseV1Schema })
+  .strict();
+const ControlConcealedNotFoundHttpResponseV1Schema = z
+  .object({ status: z.literal(404), body: ControlConcealedNotFoundResponseV1Schema })
+  .strict();
+const ControlConflictHttpResponseV1Schema = z
+  .object({ status: z.literal(409), body: ControlConflictResponseV1Schema })
+  .strict();
+const ControlCapabilityRequiredHttpResponseV1Schema = z
+  .object({ status: z.literal(412), body: ControlCapabilityRequiredResponseV1Schema })
+  .strict();
+const ControlRequestBodyTooLargeHttpResponseV1Schema = z
+  .object({ status: z.literal(413), body: ControlRequestBodyTooLargeResponseV1Schema })
+  .strict();
+const ControlObservationPolicyMismatchHttpResponseV1Schema = z
+  .object({ status: z.literal(422), body: ControlObservationPolicyMismatchResponseV1Schema })
+  .strict();
+const ControlProtocolUpgradeHttpResponseV1Schema = z
+  .object({ status: z.literal(426), body: ControlProtocolUpgradeResponseV1Schema })
+  .strict();
 
-export const ControlHttpResponseV1Schema = z.union([
-  z.object({ status: z.literal(202), body: ControlWaitingResponseV1Schema }).strict(),
-  z.object({ status: z.literal(404), body: ControlConcealedNotFoundResponseV1Schema }).strict(),
-  z.object({ status: z.literal(409), body: ControlConflictResponseV1Schema }).strict(),
-  z.object({ status: z.literal(412), body: ControlCapabilityRequiredResponseV1Schema }).strict(),
-  z.object({ status: z.literal(426), body: ControlProtocolUpgradeResponseV1Schema }).strict(),
+export const ControlErrorHttpResponseV1Schema = z.union([
+  ControlInvalidRequestHttpResponseV1Schema,
+  ControlInvalidCredentialHttpResponseV1Schema,
+  ControlInsufficientScopeHttpResponseV1Schema,
+  ControlConcealedNotFoundHttpResponseV1Schema,
+  ControlConflictHttpResponseV1Schema,
+  ControlCapabilityRequiredHttpResponseV1Schema,
+  ControlRequestBodyTooLargeHttpResponseV1Schema,
+  ControlObservationPolicyMismatchHttpResponseV1Schema,
+  ControlProtocolUpgradeHttpResponseV1Schema,
 ]);
 
 export const RunnerRegistrationRequestV1Schema = z
   .object({
     ...ControlMutationRequestV1Shape,
     runnerId: NonEmptyIdSchema,
-    displayName: z.string().trim().min(1).max(120).optional(),
+    displayName: z
+      .string()
+      .min(1)
+      .max(120)
+      .refine((value) => value === value.trim(), "Display name must not contain leading or trailing whitespace.")
+      .optional(),
     capabilities: RelayCapabilitiesSchema,
   })
   .strict()
@@ -210,6 +308,7 @@ export const RunnerCredentialReprovisionRequestV1Schema = z
   .object({
     ...ControlMutationRequestV1Shape,
     runnerId: NonEmptyIdSchema,
+    recoveryCredentialId: NonEmptyIdSchema,
     expectedRegistrationGeneration: z.number().int().positive(),
     expectedCredentialGeneration: z.number().int().positive(),
   })
@@ -251,6 +350,11 @@ export const RunnerCredentialResponseV1Schema = z.discriminatedUnion("replayed",
 ]);
 export const RunnerRegistrationResponseV1Schema = RunnerCredentialResponseV1Schema;
 export const RunnerCredentialReprovisionResponseV1Schema = RunnerCredentialResponseV1Schema;
+export const RunnerCredentialHttpResponseV1Schema = z.union([
+  z.object({ status: z.literal(201), body: FreshRunnerCredentialResponseV1Schema }).strict(),
+  z.object({ status: z.literal(200), body: ReplayedRunnerCredentialResponseV1Schema }).strict(),
+  ControlErrorHttpResponseV1Schema,
+]);
 
 export const ReceiptAttemptRefV1Schema = z
   .object({
@@ -302,7 +406,7 @@ function hasExactReceiptIdentity(
 }
 
 export const ReadinessStateV1Schema = z.enum(["ready", "degraded", "blocked", "unknown"]);
-const ReadinessReasonShape = { reasonCode: ReasonCodeSchema.optional() };
+const ReadinessReasonShape = { reasonCode: RunnerReadinessReasonCodeV1Schema.optional() };
 
 export const RunnerReadinessPayloadV1Schema = z
   .object({
@@ -314,7 +418,7 @@ export const RunnerReadinessPayloadV1Schema = z
       z
         .object({
           executorId: NonEmptyIdSchema,
-          adapterVersion: z.string().trim().min(1),
+          adapterVersion: UnpaddedNonEmptyStringSchema,
           capabilityDigest: ReceiptDigestSchema,
           state: ReadinessStateV1Schema,
           ...ReadinessReasonShape,
@@ -336,6 +440,13 @@ export const RunnerReadinessPayloadV1Schema = z
   })
   .strict()
   .superRefine((readiness, ctx) => {
+    if (Date.parse(readiness.expiresAt) <= Date.parse(readiness.observedAt)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["expiresAt"],
+        message: "Readiness expiry must be later than its observation time.",
+      });
+    }
     for (const [collectionName, entries] of [
       ["executors", readiness.executors],
       ["targets", readiness.targets],
@@ -362,6 +473,29 @@ export const RunnerReadinessReceiptEnvelopeV1Schema = z
   .superRefine((receipt, ctx) => {
     if (!receipt.requiredCapabilities.includes("relay.readiness.v1")) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requiredCapabilities"], message: "Readiness capability is required." });
+    }
+    if (receipt.producer.kind !== "runner") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["producer", "kind"], message: "Readiness receipts must be produced by the Runner." });
+    }
+    if (receipt.producer.id !== receipt.payload.runnerId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["producer", "id"], message: "Readiness producer must match the attested Runner." });
+    }
+    if (receipt.producer.credentialId === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["producer", "credentialId"], message: "Readiness producer credential identity is required." });
+    }
+    if (receipt.producer.registrationGeneration !== receipt.payload.registrationGeneration) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["producer", "registrationGeneration"],
+        message: "Readiness producer registration generation must match the attestation.",
+      });
+    }
+    if (receipt.payload.observedAt !== receipt.observedAt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["payload", "observedAt"],
+        message: "Readiness payload observation time must match the envelope.",
+      });
     }
     if (!hasExactReceiptIdentity(receipt.identity, "opentag.control.receipt/runner-readiness/v1", [
       receipt.organizationId,
@@ -484,7 +618,7 @@ export const CompletionAssessmentPayloadV1Schema = z
         .object({
           gateId: NonEmptyIdSchema,
           state: z.enum(["pending", "satisfied", "unsatisfied", "blocked", "waived"]),
-          reasonCode: ReasonCodeSchema,
+          reasonCode: CompletionReasonCodeSchema,
           evidenceReceiptDigests: DigestSetSchema,
         })
         .strict(),
@@ -619,11 +753,41 @@ export const CallbackAttemptObservationPayloadV1Schema = z
     attemptNumber: z.number().int().positive(),
     requestDigest: ReceiptDigestSchema,
     outcome: z.enum(["accepted", "rejected", "outcome_unknown"]),
-    reasonCode: ReasonCodeSchema,
+    reasonCode: CallbackObservationReasonCodeV1Schema,
+    nextAction: NonEmptyIdSchema.optional(),
+    owner: NonEmptyIdSchema.optional(),
     attemptedAt: ControlTimestampSchema,
     observedAt: ControlTimestampSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((observation, ctx) => {
+    const compatibleReasonCodes = {
+      accepted: ["provider_accepted"],
+      rejected: ["provider_rejected"],
+      outcome_unknown: ["provider_receipt_missing", "provider_timeout"],
+    } as const;
+    if (!(compatibleReasonCodes[observation.outcome] as readonly string[]).includes(observation.reasonCode)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reasonCode"],
+        message: "Callback attempt reason code is incompatible with its outcome.",
+      });
+    }
+    if (observation.outcome === "outcome_unknown" && (!observation.nextAction || !observation.owner)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["outcome"],
+        message: "Unknown callback attempts require a next action and owner.",
+      });
+    }
+    if (Date.parse(observation.observedAt) < Date.parse(observation.attemptedAt)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["observedAt"],
+        message: "Callback observation cannot precede the attempt.",
+      });
+    }
+  });
 
 export const CallbackProviderObservationPayloadV1Schema = z
   .object({
@@ -633,12 +797,27 @@ export const CallbackProviderObservationPayloadV1Schema = z
     resourceIdentity: NonEmptyIdSchema,
     outcome: z.enum(["succeeded", "failed", "outcome_unknown"]),
     observedAt: ControlTimestampSchema,
-    reasonCode: ReasonCodeSchema.optional(),
+    reasonCode: CallbackObservationReasonCodeV1Schema.optional(),
     nextAction: NonEmptyIdSchema.optional(),
     owner: NonEmptyIdSchema.optional(),
   })
   .strict()
   .superRefine((observation, ctx) => {
+    const compatibleReasonCodes = {
+      succeeded: ["provider_accepted"],
+      failed: ["provider_error", "provider_rejected"],
+      outcome_unknown: ["provider_receipt_missing", "provider_timeout"],
+    } as const;
+    if (
+      observation.reasonCode !== undefined &&
+      !(compatibleReasonCodes[observation.outcome] as readonly string[]).includes(observation.reasonCode)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reasonCode"],
+        message: "Callback provider reason code is incompatible with its outcome.",
+      });
+    }
     if (observation.outcome === "outcome_unknown" && (!observation.reasonCode || !observation.nextAction || !observation.owner)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -648,9 +827,9 @@ export const CallbackProviderObservationPayloadV1Schema = z
     }
   });
 
-function callbackEnvelope<T extends z.ZodType>(
-  receiptKind: string,
-  payload: T,
+function callbackEnvelope<const TReceiptKind extends string, TPayload extends z.ZodType>(
+  receiptKind: TReceiptKind,
+  payload: TPayload,
 ) {
   return z
     .object({
@@ -696,6 +875,13 @@ export const CallbackAttemptObservationReceiptEnvelopeV1Schema = callbackEnvelop
   ])) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["identity"], message: "Callback attempt identity tuple is invalid." });
   }
+  if (receipt.payload.observedAt !== receipt.observedAt) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["payload", "observedAt"],
+      message: "Callback attempt observation time must match the envelope.",
+    });
+  }
 });
 export const CallbackProviderObservationReceiptEnvelopeV1Schema = callbackEnvelope(
   "callback_provider_observation",
@@ -710,18 +896,14 @@ export const CallbackProviderObservationReceiptEnvelopeV1Schema = callbackEnvelo
   ])) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["identity"], message: "Callback provider identity tuple is invalid." });
   }
+  if (receipt.payload.observedAt !== receipt.observedAt) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["payload", "observedAt"],
+      message: "Callback provider observation time must match the envelope.",
+    });
+  }
 });
-
-export const ReceiptEnvelopeV1Schema = z.union([
-  RunnerReadinessReceiptEnvelopeV1Schema,
-  AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
-  WorkThreadRefReceiptEnvelopeV1Schema,
-  CompletionContractRefReceiptEnvelopeV1Schema,
-  CompletionAssessmentReceiptEnvelopeV1Schema,
-  CallbackIntentObservationReceiptEnvelopeV1Schema,
-  CallbackAttemptObservationReceiptEnvelopeV1Schema,
-  CallbackProviderObservationReceiptEnvelopeV1Schema,
-]);
 
 export type RelayCapability = z.infer<typeof RelayCapabilitySchema>;
 export type ControlMutationRequestV1 = z.infer<typeof ControlMutationRequestV1Schema>;
@@ -733,4 +915,3 @@ export type AdmissionPolicySnapshotReceiptEnvelopeV1 = z.infer<typeof AdmissionP
 export type WorkThreadRefReceiptEnvelopeV1 = z.infer<typeof WorkThreadRefReceiptEnvelopeV1Schema>;
 export type CompletionContractRefReceiptEnvelopeV1 = z.infer<typeof CompletionContractRefReceiptEnvelopeV1Schema>;
 export type CompletionAssessmentReceiptEnvelopeV1 = z.infer<typeof CompletionAssessmentReceiptEnvelopeV1Schema>;
-export type ReceiptEnvelopeV1 = z.infer<typeof ReceiptEnvelopeV1Schema>;
