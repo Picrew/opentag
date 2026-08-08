@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   CONTROL_PROTOCOL_VERSION,
@@ -12,6 +13,8 @@ import {
   CallbackProviderObservationPayloadV1Schema,
   CallbackObservationReasonCodeV1Schema,
   CompletionContractRefPayloadV1Schema,
+  CompletionContractRefReceiptEnvelopeV1Schema,
+  CompletionAssessmentPayloadV1Schema,
   CompletionAssessmentReceiptEnvelopeV1Schema,
   ControlMutationRequestV1Schema,
   ControlErrorHttpResponseV1Schema,
@@ -46,6 +49,8 @@ import {
   RunnerCredentialHttpResponseV1Schema,
   RunnerReadinessReasonCodeV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
+  WorkThreadRefPayloadV1Schema,
+  WorkThreadRefReceiptEnvelopeV1Schema,
   RunnerPermissionCurrentQueryV1Schema,
   RunnerPermissionRequestHttpResponseV1Schema,
   RunnerPermissionRequestV1Schema,
@@ -65,6 +70,12 @@ const publicFenceDigest = `sha256:${createHash("sha256").update("fence_secret_ca
 function digestCanonical(value: unknown): string {
   return `sha256:${createHash("sha256").update(canonicalJsonStringify(value)).digest("hex")}`;
 }
+
+const GOVERNED_PROJECTION_VECTORS_PATH = new URL(
+  "./fixtures/control-v1-governed-projection-vectors.json",
+  import.meta.url,
+);
+const GOVERNED_PROJECTION_VECTORS_SHA256 = "daafcf4c6d4c886d5f0ac74b8ef43e93e8526e6d5bd6dc995e349a3ff7d41722";
 
 function assessmentReceipt(): CompletionAssessmentReceiptEnvelopeV1 {
   return {
@@ -1568,6 +1579,69 @@ describe("runner credential rotation and revocation", () => {
         },
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("governed projection fixture vectors", () => {
+  it("parses and verifies the protocol-authority artifact", () => {
+    const artifactBytes = readFileSync(GOVERNED_PROJECTION_VECTORS_PATH);
+    const artifactText = artifactBytes.toString("utf8");
+    const artifact = JSON.parse(artifactText) as {
+      schemaVersion: number;
+      protocolVersion: string;
+      vectorVersion: string;
+      fixtures: Record<string, unknown>;
+    };
+
+    expect(artifactText.endsWith("\n")).toBe(true);
+    expect(artifactText).not.toContain("\r");
+    expect(createHash("sha256").update(artifactBytes).digest("hex")).toBe(
+      GOVERNED_PROJECTION_VECTORS_SHA256,
+    );
+    expect({
+      schemaVersion: artifact.schemaVersion,
+      protocolVersion: artifact.protocolVersion,
+      vectorVersion: artifact.vectorVersion,
+    }).toEqual({
+      schemaVersion: CONTROL_SCHEMA_VERSION,
+      protocolVersion: CONTROL_PROTOCOL_VERSION,
+      vectorVersion: "opentag.control.governed-projection-vectors/v1",
+    });
+
+    const fixtureSchemas = [
+      ["workThreadRef", WorkThreadRefReceiptEnvelopeV1Schema, WorkThreadRefPayloadV1Schema],
+      [
+        "completionContractRef",
+        CompletionContractRefReceiptEnvelopeV1Schema,
+        CompletionContractRefPayloadV1Schema,
+      ],
+      ["completionAssessment", CompletionAssessmentReceiptEnvelopeV1Schema, CompletionAssessmentPayloadV1Schema],
+      [
+        "callbackIntentObservation",
+        CallbackIntentObservationReceiptEnvelopeV1Schema,
+        CallbackIntentObservationPayloadV1Schema,
+      ],
+      [
+        "callbackAttemptObservation",
+        CallbackAttemptObservationReceiptEnvelopeV1Schema,
+        CallbackAttemptObservationPayloadV1Schema,
+      ],
+      [
+        "callbackProviderObservation",
+        CallbackProviderObservationReceiptEnvelopeV1Schema,
+        CallbackProviderObservationPayloadV1Schema,
+      ],
+    ] as const;
+
+    expect(Object.keys(artifact.fixtures)).toEqual(fixtureSchemas.map(([name]) => name));
+    for (const [name, receiptSchema, payloadSchema] of fixtureSchemas) {
+      const receipt = receiptSchema.parse(artifact.fixtures[name]);
+      const payload = payloadSchema.parse(receipt.payload);
+      const { receiptDigest, ...receiptDigestInput } = receipt;
+
+      expect(receipt.payloadDigest, `${name} payloadDigest`).toBe(digestCanonical(payload));
+      expect(receiptDigest, `${name} receiptDigest`).toBe(digestCanonical(receiptDigestInput));
+    }
   });
 });
 
