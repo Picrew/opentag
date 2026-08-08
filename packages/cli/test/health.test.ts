@@ -42,6 +42,23 @@ describe("strict Control V1 capability probing", () => {
       .resolves.toMatchObject({ status: "incompatible_control", reason: expect.stringContaining("incompatible") });
   });
 
+  it.each([
+    ["protocolVersion", { protocolVersion: "2.0" }],
+    ["registryVersion", { registryVersion: "opentag.control.capabilities/v2" }],
+    ["minimumClient", { minimumClient: { schemaVersion: 1, protocolVersion: "2.0" } }],
+    ["deployment", { deployment: {} }]
+  ])("does not downgrade a hybrid legacy + malformed Control document with %s", async (_field, override) => {
+    const hybrid = {
+      schemaVersion: 1,
+      relay: true,
+      platforms: [],
+      ...exactControlV1,
+      ...override
+    };
+    await expect(probe(vi.fn(async () => Response.json(hybrid)) as unknown as typeof fetch))
+      .resolves.toMatchObject({ status: "incompatible_control" });
+  });
+
   it.each([404, 503])("classifies HTTP %s as unavailable", async (status) => {
     await expect(probe(vi.fn(async () => new Response("no", { status })) as unknown as typeof fetch))
       .resolves.toEqual({ status: "unavailable", reason: `HTTP ${status}` });

@@ -535,6 +535,48 @@ describe("OpenTag CLI status", () => {
     ).toBe(true);
   });
 
+  it("uses only the runtime runner credential for Hosted Control run status reads", async () => {
+    const configured = config();
+    configured.runtime = {
+      mode: "relay",
+      relayUrl: "https://relay.example",
+      relayProvider: "custom"
+    };
+    configured.daemon.dispatcherUrl = "https://relay.example";
+    configured.daemon.runnerToken = "hosted_runtime_token";
+    configured.daemon.pairingToken = "legacy_pairing_token";
+    configured.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "paired",
+      operationId: "operation-1",
+      registration: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        runnerId: configured.daemon.runnerId,
+        registrationGeneration: 1,
+        credentialGeneration: 1,
+        credentialId: "credential-1",
+        credentialPurpose: "runtime",
+        createdAt: "2026-08-08T00:00:00.000Z"
+      }
+    };
+    const authorizations: Array<{ url: string; authorization: string | null }> = [];
+
+    const summary = await runStatusFromConfig({
+      config: configured,
+      configPath: "/tmp/opentag/config.json",
+      runId: "run_completion_auth",
+      fetchImpl: completionStatusFetch({
+        completionResponse: () => Response.json({ completion: completionExplanationFixture() }),
+        authorizations
+      })
+    });
+
+    expect(summary.completion?.completion).toBe("blocked");
+    expect(authorizations).not.toHaveLength(0);
+    expect(authorizations.every((request) => request.authorization === "Bearer hosted_runtime_token")).toBe(true);
+  });
+
   it("keeps ordinary status reads available when only a runner credential is configured", async () => {
     const configured = config();
     configured.daemon.runnerToken = "runner_mutation_token";

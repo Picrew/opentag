@@ -83,6 +83,15 @@ function assertHostedStatusAuth(config: OpenTagCliConfig): void {
   if (problem) throw new Error(problem);
 }
 
+function assertHostedRunStatusAuth(config: OpenTagCliConfig): void {
+  if (!config.daemon.controlRegistration) return;
+  const problem = hostedRunnerAuthProblem({
+    ...config.daemon,
+    pairingToken: undefined
+  });
+  if (problem) throw new Error(problem);
+}
+
 type RunAuditEvent = {
   type?: unknown;
   visibility?: unknown;
@@ -491,18 +500,23 @@ export async function runStatusFromConfig(input: {
   runId: string;
   fetchImpl?: typeof fetch;
 }): Promise<RunStatusSummary> {
-  assertHostedStatusAuth(input.config);
+  assertHostedRunStatusAuth(input.config);
   const runnerToken = runnerDispatcherToken(input.config.daemon);
+  const runtimeToken = input.config.daemon.controlRegistration
+    ? input.config.daemon.runnerToken
+    : runnerToken;
   const runnerClient = createOpenTagClient({
     dispatcherUrl: input.config.daemon.dispatcherUrl,
-    ...(runnerToken ? { pairingToken: runnerToken } : {}),
+    ...(runtimeToken ? { pairingToken: runtimeToken } : {}),
     ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
   });
-  const pairingToken = input.config.daemon.pairingToken;
-  const completionRequest = pairingToken
+  const governanceToken = input.config.daemon.controlRegistration
+    ? runtimeToken
+    : input.config.daemon.pairingToken;
+  const completionRequest = governanceToken
     ? createOpenTagClient({
         dispatcherUrl: input.config.daemon.dispatcherUrl,
-        pairingToken,
+        pairingToken: governanceToken,
         ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
       }).getCompletion({ runId: input.runId }).catch((error: unknown) => {
         if (isCompletionNotAvailable(error)) return undefined;

@@ -145,7 +145,6 @@ export async function probeControlV1Capabilities(input: {
   }
   const parsed = RelayCapabilitiesResponseV1Schema.safeParse(body);
   if (parsed.success) return { status: "control_v1", capabilities: parsed.data };
-  if (isExplicitLegacyCapabilitiesDocument(body)) return { status: "not_control_v1" };
   if (looksLikeControlV1Document(body)) {
     return {
       status: "incompatible_control",
@@ -154,6 +153,7 @@ export async function probeControlV1Capabilities(input: {
         : "relay returned a malformed OpenTag Control V1 capabilities document"
     };
   }
+  if (isExplicitLegacyCapabilitiesDocument(body)) return { status: "not_control_v1" };
   return { status: "unavailable", reason: "capabilities response was not an OpenTag Control document" };
 }
 
