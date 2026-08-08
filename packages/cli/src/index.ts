@@ -152,6 +152,10 @@ program
   .description("Pair this local runner with a remote relay")
   .option("--config <path>", "Config file path")
   .option("--relay <url>", "Remote relay dispatcher URL")
+  .option(
+    "--trust-relay-origin <origin>",
+    "Explicitly authorize this exact canonical HTTPS origin for Hosted Control V1"
+  )
   .option("--recover <recoveryCredentialId>", "Re-provision a hosted runner using this non-secret recovery credential id")
   .option("--no-register", "Update config without registering runner and project targets")
   .action(runCliAction(runPairCommand));

@@ -2,7 +2,12 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { readCliConfig, writeCliConfigAtomic } from "../src/config.js";
+import {
+  readCliConfig,
+  readCliRawConfig,
+  writeCliConfigAtomic,
+  writeHostedControlConfigAtomic
+} from "../src/config.js";
 import { formatPairRelaySummary, inferRelayProvider, normalizeRelayUrl, runPairCommand } from "../src/pair.js";
 import { createSetupConfig } from "../src/setup.js";
 
@@ -110,6 +115,45 @@ function relayCapabilityFetch(platforms: unknown[]): typeof fetch {
     }
     return new Response("not found", { status: 404 });
   }) as unknown as typeof fetch;
+}
+
+function responseAt(body: unknown, status: number, url: string): Response {
+  const response = Response.json(body, { status });
+  Object.defineProperty(response, "url", { value: url });
+  return response;
+}
+
+function controlCapabilities(capability: "relay.registration.v1" | "relay.credential-reprovision.v1") {
+  return {
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    registryVersion: "opentag.control.capabilities/v1",
+    capabilities: [capability],
+    minimumClient: { schemaVersion: 1, protocolVersion: "1.0" },
+    deployment: { environment: "test", releaseSha: "a".repeat(40) }
+  };
+}
+
+function credentialResponse(input: {
+  operationId: string;
+  replayed: boolean;
+  runnerId?: string;
+  registrationGeneration?: number;
+  credentialGeneration?: number;
+}) {
+  return {
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    operationId: input.operationId,
+    runnerId: input.runnerId ?? "runner_local",
+    registrationGeneration: input.registrationGeneration ?? 1,
+    credentialGeneration: input.credentialGeneration ?? 1,
+    credentialId: "credential_runtime_1",
+    credentialPurpose: "runtime",
+    createdAt: "2026-08-08T00:00:00.000Z",
+    replayed: input.replayed,
+    ...(input.replayed ? {} : { runnerToken: "runner_runtime_canary" })
+  };
 }
 
 describe("OpenTag CLI pair relay", () => {
@@ -427,5 +471,541 @@ describe("OpenTag CLI pair relay", () => {
 
     expect(webhook).toContain("Discord Interactions Endpoint URL: https://relay.example/discord/interactions");
     expect(gateway).not.toContain("Discord Interactions Endpoint URL:");
+  });
+
+  it("persists explicit trust and pending operation before strict hosted registration", async () => {
+    const configPath = join(tempDir(), "config.json");
+    writeCliConfigAtomic(configPath, githubConfig());
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl = vi.fn(async (url, init) => {
+      requests.push({ url: String(url), init });
+      expect(init?.redirect).toBe("manual");
+      if (String(url).endsWith("/v1/relay/capabilities")) {
+        const daemon = (readCliRawConfig(configPath) as {
+          daemon: Record<string, unknown>;
+        }).daemon;
+        expect(daemon.trustedRelay).toEqual({
+          schemaVersion: 1,
+          origin: "https://control.example",
+          authorizedAt: "2026-08-08T01:00:00.000Z",
+          authorizationMethod: "explicit_cli"
+        });
+        expect(daemon.controlRegistration).toMatchObject({
+          state: "unpaired",
+          flow: "registration",
+          operationId: "operation_hosted_1",
+          reason: "pending"
+        });
+        return responseAt(
+          controlCapabilities("relay.registration.v1"),
+          200,
+          "https://control.example/v1/relay/capabilities"
+        );
+      }
+      expect(String(url)).toBe("https://control.example/v1/runners");
+      expect(new Headers(init?.headers).get("authorization")).toMatch(/^Bearer .+/u);
+      expect(JSON.parse(String(init?.body))).toEqual({
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        requiredCapabilities: ["relay.registration.v1"],
+        requestId: "request:operation_hosted_1",
+        operationId: "operation_hosted_1",
+        runnerId: "runner_local",
+        capabilities: []
+      });
+      return responseAt(
+        credentialResponse({ operationId: "operation_hosted_1", replayed: false }),
+        201,
+        "https://control.example/v1/runners"
+      );
+    }) as unknown as typeof fetch;
+
+    await runPairCommand(
+      {
+        config: configPath,
+        relay: "https://CONTROL.example:443",
+        trustRelayOrigin: "https://control.example"
+      },
+      {
+        fetchImpl,
+        randomUUID: () => "operation_hosted_1",
+        now: () => new Date("2026-08-08T01:00:00.000Z"),
+        logger: { log() {}, warn() {} }
+      }
+    );
+
+    const saved = readCliConfig(configPath);
+    expect(saved.daemon.controlRegistration?.state).toBe("paired");
+    expect(saved.daemon.runnerToken).toBe("runner_runtime_canary");
+    expect(saved.daemon.pairingToken).toBeUndefined();
+    expect(requests.map((request) => request.url)).toEqual([
+      "https://control.example/v1/relay/capabilities",
+      "https://control.example/v1/runners"
+    ]);
+  });
+
+  it("keeps a 200 hosted registration replay recovery-required and never paired", async () => {
+    const configPath = join(tempDir(), "config.json");
+    writeCliConfigAtomic(configPath, githubConfig());
+    const fetchImpl = vi.fn(async (url) => {
+      if (String(url).endsWith("/v1/relay/capabilities")) {
+        return responseAt(
+          controlCapabilities("relay.registration.v1"),
+          200,
+          "https://control.example/v1/relay/capabilities"
+        );
+      }
+      return responseAt(
+        credentialResponse({ operationId: "operation_replay_1", replayed: true }),
+        200,
+        "https://control.example/v1/runners"
+      );
+    }) as unknown as typeof fetch;
+
+    await runPairCommand(
+      {
+        config: configPath,
+        relay: "https://control.example",
+        trustRelayOrigin: "https://control.example"
+      },
+      {
+        fetchImpl,
+        randomUUID: () => "operation_replay_1",
+        now: () => new Date("2026-08-08T01:00:00.000Z"),
+        logger: { log() {}, warn() {} }
+      }
+    );
+
+    const saved = readCliConfig(configPath);
+    expect(saved.daemon.controlRegistration).toMatchObject({
+      state: "unpaired",
+      reason: "recovery_required"
+    });
+    expect(saved.daemon.runnerToken).toBeUndefined();
+    expect(saved.daemon.pairingToken).toBeUndefined();
+  });
+
+  it("persists outcome_unknown without leaking a transport canary and reuses the operation", async () => {
+    const configPath = join(tempDir(), "config.json");
+    writeCliConfigAtomic(configPath, githubConfig());
+    const secretCanary = "pairing_transport_secret_canary";
+    const fetchImpl = vi.fn(async (url) => {
+      if (String(url).endsWith("/v1/relay/capabilities")) {
+        return responseAt(
+          controlCapabilities("relay.registration.v1"),
+          200,
+          "https://control.example/v1/relay/capabilities"
+        );
+      }
+      throw new Error(secretCanary);
+    }) as unknown as typeof fetch;
+
+    let message = "";
+    try {
+      await runPairCommand(
+        {
+          config: configPath,
+          relay: "https://control.example",
+          trustRelayOrigin: "https://control.example"
+        },
+        {
+          fetchImpl,
+          randomUUID: () => "operation_unknown_1",
+          now: () => new Date("2026-08-08T01:00:00.000Z")
+        }
+      );
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("outcome is unknown");
+    expect(message).not.toContain(secretCanary);
+    expect(readCliConfig(configPath).daemon.controlRegistration).toMatchObject({
+      operationId: "operation_unknown_1",
+      reason: "outcome_unknown"
+    });
+
+    const randomUUID = vi.fn(() => "operation_must_not_be_generated");
+    await expect(runPairCommand(
+      { config: configPath, relay: "https://control.example" },
+      { fetchImpl, randomUUID }
+    )).rejects.toThrow("outcome is unknown");
+    expect(randomUUID).not.toHaveBeenCalled();
+    expect(readCliConfig(configPath).daemon.controlRegistration).toMatchObject({
+      operationId: "operation_unknown_1",
+      reason: "outcome_unknown"
+    });
+  });
+
+  it("rejects trusted-origin rebinding before fetch, secret reads, clients, or writes", async () => {
+    const raw = githubConfig() as unknown as Record<string, unknown>;
+    const daemon = (raw.daemon as Record<string, unknown>);
+    raw.runtime = { mode: "relay", relayUrl: "https://relay-a.example" };
+    daemon.dispatcherUrl = "https://relay-a.example";
+    daemon.trustedRelay = {
+      schemaVersion: 1,
+      origin: "https://relay-a.example",
+      authorizedAt: "2026-08-08T00:00:00.000Z",
+      authorizationMethod: "explicit_cli"
+    };
+    daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "unpaired",
+      flow: "registration",
+      operationId: "operation_a",
+      reason: "pending"
+    };
+    daemon.pairingToken = {
+      kind: "file",
+      path: "/must/not/read/pairing-secret-canary"
+    };
+    const fetchImpl = vi.fn();
+    const readConfig = vi.fn(() => {
+      throw new Error("secret resolver must not run");
+    });
+    const createControlClient = vi.fn();
+    const writeHostedConfig = vi.fn();
+
+    await expect(runPairCommand(
+      { config: "/unused/config.json", relay: "https://relay-b.example" },
+      {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        readRawConfig: () => raw,
+        readConfig,
+        createControlClient: createControlClient as never,
+        writeHostedConfig
+      }
+    )).rejects.toThrow("already bound to a different trusted relay origin");
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(readConfig).not.toHaveBeenCalled();
+    expect(createControlClient).not.toHaveBeenCalled();
+    expect(writeHostedConfig).not.toHaveBeenCalled();
+  });
+
+  it.each(["fresh registration", "recovery", "credential_staged"] as const)(
+    "rejects hosted %s with --no-register before every side effect",
+    async (scenario) => {
+      const raw = githubConfig() as unknown as Record<string, unknown>;
+      const daemon = raw.daemon as Record<string, unknown>;
+      const options: Parameters<typeof runPairCommand>[0] = {
+        config: "/unused/config.json",
+        relay: "https://control.example",
+        register: false
+      };
+      if (scenario === "fresh registration") {
+        options.trustRelayOrigin = "https://control.example";
+        daemon.pairingToken = {
+          kind: "file",
+          path: "/must/not/read/no-register-pairing-canary"
+        };
+      } else {
+        raw.runtime = { mode: "relay", relayUrl: "https://control.example" };
+        daemon.dispatcherUrl = "https://control.example";
+        daemon.trustedRelay = {
+          schemaVersion: 1,
+          origin: "https://control.example",
+          authorizedAt: "2026-08-08T00:00:00.000Z",
+          authorizationMethod: "explicit_cli"
+        };
+        delete daemon.pairingToken;
+        const registration = {
+          schemaVersion: 1,
+          protocolVersion: "1.0",
+          runnerId: "runner_local",
+          registrationGeneration: 1,
+          credentialGeneration: 1,
+          credentialId: "credential_runtime_1",
+          credentialPurpose: "runtime",
+          createdAt: "2026-08-08T00:00:00.000Z"
+        };
+        if (scenario === "recovery") {
+          options.recover = "recovery_credential_1";
+          daemon.controlRegistration = {
+            kind: "hosted_control_v1",
+            state: "unpaired",
+            reason: "recovery_required",
+            registration
+          };
+        } else {
+          daemon.runnerToken = "staged_runner_token_canary";
+          daemon.controlRegistration = {
+            kind: "hosted_control_v1",
+            state: "credential_staged",
+            operationId: "operation_staged_1",
+            registration
+          };
+        }
+      }
+      const fetchImpl = vi.fn();
+      const createControlClient = vi.fn();
+      const readConfig = vi.fn();
+      const readRecoverySecret = vi.fn();
+      const randomUUID = vi.fn();
+      const writeHostedConfig = vi.fn();
+
+      let message = "";
+      try {
+        await runPairCommand(options, {
+          readRawConfig: () => raw,
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+          createControlClient: createControlClient as never,
+          readConfig: readConfig as never,
+          readRecoverySecret: readRecoverySecret as never,
+          randomUUID: randomUUID as never,
+          writeHostedConfig
+        });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toBe(
+        "--no-register is incompatible with Hosted Control V1 registration, recovery, and staged finalization."
+      );
+      expect(message).not.toContain("canary");
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(createControlClient).not.toHaveBeenCalled();
+      expect(readConfig).not.toHaveBeenCalled();
+      expect(readRecoverySecret).not.toHaveBeenCalled();
+      expect(randomUUID).not.toHaveBeenCalled();
+      expect(writeHostedConfig).not.toHaveBeenCalled();
+    }
+  );
+
+  it("reads the recovery secret only after trust and pending readback, then uses the exact endpoint", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const source = githubConfig();
+    source.runtime = { mode: "relay", relayUrl: "https://control.example" };
+    source.daemon.dispatcherUrl = "https://control.example";
+    source.daemon.trustedRelay = {
+      schemaVersion: 1,
+      origin: "https://control.example",
+      authorizedAt: "2026-08-08T00:00:00.000Z",
+      authorizationMethod: "explicit_cli"
+    };
+    delete source.daemon.pairingToken;
+    source.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "unpaired",
+      reason: "recovery_required",
+      registration: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        runnerId: source.daemon.runnerId,
+        registrationGeneration: 1,
+        credentialGeneration: 1,
+        credentialId: "credential_runtime_1",
+        credentialPurpose: "runtime",
+        createdAt: "2026-08-08T00:00:00.000Z"
+      }
+    };
+    writeCliConfigAtomic(configPath, source);
+    const readRecoverySecret = vi.fn(() => "recovery_secret_canary");
+    const fetchImpl = vi.fn(async (url, init) => {
+      expect(init?.redirect).toBe("manual");
+      if (String(url).endsWith("/v1/relay/capabilities")) {
+        expect(readRecoverySecret).not.toHaveBeenCalled();
+        expect((readCliRawConfig(configPath) as {
+          daemon: { controlRegistration: unknown };
+        }).daemon.controlRegistration).toMatchObject({
+          state: "unpaired",
+          flow: "reprovision",
+          operationId: "operation_recovery_1",
+          reason: "pending",
+          recoveryCredentialId: "recovery_credential_1"
+        });
+        return responseAt(
+          controlCapabilities("relay.credential-reprovision.v1"),
+          200,
+          "https://control.example/v1/relay/capabilities"
+        );
+      }
+      expect(String(url)).toBe(
+        "https://control.example/v1/runners/runner_local/credentials/reprovision"
+      );
+      expect(new Headers(init?.headers).get("authorization")).toBe(
+        "Bearer recovery_secret_canary"
+      );
+      expect(JSON.parse(String(init?.body))).toEqual({
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        requiredCapabilities: ["relay.credential-reprovision.v1"],
+        requestId: "request:operation_recovery_1",
+        operationId: "operation_recovery_1",
+        runnerId: "runner_local",
+        recoveryCredentialId: "recovery_credential_1",
+        expectedRegistrationGeneration: 1,
+        expectedCredentialGeneration: 1
+      });
+      return responseAt(
+        credentialResponse({
+          operationId: "operation_recovery_1",
+          replayed: false,
+          registrationGeneration: 2,
+          credentialGeneration: 2
+        }),
+        201,
+        "https://control.example/v1/runners/runner_local/credentials/reprovision"
+      );
+    }) as unknown as typeof fetch;
+
+    await runPairCommand(
+      {
+        config: configPath,
+        relay: "https://control.example",
+        recover: "recovery_credential_1"
+      },
+      {
+        fetchImpl,
+        randomUUID: () => "operation_recovery_1",
+        readRecoverySecret,
+        logger: { log() {}, warn() {} }
+      }
+    );
+
+    expect(readRecoverySecret).toHaveBeenCalledOnce();
+    expect(readCliConfig(configPath).daemon.controlRegistration?.state).toBe("paired");
+  });
+
+  it("finalizes a durable staged credential locally after the paired write failed", async () => {
+    const configPath = join(tempDir(), "config.json");
+    writeCliConfigAtomic(configPath, githubConfig());
+    const fetchImpl = vi.fn(async (url) => {
+      if (String(url).endsWith("/v1/relay/capabilities")) {
+        return responseAt(
+          controlCapabilities("relay.registration.v1"),
+          200,
+          "https://control.example/v1/relay/capabilities"
+        );
+      }
+      return responseAt(
+        credentialResponse({ operationId: "operation_crash_1", replayed: false }),
+        201,
+        "https://control.example/v1/runners"
+      );
+    }) as unknown as typeof fetch;
+    const failPairedWrite = vi.fn((
+      path: string,
+      patch: Parameters<typeof writeHostedControlConfigAtomic>[1],
+      filesystem?: Parameters<typeof writeHostedControlConfigAtomic>[2]
+    ) => {
+      if (patch.controlRegistration.state === "paired") {
+        throw new Error("simulated paired write failure");
+      }
+      writeHostedControlConfigAtomic(path, patch, filesystem);
+    });
+
+    await expect(runPairCommand(
+      {
+        config: configPath,
+        relay: "https://control.example",
+        trustRelayOrigin: "https://control.example"
+      },
+      {
+        fetchImpl,
+        randomUUID: () => "operation_crash_1",
+        now: () => new Date("2026-08-08T01:00:00.000Z"),
+        writeHostedConfig: failPairedWrite,
+        logger: { log() {}, warn() {} }
+      }
+    )).rejects.toThrow("simulated paired write failure");
+    expect(readCliConfig(configPath).daemon).toMatchObject({
+      runnerToken: "runner_runtime_canary",
+      controlRegistration: {
+        state: "credential_staged",
+        operationId: "operation_crash_1",
+        registration: { runnerId: "runner_local" }
+      }
+    });
+
+    const retryFetch = vi.fn();
+    const retryClient = vi.fn();
+    const retryReadConfig = vi.fn(() => {
+      throw new Error("SecretRef materialization must not run");
+    });
+    const retryRecoverySecret = vi.fn();
+    const retryUuid = vi.fn(() => "operation_must_not_be_generated");
+    await runPairCommand(
+      { config: configPath, relay: "https://control.example" },
+      {
+        fetchImpl: retryFetch as unknown as typeof fetch,
+        createControlClient: retryClient as never,
+        readConfig: retryReadConfig,
+        readRecoverySecret: retryRecoverySecret as never,
+        randomUUID: retryUuid,
+        logger: { log() {}, warn() {} }
+      }
+    );
+
+    expect(readCliConfig(configPath).daemon.controlRegistration).toMatchObject({
+      state: "paired",
+      operationId: "operation_crash_1"
+    });
+    expect(retryFetch).not.toHaveBeenCalled();
+    expect(retryClient).not.toHaveBeenCalled();
+    expect(retryReadConfig).not.toHaveBeenCalled();
+    expect(retryRecoverySecret).not.toHaveBeenCalled();
+    expect(retryUuid).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing token", undefined, "runner_local"],
+    ["SecretRef token", { kind: "env", name: "MUST_NOT_READ" }, "runner_local"],
+    ["runner mismatch", "runner_runtime_canary", "runner_other"],
+    ["extra uncertainty", "runner_runtime_canary", "runner_local"]
+  ])("rejects corrupt staged state without writes: %s", async (_name, token, registrationRunnerId) => {
+    const raw = githubConfig() as unknown as Record<string, unknown>;
+    const daemon = raw.daemon as Record<string, unknown>;
+    raw.runtime = { mode: "relay", relayUrl: "https://control.example" };
+    daemon.dispatcherUrl = "https://control.example";
+    daemon.trustedRelay = {
+      schemaVersion: 1,
+      origin: "https://control.example",
+      authorizedAt: "2026-08-08T00:00:00.000Z",
+      authorizationMethod: "explicit_cli"
+    };
+    delete daemon.pairingToken;
+    if (token !== undefined) daemon.runnerToken = token;
+    else delete daemon.runnerToken;
+    daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "credential_staged",
+      operationId: "operation_staged_corrupt",
+      registration: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        runnerId: registrationRunnerId,
+        registrationGeneration: 1,
+        credentialGeneration: 1,
+        credentialId: "credential_runtime_1",
+        credentialPurpose: "runtime",
+        createdAt: "2026-08-08T00:00:00.000Z"
+      }
+    };
+    if (_name === "extra uncertainty") {
+      (daemon.controlRegistration as Record<string, unknown>).reason = "outcome_unknown";
+    }
+    const fetchImpl = vi.fn();
+    const createControlClient = vi.fn();
+    const readConfig = vi.fn();
+    const readRecoverySecret = vi.fn();
+    const randomUUID = vi.fn();
+    const writeHostedConfig = vi.fn();
+
+    await expect(runPairCommand(
+      { config: "/unused/config.json", relay: "https://control.example" },
+      {
+        readRawConfig: () => raw,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        createControlClient: createControlClient as never,
+        readConfig: readConfig as never,
+        readRecoverySecret: readRecoverySecret as never,
+        randomUUID: randomUUID as never,
+        writeHostedConfig
+      }
+    )).rejects.toThrow();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(createControlClient).not.toHaveBeenCalled();
+    expect(readConfig).not.toHaveBeenCalled();
+    expect(readRecoverySecret).not.toHaveBeenCalled();
+    expect(randomUUID).not.toHaveBeenCalled();
+    expect(writeHostedConfig).not.toHaveBeenCalled();
   });
 });

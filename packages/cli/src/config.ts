@@ -721,6 +721,11 @@ export function readCliConfig(path = defaultConfigPath()): OpenTagCliConfig {
   return parseCliConfig(JSON.parse(readFileSync(path, "utf8")));
 }
 
+export function readCliRawConfig(path = defaultConfigPath()): unknown {
+  assertPrivateConfigFile(path);
+  return JSON.parse(readFileSync(path, "utf8")) as unknown;
+}
+
 export function ensurePrivateDirectory(
   path: string,
   filesystem: CliConfigFilesystemOps = CLI_CONFIG_FILESYSTEM_OPS

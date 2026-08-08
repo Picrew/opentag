@@ -23,6 +23,7 @@ import {
   formatCliConfigError,
   parseCliConfig,
   readCliConfig,
+  readCliRawConfig,
   readKeychainSecret,
   readRedactedCliConfig,
   redactedCliConfig,
@@ -1023,6 +1024,21 @@ describe("OpenTag CLI config", () => {
     };
 
     expect(() => parseCliConfig(source)).toThrow(/explicit trustedRelay authorization/iu);
+  });
+
+  it("reads raw config without materializing SecretRefs", () => {
+    const path = join(tempDir(), "config.json");
+    const raw = JSON.parse(JSON.stringify(config())) as {
+      daemon: Record<string, unknown>;
+    };
+    raw.daemon.pairingToken = {
+      kind: "file",
+      path: "/definitely/not-read/raw-config-token"
+    };
+    writeFileSync(path, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+
+    expect((readCliRawConfig(path) as { daemon: Record<string, unknown> })
+      .daemon.pairingToken).toEqual(raw.daemon.pairingToken);
   });
 
   it.each([
