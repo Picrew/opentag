@@ -743,6 +743,7 @@ describe("material action receipt V1 control protocol", () => {
     for (const [status, error] of [
       [404, "missing_or_concealed"],
       [409, "idempotency_conflict"],
+      [500, "internal_error"],
     ] as const) {
       expect(MaterialActionReconcileHttpResponseV1Schema.safeParse({
         status,
@@ -882,6 +883,12 @@ describe("OpenTag Control V1 status semantics", () => {
       requestId: "req_1",
       retryAfterSeconds: 30,
     },
+    {
+      status: 500,
+      error: "internal_error",
+      message: "Internal failure.",
+      requestId: "req_1",
+    },
   ])("accepts the normalized $status response shape", (response) => {
     expect(
       ControlErrorHttpResponseV1Schema.safeParse({
@@ -893,6 +900,37 @@ describe("OpenTag Control V1 status semantics", () => {
         },
       }).success,
     ).toBe(true);
+  });
+
+  it("freezes the strict 500 internal error response shape", () => {
+    const response = {
+      status: 500,
+      body: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        error: "internal_error",
+        message: "Internal failure.",
+        requestId: "req_internal_1",
+      },
+    } as const;
+
+    expect(ControlErrorHttpResponseV1Schema.safeParse(response).success).toBe(true);
+    expect(ControlErrorHttpResponseV1Schema.safeParse({
+      ...response,
+      unexpected: true,
+    }).success).toBe(false);
+    expect(ControlErrorHttpResponseV1Schema.safeParse({
+      ...response,
+      body: { ...response.body, unexpected: true },
+    }).success).toBe(false);
+    expect(ControlErrorHttpResponseV1Schema.safeParse({
+      ...response,
+      body: { ...response.body, message: "" },
+    }).success).toBe(false);
+    expect(ControlErrorHttpResponseV1Schema.safeParse({
+      ...response,
+      body: { ...response.body, requestId: "" },
+    }).success).toBe(false);
   });
 
   it.each(["stale_registration", "stale_readiness", "target_binding_stale"] as const)(

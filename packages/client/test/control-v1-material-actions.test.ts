@@ -344,4 +344,27 @@ describe("Control V1 material action transport", () => {
     await expect(mismatch.reconcileMaterialActionControlV1(request))
       .rejects.toMatchObject({ responseBody: "response_identity_mismatch" });
   });
+
+  it("fails safely on a 500 response without leaking its message", async () => {
+    const request = reconcileRequest();
+    const serverMessage = "internal_database_credential_canary";
+    const sdk = client(async () => jsonResponse({
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      error: "internal_error",
+      message: serverMessage,
+      requestId: request.requestId,
+    }, 500, "https://control.example/response"));
+
+    const failure = await sdk.reconcileMaterialActionControlV1(request)
+      .catch((caught) => caught);
+    expect(failure).toBeInstanceOf(OpenTagControlV1HttpError);
+    expect(failure).toMatchObject({
+      status: 500,
+      code: "internal_error",
+      requestId: request.requestId,
+    });
+    expect(String(failure)).not.toContain(serverMessage);
+    expect(JSON.stringify(failure)).not.toContain(serverMessage);
+  });
 });

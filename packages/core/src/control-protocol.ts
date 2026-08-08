@@ -633,6 +633,15 @@ export const ControlProtocolUpgradeResponseV1Schema = z
   })
   .strict();
 
+export const ControlInternalErrorResponseV1Schema = z
+  .object({
+    ...VersionedResponseShape,
+    error: z.literal("internal_error"),
+    message: z.string().min(1),
+    requestId: NonEmptyIdSchema,
+  })
+  .strict();
+
 const ControlInvalidRequestHttpResponseV1Schema = z
   .object({ status: z.literal(400), body: ControlInvalidRequestResponseV1Schema })
   .strict();
@@ -663,6 +672,9 @@ const ControlProtocolUpgradeHttpResponseV1Schema = z
 const ControlRateLimitedHttpResponseV1Schema = z
   .object({ status: z.literal(429), body: ControlRateLimitedResponseV1Schema })
   .strict();
+const ControlInternalErrorHttpResponseV1Schema = z
+  .object({ status: z.literal(500), body: ControlInternalErrorResponseV1Schema })
+  .strict();
 
 export const ControlErrorHttpResponseV1Schema = z.union([
   ControlInvalidRequestHttpResponseV1Schema,
@@ -675,6 +687,7 @@ export const ControlErrorHttpResponseV1Schema = z.union([
   ControlObservationPolicyMismatchHttpResponseV1Schema,
   ControlProtocolUpgradeHttpResponseV1Schema,
   ControlRateLimitedHttpResponseV1Schema,
+  ControlInternalErrorHttpResponseV1Schema,
 ]);
 
 export const RunnerRegistrationRequestV1Schema = z
