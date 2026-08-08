@@ -266,7 +266,14 @@ function currentQuery(): RunnerPermissionCurrentQueryV1 {
 describe("Control V1 permission transport", () => {
   it("rejects every wrong credential kind before permission transport", async () => {
     let calls = 0;
-    const createClient = (kind: "bootstrap_pairing" | "recovery_pairing" | "operator" | "runtime") =>
+    const createClient = (
+      kind:
+        | "bootstrap_pairing"
+        | "recovery_pairing"
+        | "operator"
+        | "approver"
+        | "runtime",
+    ) =>
       createOpenTagClient({
         dispatcherUrl: "https://control.example/base",
         controlCredential: { kind, token: `${kind}_header_canary` },
@@ -283,12 +290,24 @@ describe("Control V1 permission transport", () => {
     await expect(operator.getActionPermissionCurrentControlV1(currentQuery())).rejects.toThrow(
       /required=runtime actual=operator/,
     );
+    await expect(operator.resolveActionPermissionControlV1({
+      runnerId: "runner:1",
+      decision: humanDecision(),
+    })).rejects.toThrow(/required=approver actual=operator/);
+
+    const approver = createClient("approver");
+    await expect(approver.requestActionPermissionControlV1(runnerRequest())).rejects.toThrow(
+      /required=runtime actual=approver/,
+    );
+    await expect(approver.getActionPermissionCurrentControlV1(currentQuery())).rejects.toThrow(
+      /required=runtime actual=approver/,
+    );
 
     const runtime = createClient("runtime");
     await expect(runtime.resolveActionPermissionControlV1({
       runnerId: "runner:1",
       decision: humanDecision(),
-    })).rejects.toThrow(/required=operator actual=runtime/);
+    })).rejects.toThrow(/required=approver actual=runtime/);
 
     for (const kind of ["bootstrap_pairing", "recovery_pairing"] as const) {
       const pairing = createClient(kind);
@@ -301,7 +320,7 @@ describe("Control V1 permission transport", () => {
       await expect(pairing.resolveActionPermissionControlV1({
         runnerId: "runner:1",
         decision: humanDecision(),
-      })).rejects.toThrow(new RegExp(`required=operator actual=${kind}`));
+      })).rejects.toThrow(new RegExp(`required=approver actual=${kind}`));
     }
 
     expect(calls).toBe(0);
@@ -346,12 +365,12 @@ describe("Control V1 permission transport", () => {
       .rejects.toMatchObject({ responseBody: "invalid_control_v1_response" });
   });
 
-  it("posts a human decision with operator transport and uses a decision-specific parser", async () => {
+  it("posts a human decision with approver transport and uses a decision-specific parser", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const receipt = authorizedReceipt();
     const sdk = createOpenTagClient({
       dispatcherUrl: "https://control.example/base",
-      controlCredential: { kind: "operator", token: "operator_header_canary" },
+      controlCredential: { kind: "approver", token: "approver_header_canary" },
       fetchImpl: async (url, init) => {
         requests.push({ url: String(url), init });
         return jsonResponse(receipt, 200, "https://control.example/response");
@@ -366,18 +385,18 @@ describe("Control V1 permission transport", () => {
       "https://control.example/base/v1/runners/runner%3A1/runs/run%3A1/action-permissions/action%3A1/resolve",
     );
     expect(new Headers(requests[0]?.init?.headers).get("authorization")).toBe(
-      "Bearer operator_header_canary",
+      "Bearer approver_header_canary",
     );
     expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(humanDecision());
     const serializedDecision = JSON.parse(String(requests[0]?.init?.body)) as Record<string, unknown>;
     expect(serializedDecision).not.toHaveProperty("runnerId");
     expect(serializedDecision).not.toHaveProperty("fencingToken");
     expect(JSON.stringify(serializedDecision)).not.toContain("runtime_header_canary");
-    expect(JSON.stringify(serializedDecision)).not.toContain("operator_header_canary");
+    expect(JSON.stringify(serializedDecision)).not.toContain("approver_header_canary");
 
     const waiting = createOpenTagClient({
       dispatcherUrl: "https://control.example/base",
-      controlCredential: { kind: "operator", token: "operator_header_canary" },
+      controlCredential: { kind: "approver", token: "approver_header_canary" },
       fetchImpl: async () => jsonResponse(waitingReceipt(), 202, "https://control.example/response"),
     });
     await expect(waiting.resolveActionPermissionControlV1({
@@ -391,7 +410,7 @@ describe("Control V1 permission transport", () => {
     });
     const mismatch = createOpenTagClient({
       dispatcherUrl: "https://control.example/base",
-      controlCredential: { kind: "operator", token: "operator_header_canary" },
+      controlCredential: { kind: "approver", token: "approver_header_canary" },
       fetchImpl: async () => jsonResponse(otherOperation, 200, "https://control.example/response"),
     });
     await expect(mismatch.resolveActionPermissionControlV1({
@@ -405,7 +424,7 @@ describe("Control V1 permission transport", () => {
     const receipt = deniedReceipt();
     const resolveSdk = createOpenTagClient({
       dispatcherUrl: "https://control.example/base",
-      controlCredential: { kind: "operator", token: "operator_header_canary" },
+      controlCredential: { kind: "approver", token: "approver_header_canary" },
       fetchImpl: async () => jsonResponse(receipt, 200, "https://control.example/response"),
     });
     await expect(resolveSdk.resolveActionPermissionControlV1({
@@ -438,7 +457,7 @@ describe("Control V1 permission transport", () => {
     ]) {
       const invalidSdk = createOpenTagClient({
         dispatcherUrl: "https://control.example/base",
-        controlCredential: { kind: "operator", token: "operator_header_canary" },
+        controlCredential: { kind: "approver", token: "approver_header_canary" },
         fetchImpl: async () => jsonResponse(mutate(), 200, "https://control.example/response"),
       });
       await expect(invalidSdk.resolveActionPermissionControlV1({

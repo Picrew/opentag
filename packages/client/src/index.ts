@@ -311,6 +311,7 @@ export type ControlCredential =
   | { kind: "bootstrap_pairing"; token: string }
   | { kind: "recovery_pairing"; token: string }
   | { kind: "operator"; token: string }
+  | { kind: "approver"; token: string }
   | { kind: "runtime"; token: string };
 
 export type RelayCapabilitiesResponseV1 = typeof RelayCapabilitiesResponseV1Schema._output;
@@ -1405,7 +1406,7 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       const runnerId = RunnerPermissionCurrentQueryV1Schema.shape.runnerId.parse(input.runnerId);
       const decision = HumanPermissionDecisionRequestV1Schema.parse(input.decision);
       const action = "resolveActionPermissionControlV1";
-      const token = requireControlCredential(options.controlCredential, "operator");
+      const token = requireControlCredential(options.controlCredential, "approver");
       const response = await controlFetch(
         `${baseUrl}/v1/runners/${encodeURIComponent(runnerId)}/runs/${encodeURIComponent(decision.runId)}/action-permissions/${encodeURIComponent(decision.actionId)}/resolve`,
         {
