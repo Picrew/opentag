@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
-import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
+import { check, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const runs = sqliteTable(
   "runs",
@@ -654,6 +655,96 @@ export const reassessmentObligations = sqliteTable(
   })
 );
 
+export const controlPlaneProjectionOutbox = sqliteTable(
+  "control_plane_projection_outbox",
+  {
+    receiptId: text("receipt_id").notNull(),
+    destinationId: text("destination_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    runnerId: text("runner_id"),
+    runId: text("run_id"),
+    workThreadId: text("work_thread_id"),
+    receiptKind: text("receipt_kind").notNull(),
+    identityNamespace: text("identity_namespace").notNull(),
+    identityPartsJson: text("identity_parts_json").notNull(),
+    identityKey: text("identity_key").notNull(),
+    operationId: text("operation_id").notNull(),
+    payloadDigest: text("payload_digest").notNull(),
+    receiptDigest: text("receipt_digest").notNull(),
+    envelopeJson: text("envelope_json").notNull(),
+    state: text("state").notNull(),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    nextAttemptAt: text("next_attempt_at"),
+    leaseOwner: text("lease_owner"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: text("lease_expires_at"),
+    lastReasonCode: text("last_reason_code"),
+    lastHttpStatus: integer("last_http_status"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    acknowledgedAt: text("acknowledged_at")
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "control_plane_projection_outbox_pk",
+      columns: [table.destinationId, table.organizationId, table.receiptId]
+    }),
+    destinationIdentityIdx: uniqueIndex("control_plane_projection_outbox_destination_identity_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.identityKey
+    ),
+    destinationOperationIdx: uniqueIndex("control_plane_projection_outbox_destination_operation_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.operationId
+    ),
+    dueIdx: index("control_plane_projection_outbox_due_idx").on(
+      table.destinationId,
+      table.state,
+      table.nextAttemptAt,
+      table.leaseExpiresAt,
+      table.createdAt,
+      table.receiptId
+    ),
+    tenantIdx: index("control_plane_projection_outbox_tenant_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.state,
+      table.createdAt
+    ),
+    attemptCountCheck: check(
+      "control_plane_projection_outbox_attempt_count_check",
+      sql`typeof(${table.attemptCount}) = 'integer' AND ${table.attemptCount} >= 0`
+    ),
+    httpStatusCheck: check(
+      "control_plane_projection_outbox_http_status_check",
+      sql`${table.lastHttpStatus} IS NULL OR (typeof(${table.lastHttpStatus}) = 'integer' AND ${table.lastHttpStatus} >= 100 AND ${table.lastHttpStatus} <= 599)`
+    ),
+    receiptKindCheck: check(
+      "control_plane_projection_outbox_receipt_kind_check",
+      sql`${table.receiptKind} IN ('runner_readiness', 'work_thread_ref', 'completion_contract_ref', 'completion_assessment', 'callback_intent_observation', 'callback_attempt_observation', 'callback_provider_observation')`
+    ),
+    jsonShapeCheck: check(
+      "control_plane_projection_outbox_json_shape_check",
+      sql`json_valid(${table.identityPartsJson}) AND json_type(${table.identityPartsJson}) = 'array' AND json_valid(${table.envelopeJson}) AND json_type(${table.envelopeJson}) = 'object'`
+    ),
+    digestShapeCheck: check(
+      "control_plane_projection_outbox_digest_shape_check",
+      sql`length(${table.payloadDigest}) = 71 AND substr(${table.payloadDigest}, 1, 7) = 'sha256:' AND substr(${table.payloadDigest}, 8) NOT GLOB '*[^0-9a-f]*' AND length(${table.receiptDigest}) = 71 AND substr(${table.receiptDigest}, 1, 7) = 'sha256:' AND substr(${table.receiptDigest}, 8) NOT GLOB '*[^0-9a-f]*'`
+    ),
+    stateShapeCheck: check(
+      "control_plane_projection_outbox_state_shape_check",
+      sql`(
+        (${table.state} = 'pending' AND ${table.nextAttemptAt} IS NOT NULL AND ${table.leaseOwner} IS NULL AND ${table.leaseToken} IS NULL AND ${table.leaseExpiresAt} IS NULL AND ${table.acknowledgedAt} IS NULL)
+        OR (${table.state} = 'leased' AND ${table.nextAttemptAt} IS NOT NULL AND ${table.leaseOwner} IS NOT NULL AND ${table.leaseToken} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL AND ${table.acknowledgedAt} IS NULL)
+        OR (${table.state} = 'acknowledged' AND ${table.nextAttemptAt} IS NULL AND ${table.leaseOwner} IS NULL AND ${table.leaseToken} IS NULL AND ${table.leaseExpiresAt} IS NULL AND ${table.acknowledgedAt} IS NOT NULL)
+        OR (${table.state} = 'attention' AND ${table.nextAttemptAt} IS NULL AND ${table.leaseOwner} IS NULL AND ${table.leaseToken} IS NULL AND ${table.leaseExpiresAt} IS NULL AND ${table.acknowledgedAt} IS NULL AND ${table.lastReasonCode} IS NOT NULL)
+      )`
+    )
+  })
+);
+
 function migrateCompletionGovernanceSchema(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS opentag_schema_migrations (
@@ -950,6 +1041,251 @@ function migrateReassessmentObligationSchema(sqlite: Database.Database): void {
         ON reassessment_obligations(state, not_before, lease_expires_at, created_at, id);
       CREATE INDEX IF NOT EXISTS reassessment_obligations_thread_state_idx
         ON reassessment_obligations(work_thread_id, state, created_at);
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateControlPlaneProjectionOutboxSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-08-control-plane-projection-outbox-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS control_plane_projection_outbox (
+        receipt_id TEXT NOT NULL,
+        destination_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        runner_id TEXT,
+        run_id TEXT,
+        work_thread_id TEXT,
+        receipt_kind TEXT NOT NULL,
+        identity_namespace TEXT NOT NULL,
+        identity_parts_json TEXT NOT NULL,
+        identity_key TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        payload_digest TEXT NOT NULL,
+        receipt_digest TEXT NOT NULL,
+        envelope_json TEXT NOT NULL,
+        state TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempt_count) = 'integer' AND attempt_count >= 0),
+        next_attempt_at TEXT,
+        lease_owner TEXT,
+        lease_token TEXT,
+        lease_expires_at TEXT,
+        last_reason_code TEXT,
+        last_http_status INTEGER CHECK (last_http_status IS NULL OR (typeof(last_http_status) = 'integer' AND last_http_status >= 100 AND last_http_status <= 599)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        acknowledged_at TEXT,
+        CONSTRAINT control_plane_projection_outbox_pk PRIMARY KEY (destination_id, organization_id, receipt_id),
+        CONSTRAINT control_plane_projection_outbox_receipt_kind_check CHECK (
+          receipt_kind IN (
+            'runner_readiness', 'work_thread_ref', 'completion_contract_ref',
+            'completion_assessment', 'callback_intent_observation',
+            'callback_attempt_observation', 'callback_provider_observation'
+          )
+        ),
+        CONSTRAINT control_plane_projection_outbox_json_shape_check CHECK (
+          json_valid(identity_parts_json) AND json_type(identity_parts_json) = 'array'
+          AND json_valid(envelope_json) AND json_type(envelope_json) = 'object'
+        ),
+        CONSTRAINT control_plane_projection_outbox_digest_shape_check CHECK (
+          length(payload_digest) = 71 AND substr(payload_digest, 1, 7) = 'sha256:'
+          AND substr(payload_digest, 8) NOT GLOB '*[^0-9a-f]*'
+          AND length(receipt_digest) = 71 AND substr(receipt_digest, 1, 7) = 'sha256:'
+          AND substr(receipt_digest, 8) NOT GLOB '*[^0-9a-f]*'
+        ),
+        CONSTRAINT control_plane_projection_outbox_state_shape_check CHECK (
+          (state = 'pending' AND next_attempt_at IS NOT NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'leased' AND next_attempt_at IS NOT NULL AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL AND acknowledged_at IS NULL)
+          OR (state = 'acknowledged' AND next_attempt_at IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND acknowledged_at IS NOT NULL)
+          OR (state = 'attention' AND next_attempt_at IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND acknowledged_at IS NULL AND last_reason_code IS NOT NULL)
+        )
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS control_plane_projection_outbox_destination_identity_idx
+        ON control_plane_projection_outbox(destination_id, organization_id, identity_key);
+      CREATE UNIQUE INDEX IF NOT EXISTS control_plane_projection_outbox_destination_operation_idx
+        ON control_plane_projection_outbox(destination_id, organization_id, operation_id);
+      CREATE INDEX IF NOT EXISTS control_plane_projection_outbox_due_idx
+        ON control_plane_projection_outbox(destination_id, state, next_attempt_at, lease_expires_at, created_at, receipt_id);
+      CREATE INDEX IF NOT EXISTS control_plane_projection_outbox_tenant_idx
+        ON control_plane_projection_outbox(destination_id, organization_id, state, created_at);
+      CREATE TRIGGER IF NOT EXISTS control_plane_projection_outbox_duplicate_insert_guard
+      BEFORE INSERT ON control_plane_projection_outbox
+      WHEN EXISTS (
+        SELECT 1 FROM control_plane_projection_outbox existing
+        WHERE (
+            existing.destination_id = NEW.destination_id
+            AND existing.organization_id = NEW.organization_id
+            AND existing.receipt_id = NEW.receipt_id
+          )
+          OR (
+            existing.destination_id = NEW.destination_id
+            AND existing.organization_id = NEW.organization_id
+            AND existing.identity_key = NEW.identity_key
+          )
+          OR (
+            existing.destination_id = NEW.destination_id
+            AND existing.organization_id = NEW.organization_id
+            AND existing.operation_id = NEW.operation_id
+          )
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'control_plane_projection_outbox_duplicate_insert');
+      END;
+      CREATE TRIGGER IF NOT EXISTS control_plane_projection_outbox_insert_guard
+      BEFORE INSERT ON control_plane_projection_outbox
+      WHEN (
+        NEW.state = 'pending'
+        AND NEW.attempt_count = 0
+        AND NEW.next_attempt_at IS NOT NULL
+        AND NEW.lease_owner IS NULL
+        AND NEW.lease_token IS NULL
+        AND NEW.lease_expires_at IS NULL
+        AND NEW.last_reason_code IS NULL
+        AND NEW.last_http_status IS NULL
+        AND NEW.acknowledged_at IS NULL
+        AND NEW.created_at = NEW.updated_at
+        AND length(NEW.created_at) = 24
+        AND NEW.created_at GLOB '????-??-??T??:??:??.???Z'
+        AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW.created_at) = NEW.created_at
+        AND length(NEW.next_attempt_at) = 24
+        AND NEW.next_attempt_at GLOB '????-??-??T??:??:??.???Z'
+        AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW.next_attempt_at) = NEW.next_attempt_at
+        AND NEW.next_attempt_at >= NEW.created_at
+        AND json_extract(NEW.envelope_json, '$.receiptId') = NEW.receipt_id
+        AND json_extract(NEW.envelope_json, '$.organizationId') = NEW.organization_id
+        AND json_extract(NEW.envelope_json, '$.receiptKind') = NEW.receipt_kind
+        AND json_extract(NEW.envelope_json, '$.identity.namespace') = NEW.identity_namespace
+        AND json_extract(NEW.envelope_json, '$.identity.parts') = json(NEW.identity_parts_json)
+        AND json_extract(NEW.envelope_json, '$.operationId') = NEW.operation_id
+        AND json_extract(NEW.envelope_json, '$.payloadDigest') = NEW.payload_digest
+        AND json_extract(NEW.envelope_json, '$.receiptDigest') = NEW.receipt_digest
+        AND json_extract(NEW.envelope_json, '$.runId') IS NEW.run_id
+        AND json_extract(NEW.envelope_json, '$.workThreadId') IS NEW.work_thread_id
+        AND (
+          (NEW.receipt_kind = 'runner_readiness'
+            AND json_extract(NEW.envelope_json, '$.payload.runnerId') = NEW.runner_id)
+          OR (NEW.receipt_kind <> 'runner_readiness' AND NEW.runner_id IS NULL)
+        )
+      ) IS NOT TRUE
+      AND NOT EXISTS (
+        SELECT 1 FROM control_plane_projection_outbox existing
+        WHERE existing.destination_id = NEW.destination_id
+          AND existing.organization_id = NEW.organization_id
+          AND (
+            existing.receipt_id = NEW.receipt_id
+            OR existing.identity_key = NEW.identity_key
+            OR existing.operation_id = NEW.operation_id
+          )
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'control_plane_projection_outbox_insert_invalid');
+      END;
+      CREATE TRIGGER IF NOT EXISTS control_plane_projection_outbox_immutable_update_guard
+      BEFORE UPDATE OF
+        receipt_id, destination_id, organization_id, runner_id, run_id, work_thread_id,
+        receipt_kind, identity_namespace, identity_parts_json, identity_key, operation_id,
+        payload_digest, receipt_digest, envelope_json, created_at
+      ON control_plane_projection_outbox
+      BEGIN
+        SELECT RAISE(ABORT, 'control_plane_projection_outbox_immutable');
+      END;
+      CREATE TRIGGER IF NOT EXISTS control_plane_projection_outbox_transition_guard
+      BEFORE UPDATE OF
+        state, attempt_count, next_attempt_at, lease_owner, lease_token,
+        lease_expires_at, last_reason_code, last_http_status, updated_at,
+      acknowledged_at
+      ON control_plane_projection_outbox
+      WHEN (
+        length(NEW.updated_at) = 24
+        AND NEW.updated_at GLOB '????-??-??T??:??:??.???Z'
+        AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW.updated_at) = NEW.updated_at
+        AND NEW.updated_at >= OLD.updated_at
+        AND (NEW.last_http_status IS NULL OR (typeof(NEW.last_http_status) = 'integer' AND NEW.last_http_status >= 100 AND NEW.last_http_status <= 599))
+        AND (
+          NEW.last_reason_code IS NULL
+          OR (
+            length(NEW.last_reason_code) > 0
+            AND NEW.last_reason_code NOT GLOB '*[^A-Za-z0-9._:@/#-]*'
+            AND instr(lower(NEW.last_reason_code), '://') = 0
+            AND NEW.last_reason_code NOT LIKE '../%'
+            AND NEW.last_reason_code NOT LIKE '%/../%'
+            AND NEW.last_reason_code NOT LIKE '%/..'
+          )
+        )
+        AND (
+          NEW.lease_owner IS NULL
+          OR (
+            length(NEW.lease_owner) > 0
+            AND NEW.lease_owner NOT GLOB '*[^A-Za-z0-9._:@/#-]*'
+            AND instr(lower(NEW.lease_owner), '://') = 0
+            AND NEW.lease_owner NOT LIKE '../%'
+            AND NEW.lease_owner NOT LIKE '%/../%'
+            AND NEW.lease_owner NOT LIKE '%/..'
+          )
+        )
+        AND (
+          (
+            OLD.state = 'pending' AND NEW.state = 'leased'
+            AND NEW.attempt_count = OLD.attempt_count + 1
+            AND NEW.next_attempt_at IS OLD.next_attempt_at
+            AND length(NEW.next_attempt_at) = 24
+            AND NEW.next_attempt_at GLOB '????-??-??T??:??:??.???Z'
+            AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW.next_attempt_at) = NEW.next_attempt_at
+            AND NEW.lease_owner IS NOT NULL
+            AND NEW.lease_token IS NOT NULL
+            AND NEW.lease_expires_at IS NOT NULL
+            AND length(NEW.lease_expires_at) = 24
+            AND NEW.lease_expires_at GLOB '????-??-??T??:??:??.???Z'
+            AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW.lease_expires_at) = NEW.lease_expires_at
+            AND NEW.lease_expires_at > NEW.updated_at
+            AND NEW.last_reason_code IS OLD.last_reason_code
+            AND NEW.last_http_status IS OLD.last_http_status
+            AND NEW.acknowledged_at IS NULL
+          )
+          OR (
+            OLD.state = 'leased' AND NEW.state = 'pending'
+            AND NEW.attempt_count = OLD.attempt_count
+            AND NEW.next_attempt_at IS NOT NULL
+            AND length(NEW.next_attempt_at) = 24
+            AND NEW.next_attempt_at GLOB '????-??-??T??:??:??.???Z'
+            AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW.next_attempt_at) = NEW.next_attempt_at
+            AND NEW.next_attempt_at >= NEW.updated_at
+            AND NEW.lease_owner IS NULL AND NEW.lease_token IS NULL AND NEW.lease_expires_at IS NULL
+            AND NEW.last_reason_code IS NOT NULL
+            AND NEW.acknowledged_at IS NULL
+          )
+          OR (
+            OLD.state = 'leased' AND NEW.state = 'acknowledged'
+            AND NEW.attempt_count = OLD.attempt_count
+            AND NEW.next_attempt_at IS NULL
+            AND NEW.lease_owner IS NULL AND NEW.lease_token IS NULL AND NEW.lease_expires_at IS NULL
+            AND NEW.last_reason_code IS OLD.last_reason_code
+            AND NEW.acknowledged_at = NEW.updated_at
+          )
+          OR (
+            OLD.state = 'leased' AND NEW.state = 'attention'
+            AND NEW.attempt_count = OLD.attempt_count
+            AND NEW.next_attempt_at IS NULL
+            AND NEW.lease_owner IS NULL AND NEW.lease_token IS NULL AND NEW.lease_expires_at IS NULL
+            AND NEW.last_reason_code IS NOT NULL
+            AND NEW.acknowledged_at IS NULL
+          )
+        )
+      ) IS NOT TRUE
+      BEGIN
+        SELECT RAISE(ABORT, 'control_plane_projection_outbox_transition_invalid');
+      END;
+      CREATE TRIGGER IF NOT EXISTS control_plane_projection_outbox_delete_guard
+      BEFORE DELETE ON control_plane_projection_outbox
+      BEGIN
+        SELECT RAISE(ABORT, 'control_plane_projection_outbox_delete_forbidden');
+      END;
     `);
     sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
       migrationId,
@@ -1556,4 +1892,5 @@ export function migrateSchema(sqlite: Database.Database): void {
   migrateHumanEscalationAccessIdentitySchema(sqlite);
   migrateFactoryWorkstreamSchema(sqlite);
   migrateReassessmentObligationSchema(sqlite);
+  migrateControlPlaneProjectionOutboxSchema(sqlite);
 }

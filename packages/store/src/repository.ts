@@ -17,6 +17,12 @@ import {
   CompletionAssessmentSchema,
   CompletionContractSchema,
   CompletionWaiverSchema,
+  canonicalJsonStringify,
+  CompletionAssessmentReceiptEnvelopeV1Schema,
+  CompletionContractRefReceiptEnvelopeV1Schema,
+  CallbackAttemptObservationReceiptEnvelopeV1Schema,
+  CallbackIntentObservationReceiptEnvelopeV1Schema,
+  CallbackProviderObservationReceiptEnvelopeV1Schema,
   ContextPacketSchema,
   conversationKeyFromEvent,
   conversationKeysFromEvent,
@@ -50,10 +56,12 @@ import {
   RunEventVisibilitySchema,
   RoutingDecisionSchema,
   RunnerDirectoryEntrySchema,
+  RunnerReadinessReceiptEnvelopeV1Schema,
   RunnerRegistrationInputSchema,
   SuggestedChangesSnapshotSchema,
   HumanEscalationSchema,
   VerificationEvidenceSchema,
+  WorkThreadRefReceiptEnvelopeV1Schema,
   WorkThreadSchema,
   WorkstreamAdmissionBatchInputSchema,
   WorkstreamInputSchema,
@@ -73,6 +81,8 @@ import {
   type CompletionAssessment,
   type CompletionContract,
   type CompletionWaiver,
+  type CompletionAssessmentReceiptEnvelopeV1,
+  type CompletionContractRefReceiptEnvelopeV1,
   type FrozenRoutingPolicy,
   type FactoryRecipeSnapshotInput,
   type HumanEscalation,
@@ -97,8 +107,10 @@ import {
   type RunnerDirectoryEntry,
   type RunnerRegistrationConfig,
   type RunnerRegistrationInput,
+  type RunnerReadinessReceiptEnvelopeV1,
   type SuggestedChangesSnapshot,
   type VerificationEvidence,
+  type WorkThreadRefReceiptEnvelopeV1,
   type WorkThread,
   type WorkstreamInput
 } from "@opentag/core";
@@ -121,6 +133,7 @@ import {
   completionAssessments,
   completionContracts,
   completionWaivers,
+  controlPlaneProjectionOutbox,
   controlPlaneEvents,
   factoryRecipeSnapshots,
   factoryWorkstreamMembers,
@@ -145,6 +158,77 @@ import {
   workstreamAdmissionBatchItems,
   workstreamAdmissionBatches
 } from "./schema.js";
+
+export type ControlPlaneProjectionEnvelope =
+  | RunnerReadinessReceiptEnvelopeV1
+  | WorkThreadRefReceiptEnvelopeV1
+  | CompletionContractRefReceiptEnvelopeV1
+  | CompletionAssessmentReceiptEnvelopeV1
+  | typeof CallbackIntentObservationReceiptEnvelopeV1Schema._output
+  | typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output
+  | typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+
+export type ControlPlaneProjectionOutboxState = "pending" | "leased" | "acknowledged" | "attention";
+
+export type ControlPlaneProjectionOutboxEntry = {
+  receiptId: string;
+  destinationId: string;
+  organizationId: string;
+  runnerId?: string;
+  runId?: string;
+  workThreadId?: string;
+  receiptKind: ControlPlaneProjectionEnvelope["receiptKind"];
+  identity: { namespace: string; parts: string[]; key: string };
+  operationId: string;
+  payloadDigest: string;
+  receiptDigest: string;
+  envelope: ControlPlaneProjectionEnvelope;
+  state: ControlPlaneProjectionOutboxState;
+  attemptCount: number;
+  nextAttemptAt?: string;
+  leaseOwner?: string;
+  leaseToken?: string;
+  leaseExpiresAt?: string;
+  lastReasonCode?: string;
+  lastHttpStatus?: number;
+  createdAt: string;
+  updatedAt: string;
+  acknowledgedAt?: string;
+};
+
+export type EnqueueControlPlaneProjectionInput = {
+  destinationId: string;
+  envelope: unknown;
+  now?: Date;
+};
+
+export type EnqueueControlPlaneProjectionResult =
+  | { outcome: "created" | "replay"; entry: ControlPlaneProjectionOutboxEntry }
+  | { outcome: "conflict"; conflictOn: "receipt_id" | "identity" | "operation"; existingReceiptId: string };
+
+export type ClaimControlPlaneProjectionsResult = {
+  entries: ControlPlaneProjectionOutboxEntry[];
+  rejected: Array<{
+    receiptId?: string;
+    rowIdentityDigest: string;
+    reasonCode: "stored_row_invalid";
+  }>;
+};
+
+export class ControlPlaneProjectionOutboxValidationError extends Error {
+  readonly code:
+    | "projection_envelope_invalid"
+    | "projection_custody_violation"
+    | "projection_destination_invalid"
+    | "projection_digest_mismatch"
+    | "projection_invalid_unicode";
+
+  constructor(code: ControlPlaneProjectionOutboxValidationError["code"]) {
+    super(code);
+    this.name = "ControlPlaneProjectionOutboxValidationError";
+    this.code = code;
+  }
+}
 
 export type OpenTagRunWithEvent = {
   run: OpenTagRun;
@@ -634,6 +718,221 @@ function nowIso(): string {
 
 function sha256Json(value: unknown): string {
   return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
+}
+
+const projectionEnvelopeSchemas = {
+  runner_readiness: RunnerReadinessReceiptEnvelopeV1Schema,
+  work_thread_ref: WorkThreadRefReceiptEnvelopeV1Schema,
+  completion_contract_ref: CompletionContractRefReceiptEnvelopeV1Schema,
+  completion_assessment: CompletionAssessmentReceiptEnvelopeV1Schema,
+  callback_intent_observation: CallbackIntentObservationReceiptEnvelopeV1Schema,
+  callback_attempt_observation: CallbackAttemptObservationReceiptEnvelopeV1Schema,
+  callback_provider_observation: CallbackProviderObservationReceiptEnvelopeV1Schema
+} as const;
+
+const PROJECTION_SAFE_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._:@/#-]*$/u;
+const PROJECTION_FORBIDDEN_FIELD = /^(?:uri|url|body|headers?|comment|credential|path|command|context)$/iu;
+
+function isProjectionTimestamp(value: string): boolean {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+
+function assertProjectionMutableReference(value: string): void {
+  assertProjectionCustodySafe(value);
+}
+
+function parseControlPlaneProjectionEnvelope(input: unknown): ControlPlaneProjectionEnvelope {
+  const receiptKind = input && typeof input === "object"
+    ? (input as { receiptKind?: unknown }).receiptKind
+    : undefined;
+  if (typeof receiptKind !== "string" || !(receiptKind in projectionEnvelopeSchemas)) {
+    throw new ControlPlaneProjectionOutboxValidationError("projection_envelope_invalid");
+  }
+  const parsed = projectionEnvelopeSchemas[receiptKind as keyof typeof projectionEnvelopeSchemas].safeParse(input);
+  if (!parsed.success) throw new ControlPlaneProjectionOutboxValidationError("projection_envelope_invalid");
+  return parsed.data as ControlPlaneProjectionEnvelope;
+}
+
+function assertProjectionCustodySafe(value: unknown, path: string[] = []): void {
+  if (typeof value === "string") {
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code >= 0xd800 && code <= 0xdbff) {
+        const next = value.charCodeAt(index + 1);
+        if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff) {
+          throw new ControlPlaneProjectionOutboxValidationError("projection_invalid_unicode");
+        }
+        index += 1;
+      } else if (code >= 0xdc00 && code <= 0xdfff) {
+        throw new ControlPlaneProjectionOutboxValidationError("projection_invalid_unicode");
+      }
+    }
+    if (
+      containsCredentialLikeData(value)
+      || !PROJECTION_SAFE_REFERENCE.test(value)
+      || /^[a-z][a-z0-9+.-]*:\/\//iu.test(value)
+      || /^(?:\/|~\/|[A-Za-z]:[\\/])/u.test(value)
+      || /(?:^|[/\\])\.\.(?:[/\\]|$)/u.test(value)
+    ) {
+      throw new ControlPlaneProjectionOutboxValidationError("projection_custody_violation");
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((child, index) => assertProjectionCustodySafe(child, [...path, String(index)]));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const childPath = [...path, key];
+    const digestReference = /Digest$/u.test(key);
+    const allowedCredentialReference = childPath.join(".") === "producer.credentialId";
+    if (
+      PROJECTION_FORBIDDEN_FIELD.test(key)
+      || (isCredentialFieldName(key) && !digestReference && !allowedCredentialReference)
+    ) {
+      throw new ControlPlaneProjectionOutboxValidationError("projection_custody_violation");
+    }
+    assertProjectionCustodySafe(child, childPath);
+  }
+}
+
+function projectionIdentityKey(envelope: ControlPlaneProjectionEnvelope): string {
+  return canonicalSha256Json({
+    namespace: envelope.identity.namespace,
+    parts: envelope.identity.parts
+  });
+}
+
+function assertProjectionDigests(envelope: ControlPlaneProjectionEnvelope): void {
+  const payloadDigest = canonicalSha256Json(envelope.payload);
+  const { receiptDigest: _receiptDigest, ...receiptContent } = envelope;
+  const receiptDigest = canonicalSha256Json(receiptContent);
+  if (envelope.payloadDigest !== payloadDigest || envelope.receiptDigest !== receiptDigest) {
+    throw new ControlPlaneProjectionOutboxValidationError("projection_digest_mismatch");
+  }
+}
+
+function projectionOutboxEntryFromRow(
+  row: typeof controlPlaneProjectionOutbox.$inferSelect
+): ControlPlaneProjectionOutboxEntry {
+  const state = row.state as ControlPlaneProjectionOutboxState;
+  if (!["pending", "leased", "acknowledged", "attention"].includes(state)) {
+    throw new Error("control_plane_projection_outbox_state_invalid");
+  }
+  let envelope: ControlPlaneProjectionEnvelope;
+  try {
+    envelope = parseControlPlaneProjectionEnvelope(JSON.parse(row.envelopeJson));
+    assertProjectionCustodySafe(envelope);
+    assertProjectionDigests(envelope);
+  } catch {
+    throw new Error("control_plane_projection_outbox_row_invalid");
+  }
+  const runnerId = envelope.receiptKind === "runner_readiness"
+    ? envelope.payload.runnerId
+    : null;
+  const runId = "runId" in envelope ? envelope.runId : null;
+  const workThreadId = "workThreadId" in envelope ? envelope.workThreadId : null;
+  const timestampValues = [
+    row.createdAt,
+    row.updatedAt,
+    ...(row.nextAttemptAt ? [row.nextAttemptAt] : []),
+    ...(row.leaseExpiresAt ? [row.leaseExpiresAt] : []),
+    ...(row.acknowledgedAt ? [row.acknowledgedAt] : [])
+  ];
+  const validMutableShape = Number.isInteger(row.attemptCount)
+    && row.attemptCount >= 0
+    && timestampValues.every(isProjectionTimestamp)
+    && row.updatedAt >= row.createdAt
+    && (row.lastHttpStatus === null
+      || (Number.isInteger(row.lastHttpStatus) && row.lastHttpStatus >= 100 && row.lastHttpStatus <= 599))
+    && (state !== "pending" || (
+      row.nextAttemptAt !== null
+      && row.nextAttemptAt >= row.updatedAt
+      && row.leaseOwner === null
+      && row.leaseToken === null
+      && row.leaseExpiresAt === null
+      && row.acknowledgedAt === null
+    ))
+    && (state !== "leased" || (
+      row.nextAttemptAt !== null
+      && row.leaseOwner !== null
+      && row.leaseToken !== null
+      && row.leaseExpiresAt !== null
+      && row.leaseExpiresAt > row.updatedAt
+      && row.acknowledgedAt === null
+    ))
+    && (state !== "acknowledged" || (
+      row.nextAttemptAt === null
+      && row.leaseOwner === null
+      && row.leaseToken === null
+      && row.leaseExpiresAt === null
+      && row.acknowledgedAt !== null
+      && row.acknowledgedAt >= row.updatedAt
+    ))
+    && (state !== "attention" || (
+      row.nextAttemptAt === null
+      && row.leaseOwner === null
+      && row.leaseToken === null
+      && row.leaseExpiresAt === null
+      && row.acknowledgedAt === null
+      && row.lastReasonCode !== null
+    ));
+  try {
+    if (row.lastReasonCode !== null) assertProjectionMutableReference(row.lastReasonCode);
+    if (row.leaseOwner !== null) assertProjectionMutableReference(row.leaseOwner);
+    if (row.leaseToken !== null) assertProjectionMutableReference(row.leaseToken);
+  } catch {
+    throw new Error("control_plane_projection_outbox_row_invalid");
+  }
+  if (
+    !validMutableShape
+    || row.receiptId !== envelope.receiptId
+    || row.organizationId !== envelope.organizationId
+    || row.runnerId !== runnerId
+    || row.runId !== runId
+    || row.workThreadId !== workThreadId
+    || row.receiptKind !== envelope.receiptKind
+    || row.identityNamespace !== envelope.identity.namespace
+    || row.identityPartsJson !== JSON.stringify(envelope.identity.parts)
+    || row.identityKey !== projectionIdentityKey(envelope)
+    || row.operationId !== envelope.operationId
+    || row.payloadDigest !== envelope.payloadDigest
+    || row.receiptDigest !== envelope.receiptDigest
+    || row.envelopeJson !== canonicalJsonStringify(envelope)
+  ) {
+    throw new Error("control_plane_projection_outbox_row_invalid");
+  }
+  return {
+    receiptId: row.receiptId,
+    destinationId: row.destinationId,
+    organizationId: row.organizationId,
+    ...(row.runnerId ? { runnerId: row.runnerId } : {}),
+    ...(row.runId ? { runId: row.runId } : {}),
+    ...(row.workThreadId ? { workThreadId: row.workThreadId } : {}),
+    receiptKind: row.receiptKind as ControlPlaneProjectionEnvelope["receiptKind"],
+    identity: {
+      namespace: row.identityNamespace,
+      parts: JSON.parse(row.identityPartsJson) as string[],
+      key: row.identityKey
+    },
+    operationId: row.operationId,
+    payloadDigest: row.payloadDigest,
+    receiptDigest: row.receiptDigest,
+    envelope,
+    state,
+    attemptCount: row.attemptCount,
+    ...(row.nextAttemptAt ? { nextAttemptAt: row.nextAttemptAt } : {}),
+    ...(row.leaseOwner ? { leaseOwner: row.leaseOwner } : {}),
+    ...(row.leaseToken ? { leaseToken: row.leaseToken } : {}),
+    ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt } : {}),
+    ...(row.lastReasonCode ? { lastReasonCode: row.lastReasonCode } : {}),
+    ...(row.lastHttpStatus !== null ? { lastHttpStatus: row.lastHttpStatus } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    ...(row.acknowledgedAt ? { acknowledgedAt: row.acknowledgedAt } : {})
+  };
 }
 
 function workThreadCanonicalKey(thread: WorkThread): string {
@@ -2673,8 +2972,535 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     };
   }
 
+  type ProjectionTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+  function projectionDestination(value: string): string {
+    if (
+      !PROJECTION_SAFE_REFERENCE.test(value)
+      || containsCredentialLikeData(value)
+      || /^[a-z][a-z0-9+.-]*:\/\//iu.test(value)
+      || /(?:^|[/\\])\.\.(?:[/\\]|$)/u.test(value)
+    ) {
+      throw new ControlPlaneProjectionOutboxValidationError("projection_destination_invalid");
+    }
+    return value;
+  }
+
+  function projectionOrganization(value: string): string {
+    return projectionDestination(value);
+  }
+
+  function enqueueControlPlaneProjectionTx(
+    tx: ProjectionTransaction,
+    input: EnqueueControlPlaneProjectionInput
+  ): EnqueueControlPlaneProjectionResult {
+    const destinationId = projectionDestination(input.destinationId);
+    const envelope = parseControlPlaneProjectionEnvelope(input.envelope);
+    assertProjectionCustodySafe(envelope);
+    assertProjectionDigests(envelope);
+    const at = (input.now ?? new Date()).toISOString();
+    const identityKey = projectionIdentityKey(envelope);
+    const envelopeJson = canonicalJsonStringify(envelope);
+    const runnerId = envelope.receiptKind === "runner_readiness" ? envelope.payload.runnerId : null;
+    const runId = "runId" in envelope ? envelope.runId : null;
+    const workThreadId = "workThreadId" in envelope ? envelope.workThreadId : null;
+    const values: typeof controlPlaneProjectionOutbox.$inferInsert = {
+      receiptId: envelope.receiptId,
+      destinationId,
+      organizationId: envelope.organizationId,
+      runnerId,
+      runId,
+      workThreadId,
+      receiptKind: envelope.receiptKind,
+      identityNamespace: envelope.identity.namespace,
+      identityPartsJson: JSON.stringify(envelope.identity.parts),
+      identityKey,
+      operationId: envelope.operationId,
+      payloadDigest: envelope.payloadDigest,
+      receiptDigest: envelope.receiptDigest,
+      envelopeJson,
+      state: "pending",
+      attemptCount: 0,
+      nextAttemptAt: at,
+      createdAt: at,
+      updatedAt: at
+    };
+    const byReceipt = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, envelope.organizationId),
+      eq(controlPlaneProjectionOutbox.receiptId, envelope.receiptId)
+    )).limit(1).get();
+    const byIdentity = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, envelope.organizationId),
+      eq(controlPlaneProjectionOutbox.identityKey, identityKey)
+    )).limit(1).get();
+    const byOperation = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, envelope.organizationId),
+      eq(controlPlaneProjectionOutbox.operationId, envelope.operationId)
+    )).limit(1).get();
+    const conflict = byReceipt ?? byIdentity ?? byOperation;
+    if (conflict) {
+      const exact = conflict.receiptId === values.receiptId
+        && conflict.destinationId === values.destinationId
+        && conflict.organizationId === values.organizationId
+        && conflict.runnerId === values.runnerId
+        && conflict.runId === values.runId
+        && conflict.workThreadId === values.workThreadId
+        && conflict.receiptKind === values.receiptKind
+        && conflict.identityNamespace === values.identityNamespace
+        && conflict.identityPartsJson === values.identityPartsJson
+        && conflict.identityKey === values.identityKey
+        && conflict.operationId === values.operationId
+        && conflict.payloadDigest === values.payloadDigest
+        && conflict.receiptDigest === values.receiptDigest
+        && conflict.envelopeJson === values.envelopeJson;
+      if (exact) return { outcome: "replay", entry: projectionOutboxEntryFromRow(conflict) };
+      return {
+        outcome: "conflict",
+        conflictOn: byReceipt ? "receipt_id" : byIdentity ? "identity" : "operation",
+        existingReceiptId: conflict.receiptId
+      };
+    }
+    tx.insert(controlPlaneProjectionOutbox).values(values).run();
+    const created = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, envelope.organizationId),
+      eq(controlPlaneProjectionOutbox.receiptId, envelope.receiptId)
+    )).limit(1).get();
+    if (!created) throw new Error("control_plane_projection_outbox_insert_lost");
+    return { outcome: "created", entry: projectionOutboxEntryFromRow(created) };
+  }
+
+  function validProjectionLimit(value: number | undefined): number {
+    if (value !== undefined && (!Number.isFinite(value) || value <= 0)) throw new Error("projection_limit_invalid");
+    return Math.min(100, Math.max(1, Math.trunc(value ?? 50)));
+  }
+
+  function validProjectionReason(value: string): string {
+    try {
+      assertProjectionMutableReference(value);
+    } catch {
+      throw new ControlPlaneProjectionOutboxValidationError("projection_custody_violation");
+    }
+    return value;
+  }
+
+  function validProjectionHttpStatus(value: number | undefined): number | undefined {
+    if (value !== undefined && (!Number.isInteger(value) || value < 100 || value > 599)) {
+      throw new Error("projection_http_status_invalid");
+    }
+    return value;
+  }
+
+  function validProjectionTimestamp(value: string): string {
+    if (!isProjectionTimestamp(value)) {
+      throw new Error("projection_timestamp_invalid");
+    }
+    return value;
+  }
+
   return {
     appendRunEvent,
+
+    async enqueueControlPlaneProjection(input: EnqueueControlPlaneProjectionInput): Promise<EnqueueControlPlaneProjectionResult> {
+      return db.transaction((tx) => enqueueControlPlaneProjectionTx(tx, input), { behavior: "immediate" });
+    },
+
+    async getControlPlaneProjection(input: {
+      destinationId: string;
+      organizationId: string;
+      receiptId: string;
+    }): Promise<ControlPlaneProjectionOutboxEntry | null> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const row = await db.select().from(controlPlaneProjectionOutbox).where(and(
+        eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+        eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+        eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+      )).limit(1).get();
+      return row ? projectionOutboxEntryFromRow(row) : null;
+    },
+
+    async listControlPlaneProjections(input: {
+      destinationId: string;
+      organizationId: string;
+      state?: ControlPlaneProjectionOutboxState;
+      limit?: number;
+    }): Promise<ControlPlaneProjectionOutboxEntry[]> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const condition = input.state
+        ? and(
+            eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+            eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+            eq(controlPlaneProjectionOutbox.state, input.state)
+          )
+        : and(
+            eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+            eq(controlPlaneProjectionOutbox.organizationId, organizationId)
+          );
+      const rows = await db.select().from(controlPlaneProjectionOutbox).where(condition)
+        .orderBy(asc(controlPlaneProjectionOutbox.createdAt), asc(controlPlaneProjectionOutbox.receiptId))
+        .limit(validProjectionLimit(input.limit));
+      return rows.map(projectionOutboxEntryFromRow);
+    },
+
+    async claimDueControlPlaneProjections(input: {
+      destinationId: string;
+      organizationId: string;
+      leaseOwner: string;
+      leaseSeconds: number;
+      limit?: number;
+      now?: Date;
+    }): Promise<ClaimControlPlaneProjectionsResult> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const leaseOwner = projectionDestination(input.leaseOwner);
+      if (!Number.isFinite(input.leaseSeconds) || input.leaseSeconds <= 0) throw new Error("projection_lease_seconds_invalid");
+      const limit = validProjectionLimit(input.limit);
+      const now = input.now ?? new Date();
+      const at = now.toISOString();
+      const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000).toISOString();
+      return db.transaction((tx) => {
+        const claimed: ControlPlaneProjectionOutboxEntry[] = [];
+        const rejected: ClaimControlPlaneProjectionsResult["rejected"] = [];
+        let cursor: {
+          nextAttemptAt: string;
+          createdAt: string;
+          receiptId: string;
+        } | undefined;
+        while (claimed.length < limit) {
+          const cursorCondition = cursor
+            ? or(
+                gt(controlPlaneProjectionOutbox.nextAttemptAt, cursor.nextAttemptAt),
+                and(
+                  eq(controlPlaneProjectionOutbox.nextAttemptAt, cursor.nextAttemptAt),
+                  gt(controlPlaneProjectionOutbox.createdAt, cursor.createdAt)
+                ),
+                and(
+                  eq(controlPlaneProjectionOutbox.nextAttemptAt, cursor.nextAttemptAt),
+                  eq(controlPlaneProjectionOutbox.createdAt, cursor.createdAt),
+                  gt(controlPlaneProjectionOutbox.receiptId, cursor.receiptId)
+                )
+              )
+            : undefined;
+          const due = tx.select().from(controlPlaneProjectionOutbox).where(and(
+            eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+            eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+            eq(controlPlaneProjectionOutbox.state, "pending"),
+            lte(controlPlaneProjectionOutbox.nextAttemptAt, at),
+            cursorCondition
+          )).orderBy(
+            asc(controlPlaneProjectionOutbox.nextAttemptAt),
+            asc(controlPlaneProjectionOutbox.createdAt),
+            asc(controlPlaneProjectionOutbox.receiptId)
+          ).limit(100).all();
+          if (due.length === 0) break;
+          for (const row of due) {
+            cursor = {
+              nextAttemptAt: row.nextAttemptAt!,
+              createdAt: row.createdAt,
+              receiptId: row.receiptId
+            };
+            if (claimed.length >= limit) break;
+            try {
+              projectionOutboxEntryFromRow(row);
+            } catch {
+              if (rejected.length < 100) {
+                const safeReceiptId = PROJECTION_SAFE_REFERENCE.test(row.receiptId)
+                  && !containsCredentialLikeData(row.receiptId)
+                  && !/(?:^|[/\\])\.\.(?:[/\\]|$)/u.test(row.receiptId);
+                rejected.push({
+                  ...(safeReceiptId ? { receiptId: row.receiptId } : {}),
+                  rowIdentityDigest: canonicalSha256Json({
+                    destinationId: row.destinationId,
+                    organizationId: row.organizationId,
+                    receiptId: row.receiptId
+                  }),
+                  reasonCode: "stored_row_invalid"
+                });
+              }
+              continue;
+            }
+            const leaseToken = randomUUID();
+            const updated = tx.update(controlPlaneProjectionOutbox).set({
+              state: "leased",
+              leaseOwner,
+              leaseToken,
+              leaseExpiresAt,
+              attemptCount: row.attemptCount + 1,
+              updatedAt: at
+            }).where(and(
+              eq(controlPlaneProjectionOutbox.receiptId, row.receiptId),
+              eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+              eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+              eq(controlPlaneProjectionOutbox.state, "pending"),
+              lte(controlPlaneProjectionOutbox.nextAttemptAt, at)
+            )).run();
+            if (updated.changes !== 1) continue;
+            claimed.push(projectionOutboxEntryFromRow({
+              ...row,
+              state: "leased",
+              leaseOwner,
+              leaseToken,
+              leaseExpiresAt,
+              attemptCount: row.attemptCount + 1,
+              updatedAt: at
+            }));
+          }
+          if (due.length < 100) break;
+        }
+        return { entries: claimed, rejected };
+      }, { behavior: "immediate" });
+    },
+
+    async acknowledgeControlPlaneProjection(input: {
+      destinationId: string;
+      organizationId: string;
+      receiptId: string;
+      leaseToken: string;
+      httpStatus?: number;
+      now?: Date;
+    }): Promise<{ outcome: "acknowledged" | "stale_lease" | "not_found"; entry?: ControlPlaneProjectionOutboxEntry }> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const at = (input.now ?? new Date()).toISOString();
+      const httpStatus = validProjectionHttpStatus(input.httpStatus);
+      return db.transaction((tx) => {
+        const row = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+        )).limit(1).get();
+        if (!row) return { outcome: "not_found" as const };
+        projectionOutboxEntryFromRow(row);
+        if (row.state !== "leased" || row.leaseToken !== input.leaseToken || !row.leaseExpiresAt || row.leaseExpiresAt <= at) {
+          return { outcome: "stale_lease" as const };
+        }
+        const updated = tx.update(controlPlaneProjectionOutbox).set({
+          state: "acknowledged",
+          nextAttemptAt: null,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          lastHttpStatus: httpStatus ?? null,
+          updatedAt: at,
+          acknowledgedAt: at
+        }).where(and(
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId),
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.state, "leased"),
+          eq(controlPlaneProjectionOutbox.leaseToken, input.leaseToken),
+          gt(controlPlaneProjectionOutbox.leaseExpiresAt, at)
+        )).run();
+        if (updated.changes !== 1) return { outcome: "stale_lease" as const };
+        const acknowledged = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+        )).limit(1).get();
+        return { outcome: "acknowledged" as const, entry: projectionOutboxEntryFromRow(acknowledged!) };
+      }, { behavior: "immediate" });
+    },
+
+    async retryControlPlaneProjection(input: {
+      destinationId: string;
+      organizationId: string;
+      receiptId: string;
+      leaseToken: string;
+      nextAttemptAt: string;
+      reasonCode: string;
+      httpStatus?: number;
+      now?: Date;
+    }): Promise<{ outcome: "retried" | "stale_lease" | "not_found"; entry?: ControlPlaneProjectionOutboxEntry }> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const at = (input.now ?? new Date()).toISOString();
+      const nextAttemptAt = validProjectionTimestamp(input.nextAttemptAt);
+      if (nextAttemptAt < at) throw new Error("projection_retry_time_in_past");
+      const reasonCode = validProjectionReason(input.reasonCode);
+      const httpStatus = validProjectionHttpStatus(input.httpStatus);
+      return db.transaction((tx) => {
+        const row = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+        )).limit(1).get();
+        if (!row) return { outcome: "not_found" as const };
+        projectionOutboxEntryFromRow(row);
+        if (row.state !== "leased" || row.leaseToken !== input.leaseToken || !row.leaseExpiresAt || row.leaseExpiresAt <= at) {
+          return { outcome: "stale_lease" as const };
+        }
+        const updated = tx.update(controlPlaneProjectionOutbox).set({
+          state: "pending",
+          nextAttemptAt,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          lastReasonCode: reasonCode,
+          lastHttpStatus: httpStatus ?? null,
+          updatedAt: at
+        }).where(and(
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId),
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.state, "leased"),
+          eq(controlPlaneProjectionOutbox.leaseToken, input.leaseToken),
+          gt(controlPlaneProjectionOutbox.leaseExpiresAt, at)
+        )).run();
+        if (updated.changes !== 1) return { outcome: "stale_lease" as const };
+        const retried = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+        )).limit(1).get();
+        return { outcome: "retried" as const, entry: projectionOutboxEntryFromRow(retried!) };
+      }, { behavior: "immediate" });
+    },
+
+    async markControlPlaneProjectionAttention(input: {
+      destinationId: string;
+      organizationId: string;
+      receiptId: string;
+      leaseToken: string;
+      reasonCode: string;
+      httpStatus?: number;
+      now?: Date;
+    }): Promise<{ outcome: "attention" | "stale_lease" | "not_found"; entry?: ControlPlaneProjectionOutboxEntry }> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const at = (input.now ?? new Date()).toISOString();
+      const reasonCode = validProjectionReason(input.reasonCode);
+      const httpStatus = validProjectionHttpStatus(input.httpStatus);
+      return db.transaction((tx) => {
+        const row = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+        )).limit(1).get();
+        if (!row) return { outcome: "not_found" as const };
+        projectionOutboxEntryFromRow(row);
+        if (row.state !== "leased" || row.leaseToken !== input.leaseToken || !row.leaseExpiresAt || row.leaseExpiresAt <= at) {
+          return { outcome: "stale_lease" as const };
+        }
+        const updated = tx.update(controlPlaneProjectionOutbox).set({
+          state: "attention",
+          nextAttemptAt: null,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          lastReasonCode: reasonCode,
+          lastHttpStatus: httpStatus ?? null,
+          updatedAt: at
+        }).where(and(
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId),
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.state, "leased"),
+          eq(controlPlaneProjectionOutbox.leaseToken, input.leaseToken),
+          gt(controlPlaneProjectionOutbox.leaseExpiresAt, at)
+        )).run();
+        if (updated.changes !== 1) return { outcome: "stale_lease" as const };
+        const attention = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+        )).limit(1).get();
+        return { outcome: "attention" as const, entry: projectionOutboxEntryFromRow(attention!) };
+      }, { behavior: "immediate" });
+    },
+
+    async recoverExpiredControlPlaneProjectionLeases(input: {
+      destinationId: string;
+      organizationId: string;
+      limit?: number;
+      now?: Date;
+    }): Promise<{ recovered: number; entries: ControlPlaneProjectionOutboxEntry[] }> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const limit = validProjectionLimit(input.limit);
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const entries: ControlPlaneProjectionOutboxEntry[] = [];
+        let cursor: {
+          leaseExpiresAt: string;
+          createdAt: string;
+          receiptId: string;
+        } | undefined;
+        while (entries.length < limit) {
+          const cursorCondition = cursor
+            ? or(
+                gt(controlPlaneProjectionOutbox.leaseExpiresAt, cursor.leaseExpiresAt),
+                and(
+                  eq(controlPlaneProjectionOutbox.leaseExpiresAt, cursor.leaseExpiresAt),
+                  gt(controlPlaneProjectionOutbox.createdAt, cursor.createdAt)
+                ),
+                and(
+                  eq(controlPlaneProjectionOutbox.leaseExpiresAt, cursor.leaseExpiresAt),
+                  eq(controlPlaneProjectionOutbox.createdAt, cursor.createdAt),
+                  gt(controlPlaneProjectionOutbox.receiptId, cursor.receiptId)
+                )
+              )
+            : undefined;
+          const expired = tx.select().from(controlPlaneProjectionOutbox).where(and(
+            eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+            eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+            eq(controlPlaneProjectionOutbox.state, "leased"),
+            lte(controlPlaneProjectionOutbox.leaseExpiresAt, at),
+            cursorCondition
+          )).orderBy(
+            asc(controlPlaneProjectionOutbox.leaseExpiresAt),
+            asc(controlPlaneProjectionOutbox.createdAt),
+            asc(controlPlaneProjectionOutbox.receiptId)
+          ).limit(100).all();
+          if (expired.length === 0) break;
+          for (const row of expired) {
+            cursor = {
+              leaseExpiresAt: row.leaseExpiresAt!,
+              createdAt: row.createdAt,
+              receiptId: row.receiptId
+            };
+            if (entries.length >= limit) break;
+            try {
+              projectionOutboxEntryFromRow(row);
+            } catch {
+              continue;
+            }
+            const updated = tx.update(controlPlaneProjectionOutbox).set({
+              state: "pending",
+              nextAttemptAt: at,
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              lastReasonCode: "lease_expired",
+              updatedAt: at
+            }).where(and(
+              eq(controlPlaneProjectionOutbox.receiptId, row.receiptId),
+              eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+              eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+              eq(controlPlaneProjectionOutbox.state, "leased"),
+              lte(controlPlaneProjectionOutbox.leaseExpiresAt, at)
+            )).run();
+            if (updated.changes !== 1) continue;
+            entries.push(projectionOutboxEntryFromRow({
+              ...row,
+              state: "pending",
+              nextAttemptAt: at,
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              lastReasonCode: "lease_expired",
+              updatedAt: at
+            }));
+          }
+          if (expired.length < 100) break;
+        }
+        return { recovered: entries.length, entries };
+      }, { behavior: "immediate" });
+    },
 
     async getFactoryRecipeSnapshot(input: { id: string; version: number }): Promise<StoredFactoryRecipeSnapshot | null> {
       const row = await db.select().from(factoryRecipeSnapshots)
