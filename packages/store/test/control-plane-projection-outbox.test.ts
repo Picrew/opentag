@@ -60,14 +60,14 @@ function callbackProviderReceipt(resourceIdentity = "github:comment:123") {
     producer: { kind: "local_opentag", id: "local_opentag" },
     identity: {
       namespace: "opentag.control.receipt/callback-provider-observation/v1",
-      parts: ["org_1", "work_thread_1", "intent_1", "attempt_1", "provider_receipt_1"]
+      parts: ["org_1", "work_thread_1", "intent_1", "callback_attempt_1", "provider_receipt_1"]
     },
     observedAt: NOW.toISOString(),
     runId: "run_1",
     workThreadId: "work_thread_1",
     payload: {
       localIntentId: "intent_1",
-      localAttemptId: "attempt_1",
+      localAttemptId: "callback_attempt_1",
       providerReceiptId: "provider_receipt_1",
       resourceIdentity,
       outcome: "succeeded",
@@ -984,7 +984,7 @@ describe("control_plane_projection_outbox", () => {
       destinationId: "cloud",
       envelope: callbackProviderReceipt("https://api.github.com/comments/123?token=secret"),
       now: NOW
-    })).rejects.toMatchObject({ code: "projection_custody_violation" });
+    })).rejects.toMatchObject({ code: "projection_envelope_invalid" });
     const topUnknown = { ...workThreadReceipt(), unexpected: "value" };
     const nestedUnknown = {
       ...workThreadReceipt(),
@@ -1019,11 +1019,7 @@ describe("control_plane_projection_outbox", () => {
       const expectation = expect(repo.enqueueControlPlaneProjection({
         destinationId: "cloud", envelope: callbackProviderReceipt(unsafe), now: NOW
       })).rejects;
-      if (unsafe.includes("\ud800") || unsafe.includes("\udcff")) {
-        await expectation.toMatchObject({ code: "projection_invalid_unicode" });
-      } else {
-        await expectation.toMatchObject({ code: "projection_custody_violation" });
-      }
+      await expectation.toMatchObject({ code: "projection_envelope_invalid" });
     }
     expect(sqlite.prepare("SELECT count(*) AS count FROM control_plane_projection_outbox").get()).toEqual({ count: 0 });
     sqlite.close();

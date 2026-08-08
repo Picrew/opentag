@@ -11,7 +11,9 @@ import {
   CallbackIntentObservationPayloadV1Schema,
   CallbackProviderObservationReceiptEnvelopeV1Schema,
   CallbackProviderObservationPayloadV1Schema,
+  CallbackNextActionV1Schema,
   CallbackObservationReasonCodeV1Schema,
+  CallbackProviderV1Schema,
   CompletionContractRefPayloadV1Schema,
   CompletionContractRefReceiptEnvelopeV1Schema,
   CompletionAssessmentPayloadV1Schema,
@@ -1668,6 +1670,8 @@ describe("ReceiptEnvelope V1", () => {
     expectTypeOf<
       typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output.receiptKind
     >().toEqualTypeOf<"callback_provider_observation">();
+    expectTypeOf<typeof CallbackProviderV1Schema._output>().toEqualTypeOf<"github">();
+    expectTypeOf<typeof CallbackNextActionV1Schema._output>().toEqualTypeOf<"reconcile-provider">();
   });
 
   it("accepts an executor-neutral, locally authored completion assessment", () => {
@@ -1949,7 +1953,7 @@ describe("ReceiptEnvelope V1", () => {
         outcome: "outcome_unknown",
         observedAt,
         reasonCode: "provider_timeout",
-        nextAction: "reconcile_provider_receipt",
+        nextAction: "reconcile-provider",
         owner: "local_opentag",
       }).success,
     ).toBe(true);
@@ -1963,7 +1967,7 @@ describe("ReceiptEnvelope V1", () => {
       requestDigest: digest,
       outcome: "outcome_unknown",
       reasonCode: "provider_timeout",
-      nextAction: "reconcile_provider_receipt",
+      nextAction: "reconcile-provider",
       owner: "local_opentag",
       attemptedAt: "2026-08-08T00:00:00.000Z",
       observedAt: "2026-08-08T00:00:01.000Z",
@@ -2010,6 +2014,160 @@ describe("ReceiptEnvelope V1", () => {
     ).toBe(false);
     expect(CallbackObservationReasonCodeV1Schema.safeParse("provider_timeout").success).toBe(true);
     expect(RunnerReadinessReasonCodeV1Schema.safeParse("made_up_reason").success).toBe(false);
+  });
+
+  it("rejects callback custody, credentials, paths, commands, and unregistered literals", () => {
+    const intent = {
+      localIntentId: "intent_1",
+      assessmentRef: "assessment_1",
+      assessmentDigest: digest,
+      provider: "github",
+      sourceThreadIdentityDigest: digest,
+      operationId: "op_callback_1",
+      payloadDigest: digest,
+      createdAt: observedAt,
+    } as const;
+    const attempt = {
+      localIntentId: "intent_1",
+      localAttemptId: "callback_attempt_1",
+      attemptNumber: 1,
+      requestDigest: digest,
+      outcome: "accepted",
+      reasonCode: "provider_accepted",
+      attemptedAt: observedAt,
+      observedAt,
+    } as const;
+    const provider = {
+      localIntentId: "intent_1",
+      localAttemptId: "callback_attempt_1",
+      providerReceiptId: "comment_1",
+      resourceIdentity: "github:comment:1",
+      outcome: "succeeded",
+      reasonCode: "provider_accepted",
+      observedAt,
+    } as const;
+
+    expect(CallbackIntentObservationPayloadV1Schema.safeParse({ ...intent, provider: "gitlab" }).success).toBe(false);
+    expect(CallbackAttemptObservationPayloadV1Schema.safeParse({
+      ...attempt,
+      nextAction: "upload-callback-body",
+    }).success).toBe(false);
+    for (const resourceIdentity of [
+      "gitlab:issue:42",
+      "github:pull-request:42",
+      "github:issue:https://github.com/example/repo/issues/42",
+      "github:issue:42?token=secret",
+      "github:comment:42#body",
+      "github:issue:42\nAuthorization: Bearer abcdefghijklmnopqrstuvwxyz",
+      "github:issue:nested_github_pat_abcdefghijklmnopqrstuvwxyz123456",
+      "github:issue:nested-github_pat_abcdefghijklmnopqrstuvwxyz123456",
+      "github:comment:nested_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk",
+      "github:comment:nested-eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk",
+    ]) {
+      expect(
+        CallbackProviderObservationPayloadV1Schema.safeParse({ ...provider, resourceIdentity }).success,
+        resourceIdentity,
+      ).toBe(false);
+    }
+    for (const resourceIdentity of [
+      "github:issue:issue_1",
+      "github:comment:comment-1",
+      "github:comment:nested_comment_1",
+    ]) {
+      expect(
+        CallbackProviderObservationPayloadV1Schema.safeParse({ ...provider, resourceIdentity }).success,
+        resourceIdentity,
+      ).toBe(true);
+    }
+
+    const unsafeReferences = [
+      "https://example.test/callback?token=secret",
+      '{"body":"callback"}',
+      "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+      "Bearer abcdefghijklmnopqrstuvwxyz",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk",
+      "github_pat_abcdefghijklmnopqrstuvwxyz123456",
+      "/tmp/callback-receipt",
+      "../callback-receipt",
+      "curl https://example.test/callback",
+      "callback; rm -rf workspace",
+      "callback$(whoami)",
+      "callback\r\nnext-header: value",
+    ] as const;
+    for (const unsafeReference of unsafeReferences) {
+      expect(
+        CallbackIntentObservationPayloadV1Schema.safeParse({ ...intent, localIntentId: unsafeReference }).success,
+        `localIntentId: ${unsafeReference}`,
+      ).toBe(false);
+      expect(
+        CallbackAttemptObservationPayloadV1Schema.safeParse({ ...attempt, localAttemptId: unsafeReference }).success,
+        `localAttemptId: ${unsafeReference}`,
+      ).toBe(false);
+      expect(
+        CallbackProviderObservationPayloadV1Schema.safeParse({
+          ...provider,
+          providerReceiptId: unsafeReference,
+        }).success,
+        `providerReceiptId: ${unsafeReference}`,
+      ).toBe(false);
+    }
+    for (const credentialLikeReference of [
+      "github_pat_abcdefghijklmnopqrstuvwxyz123456",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk",
+    ]) {
+      expect(
+        CallbackIntentObservationPayloadV1Schema.safeParse({
+          ...intent,
+          localIntentId: `intent-${credentialLikeReference}`,
+        }).success,
+      ).toBe(false);
+      expect(
+        CallbackAttemptObservationPayloadV1Schema.safeParse({
+          ...attempt,
+          localAttemptId: `callback-attempt-${credentialLikeReference}`,
+        }).success,
+      ).toBe(false);
+      expect(
+        CallbackProviderObservationPayloadV1Schema.safeParse({
+          ...provider,
+          providerReceiptId: `provider-receipt-${credentialLikeReference}`,
+        }).success,
+      ).toBe(false);
+    }
+    for (const [field, value] of [
+      ["localIntentId", "intent_github_pat_abcdefghijklmnopqrstuvwxyz123456"],
+      [
+        "localIntentId",
+        "intent_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk",
+      ],
+      ["localAttemptId", "callback_attempt_ghp_abcdefghijklmnopqrstuvwxyz"],
+      ["providerReceiptId", "provider_receipt_github_pat_abcdefghijklmnopqrstuvwxyz123456"],
+      [
+        "localAttemptId",
+        "callback-attempt_nested_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk",
+      ],
+      [
+        "providerReceiptId",
+        "provider_receipt_nested_github_pat_abcdefghijklmnopqrstuvwxyz123456",
+      ],
+    ] as const) {
+      const schema = field === "localIntentId"
+        ? CallbackIntentObservationPayloadV1Schema
+        : field === "localAttemptId"
+          ? CallbackAttemptObservationPayloadV1Schema
+          : CallbackProviderObservationPayloadV1Schema;
+      const source = field === "localIntentId" ? intent : field === "localAttemptId" ? attempt : provider;
+      expect(schema.safeParse({ ...source, [field]: value }).success, `${field}: ${value}`).toBe(false);
+    }
+    expect(CallbackIntentObservationPayloadV1Schema.safeParse(intent).success).toBe(true);
+    expect(CallbackAttemptObservationPayloadV1Schema.safeParse(attempt).success).toBe(true);
+    expect(CallbackProviderObservationPayloadV1Schema.safeParse(provider).success).toBe(true);
+    expect(CallbackIntentObservationPayloadV1Schema.safeParse({ ...intent, localIntentId: "callback_1" }).success).toBe(false);
+    expect(CallbackAttemptObservationPayloadV1Schema.safeParse({ ...attempt, localAttemptId: "attempt_1" }).success).toBe(false);
+    expect(CallbackProviderObservationPayloadV1Schema.safeParse({
+      ...provider,
+      providerReceiptId: "receipt_1",
+    }).success).toBe(false);
   });
 
   it("binds callback attempt and provider observation times to their envelopes", () => {
@@ -2071,6 +2229,40 @@ describe("ReceiptEnvelope V1", () => {
 
     expect(CallbackAttemptObservationReceiptEnvelopeV1Schema.safeParse(attemptEnvelope).success).toBe(true);
     expect(CallbackProviderObservationReceiptEnvelopeV1Schema.safeParse(providerEnvelope).success).toBe(true);
+    const unknownAttemptEnvelope = {
+      ...attemptEnvelope,
+      payload: {
+        ...attemptEnvelope.payload,
+        outcome: "outcome_unknown",
+        reasonCode: "provider_timeout",
+        nextAction: "reconcile-provider",
+        owner: attemptEnvelope.producer.id,
+      },
+    } as const;
+    expect(CallbackAttemptObservationReceiptEnvelopeV1Schema.safeParse(unknownAttemptEnvelope).success).toBe(true);
+    expect(
+      CallbackAttemptObservationReceiptEnvelopeV1Schema.safeParse({
+        ...unknownAttemptEnvelope,
+        payload: { ...unknownAttemptEnvelope.payload, owner: "different-local-owner" },
+      }).success,
+    ).toBe(false);
+    const unknownProviderEnvelope = {
+      ...providerEnvelope,
+      payload: {
+        ...providerEnvelope.payload,
+        outcome: "outcome_unknown",
+        reasonCode: "provider_receipt_missing",
+        nextAction: "reconcile-provider",
+        owner: providerEnvelope.producer.id,
+      },
+    } as const;
+    expect(CallbackProviderObservationReceiptEnvelopeV1Schema.safeParse(unknownProviderEnvelope).success).toBe(true);
+    expect(
+      CallbackProviderObservationReceiptEnvelopeV1Schema.safeParse({
+        ...unknownProviderEnvelope,
+        payload: { ...unknownProviderEnvelope.payload, owner: "different-local-owner" },
+      }).success,
+    ).toBe(false);
     expect(
       CallbackAttemptObservationReceiptEnvelopeV1Schema.safeParse({
         ...attemptEnvelope,

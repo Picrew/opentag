@@ -180,8 +180,8 @@ function callbackUnknown(): CallbackObservationReceiptEnvelopeV1 {
       requestDigest: digest,
       outcome: "outcome_unknown",
       reasonCode: "provider_timeout",
-      nextAction: "reconcile_provider_receipt",
-      owner: "local_opentag",
+      nextAction: "reconcile-provider",
+      owner: base.producer.id,
       attemptedAt: observedAt,
       observedAt
     }

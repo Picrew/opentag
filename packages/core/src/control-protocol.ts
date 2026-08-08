@@ -99,6 +99,58 @@ export const CallbackObservationReasonCodeV1Schema = z.enum([
   "provider_timeout",
 ]);
 
+export const CallbackProviderV1Schema = z.literal("github");
+export const CallbackNextActionV1Schema = z.literal("reconcile-provider");
+
+function isCallbackCredentialSafeStableReference(value: string): boolean {
+  if (!isCredentialSafeText(value)) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    if (
+      (value[index] === "-" || value[index] === "_" || value[index] === ".") &&
+      !isCredentialSafeText(value.slice(index + 1))
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const CallbackSafeStableReferenceSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine(
+    isCallbackCredentialSafeStableReference,
+    "Callback reference must not contain credential-like data.",
+  );
+
+export const CallbackLocalIntentIdV1Schema = CallbackSafeStableReferenceSchema.regex(
+  /^intent[-_][A-Za-z0-9][A-Za-z0-9._-]*$/u,
+  "Callback intent ID must use the intent- or intent_ stable reference prefix.",
+);
+
+export const CallbackLocalAttemptIdV1Schema = CallbackSafeStableReferenceSchema.regex(
+  /^callback[-_]attempt[-_][A-Za-z0-9][A-Za-z0-9._-]*$/u,
+  "Callback attempt ID must use the callback-attempt- or callback_attempt_ stable reference prefix.",
+);
+
+export const CallbackProviderReceiptIdV1Schema = CallbackSafeStableReferenceSchema.regex(
+  /^(?:provider[-_]receipt|issue|comment)[-_][A-Za-z0-9][A-Za-z0-9._-]*$/u,
+  "Callback provider receipt ID must use a provider-receipt, issue, or comment stable reference prefix.",
+);
+
+export const CallbackResourceIdentityV1Schema = z
+  .string()
+  .max(160)
+  .regex(
+    /^github:(?:issue|comment):[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u,
+    "Callback resource identity must be a stable GitHub issue or comment identity.",
+  )
+  .refine(
+    isCallbackCredentialSafeStableReference,
+    "Callback resource identity must not contain credential-like data.",
+  );
+
 export const PermissionResolutionReasonCodeV1Schema = z.enum([
   "human_approval_required",
   "human_approved",
@@ -1568,10 +1620,10 @@ export const CompletionAssessmentReceiptEnvelopeV1Schema = z
 
 export const CallbackIntentObservationPayloadV1Schema = z
   .object({
-    localIntentId: NonEmptyIdSchema,
+    localIntentId: CallbackLocalIntentIdV1Schema,
     assessmentRef: NonEmptyIdSchema,
     assessmentDigest: ReceiptDigestSchema,
-    provider: NonEmptyIdSchema,
+    provider: CallbackProviderV1Schema,
     sourceThreadIdentityDigest: ReceiptDigestSchema,
     operationId: NonEmptyIdSchema,
     payloadDigest: ReceiptDigestSchema,
@@ -1581,13 +1633,13 @@ export const CallbackIntentObservationPayloadV1Schema = z
 
 export const CallbackAttemptObservationPayloadV1Schema = z
   .object({
-    localIntentId: NonEmptyIdSchema,
-    localAttemptId: NonEmptyIdSchema,
+    localIntentId: CallbackLocalIntentIdV1Schema,
+    localAttemptId: CallbackLocalAttemptIdV1Schema,
     attemptNumber: z.number().int().positive(),
     requestDigest: ReceiptDigestSchema,
     outcome: z.enum(["accepted", "rejected", "outcome_unknown"]),
     reasonCode: CallbackObservationReasonCodeV1Schema,
-    nextAction: NonEmptyIdSchema.optional(),
+    nextAction: CallbackNextActionV1Schema.optional(),
     owner: NonEmptyIdSchema.optional(),
     attemptedAt: ControlTimestampSchema,
     observedAt: ControlTimestampSchema,
@@ -1624,14 +1676,14 @@ export const CallbackAttemptObservationPayloadV1Schema = z
 
 export const CallbackProviderObservationPayloadV1Schema = z
   .object({
-    localIntentId: NonEmptyIdSchema,
-    localAttemptId: NonEmptyIdSchema,
-    providerReceiptId: NonEmptyIdSchema,
-    resourceIdentity: NonEmptyIdSchema,
+    localIntentId: CallbackLocalIntentIdV1Schema,
+    localAttemptId: CallbackLocalAttemptIdV1Schema,
+    providerReceiptId: CallbackProviderReceiptIdV1Schema,
+    resourceIdentity: CallbackResourceIdentityV1Schema,
     outcome: z.enum(["succeeded", "failed", "outcome_unknown"]),
     observedAt: ControlTimestampSchema,
     reasonCode: CallbackObservationReasonCodeV1Schema.optional(),
-    nextAction: NonEmptyIdSchema.optional(),
+    nextAction: CallbackNextActionV1Schema.optional(),
     owner: NonEmptyIdSchema.optional(),
   })
   .strict()
@@ -1677,6 +1729,20 @@ function callbackEnvelope<const TReceiptKind extends string, TPayload extends z.
       }
       if (receipt.producer.kind !== "local_opentag") {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["producer", "kind"], message: "Callback observations are locally authoritative." });
+      }
+      const callbackPayload = (
+        receipt as unknown as { payload: { outcome?: string; owner?: string } }
+      ).payload;
+      if (
+        callbackPayload.outcome === "outcome_unknown" &&
+        callbackPayload.owner !== undefined &&
+        callbackPayload.owner !== receipt.producer.id
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["payload", "owner"],
+          message: "Unknown callback observation owner must match the local producer.",
+        });
       }
     });
 }
