@@ -20,11 +20,18 @@ const event: OpenTagEvent = {
   metadata: { owner: "acme", repo: "demo" }
 };
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
+function jsonResponse(
+  body: unknown,
+  status = 200,
+  url = "http://dispatcher.test/response",
+  headers: HeadersInit = {}
+): Response {
+  const response = new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" }
+    headers: { "content-type": "application/json", ...Object.fromEntries(new Headers(headers)) }
   });
+  Object.defineProperty(response, "url", { value: url });
+  return response;
 }
 
 function runnerRegistrationRequest() {
@@ -2298,6 +2305,59 @@ describe("@opentag/client", () => {
     expect(failure).not.toHaveProperty("responseBody");
   });
 
+  it("maps a strict registration 429 with sanitized retry metadata", async () => {
+    const input = runnerRegistrationRequest();
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      controlCredential: bootstrapControlCredential,
+      fetchImpl: async () => jsonResponse({
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        error: "rate_limited",
+        message: "registration_429_body_canary",
+        requestId: input.requestId,
+        retryAfterSeconds: 11
+      }, 429, "http://dispatcher.test/v1/runners", {
+        "retry-after": "11",
+        "x-secret-canary": "registration_429_header_canary"
+      })
+    });
+
+    const failure = await client.registerRunnerControlV1(input).catch((caught: unknown) => caught);
+    expect(failure).toBeInstanceOf(OpenTagControlV1HttpError);
+    expect(failure).toMatchObject({
+      status: 429,
+      code: "rate_limited",
+      requestId: input.requestId,
+      retryAfterSeconds: 11
+    });
+    expect(String(failure)).not.toContain("canary");
+  });
+
+  it.each([
+    ["missing header", {}, { retryAfterSeconds: 11 }],
+    ["mismatched header", { "retry-after": "12" }, { retryAfterSeconds: 11 }],
+    ["malformed body", { "retry-after": "11" }, { retryAfterSeconds: "11" }]
+  ])("rejects a registration 429 with %s", async (_name, headers, extra) => {
+    const input = runnerRegistrationRequest();
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      controlCredential: bootstrapControlCredential,
+      fetchImpl: async () => jsonResponse({
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        error: "rate_limited",
+        message: "registration_429_body_canary",
+        requestId: input.requestId,
+        ...extra
+      }, 429, "http://dispatcher.test/v1/runners", headers)
+    });
+
+    const failure = await client.registerRunnerControlV1(input).catch((caught: unknown) => caught);
+    expect(failure).toMatchObject({ responseBody: "invalid_control_v1_response" });
+    expect(String(failure)).not.toContain("canary");
+  });
+
   it("fails closed when a valid Control V1 error has a mismatched request identity", async () => {
     const input = runnerRegistrationRequest();
     const body = {
@@ -2327,7 +2387,11 @@ describe("@opentag/client", () => {
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
       controlCredential: bootstrapControlCredential,
-      fetchImpl: async () => new Response("not-json-runtime_secret_value", { status: 201 })
+      fetchImpl: async () => {
+        const response = new Response("not-json-runtime_secret_value", { status: 201 });
+        Object.defineProperty(response, "url", { value: "http://dispatcher.test/v1/runners" });
+        return response;
+      }
     });
 
     await expect(client.registerRunnerControlV1(runnerRegistrationRequest())).rejects.toMatchObject({
@@ -2337,8 +2401,8 @@ describe("@opentag/client", () => {
     });
   });
 
-  it("propagates transport failures without synthesizing a credential response", async () => {
-    const failure = new TypeError("network unavailable");
+  it("sanitizes Control V1 transport failures without synthesizing a credential response", async () => {
+    const failure = new TypeError("network unavailable with runtime_secret_value");
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
       controlCredential: bootstrapControlCredential,
@@ -2347,6 +2411,13 @@ describe("@opentag/client", () => {
       }
     });
 
-    await expect(client.registerRunnerControlV1(runnerRegistrationRequest())).rejects.toBe(failure);
+    const caught = await client.registerRunnerControlV1(runnerRegistrationRequest())
+      .catch((error: unknown) => error);
+    expect(caught).toMatchObject({
+      name: "OpenTagClientHttpError",
+      status: 0,
+      responseBody: "transport_failed"
+    });
+    expect(String(caught)).not.toContain("runtime_secret_value");
   });
 });

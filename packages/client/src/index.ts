@@ -14,10 +14,20 @@ import {
   FactoryRecipeSnapshotInputSchema,
   FactoryRecipeSnapshotSchema,
   RoutingDecisionSchema,
+  CallbackAttemptObservationReceiptEnvelopeV1Schema,
+  CallbackIntentObservationReceiptEnvelopeV1Schema,
+  CallbackProviderObservationReceiptEnvelopeV1Schema,
+  canonicalJsonStringify,
+  CompletionAssessmentReceiptEnvelopeV1Schema,
+  CompletionContractRefReceiptEnvelopeV1Schema,
+  ControlErrorHttpResponseV1Schema,
+  RelayCapabilitiesResponseV1Schema,
+  RunnerReadinessReceiptEnvelopeV1Schema,
   RunnerCredentialHttpResponseV1Schema,
   RunnerCredentialReprovisionRequestV1Schema,
   RunnerDirectoryEntrySchema,
   RunnerRegistrationRequestV1Schema,
+  WorkThreadRefReceiptEnvelopeV1Schema,
   RunAdmissionDecisionSchema,
   WorkstreamAdmissionBatchInputSchema,
   WorkstreamAdmissionBatchReceiptSchema,
@@ -56,6 +66,10 @@ import {
   type RunnerCredentialResponseV1,
   type RunnerDirectoryEntry,
   type RunnerRegistrationRequestV1,
+  type RunnerReadinessReceiptEnvelopeV1,
+  type WorkThreadRefReceiptEnvelopeV1,
+  type CompletionContractRefReceiptEnvelopeV1,
+  type CompletionAssessmentReceiptEnvelopeV1,
   type RunnerRegistrationConfig,
   type RunnerRegistrationInput,
   type RunEventImportance,
@@ -283,6 +297,31 @@ export type ControlCredential =
   | { kind: "operator"; token: string }
   | { kind: "runtime"; token: string };
 
+export type RelayCapabilitiesResponseV1 = typeof RelayCapabilitiesResponseV1Schema._output;
+export type CallbackIntentObservationReceiptEnvelopeV1 =
+  typeof CallbackIntentObservationReceiptEnvelopeV1Schema._output;
+export type CallbackAttemptObservationReceiptEnvelopeV1 =
+  typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output;
+export type CallbackProviderObservationReceiptEnvelopeV1 =
+  typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+export type CallbackObservationReceiptEnvelopeV1 =
+  | CallbackIntentObservationReceiptEnvelopeV1
+  | CallbackAttemptObservationReceiptEnvelopeV1
+  | CallbackProviderObservationReceiptEnvelopeV1;
+
+export type ControlReceiptResult<T> =
+  | { status: 201; replayed: false; outcome: "accepted"; receipt: T }
+  | { status: 200; replayed: true; outcome: "accepted"; receipt: T };
+
+export type CallbackObservationControlReceiptResult =
+  | ControlReceiptResult<CallbackObservationReceiptEnvelopeV1>
+  | {
+      status: 202;
+      replayed: false;
+      outcome: "outcome_unknown";
+      receipt: CallbackObservationReceiptEnvelopeV1;
+    };
+
 export type OpenTagClientOptions = {
   dispatcherUrl: string;
   pairingToken?: string;
@@ -501,9 +540,15 @@ export type LinearOAuthInstallationStart = {
 };
 
 export type OpenTagClient = {
+  getRelayCapabilitiesControlV1(): Promise<RelayCapabilitiesResponseV1>;
   registerRunner(input: RegisterRunnerInput): Promise<void>;
   registerRunnerControlV1(input: RunnerRegistrationRequestV1): Promise<RunnerCredentialResponseV1>;
   reprovisionRunnerControlV1(input: RunnerCredentialReprovisionRequestV1): Promise<RunnerCredentialResponseV1>;
+  reportRunnerReadinessControlV1(input: RunnerReadinessReceiptEnvelopeV1): Promise<ControlReceiptResult<RunnerReadinessReceiptEnvelopeV1>>;
+  projectWorkThreadRefControlV1(input: WorkThreadRefReceiptEnvelopeV1): Promise<ControlReceiptResult<WorkThreadRefReceiptEnvelopeV1>>;
+  projectCompletionContractRefControlV1(input: CompletionContractRefReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionContractRefReceiptEnvelopeV1>>;
+  projectCompletionAssessmentControlV1(input: CompletionAssessmentReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionAssessmentReceiptEnvelopeV1>>;
+  projectCallbackObservationControlV1(input: CallbackObservationReceiptEnvelopeV1): Promise<CallbackObservationControlReceiptResult>;
   getRunner(input: { runnerId: string }): Promise<{ runner: RunnerRegistration }>;
   listRunners(): Promise<{ runners: RunnerDirectoryEntry[] }>;
   listControlPlaneAlerts(input?: { limit?: number; since?: string }): Promise<{ alerts: ControlPlaneAlert[] }>;
@@ -649,18 +694,21 @@ export class OpenTagControlV1HttpError extends Error {
   readonly status: RunnerCredentialControlV1ErrorResponse["status"];
   readonly code: RunnerCredentialControlV1ErrorResponse["body"]["error"];
   readonly requestId: string;
+  readonly retryAfterSeconds?: number;
 
   constructor(
     action: string,
     status: RunnerCredentialControlV1ErrorResponse["status"],
     code: RunnerCredentialControlV1ErrorResponse["body"]["error"],
-    requestId: string
+    requestId: string,
+    retryAfterSeconds?: number
   ) {
     super(`${action} failed: ${status} ${code} requestId=${requestId}`);
     this.name = "OpenTagControlV1HttpError";
     this.status = status;
     this.code = code;
     this.requestId = requestId;
+    if (retryAfterSeconds !== undefined) this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -740,9 +788,133 @@ async function assertOk(response: Response, action: string): Promise<void> {
   }
 }
 
+type StrictControlSchema<T> = {
+  parse(value: unknown): T;
+  safeParse(value: unknown):
+    | { success: true; data: T }
+    | { success: false };
+};
+
+function assertControlResponseBoundary(
+  response: Response,
+  action: string,
+  trustedOrigin: string
+): void {
+  if (
+    response.redirected
+    || response.type === "opaqueredirect"
+    || (response.status >= 300 && response.status < 400)
+  ) {
+    throw new OpenTagClientHttpError(action, response.status, "redirect_rejected");
+  }
+  if (!response.url) {
+    throw new OpenTagClientHttpError(action, response.status, "response_origin_unverifiable");
+  }
+  let responseOrigin: string;
+  try {
+    responseOrigin = new URL(response.url).origin;
+  } catch {
+    throw new OpenTagClientHttpError(action, response.status, "response_origin_mismatch");
+  }
+  if (responseOrigin !== trustedOrigin) {
+    throw new OpenTagClientHttpError(action, response.status, "response_origin_mismatch");
+  }
+}
+
+async function parseControlJson(
+  response: Response,
+  action: string,
+  trustedOrigin: string
+): Promise<unknown> {
+  assertControlResponseBoundary(response, action, trustedOrigin);
+  try {
+    return await response.json();
+  } catch {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_json_response");
+  }
+}
+
+function throwControlV1Error(
+  response: Response,
+  body: unknown,
+  action: string,
+  expectedRequestId?: string
+): never {
+  const error = ControlErrorHttpResponseV1Schema.safeParse({
+    status: response.status,
+    body
+  });
+  if (!error.success) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+  if (expectedRequestId !== undefined && error.data.body.requestId !== expectedRequestId) {
+    throw new OpenTagClientHttpError(action, response.status, "response_identity_mismatch");
+  }
+  if (error.data.status === 429) {
+    const retryAfter = response.headers.get("retry-after");
+    if (retryAfter !== String(error.data.body.retryAfterSeconds)) {
+      throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+    }
+  }
+  throw new OpenTagControlV1HttpError(
+    action,
+    error.data.status,
+    error.data.body.error,
+    expectedRequestId ?? "unavailable",
+    error.data.status === 429 ? error.data.body.retryAfterSeconds : undefined
+  );
+}
+
+async function parseControlReceiptResponse<T extends {
+  receiptId: string;
+  organizationId: string;
+  operationId: string;
+  receiptDigest: string;
+}>(
+  response: Response,
+  action: string,
+  trustedOrigin: string,
+  request: T,
+  schema: StrictControlSchema<T>,
+  isUnknownResponse?: (receipt: T) => boolean
+): Promise<ControlReceiptResult<T> | {
+  status: 202;
+  replayed: false;
+  outcome: "outcome_unknown";
+  receipt: T;
+}> {
+  const body = await parseControlJson(response, action, trustedOrigin);
+  if (response.status !== 200 && response.status !== 201 && response.status !== 202) {
+    throwControlV1Error(response, body, action);
+  }
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+  if (canonicalJsonStringify(parsed.data) !== canonicalJsonStringify(request)) {
+    throw new OpenTagClientHttpError(action, response.status, "response_identity_mismatch");
+  }
+  if (response.status === 202 && !isUnknownResponse?.(parsed.data)) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+  if (response.status === 200) {
+    return { status: 200, replayed: true, outcome: "accepted", receipt: parsed.data };
+  }
+  if (response.status === 201) {
+    return { status: 201, replayed: false, outcome: "accepted", receipt: parsed.data };
+  }
+  return {
+    status: 202,
+    replayed: false,
+    outcome: "outcome_unknown",
+    receipt: parsed.data
+  };
+}
+
 async function parseRunnerCredentialControlV1Response(
   response: Response,
   action: string,
+  trustedOrigin: string,
   expected: {
     requestId: string;
     operationId: string;
@@ -751,12 +923,7 @@ async function parseRunnerCredentialControlV1Response(
     credentialGeneration: number;
   }
 ): Promise<RunnerCredentialResponseV1> {
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    throw new OpenTagClientHttpError(action, response.status, "invalid_json_response");
-  }
+  const body = await parseControlJson(response, action, trustedOrigin);
 
   const envelope = RunnerCredentialHttpResponseV1Schema.safeParse({
     status: response.status,
@@ -767,19 +934,7 @@ async function parseRunnerCredentialControlV1Response(
   }
 
   if (envelope.data.status !== 200 && envelope.data.status !== 201) {
-    if (envelope.data.body.requestId !== expected.requestId) {
-      throw new OpenTagClientHttpError(
-        action,
-        response.status,
-        "response_identity_mismatch"
-      );
-    }
-    throw new OpenTagControlV1HttpError(
-      action,
-      envelope.data.status,
-      envelope.data.body.error,
-      envelope.data.body.requestId
-    );
+    throwControlV1Error(response, body, action, expected.requestId);
   }
 
   if (
@@ -845,6 +1000,12 @@ function parseClaimedRun(body: {
 
 export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClient {
   const baseUrl = baseUrlFrom(options.dispatcherUrl);
+  let trustedControlOrigin: string;
+  try {
+    trustedControlOrigin = new URL(baseUrl).origin;
+  } catch {
+    throw new Error("OpenTag dispatcher URL is invalid.");
+  }
   const baseFetch = options.fetchImpl ?? fetch;
   const fetchImpl: typeof fetch = (url, init) => {
     if (!options.channelPrincipalCredential) return baseFetch(url, init);
@@ -852,8 +1013,37 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
     headers.set("x-opentag-channel-principal", options.channelPrincipalCredential);
     return baseFetch(url, { ...init, headers });
   };
+  const controlFetch = async (
+    url: string,
+    init: RequestInit,
+    action: string
+  ): Promise<Response> => {
+    try {
+      return await baseFetch(url, { ...init, redirect: "manual" });
+    } catch {
+      throw new OpenTagClientHttpError(action, 0, "transport_failed");
+    }
+  };
 
   return {
+    async getRelayCapabilitiesControlV1() {
+      const action = "getRelayCapabilitiesControlV1";
+      const response = await controlFetch(
+        `${baseUrl}/v1/relay/capabilities`,
+        { method: "GET" },
+        action
+      );
+      const body = await parseControlJson(response, action, trustedControlOrigin);
+      if (response.status !== 200) {
+        throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+      }
+      const parsed = RelayCapabilitiesResponseV1Schema.safeParse(body);
+      if (!parsed.success) {
+        throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+      }
+      return parsed.data;
+    },
+
     async registerRunner(input) {
       const response = await fetchImpl(`${baseUrl}/v1/runners`, {
         method: "POST",
@@ -869,14 +1059,16 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         options.controlCredential,
         "bootstrap_pairing"
       );
-      const response = await fetchImpl(`${baseUrl}/v1/runners`, {
+      const action = "registerRunnerControlV1";
+      const response = await controlFetch(`${baseUrl}/v1/runners`, {
         method: "POST",
         headers: jsonHeaders(controlToken),
         body: JSON.stringify(request)
-      });
+      }, action);
       return parseRunnerCredentialControlV1Response(
         response,
-        "registerRunnerControlV1",
+        action,
+        trustedControlOrigin,
         {
           ...request,
           registrationGeneration: 1,
@@ -891,22 +1083,130 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         options.controlCredential,
         "recovery_pairing"
       );
-      const response = await fetchImpl(
+      const action = "reprovisionRunnerControlV1";
+      const response = await controlFetch(
         `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/credentials/reprovision`,
         {
           method: "POST",
           headers: jsonHeaders(controlToken),
           body: JSON.stringify(request)
-        }
+        },
+        action
       );
       return parseRunnerCredentialControlV1Response(
         response,
-        "reprovisionRunnerControlV1",
+        action,
+        trustedControlOrigin,
         {
           ...request,
           registrationGeneration: request.expectedRegistrationGeneration + 1,
           credentialGeneration: request.expectedCredentialGeneration + 1
         }
+      );
+    },
+
+    async reportRunnerReadinessControlV1(input) {
+      const request = RunnerReadinessReceiptEnvelopeV1Schema.parse(input);
+      const action = "reportRunnerReadinessControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(request.payload.runnerId)}/readiness`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request)
+        },
+        action
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        request,
+        RunnerReadinessReceiptEnvelopeV1Schema,
+        undefined
+      ) as Promise<ControlReceiptResult<RunnerReadinessReceiptEnvelopeV1>>;
+    },
+
+    async projectWorkThreadRefControlV1(input) {
+      const request = WorkThreadRefReceiptEnvelopeV1Schema.parse(input);
+      const action = "projectWorkThreadRefControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runs/${encodeURIComponent(request.runId)}/receipts/work-thread-ref`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) },
+        action
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        request,
+        WorkThreadRefReceiptEnvelopeV1Schema,
+        undefined
+      ) as Promise<ControlReceiptResult<WorkThreadRefReceiptEnvelopeV1>>;
+    },
+
+    async projectCompletionContractRefControlV1(input) {
+      const request = CompletionContractRefReceiptEnvelopeV1Schema.parse(input);
+      const action = "projectCompletionContractRefControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runs/${encodeURIComponent(request.runId)}/receipts/completion-contract-ref`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) },
+        action
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        request,
+        CompletionContractRefReceiptEnvelopeV1Schema,
+        undefined
+      ) as Promise<ControlReceiptResult<CompletionContractRefReceiptEnvelopeV1>>;
+    },
+
+    async projectCompletionAssessmentControlV1(input) {
+      const request = CompletionAssessmentReceiptEnvelopeV1Schema.parse(input);
+      const action = "projectCompletionAssessmentControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runs/${encodeURIComponent(request.runId)}/receipts/completion-assessments`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) },
+        action
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        request,
+        CompletionAssessmentReceiptEnvelopeV1Schema,
+        undefined
+      ) as Promise<ControlReceiptResult<CompletionAssessmentReceiptEnvelopeV1>>;
+    },
+
+    async projectCallbackObservationControlV1(input) {
+      const schema = input.receiptKind === "callback_intent_observation"
+        ? CallbackIntentObservationReceiptEnvelopeV1Schema
+        : input.receiptKind === "callback_attempt_observation"
+          ? CallbackAttemptObservationReceiptEnvelopeV1Schema
+          : CallbackProviderObservationReceiptEnvelopeV1Schema;
+      const request = schema.parse(input) as CallbackObservationReceiptEnvelopeV1;
+      const action = "projectCallbackObservationControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runs/${encodeURIComponent(request.runId)}/receipts/callback-observations`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) },
+        action
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        request,
+        schema as StrictControlSchema<CallbackObservationReceiptEnvelopeV1>,
+        (receipt) => receipt.receiptKind !== "callback_intent_observation"
+          && receipt.payload.outcome === "outcome_unknown"
       );
     },
 
