@@ -18,6 +18,7 @@ import {
   ControlWaitingHttpResponseV1Schema,
   buildMaterialActionReceiptDigestInputV1,
   buildPermissionRequestDigestInputV1,
+  computeMaterialActionFencingTokenDigestV1,
   computeMaterialActionPayloadDigestV1,
   computeMaterialActionReceiptDigestV1,
   computePermissionFencingTokenDigestV1,
@@ -25,6 +26,7 @@ import {
   HumanPermissionDecisionHttpResponseV1Schema,
   HumanPermissionDecisionRequestV1Schema,
   MaterialActionPayloadV1Schema,
+  MaterialActionReconcileHttpResponseV1Schema,
   MaterialActionReceiptDigestInputV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
   PermissionRequestDigestInputV1Schema,
@@ -47,6 +49,7 @@ import {
   RunnerPermissionCurrentQueryV1Schema,
   RunnerPermissionRequestHttpResponseV1Schema,
   RunnerPermissionRequestV1Schema,
+  RunnerMaterialActionReconcileRequestV1Schema,
   RunnerRegistrationRequestV1Schema,
   RunnerRegistrationResponseV1Schema,
   type CompletionAssessmentReceiptEnvelopeV1,
@@ -608,6 +611,25 @@ describe("material action receipt V1 control protocol", () => {
     },
     payload,
   } as const;
+  const reconcileRequest = {
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    requiredCapabilities: ["relay.material-receipt.v1"],
+    requestId: "reconcile_request_1",
+    organizationId: "org_1",
+    runnerId: "runner_1",
+    runId: "run_1",
+    actionId: "action_1",
+    attempt: {
+      attemptId: "attempt_1",
+      attemptNumber: 2,
+      epoch: 2,
+      fencingToken: "fence_secret_canary",
+      fencingTokenDigest: publicFenceDigest,
+    },
+    expectedCurrentReceiptId: "material_receipt_1",
+    expectedCurrentReceiptDigest: otherDigest,
+  } as const;
 
   it("accepts the strict locally authoritative material receipt and canonical digest inputs", async () => {
     expect(MaterialActionPayloadV1Schema.safeParse(payload).success).toBe(true);
@@ -623,6 +645,116 @@ describe("material action receipt V1 control protocol", () => {
     expect(await computeMaterialActionReceiptDigestV1(receiptDigestInput)).toBe(
       digestCanonical(receiptDigestInput),
     );
+  });
+
+  it("freezes a strict runtime Runner reconciliation query without provider mutation fields", async () => {
+    expect(RunnerMaterialActionReconcileRequestV1Schema.safeParse(reconcileRequest).success).toBe(true);
+    const {
+      expectedCurrentReceiptId: _expectedCurrentReceiptId,
+      expectedCurrentReceiptDigest: _expectedCurrentReceiptDigest,
+      ...withoutExpectedCurrent
+    } = reconcileRequest;
+    expect(RunnerMaterialActionReconcileRequestV1Schema.safeParse(withoutExpectedCurrent).success).toBe(true);
+    expect(await computeMaterialActionFencingTokenDigestV1("fence_secret_canary")).toBe(
+      publicFenceDigest,
+    );
+
+    for (const [field, value] of [
+      ["provider", "npm"],
+      ["outcome", "succeeded"],
+      ["evidence", []],
+      ["body", { provider: "response" }],
+      ["metadata", {}],
+      ["credential", "runtime_token_canary"],
+      ["operationId", "cloud_mutation_1"],
+      ["connectionRef", "connection_1"],
+    ] as const) {
+      expect(RunnerMaterialActionReconcileRequestV1Schema.safeParse({
+        ...reconcileRequest,
+        [field]: value,
+      }).success).toBe(false);
+    }
+    expect(RunnerMaterialActionReconcileRequestV1Schema.safeParse({
+      ...reconcileRequest,
+      attempt: { ...reconcileRequest.attempt, fencingToken: "" },
+    }).success).toBe(false);
+    expect(RunnerMaterialActionReconcileRequestV1Schema.safeParse({
+      ...reconcileRequest,
+      attempt: { ...reconcileRequest.attempt, epoch: 3 },
+    }).success).toBe(false);
+  });
+
+  it("requires exact capability and an all-or-nothing expected-current pair", () => {
+    for (const mutation of [
+      { requiredCapabilities: ["relay.lifecycle.v1"] },
+      { requiredCapabilities: ["relay.material-receipt.v1", "relay.permission.v1"] },
+      { expectedCurrentReceiptId: undefined },
+      { expectedCurrentReceiptDigest: undefined },
+      { expectedCurrentReceiptId: null },
+      { expectedCurrentReceiptDigest: null },
+      { runnerId: "/private/runner" },
+      { actionId: "ghp_abcdefgh" },
+    ]) {
+      expect(RunnerMaterialActionReconcileRequestV1Schema.safeParse({
+        ...reconcileRequest,
+        ...mutation,
+      }).success).toBe(false);
+    }
+  });
+
+  it("maps terminal reconciliation to 200, unknown to 202, and keeps standard errors", () => {
+    const failedReceipt = {
+      ...receipt,
+      payload: {
+        ...payload,
+        outcome: "failed",
+        reasonCode: "provider_rejected",
+      },
+    } as const;
+    const unknownReceipt = {
+      ...receipt,
+      payload: {
+        ...payload,
+        outcome: "outcome_unknown",
+        reasonCode: "provider_receipt_missing",
+        nextAction: "reconcile_provider_receipt",
+        owner: "local_opentag",
+      },
+    } as const;
+    for (const terminalReceipt of [receipt, failedReceipt]) {
+      expect(MaterialActionReconcileHttpResponseV1Schema.safeParse({
+        status: 200,
+        body: terminalReceipt,
+      }).success).toBe(true);
+      expect(MaterialActionReconcileHttpResponseV1Schema.safeParse({
+        status: 202,
+        body: terminalReceipt,
+      }).success).toBe(false);
+    }
+    expect(MaterialActionReconcileHttpResponseV1Schema.safeParse({
+      status: 202,
+      body: unknownReceipt,
+    }).success).toBe(true);
+    expect(MaterialActionReconcileHttpResponseV1Schema.safeParse({
+      status: 200,
+      body: unknownReceipt,
+    }).success).toBe(false);
+
+    for (const [status, error] of [
+      [404, "missing_or_concealed"],
+      [409, "idempotency_conflict"],
+    ] as const) {
+      expect(MaterialActionReconcileHttpResponseV1Schema.safeParse({
+        status,
+        body: {
+          schemaVersion: 1,
+          protocolVersion: "1.0",
+          error,
+          message: "Reconciliation query failed.",
+          requestId: "reconcile_request_1",
+        },
+      }).success).toBe(true);
+    }
   });
 
   it("rejects unknown, nullable, or raw custody fields", () => {

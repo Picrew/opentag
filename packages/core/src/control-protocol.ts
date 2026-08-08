@@ -199,6 +199,53 @@ export const MaterialActionAttemptRefV1Schema = z
     }
   });
 
+export const RunnerMaterialActionReconcileAttemptV1Schema = z
+  .object({
+    attemptId: MaterialActionStableIdV1Schema,
+    attemptNumber: z.number().int().positive(),
+    epoch: z.number().int().positive(),
+    fencingToken: z.string().min(1).max(4096),
+    fencingTokenDigest: ReceiptDigestSchema,
+  })
+  .strict()
+  .superRefine((attempt, ctx) => {
+    if (attempt.epoch !== attempt.attemptNumber) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["epoch"],
+        message: "Attempt epoch must equal the Run-scoped attempt number.",
+      });
+    }
+  });
+
+export const RunnerMaterialActionReconcileRequestV1Schema = z
+  .object({
+    schemaVersion: ControlSchemaVersionSchema,
+    protocolVersion: ControlProtocolVersionSchema,
+    requiredCapabilities: z.tuple([z.literal("relay.material-receipt.v1")]),
+    requestId: MaterialActionStableIdV1Schema,
+    organizationId: MaterialActionStableIdV1Schema,
+    runnerId: MaterialActionStableIdV1Schema,
+    runId: MaterialActionStableIdV1Schema,
+    actionId: MaterialActionStableIdV1Schema,
+    attempt: RunnerMaterialActionReconcileAttemptV1Schema,
+    expectedCurrentReceiptId: MaterialActionStableIdV1Schema.optional(),
+    expectedCurrentReceiptDigest: ReceiptDigestSchema.optional(),
+  })
+  .strict()
+  .superRefine((request, ctx) => {
+    if (
+      (request.expectedCurrentReceiptId === undefined)
+      !== (request.expectedCurrentReceiptDigest === undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["expectedCurrentReceiptId"],
+        message: "Expected current receipt ID and digest must be supplied together.",
+      });
+    }
+  });
+
 export const MaterialActionPayloadV1Schema = z
   .object({
     actionId: MaterialActionStableIdV1Schema,
@@ -991,6 +1038,30 @@ export const MaterialActionReceiptEnvelopeV1Schema =
     }
   });
 
+const MaterialActionReconcileResolvedReceiptV1Schema =
+  MaterialActionReceiptEnvelopeV1Schema.refine(
+    (receipt) => receipt.payload.outcome === "succeeded" || receipt.payload.outcome === "failed",
+    {
+      path: ["payload", "outcome"],
+      message: "HTTP 200 material reconciliation must have a terminal outcome.",
+    },
+  );
+
+const MaterialActionReconcileUnknownReceiptV1Schema =
+  MaterialActionReceiptEnvelopeV1Schema.refine(
+    (receipt) => receipt.payload.outcome === "outcome_unknown",
+    {
+      path: ["payload", "outcome"],
+      message: "HTTP 202 material reconciliation must remain outcome_unknown.",
+    },
+  );
+
+export const MaterialActionReconcileHttpResponseV1Schema = z.union([
+  z.object({ status: z.literal(200), body: MaterialActionReconcileResolvedReceiptV1Schema }).strict(),
+  z.object({ status: z.literal(202), body: MaterialActionReconcileUnknownReceiptV1Schema }).strict(),
+  ControlErrorHttpResponseV1Schema,
+]);
+
 export function buildMaterialActionReceiptDigestInputV1(
   input: z.input<typeof MaterialActionReceiptDigestInputV1Schema>,
 ): z.output<typeof MaterialActionReceiptDigestInputV1Schema> {
@@ -1001,6 +1072,10 @@ export function computeMaterialActionPayloadDigestV1(
   payload: z.input<typeof MaterialActionPayloadV1Schema>,
 ): Promise<string> {
   return sha256Utf8V1(canonicalJsonStringify(MaterialActionPayloadV1Schema.parse(payload)));
+}
+
+export function computeMaterialActionFencingTokenDigestV1(rawFencingToken: string): Promise<string> {
+  return sha256Utf8V1(rawFencingToken);
 }
 
 export function computeMaterialActionReceiptDigestV1(
@@ -1665,12 +1740,21 @@ export type RunnerCredentialCurrentStateResponseV1 = z.infer<
 >;
 export type RunnerReadinessReceiptEnvelopeV1 = z.infer<typeof RunnerReadinessReceiptEnvelopeV1Schema>;
 export type MaterialActionAttemptRefV1 = z.infer<typeof MaterialActionAttemptRefV1Schema>;
+export type RunnerMaterialActionReconcileAttemptV1 = z.infer<
+  typeof RunnerMaterialActionReconcileAttemptV1Schema
+>;
+export type RunnerMaterialActionReconcileRequestV1 = z.infer<
+  typeof RunnerMaterialActionReconcileRequestV1Schema
+>;
 export type MaterialActionPayloadV1 = z.infer<typeof MaterialActionPayloadV1Schema>;
 export type MaterialActionReceiptDigestInputV1 = z.infer<
   typeof MaterialActionReceiptDigestInputV1Schema
 >;
 export type MaterialActionReceiptEnvelopeV1 = z.infer<
   typeof MaterialActionReceiptEnvelopeV1Schema
+>;
+export type MaterialActionReconcileHttpResponseV1 = z.infer<
+  typeof MaterialActionReconcileHttpResponseV1Schema
 >;
 export type RunnerPermissionRequestV1 = z.infer<typeof RunnerPermissionRequestV1Schema>;
 export type PermissionRequestDigestInputV1 = z.infer<typeof PermissionRequestDigestInputV1Schema>;
