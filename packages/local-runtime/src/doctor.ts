@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { formatProjectTargetRef } from "@opentag/core";
 import { nodeCommandRunner, type CommandRunner, type ExecutorAdapter, type ExecutorCapabilityContract } from "@opentag/runner";
-import { createOpenTagClient } from "@opentag/client";
+import { createOpenTagClient, OpenTagClientHttpError } from "@opentag/client";
 import { hostedRunnerAuthProblem, normalizeChannelBindings, runnerDispatcherToken } from "./config.js";
 import type { OpenTagDaemonConfig, RepositoryBindingConfig } from "./config.js";
 import { hermesProfileConfigurationWarning } from "./runtime.js";
@@ -19,6 +19,33 @@ export type DoctorCheck = {
 
 function check(status: DoctorCheckStatus, name: string, message: string): DoctorCheck {
   return { name, status, message };
+}
+
+type SafeRemoteError = {
+  message: string;
+  status?: number;
+  code?: string;
+};
+
+function safeRemoteError(error: unknown): SafeRemoteError {
+  if (!(error instanceof OpenTagClientHttpError)) {
+    return { message: error instanceof Error ? error.message : String(error) };
+  }
+
+  let code: string | undefined;
+  try {
+    const parsed = JSON.parse(error.responseBody) as { error?: unknown };
+    if (typeof parsed.error === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(parsed.error)) {
+      code = parsed.error;
+    }
+  } catch {
+    // Response bodies are intentionally not surfaced by doctor diagnostics.
+  }
+  return {
+    message: `Dispatcher request failed with HTTP ${error.status}${code ? ` (${code})` : ""}.`,
+    status: error.status,
+    ...(code ? { code } : {})
+  };
 }
 
 function yesNo(value: boolean): "yes" | "no" {
@@ -126,7 +153,7 @@ function checkRunnerApiAuth(config: OpenTagDaemonConfig): DoctorCheck {
     return check(
       "ok",
       "hosted runner auth",
-      "Hosted Control V1 paired runtime credential is valid for this runner; pairing credentials are not used."
+      "Hosted Control V1 paired runtime credential is configured and selected for this runner; remote authentication is checked separately."
     );
   }
   if (config.runnerToken) {
@@ -407,8 +434,18 @@ export async function runDoctor(input: {
         })
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      checks.push(check(message.includes("runner_not_found") ? "fail" : "warn", "runner registration", message));
+      const remoteError = safeRemoteError(error);
+      const hostedAuthRejected = Boolean(
+        input.config.controlRegistration
+        && (remoteError.status === 401 || remoteError.status === 403)
+      );
+      checks.push(
+        check(
+          remoteError.code === "runner_not_found" || hostedAuthRejected ? "fail" : "warn",
+          "runner registration",
+          remoteError.message
+        )
+      );
     }
   } else {
     checks.push(check("fail", "runner registration", hostedAuthProblem ?? "Hosted runner authentication is invalid."));
@@ -460,8 +497,14 @@ export async function runDoctor(input: {
           : check("fail", `${repository.owner}/${repository.repo} binding`, `Bound to ${binding.runnerId}, expected ${input.config.runnerId}`)
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      checks.push(check(message.includes("repo_binding_not_found") ? "warn" : "fail", `${repository.owner}/${repository.repo} binding`, message));
+      const remoteError = safeRemoteError(error);
+      checks.push(
+        check(
+          remoteError.code === "repo_binding_not_found" ? "warn" : "fail",
+          `${repository.owner}/${repository.repo} binding`,
+          remoteError.message
+        )
+      );
     }
   }
 
@@ -521,12 +564,12 @@ export async function runDoctor(input: {
             )
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const remoteError = safeRemoteError(error);
       checks.push(
         check(
-          message.includes("channel_binding_not_found") ? "warn" : "fail",
+          remoteError.code === "channel_binding_not_found" ? "warn" : "fail",
           `${binding.provider}:${binding.accountId}/${binding.conversationId} binding`,
-          message
+          remoteError.message
         )
       );
     }

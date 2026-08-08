@@ -72,6 +72,8 @@ async function runCodexDoctor(
     env?: Record<string, string | undefined>;
     repositoryDefaultExecutor?: string;
     requestObserver?: (url: string, init?: RequestInit) => void;
+    repositoryFree?: boolean;
+    runnerResponse?: () => Response;
   } = {}
 ) {
   const root = mkdtempSync(join(tmpdir(), "opentag-local-runtime-doctor-"));
@@ -86,18 +88,20 @@ async function runCodexDoctor(
       config: {
         runnerId: "runner_local",
         dispatcherUrl: "http://dispatcher.test",
-        repositories: [
-          {
-            provider: "github",
-            owner: "acme",
-            repo: "demo",
-            checkoutPath,
-            defaultExecutor: options.repositoryDefaultExecutor ?? "codex",
-            baseBranch: "main",
-            pushRemote: "origin",
-            keepWorktree: "on_failure"
-          }
-        ],
+        repositories: options.repositoryFree
+          ? []
+          : [
+              {
+                provider: "github",
+                owner: "acme",
+                repo: "demo",
+                checkoutPath,
+                defaultExecutor: options.repositoryDefaultExecutor ?? "codex",
+                baseBranch: "main",
+                pushRemote: "origin",
+                keepWorktree: "on_failure"
+              }
+            ],
         githubToken: "ghs_test",
         pollIntervalMs: 5000,
         heartbeatIntervalMs: 15000,
@@ -114,6 +118,7 @@ async function runCodexDoctor(
           return Response.json({ ok: true });
         }
         if (stringUrl.endsWith("/v1/runners/runner_local")) {
+          if (options.runnerResponse) return options.runnerResponse();
           return Response.json({
             runner: { runnerId: "runner_local", name: "Local Runner", createdAt: "2026-06-24T00:00:00.000Z" }
           });
@@ -497,6 +502,7 @@ describe("local-runtime doctor", () => {
         controlRegistration: {
           kind: "hosted_control_v1",
           state: "unpaired",
+          flow: "registration",
           operationId: "operation_pair_1",
           reason: "pending"
         }
@@ -514,6 +520,32 @@ describe("local-runtime doctor", () => {
     expect(formatted).toContain("FAIL hosted runner auth: Hosted Control V1 runner is not paired");
     expect(formatted).not.toContain("pairing_secret_must_not_leak");
     expect(requests.filter(({ url }) => url.includes("/v1/"))).toEqual([]);
+  });
+
+  it("accepts recovery-required state while making no authenticated request", async () => {
+    const runnerRequests: string[] = [];
+    const checks = await runCodexDoctor(
+      'service_tier = "fast"\n',
+      {
+        controlRegistration: {
+          kind: "hosted_control_v1",
+          state: "unpaired",
+          reason: "recovery_required",
+          registration: hostedRegistration
+        }
+      },
+      {
+        requestObserver(url) {
+          if (url.includes("/v1/")) runnerRequests.push(url);
+        }
+      }
+    );
+
+    expect(doctorHasFailures(checks)).toBe(true);
+    expect(formatDoctorChecks(checks)).toContain(
+      "FAIL hosted runner auth: Hosted Control V1 runner credential recovery is required"
+    );
+    expect(runnerRequests).toEqual([]);
   });
 
   it("does not authenticate a staged hosted credential", async () => {
@@ -556,8 +588,32 @@ describe("local-runtime doctor", () => {
     );
 
     expect(doctorHasFailures(checks)).toBe(false);
-    expect(formatDoctorChecks(checks)).toContain("OK   hosted runner auth: Hosted Control V1 paired runtime credential is valid");
+    expect(formatDoctorChecks(checks)).toContain("OK   hosted runner auth: Hosted Control V1 paired runtime credential is configured and selected");
     expect(authorizations).toContain("Bearer runtime_paired_secret");
+  });
+
+  it("fails hosted remote auth without exposing the dispatcher response body", async () => {
+    const checks = await runCodexDoctor(
+      'service_tier = "fast"\n',
+      {
+        runnerToken: "runtime_paired_secret",
+        controlRegistration: hostedControl("paired")
+      },
+      {
+        repositoryFree: true,
+        runnerResponse: () => Response.json(
+          { error: "unauthorized", detail: "remote_body_secret_must_not_leak" },
+          { status: 401 }
+        )
+      }
+    );
+
+    const formatted = formatDoctorChecks(checks);
+    expect(doctorHasFailures(checks)).toBe(true);
+    expect(formatted).toContain("FAIL runner registration: Dispatcher request failed with HTTP 401 (unauthorized).");
+    expect(formatted).toContain("remote authentication is checked separately");
+    expect(formatted).not.toContain("remote_body_secret_must_not_leak");
+    expect(formatted).not.toContain("runtime_paired_secret");
   });
 
   it("fails closed on hosted identity mismatch and pairing-token residue without leaking secrets", async () => {

@@ -28,12 +28,25 @@ export const HostedControlRegistrationMetadataSchema = z
 
 export type HostedControlRegistrationMetadata = z.infer<typeof HostedControlRegistrationMetadataSchema>;
 
-const HostedControlUnpairedRegistrationSchema = z
+const HostedControlInitialRegistrationSchema = z
   .object({
     kind: z.literal("hosted_control_v1"),
     state: z.literal("unpaired"),
+    flow: z.literal("registration"),
     operationId: z.string().trim().min(1),
     reason: z.enum(["pending", "outcome_unknown"])
+  })
+  .strict();
+
+const HostedControlReprovisionRegistrationSchema = z
+  .object({
+    kind: z.literal("hosted_control_v1"),
+    state: z.literal("unpaired"),
+    flow: z.literal("reprovision"),
+    operationId: z.string().trim().min(1),
+    reason: z.enum(["pending", "outcome_unknown"]),
+    recoveryCredentialId: z.string().trim().min(1),
+    registration: HostedControlRegistrationMetadataSchema
   })
   .strict();
 
@@ -41,25 +54,35 @@ const HostedControlRecoveryRequiredRegistrationSchema = z
   .object({
     kind: z.literal("hosted_control_v1"),
     state: z.literal("unpaired"),
-    operationId: z.string().trim().min(1),
     reason: z.literal("recovery_required"),
-    registration: HostedControlRegistrationMetadataSchema.optional()
+    registration: HostedControlRegistrationMetadataSchema
   })
   .strict();
 
-const HostedControlCredentialRegistrationSchema = z
+const HostedControlStagedRegistrationSchema = z
   .object({
     kind: z.literal("hosted_control_v1"),
-    state: z.enum(["credential_staged", "paired"]),
+    state: z.literal("credential_staged"),
+    operationId: z.string().trim().min(1),
+    registration: HostedControlRegistrationMetadataSchema
+  })
+  .strict();
+
+const HostedControlPairedRegistrationSchema = z
+  .object({
+    kind: z.literal("hosted_control_v1"),
+    state: z.literal("paired"),
     operationId: z.string().trim().min(1),
     registration: HostedControlRegistrationMetadataSchema
   })
   .strict();
 
 export const HostedControlRegistrationSchema = z.union([
-  HostedControlUnpairedRegistrationSchema,
+  HostedControlInitialRegistrationSchema,
+  HostedControlReprovisionRegistrationSchema,
   HostedControlRecoveryRequiredRegistrationSchema,
-  HostedControlCredentialRegistrationSchema
+  HostedControlStagedRegistrationSchema,
+  HostedControlPairedRegistrationSchema
 ]);
 
 export type HostedControlRegistration = z.infer<typeof HostedControlRegistrationSchema>;
@@ -301,16 +324,45 @@ export const OpenTagDaemonConfigSchema = z
           message: "Hosted Control V1 registration runnerId must match daemon runnerId."
         });
       }
-    } else if (
-      "registration" in control
-      && control.registration
-      && control.registration.runnerId !== config.runnerId
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["controlRegistration", "registration", "runnerId"],
-        message: "Hosted Control V1 recovery registration runnerId must match daemon runnerId."
-      });
+    } else {
+      if (config.runnerToken) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["runnerToken"],
+          message: `Hosted Control V1 ${control.reason} configuration must not contain a runtime runner token.`
+        });
+      }
+      if (control.reason === "recovery_required") {
+        if (config.pairingToken) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["pairingToken"],
+            message: "Hosted Control V1 recovery-required configuration must not retain the consumed pairing token."
+          });
+        }
+        if (control.registration.runnerId !== config.runnerId) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["controlRegistration", "registration", "runnerId"],
+            message: "Hosted Control V1 recovery registration runnerId must match daemon runnerId."
+          });
+        }
+      } else if (control.flow === "reprovision") {
+        if (config.pairingToken) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["pairingToken"],
+            message: `Hosted Control V1 re-provision ${control.reason} configuration must not retain a pairing token.`
+          });
+        }
+        if (control.registration.runnerId !== config.runnerId) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["controlRegistration", "registration", "runnerId"],
+            message: "Hosted Control V1 re-provision registration runnerId must match daemon runnerId."
+          });
+        }
+      }
     }
   });
 

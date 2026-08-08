@@ -407,6 +407,7 @@ describe("Hosted Control V1 credential state", () => {
       controlRegistration: {
         kind: "hosted_control_v1",
         state: "unpaired",
+        flow: "registration",
         operationId: "operation_pair_1",
         reason: "pending"
       }
@@ -416,7 +417,6 @@ describe("Hosted Control V1 credential state", () => {
       controlRegistration: {
         kind: "hosted_control_v1",
         state: "unpaired",
-        operationId: "operation_pair_1",
         reason: "recovery_required",
         registration: hostedRegistration
       }
@@ -431,10 +431,23 @@ describe("Hosted Control V1 credential state", () => {
       runnerToken: "runtime_committed",
       controlRegistration: hostedControl("paired")
     });
+    const reProvisionOutcomeUnknown = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        flow: "reprovision",
+        operationId: "operation_reprovision_1",
+        reason: "outcome_unknown",
+        recoveryCredentialId: "credential_recovery_1",
+        registration: hostedRegistration
+      }
+    });
 
     expect(runnerDispatcherToken(unpaired)).toBeUndefined();
     expect(runnerDispatcherToken(recoveryRequired)).toBeUndefined();
     expect(runnerDispatcherToken(staged)).toBeUndefined();
+    expect(runnerDispatcherToken(reProvisionOutcomeUnknown)).toBeUndefined();
     expect(runnerDispatcherToken(paired)).toBe("runtime_committed");
     expect(() => createDaemonClient(unpaired)).toThrow(/not paired/iu);
     expect(() => createDaemonClient(staged)).toThrow(/staged but not committed/iu);
@@ -447,6 +460,7 @@ describe("Hosted Control V1 credential state", () => {
       controlRegistration: {
         kind: "hosted_control_v1",
         state: "unpaired",
+        flow: "registration",
         operationId: "operation_pair_1",
         reason: "pending",
         unexpected: true
@@ -465,6 +479,75 @@ describe("Hosted Control V1 credential state", () => {
         controlRegistration: hostedControl("credential_staged", registration as typeof hostedRegistration)
       })).toThrow();
     }
+  });
+
+  it("enforces initial registration and re-provision replay state", () => {
+    const registrationWithoutLocalSecret = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        flow: "registration",
+        operationId: "operation_pair_1",
+        reason: "outcome_unknown"
+      }
+    });
+    expect(registrationWithoutLocalSecret.controlRegistration?.state).toBe("unpaired");
+
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      pairingToken: "pairing_bootstrap",
+      runnerToken: "runtime_must_not_exist",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        flow: "registration",
+        operationId: "operation_pair_1",
+        reason: "pending"
+      }
+    })).toThrow(/must not contain a runtime runner token/iu);
+
+    const reProvision = {
+      kind: "hosted_control_v1" as const,
+      state: "unpaired" as const,
+      flow: "reprovision" as const,
+      operationId: "operation_reprovision_1",
+      reason: "outcome_unknown" as const,
+      recoveryCredentialId: "credential_recovery_1",
+      registration: hostedRegistration
+    };
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      pairingToken: "pairing_must_not_exist",
+      controlRegistration: reProvision
+    })).toThrow(/must not retain a pairing token/iu);
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_must_not_exist",
+      controlRegistration: reProvision
+    })).toThrow(/must not contain a runtime runner token/iu);
+  });
+
+  it("requires recovery metadata and rejects every persisted token", () => {
+    const recoveryRequired = {
+      kind: "hosted_control_v1" as const,
+      state: "unpaired" as const,
+      reason: "recovery_required" as const
+    };
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      controlRegistration: recoveryRequired
+    })).toThrow();
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      pairingToken: "pairing_must_not_exist",
+      controlRegistration: { ...recoveryRequired, registration: hostedRegistration }
+    })).toThrow(/must not retain the consumed pairing token/iu);
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_must_not_exist",
+      controlRegistration: { ...recoveryRequired, registration: hostedRegistration }
+    })).toThrow(/must not contain a runtime runner token/iu);
   });
 
   it("rejects unsafe hosted credential persistence combinations", () => {
