@@ -1,10 +1,23 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import {
+  canonicalJsonStringify,
+  FreshRunnerCredentialRotationResponseV1Schema,
   OpenTagManagedChannelBindingOwnershipSchema,
+  ReceiptDigestSchema,
+  RunnerCredentialCurrentStateResponseV1Schema,
+  RunnerCredentialRevocationResponseV1Schema,
+  RunnerCredentialRevocationRequestV1Schema,
   RunnerCredentialMetadataV1Schema,
+  RunnerCredentialRotationMetadataV1Schema,
+  RunnerCredentialRotationRequestV1Schema,
+  ReplayedRunnerCredentialRotationResponseV1Schema,
+  type RunnerCredentialCurrentStateResponseV1,
+  type RunnerCredentialRevocationRequestV1,
+  type RunnerCredentialRotationRequestV1,
 } from "@opentag/core";
 import { z } from "zod";
 
@@ -71,15 +84,247 @@ const HostedControlPairedRegistrationSchema = z
   })
   .strict();
 
+export type HostedCredentialMutationRequest =
+  | RunnerCredentialRotationRequestV1
+  | RunnerCredentialRevocationRequestV1;
+type ReplayedRunnerCredentialRotationResponseV1 = z.infer<
+  typeof ReplayedRunnerCredentialRotationResponseV1Schema
+>;
+
+const HostedControlRotationPendingSchema = z
+  .object({
+    kind: z.literal("hosted_control_v1"),
+    state: z.enum(["rotation_pending", "rotation_outcome_unknown"]),
+    endpoint: z.literal("rotate"),
+    origin: z.literal("paired"),
+    canonicalRequestDigest: ReceiptDigestSchema,
+    request: RunnerCredentialRotationRequestV1Schema,
+    registration: HostedControlRegistrationMetadataSchema
+  })
+  .strict();
+
+const HostedCredentialConflictEvidenceSchema = z
+  .object({
+    originalRequest: RunnerCredentialRotationRequestV1Schema,
+    originalCanonicalRequestDigest: ReceiptDigestSchema,
+    replay: ReplayedRunnerCredentialRotationResponseV1Schema,
+    current: RunnerCredentialCurrentStateResponseV1Schema,
+    successorAttempted: z.boolean(),
+    provenance: z
+      .object({
+        origin: z.literal("lost_201_replay"),
+        source: z.enum([
+          "verified_metadata_replay_and_current_state",
+          "metadata_replay_mismatch",
+          "current_state_unsafe"
+        ])
+      })
+      .strict()
+  })
+  .strict();
+
+const HostedControlRotationSuccessorPendingSchema = z
+  .object({
+    kind: z.literal("hosted_control_v1"),
+    state: z.enum(["rotation_pending", "rotation_outcome_unknown"]),
+    endpoint: z.literal("rotate"),
+    origin: z.literal("lost_201_successor"),
+    canonicalRequestDigest: ReceiptDigestSchema,
+    request: RunnerCredentialRotationRequestV1Schema,
+    registration: HostedControlRegistrationMetadataSchema,
+    predecessorConflict: HostedCredentialConflictEvidenceSchema.extend({
+      successorAttempted: z.literal(true)
+    })
+  })
+  .strict();
+
+const HostedControlRotationStagedFromPairedSchema = z
+  .object({
+    kind: z.literal("hosted_control_v1"),
+    state: z.literal("rotation_staged"),
+    endpoint: z.literal("rotate"),
+    origin: z.literal("paired"),
+    canonicalRequestDigest: ReceiptDigestSchema,
+    request: RunnerCredentialRotationRequestV1Schema,
+    rotation: RunnerCredentialRotationMetadataV1Schema
+  })
+  .strict();
+
+const HostedControlRotationStagedFromSuccessorSchema = HostedControlRotationStagedFromPairedSchema
+  .omit({ origin: true })
+  .extend({
+    origin: z.literal("lost_201_successor"),
+    predecessorConflict: HostedCredentialConflictEvidenceSchema.extend({
+      successorAttempted: z.literal(true)
+    })
+  })
+  .strict();
+
+const HostedControlRevocationPendingSchema = z
+  .object({
+    kind: z.literal("hosted_control_v1"),
+    state: z.enum(["revocation_pending", "revocation_outcome_unknown"]),
+    endpoint: z.literal("revoke"),
+    canonicalRequestDigest: ReceiptDigestSchema,
+    request: RunnerCredentialRevocationRequestV1Schema,
+    registration: HostedControlRegistrationMetadataSchema
+  })
+  .strict();
+
+const HostedControlRevokedSchema = z
+  .object({
+    kind: z.literal("hosted_control_v1"),
+    state: z.literal("revoked"),
+    endpoint: z.literal("revoke"),
+    canonicalRequestDigest: ReceiptDigestSchema,
+    request: RunnerCredentialRevocationRequestV1Schema,
+    registration: HostedControlRegistrationMetadataSchema,
+    revocation: RunnerCredentialRevocationResponseV1Schema
+  })
+  .strict();
+
+const HostedControlCredentialConflictSchema = z
+  .object({
+    kind: z.literal("hosted_control_v1"),
+    state: z.literal("credential_conflict"),
+    endpoint: z.literal("rotate"),
+    canonicalRequestDigest: ReceiptDigestSchema,
+    request: RunnerCredentialRotationRequestV1Schema,
+    replay: ReplayedRunnerCredentialRotationResponseV1Schema,
+    current: RunnerCredentialCurrentStateResponseV1Schema,
+    successorAttempted: z.literal(false),
+    provenance: z
+      .object({
+        origin: z.literal("lost_201_replay"),
+        source: z.literal("verified_metadata_replay_and_current_state")
+      })
+      .strict()
+  })
+  .strict();
+
+const HostedControlLifecycleRecoveryBaseShape = {
+  kind: z.literal("hosted_control_v1"),
+  state: z.literal("unpaired"),
+  reason: z.literal("recovery_required"),
+  registration: HostedControlRegistrationMetadataSchema
+};
+
+const HostedCredentialReconciliationFailureEvidenceSchema = z
+  .object({
+    kind: z.literal("reconciliation_failure"),
+    originalRequest: RunnerCredentialRotationRequestV1Schema,
+    originalCanonicalRequestDigest: ReceiptDigestSchema,
+    failure: z
+      .object({
+        reason: z.enum(["membership_verification_failed", "current_state_read_failed"]),
+        code: z.enum([
+          "membership_unavailable",
+          "membership_forbidden",
+          "current_state_unavailable",
+          "current_state_forbidden",
+          "invalid_response"
+        ])
+      })
+      .strict(),
+    provenance: z
+      .object({
+        origin: z.literal("lost_201_reconciliation"),
+        source: z.literal("redacted_local_failure")
+      })
+      .strict()
+  })
+  .strict();
+
+const HostedControlEvidenceRecoveryRequiredSchema = z
+  .object({
+    ...HostedControlLifecycleRecoveryBaseShape,
+    recoveryReason: z.enum(["replay_mismatch", "current_state_unsafe"]),
+    evidence: HostedCredentialConflictEvidenceSchema
+  })
+  .strict();
+
+const HostedControlFailureRecoveryRequiredSchema = z
+  .object({
+    ...HostedControlLifecycleRecoveryBaseShape,
+    recoveryReason: z.enum(["membership_verification_failed", "current_state_read_failed"]),
+    evidence: HostedCredentialReconciliationFailureEvidenceSchema
+  })
+  .strict();
+
+const HostedControlSuccessorRecoveryRequiredSchema = z
+  .object({
+    ...HostedControlLifecycleRecoveryBaseShape,
+    recoveryReason: z.enum(["successor_replay_without_token", "successor_replay_mismatch"]),
+    evidence: HostedCredentialConflictEvidenceSchema.extend({
+      successorAttempted: z.literal(true)
+    }),
+    successorRequest: RunnerCredentialRotationRequestV1Schema,
+    successorCanonicalRequestDigest: ReceiptDigestSchema,
+    successorReplay: ReplayedRunnerCredentialRotationResponseV1Schema
+  })
+  .strict();
+
+const HostedControlLifecycleRecoveryRequiredSchema = z.union([
+  HostedControlEvidenceRecoveryRequiredSchema,
+  HostedControlFailureRecoveryRequiredSchema,
+  HostedControlSuccessorRecoveryRequiredSchema
+]);
+
 export const HostedControlRegistrationSchema = z.union([
   HostedControlInitialRegistrationSchema,
   HostedControlReprovisionRegistrationSchema,
   HostedControlRecoveryRequiredRegistrationSchema,
+  HostedControlLifecycleRecoveryRequiredSchema,
+  HostedControlCredentialConflictSchema,
   HostedControlStagedRegistrationSchema,
-  HostedControlPairedRegistrationSchema
+  HostedControlPairedRegistrationSchema,
+  HostedControlRotationPendingSchema,
+  HostedControlRotationSuccessorPendingSchema,
+  HostedControlRotationStagedFromPairedSchema,
+  HostedControlRotationStagedFromSuccessorSchema,
+  HostedControlRevocationPendingSchema,
+  HostedControlRevokedSchema
 ]);
 
 export type HostedControlRegistration = z.infer<typeof HostedControlRegistrationSchema>;
+
+export function hostedCredentialMutationRequestDigest(requestValue: HostedCredentialMutationRequest): string {
+  const request = RunnerCredentialRotationRequestV1Schema.parse(requestValue);
+  return `sha256:${createHash("sha256").update(canonicalJsonStringify(request)).digest("hex")}`;
+}
+
+function verifiedHostedCredentialMutationDigest(
+  request: HostedCredentialMutationRequest,
+  suppliedDigest?: string
+): string {
+  const computedDigest = hostedCredentialMutationRequestDigest(request);
+  if (suppliedDigest !== undefined && ReceiptDigestSchema.parse(suppliedDigest) !== computedDigest) {
+    throw new Error("Hosted credential mutation digest does not match the canonical strict request.");
+  }
+  return computedDigest;
+}
+
+function rotationReplayMatchesRequest(
+  replay: ReplayedRunnerCredentialRotationResponseV1,
+  request: RunnerCredentialRotationRequestV1
+): boolean {
+  return replay.operationId === request.operationId
+    && replay.runnerId === request.runnerId
+    && replay.registrationGeneration === request.expectedRegistrationGeneration
+    && replay.credentialGeneration === request.expectedCredentialGeneration + 1
+    && replay.replacedCredentialId === request.expectedCredentialId;
+}
+
+function currentStateMatchesRotationReplay(
+  current: RunnerCredentialCurrentStateResponseV1,
+  replay: ReplayedRunnerCredentialRotationResponseV1
+): boolean {
+  return current.credentialState === "active"
+    && current.runnerId === replay.runnerId
+    && current.registrationGeneration === replay.registrationGeneration
+    && current.credentialGeneration === replay.credentialGeneration
+    && current.activeCredentialId === replay.credentialId;
+}
 
 function defaultLocalStateDirectory(): string {
   if (process.env.OPENTAG_STATE_DIR) return resolve(process.env.OPENTAG_STATE_DIR);
@@ -296,67 +541,278 @@ export const OpenTagDaemonConfigSchema = z
     const control = config.controlRegistration;
     if (!control) return;
 
-    if (control.state === "credential_staged" || control.state === "paired") {
-      if (config.pairingToken) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["pairingToken"],
-          message: `Hosted Control V1 ${control.state} configuration must not retain the pairing token.`
-        });
-      }
-      if (!config.runnerToken) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["runnerToken"],
-          message: `Hosted Control V1 ${control.state} configuration requires a staged runtime runner token.`
-        });
-      }
-      if (control.registration.runnerId !== config.runnerId) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["controlRegistration", "registration", "runnerId"],
-          message: "Hosted Control V1 registration runnerId must match daemon runnerId."
-        });
-      }
-    } else {
-      if (config.runnerToken) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["runnerToken"],
-          message: `Hosted Control V1 ${control.reason} configuration must not contain a runtime runner token.`
-        });
-      }
-      if (control.reason === "recovery_required") {
-        if (config.pairingToken) {
+    if (config.runnerTokens?.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runnerTokens"],
+        message: "Hosted Control V1 configuration must not retain fallback runner tokens."
+      });
+    }
+    const tokenAllowed = control.state === "credential_staged"
+      || control.state === "paired"
+      || control.state === "rotation_staged";
+    if (config.pairingToken && !(control.state === "unpaired" && "flow" in control && control.flow === "registration")) {
+      const pairingMessage = control.state === "unpaired" && control.reason === "recovery_required"
+        ? "Hosted Control V1 recovery-required configuration must not retain the consumed pairing token."
+        : `Hosted Control V1 ${control.state} configuration must not retain a pairing token.`;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["pairingToken"],
+        message: pairingMessage
+      });
+    }
+    if (tokenAllowed && !config.runnerToken) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runnerToken"],
+        message: `Hosted Control V1 ${control.state} configuration requires a staged runtime runner token.`
+      });
+    }
+    if (!tokenAllowed && config.runnerToken) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runnerToken"],
+        message: `Hosted Control V1 ${control.state} configuration must not contain a runtime runner token.`
+      });
+    }
+    if ("registration" in control && control.registration.runnerId !== config.runnerId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "registration", "runnerId"],
+        message: "Hosted Control V1 registration runnerId must match daemon runnerId."
+      });
+    }
+    if ("request" in control && control.request.runnerId !== config.runnerId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "request", "runnerId"],
+        message: "Hosted credential mutation request runnerId must match daemon runnerId."
+      });
+    }
+    if ("current" in control && control.current.runnerId !== config.runnerId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "current", "runnerId"],
+        message: "Hosted credential current-state identity must match daemon runnerId."
+      });
+    }
+    if (
+      "canonicalRequestDigest" in control
+      && control.canonicalRequestDigest !== hostedCredentialMutationRequestDigest(control.request)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "canonicalRequestDigest"],
+        message: "Hosted credential mutation digest must match the canonical strict request."
+      });
+    }
+    const conflictEvidence = control.state === "credential_conflict"
+      ? {
+          originalRequest: control.request,
+          originalCanonicalRequestDigest: control.canonicalRequestDigest,
+          replay: control.replay,
+          current: control.current,
+          provenance: control.provenance
+        }
+      : "predecessorConflict" in control
+        ? control.predecessorConflict
+        : control.state === "unpaired" && "evidence" in control && "replay" in control.evidence
+          ? control.evidence
+          : undefined;
+    if (
+      conflictEvidence
+      && conflictEvidence.originalCanonicalRequestDigest
+        !== hostedCredentialMutationRequestDigest(conflictEvidence.originalRequest)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "evidence", "originalCanonicalRequestDigest"],
+        message: "Original credential mutation digest must match its canonical strict request."
+      });
+    }
+    if (
+      conflictEvidence
+      && (
+        conflictEvidence.originalRequest.runnerId !== config.runnerId
+        || conflictEvidence.replay.runnerId !== config.runnerId
+        || conflictEvidence.current.runnerId !== config.runnerId
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "evidence", "runnerId"],
+        message: "Nested credential lifecycle evidence must match daemon runnerId."
+      });
+    }
+    if (
+      conflictEvidence
+      && conflictEvidence.provenance.source === "verified_metadata_replay_and_current_state"
+      && (
+        !rotationReplayMatchesRequest(conflictEvidence.replay, conflictEvidence.originalRequest)
+        || !currentStateMatchesRotationReplay(conflictEvidence.current, conflictEvidence.replay)
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "evidence"],
+        message: "Verified credential-conflict evidence must bind the replay and current credential tuple."
+      });
+    }
+    if (
+      "predecessorConflict" in control
+      && (
+        control.request.operationId === control.predecessorConflict.originalRequest.operationId
+        || control.request.requestId === control.predecessorConflict.originalRequest.requestId
+        || control.request.expectedRegistrationGeneration
+          !== control.predecessorConflict.replay.registrationGeneration
+        || control.request.expectedCredentialGeneration
+          !== control.predecessorConflict.replay.credentialGeneration
+        || control.request.expectedCredentialId !== control.predecessorConflict.replay.credentialId
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "request"],
+        message: "Successor rotation must be fresh and target its verified predecessor replay tuple."
+      });
+    }
+    if (control.state === "unpaired" && "evidence" in control) {
+      if ("replay" in control.evidence) {
+        const expectedSource = control.recoveryReason === "replay_mismatch"
+          ? "metadata_replay_mismatch"
+          : control.recoveryReason === "current_state_unsafe"
+            ? "current_state_unsafe"
+            : "verified_metadata_replay_and_current_state";
+        const expectedSuccessorAttempted = "successorReplay" in control;
+        if (
+          control.evidence.provenance.source !== expectedSource
+          || control.evidence.successorAttempted !== expectedSuccessorAttempted
+        ) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
-            path: ["pairingToken"],
-            message: "Hosted Control V1 recovery-required configuration must not retain the consumed pairing token."
+            path: ["controlRegistration", "evidence", "provenance"],
+            message: "Terminal recovery evidence provenance must match its recovery reason."
           });
         }
-        if (control.registration.runnerId !== config.runnerId) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["controlRegistration", "registration", "runnerId"],
-            message: "Hosted Control V1 recovery registration runnerId must match daemon runnerId."
-          });
-        }
-      } else if (control.flow === "reprovision") {
-        if (config.pairingToken) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["pairingToken"],
-            message: `Hosted Control V1 re-provision ${control.reason} configuration must not retain a pairing token.`
-          });
-        }
-        if (control.registration.runnerId !== config.runnerId) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["controlRegistration", "registration", "runnerId"],
-            message: "Hosted Control V1 re-provision registration runnerId must match daemon runnerId."
-          });
-        }
+      } else if (
+        control.evidence.failure.reason !== control.recoveryReason
+        || control.evidence.originalCanonicalRequestDigest
+          !== hostedCredentialMutationRequestDigest(control.evidence.originalRequest)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["controlRegistration", "evidence"],
+          message: "Redacted reconciliation failure evidence must bind its reason and canonical request."
+        });
       }
+    }
+    if (
+      control.state === "unpaired"
+      && "successorReplay" in control
+      && control.successorCanonicalRequestDigest !== hostedCredentialMutationRequestDigest(control.successorRequest)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "successorCanonicalRequestDigest"],
+        message: "Successor credential mutation digest must match its canonical strict request."
+      });
+    }
+    if (control.state === "unpaired" && "successorReplay" in control) {
+      const replayMatches = rotationReplayMatchesRequest(control.successorReplay, control.successorRequest);
+      const shouldMatch = control.recoveryReason === "successor_replay_without_token";
+      const successorTargetsPredecessor =
+        control.successorRequest.operationId !== control.evidence.originalRequest.operationId
+        && control.successorRequest.requestId !== control.evidence.originalRequest.requestId
+        && control.successorRequest.expectedRegistrationGeneration
+          === control.evidence.replay.registrationGeneration
+        && control.successorRequest.expectedCredentialGeneration
+          === control.evidence.replay.credentialGeneration
+        && control.successorRequest.expectedCredentialId === control.evidence.replay.credentialId;
+      if (replayMatches !== shouldMatch || !successorTargetsPredecessor) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["controlRegistration", "successorReplay"],
+          message: "Terminal successor replay metadata must match its recovery reason and successor request."
+        });
+      }
+      if (
+        control.successorRequest.runnerId !== config.runnerId
+        || control.successorReplay.runnerId !== config.runnerId
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["controlRegistration", "successorReplay", "runnerId"],
+          message: "Terminal successor evidence must match daemon runnerId."
+        });
+      }
+    }
+    if (
+      control.state === "unpaired"
+      && "evidence" in control
+      && "failure" in control.evidence
+      && (
+        control.evidence.originalRequest.runnerId !== config.runnerId
+        || (
+          control.recoveryReason === "membership_verification_failed"
+            ? control.evidence.failure.code !== "membership_unavailable"
+              && control.evidence.failure.code !== "membership_forbidden"
+            : control.evidence.failure.code !== "current_state_unavailable"
+              && control.evidence.failure.code !== "current_state_forbidden"
+              && control.evidence.failure.code !== "invalid_response"
+        )
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "evidence"],
+        message: "Reconciliation failure evidence must bind daemon runnerId and a reason-safe redacted code."
+      });
+    }
+    if (
+      "request" in control
+      && control.state !== "rotation_staged"
+      && control.state !== "revoked"
+      && control.state !== "credential_conflict"
+      && (
+        control.request.expectedRegistrationGeneration !== control.registration.registrationGeneration
+        || control.request.expectedCredentialGeneration !== control.registration.credentialGeneration
+        || control.request.expectedCredentialId !== control.registration.credentialId
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "request"],
+        message: "Hosted credential mutation request must describe the currently paired credential."
+      });
+    }
+    if (control.state === "rotation_staged" && (
+      control.rotation.operationId !== control.request.operationId
+      || control.rotation.runnerId !== control.request.runnerId
+      || control.rotation.registrationGeneration !== control.request.expectedRegistrationGeneration
+      || control.rotation.credentialGeneration !== control.request.expectedCredentialGeneration + 1
+      || control.rotation.replacedCredentialId !== control.request.expectedCredentialId
+    )) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "rotation"],
+        message: "Staged rotation metadata must advance only the credential generation and identify a fresh credential."
+      });
+    }
+    if (control.state === "revoked" && (
+      control.revocation.operationId !== control.request.operationId
+      || control.revocation.runnerId !== control.request.runnerId
+      || control.revocation.registrationGeneration !== control.request.expectedRegistrationGeneration
+      || control.revocation.credentialGeneration !== control.request.expectedCredentialGeneration + 1
+      || control.revocation.revokedCredentialId !== control.request.expectedCredentialId
+      || control.registration.registrationGeneration !== control.request.expectedRegistrationGeneration
+      || control.registration.credentialGeneration !== control.request.expectedCredentialGeneration
+      || control.registration.credentialId !== control.request.expectedCredentialId
+    )) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["controlRegistration", "revocation"],
+        message: "Revocation metadata must advance only the credential generation and identify the revoked credential."
+      });
     }
   });
 
@@ -487,6 +943,407 @@ export function parseDaemonConfig(value: unknown): OpenTagDaemonConfig {
   return parsed;
 }
 
+export type HostedCredentialOperation = "rotate" | "revoke" | "reprovision";
+
+export function hostedCredentialOperationProblem(
+  control: HostedControlRegistration | undefined,
+  operation: HostedCredentialOperation
+): string | undefined {
+  if (!control) return "Hosted Control V1 is not configured.";
+  if (operation === "reprovision") {
+    return control.state === "revoked"
+      || (control.state === "unpaired" && control.reason === "recovery_required")
+      ? undefined
+      : "Hosted credential re-provision requires a revoked or recovery-required runner.";
+  }
+  return control.state === "paired"
+    ? undefined
+    : `Hosted credential ${operation} requires a paired runner.`;
+}
+
+function requirePairedCredentialMutation<Request extends HostedCredentialMutationRequest>(
+  config: OpenTagDaemonConfig,
+  requestValue: Request,
+  operation: "rotate" | "revoke",
+  schema: { parse(value: unknown): Request }
+): { request: Request; registration: HostedControlRegistrationMetadata } {
+  const problem = hostedCredentialOperationProblem(config.controlRegistration, operation);
+  if (problem) throw new Error(problem);
+  const control = config.controlRegistration;
+  if (!control || control.state !== "paired") throw new Error(`Hosted credential ${operation} requires a paired runner.`);
+  const request = schema.parse(requestValue);
+  if (
+    request.runnerId !== config.runnerId
+    || request.expectedRegistrationGeneration !== control.registration.registrationGeneration
+    || request.expectedCredentialGeneration !== control.registration.credentialGeneration
+    || request.expectedCredentialId !== control.registration.credentialId
+  ) {
+    throw new Error(`Hosted credential ${operation} request does not match the currently paired credential.`);
+  }
+  return { request, registration: control.registration };
+}
+
+function withoutHostedTokens(
+  config: OpenTagDaemonConfig
+): Omit<OpenTagDaemonConfig, "runnerToken" | "runnerTokens" | "pairingToken"> {
+  const { runnerToken: _runnerToken, runnerTokens: _runnerTokens, pairingToken: _pairingToken, ...rest } = config;
+  return rest;
+}
+
+function registrationFromRotation(
+  rotation: z.infer<typeof RunnerCredentialRotationMetadataV1Schema>
+): HostedControlRegistrationMetadata {
+  return HostedControlRegistrationMetadataSchema.parse({
+    schemaVersion: rotation.schemaVersion,
+    protocolVersion: rotation.protocolVersion,
+    runnerId: rotation.runnerId,
+    registrationGeneration: rotation.registrationGeneration,
+    credentialGeneration: rotation.credentialGeneration,
+    credentialId: rotation.credentialId,
+    credentialPurpose: rotation.credentialPurpose,
+    createdAt: rotation.createdAt
+  });
+}
+
+export function beginHostedCredentialRotation(
+  config: OpenTagDaemonConfig,
+  input: {
+    request: RunnerCredentialRotationRequestV1;
+    canonicalRequestDigest?: string;
+  }
+): OpenTagDaemonConfig {
+  const { request, registration } = requirePairedCredentialMutation(
+    config,
+    input.request,
+    "rotate",
+    RunnerCredentialRotationRequestV1Schema
+  );
+  const canonicalRequestDigest = verifiedHostedCredentialMutationDigest(request, input.canonicalRequestDigest);
+  return parseDaemonConfig({
+    ...withoutHostedTokens(config),
+    controlRegistration: {
+      kind: "hosted_control_v1",
+      state: "rotation_pending",
+      endpoint: "rotate",
+      origin: "paired",
+      canonicalRequestDigest,
+      request,
+      registration
+    }
+  });
+}
+
+export function markHostedCredentialRotationOutcomeUnknown(config: OpenTagDaemonConfig): OpenTagDaemonConfig {
+  const control = config.controlRegistration;
+  if (!control || control.state !== "rotation_pending") {
+    throw new Error("Only a pending hosted credential rotation can become outcome-unknown.");
+  }
+  return parseDaemonConfig({
+    ...withoutHostedTokens(config),
+    controlRegistration: { ...control, state: "rotation_outcome_unknown" }
+  });
+}
+
+export function beginHostedCredentialRotationSuccessor(
+  config: OpenTagDaemonConfig,
+  input: {
+    request: RunnerCredentialRotationRequestV1;
+    canonicalRequestDigest?: string;
+  }
+): OpenTagDaemonConfig {
+  const control = config.controlRegistration;
+  if (!control || control.state !== "credential_conflict" || control.successorAttempted) {
+    throw new Error("A fresh successor rotation requires an unattempted credential-conflict state.");
+  }
+  const request = RunnerCredentialRotationRequestV1Schema.parse(input.request);
+  if (
+    request.runnerId !== control.replay.runnerId
+    || request.operationId === control.request.operationId
+    || request.requestId === control.request.requestId
+    || request.expectedRegistrationGeneration !== control.replay.registrationGeneration
+    || request.expectedCredentialGeneration !== control.replay.credentialGeneration
+    || request.expectedCredentialId !== control.replay.credentialId
+  ) {
+    throw new Error("Successor rotation must be fresh and target the verified replay credential tuple.");
+  }
+  const canonicalRequestDigest = verifiedHostedCredentialMutationDigest(request, input.canonicalRequestDigest);
+  return parseDaemonConfig({
+    ...withoutHostedTokens(config),
+    controlRegistration: {
+      kind: "hosted_control_v1",
+      state: "rotation_pending",
+      endpoint: "rotate",
+      origin: "lost_201_successor",
+      canonicalRequestDigest,
+      request,
+      registration: registrationFromRotation(control.replay),
+      predecessorConflict: {
+        originalRequest: control.request,
+        originalCanonicalRequestDigest: control.canonicalRequestDigest,
+        replay: control.replay,
+        current: control.current,
+        successorAttempted: true,
+        provenance: control.provenance
+      }
+    }
+  });
+}
+
+export function stageHostedCredentialRotation(
+  config: OpenTagDaemonConfig,
+  responseValue: z.infer<typeof FreshRunnerCredentialRotationResponseV1Schema>
+): OpenTagDaemonConfig {
+  const control = config.controlRegistration;
+  if (
+    !control
+    || (control.state !== "rotation_pending" && control.state !== "rotation_outcome_unknown")
+  ) {
+    throw new Error(
+      "Only a pending or outcome-unknown hosted credential rotation can stage a fresh 201 response."
+    );
+  }
+  const response = FreshRunnerCredentialRotationResponseV1Schema.parse(responseValue);
+  const { runnerToken, replayed: _replayed, ...rotationValue } = response;
+  const rotation = RunnerCredentialRotationMetadataV1Schema.parse(rotationValue);
+  return parseDaemonConfig({
+    ...withoutHostedTokens(config),
+    runnerToken,
+    controlRegistration: {
+      kind: "hosted_control_v1",
+      state: "rotation_staged",
+      endpoint: control.endpoint,
+      origin: control.origin,
+      canonicalRequestDigest: control.canonicalRequestDigest,
+      request: control.request,
+      rotation,
+      ...(control.origin === "lost_201_successor"
+        ? { predecessorConflict: control.predecessorConflict }
+        : {})
+    }
+  });
+}
+
+export function reconcileHostedCredentialRotationSuccessorReplay(
+  config: OpenTagDaemonConfig,
+  replayValue: ReplayedRunnerCredentialRotationResponseV1
+): OpenTagDaemonConfig {
+  const control = config.controlRegistration;
+  if (
+    !control
+    || control.state !== "rotation_outcome_unknown"
+    || control.origin !== "lost_201_successor"
+  ) {
+    throw new Error("Successor replay reconciliation requires a persisted successor outcome-unknown state.");
+  }
+  const successorReplay = ReplayedRunnerCredentialRotationResponseV1Schema.parse(replayValue);
+  const replayMatches = rotationReplayMatchesRequest(successorReplay, control.request);
+  return parseDaemonConfig({
+    ...withoutHostedTokens(config),
+    controlRegistration: {
+      kind: "hosted_control_v1",
+      state: "unpaired",
+      reason: "recovery_required",
+      recoveryReason: replayMatches
+        ? "successor_replay_without_token"
+        : "successor_replay_mismatch",
+      registration: replayMatches
+        ? registrationFromRotation(successorReplay)
+        : control.registration,
+      evidence: control.predecessorConflict,
+      successorRequest: control.request,
+      successorCanonicalRequestDigest: control.canonicalRequestDigest,
+      successorReplay
+    }
+  });
+}
+
+export function recordHostedCredentialReconciliationFailure(
+  config: OpenTagDaemonConfig,
+  input: {
+    reason: "membership_verification_failed" | "current_state_read_failed";
+    code:
+      | "membership_unavailable"
+      | "membership_forbidden"
+      | "current_state_unavailable"
+      | "current_state_forbidden"
+      | "invalid_response";
+  }
+): OpenTagDaemonConfig {
+  const control = config.controlRegistration;
+  if (!control || control.state !== "rotation_outcome_unknown" || control.origin !== "paired") {
+    throw new Error("Reconciliation failure requires an authoritative rotation outcome-unknown state.");
+  }
+  const validCode = input.reason === "membership_verification_failed"
+    ? input.code === "membership_unavailable" || input.code === "membership_forbidden"
+    : input.code === "current_state_unavailable"
+      || input.code === "current_state_forbidden"
+      || input.code === "invalid_response";
+  if (!validCode) throw new Error("Reconciliation failure code does not match its redacted reason.");
+  return parseDaemonConfig({
+    ...withoutHostedTokens(config),
+    controlRegistration: {
+      kind: "hosted_control_v1",
+      state: "unpaired",
+      reason: "recovery_required",
+      recoveryReason: input.reason,
+      registration: control.registration,
+      evidence: {
+        kind: "reconciliation_failure",
+        originalRequest: control.request,
+        originalCanonicalRequestDigest: control.canonicalRequestDigest,
+        failure: input,
+        provenance: {
+          origin: "lost_201_reconciliation",
+          source: "redacted_local_failure"
+        }
+      }
+    }
+  });
+}
+
+export function finalizeHostedCredentialRotation(config: OpenTagDaemonConfig): OpenTagDaemonConfig {
+  const control = config.controlRegistration;
+  if (!control || control.state !== "rotation_staged") {
+    throw new Error("Only a staged hosted credential rotation can be finalized.");
+  }
+  return parseDaemonConfig({
+    ...config,
+    controlRegistration: {
+      kind: "hosted_control_v1",
+      state: "paired",
+      operationId: control.request.operationId,
+      registration: registrationFromRotation(control.rotation)
+    }
+  });
+}
+
+export function beginHostedCredentialRevocation(
+  config: OpenTagDaemonConfig,
+  input: {
+    request: RunnerCredentialRevocationRequestV1;
+    canonicalRequestDigest?: string;
+  }
+): OpenTagDaemonConfig {
+  const { request, registration } = requirePairedCredentialMutation(
+    config,
+    input.request,
+    "revoke",
+    RunnerCredentialRevocationRequestV1Schema
+  );
+  const canonicalRequestDigest = verifiedHostedCredentialMutationDigest(request, input.canonicalRequestDigest);
+  return parseDaemonConfig({
+    ...withoutHostedTokens(config),
+    controlRegistration: {
+      kind: "hosted_control_v1",
+      state: "revocation_pending",
+      endpoint: "revoke",
+      canonicalRequestDigest,
+      request,
+      registration
+    }
+  });
+}
+
+export function markHostedCredentialRevocationOutcomeUnknown(config: OpenTagDaemonConfig): OpenTagDaemonConfig {
+  const control = config.controlRegistration;
+  if (!control || control.state !== "revocation_pending") {
+    throw new Error("Only a pending hosted credential revocation can become outcome-unknown.");
+  }
+  return parseDaemonConfig({
+    ...withoutHostedTokens(config),
+    controlRegistration: { ...control, state: "revocation_outcome_unknown" }
+  });
+}
+
+export function confirmHostedCredentialRevocation(
+  config: OpenTagDaemonConfig,
+  revocation: z.infer<typeof RunnerCredentialRevocationResponseV1Schema>
+): OpenTagDaemonConfig {
+  const control = config.controlRegistration;
+  if (!control || (control.state !== "revocation_pending" && control.state !== "revocation_outcome_unknown")) {
+    throw new Error("Only an unresolved hosted credential revocation can be confirmed.");
+  }
+  return parseDaemonConfig({
+    ...withoutHostedTokens(config),
+    controlRegistration: {
+      kind: "hosted_control_v1",
+      state: "revoked",
+      endpoint: control.endpoint,
+      canonicalRequestDigest: control.canonicalRequestDigest,
+      request: control.request,
+      registration: control.registration,
+      revocation
+    }
+  });
+}
+
+export function recordHostedCredentialConflict(
+  config: OpenTagDaemonConfig,
+  input: {
+    replay: ReplayedRunnerCredentialRotationResponseV1;
+    current: RunnerCredentialCurrentStateResponseV1;
+  }
+): OpenTagDaemonConfig {
+  const control = config.controlRegistration;
+  if (!control || control.state !== "rotation_outcome_unknown" || control.origin !== "paired") {
+    throw new Error("Credential conflict reconciliation requires an authoritative rotation outcome-unknown state.");
+  }
+  const replay = ReplayedRunnerCredentialRotationResponseV1Schema.parse(input.replay);
+  const current = RunnerCredentialCurrentStateResponseV1Schema.parse(input.current);
+  if (current.runnerId !== config.runnerId || replay.runnerId !== config.runnerId) {
+    throw new Error("Hosted credential conflict identity must match daemon runnerId.");
+  }
+  const replayMatches = rotationReplayMatchesRequest(replay, control.request);
+  const currentMatches = currentStateMatchesRotationReplay(current, replay);
+  const evidence = {
+    originalRequest: control.request,
+    originalCanonicalRequestDigest: control.canonicalRequestDigest,
+    replay,
+    current,
+    successorAttempted: false,
+    provenance: {
+      origin: "lost_201_replay" as const,
+      source: (replayMatches
+        ? currentMatches
+          ? "verified_metadata_replay_and_current_state"
+          : "current_state_unsafe"
+        : "metadata_replay_mismatch") as
+          | "verified_metadata_replay_and_current_state"
+          | "metadata_replay_mismatch"
+          | "current_state_unsafe"
+    }
+  };
+  if (!replayMatches || !currentMatches) {
+    return parseDaemonConfig({
+      ...withoutHostedTokens(config),
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        reason: "recovery_required",
+        recoveryReason: replayMatches ? "current_state_unsafe" : "replay_mismatch",
+        registration: replayMatches
+          ? registrationFromRotation(replay)
+          : control.registration,
+        evidence
+      }
+    });
+  }
+  return parseDaemonConfig({
+    ...withoutHostedTokens(config),
+    controlRegistration: {
+      kind: "hosted_control_v1",
+      state: "credential_conflict",
+      endpoint: control.endpoint,
+      canonicalRequestDigest: control.canonicalRequestDigest,
+      request: control.request,
+      replay,
+      current,
+      successorAttempted: false,
+      provenance: evidence.provenance
+    }
+  });
+}
+
 export function hostedRunnerAuthProblem(
   config: Pick<OpenTagDaemonConfig, "runnerId" | "runnerToken" | "pairingToken" | "controlRegistration">
 ): string | undefined {
@@ -499,6 +1356,21 @@ export function hostedRunnerAuthProblem(
   }
   if (control.state === "credential_staged") {
     return "Hosted Control V1 runner credential is staged but not committed as paired; finish local credential verification before starting it.";
+  }
+  if (control.state === "rotation_staged") {
+    return "Hosted Control V1 runner credential rotation is staged but not finalized; finalize the local rotation before starting it.";
+  }
+  if (control.state === "rotation_pending" || control.state === "rotation_outcome_unknown") {
+    return `Hosted Control V1 runner credential rotation is ${control.state === "rotation_pending" ? "pending" : "outcome-unknown"}; reconcile it before starting the runner.`;
+  }
+  if (control.state === "revocation_pending" || control.state === "revocation_outcome_unknown") {
+    return `Hosted Control V1 runner credential revocation is ${control.state === "revocation_pending" ? "pending" : "outcome-unknown"}; reconcile it before starting the runner.`;
+  }
+  if (control.state === "credential_conflict") {
+    return "Hosted Control V1 runner has a verified credential conflict; attempt the single fresh successor rotation or enter terminal recovery.";
+  }
+  if (control.state === "revoked") {
+    return "Hosted Control V1 runner credential is revoked; re-provision the runner before starting it.";
   }
   if (config.pairingToken) {
     return "Hosted Control V1 paired configuration retains a pairing token; remove it before starting the runner.";
