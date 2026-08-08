@@ -433,9 +433,10 @@ export const RunnerCredentialRevocationResponseV1Schema = z
   })
   .strict();
 
-export const RunnerCredentialCurrentStateResponseV1Schema = z
+const RunnerCredentialReadyCurrentStateResponseV1Schema = z
   .object({
     ...VersionedResponseShape,
+    projectionStatus: z.literal("ready"),
     runnerId: NonEmptyIdSchema,
     registrationGeneration: z.number().int().positive(),
     credentialGeneration: z.number().int().positive(),
@@ -460,6 +461,30 @@ export const RunnerCredentialCurrentStateResponseV1Schema = z
       });
     }
   });
+
+const RunnerCredentialPendingCurrentStateResponseV1Schema = z
+  .object({
+    ...VersionedResponseShape,
+    projectionStatus: z.literal("pending"),
+    runnerId: NonEmptyIdSchema,
+    registrationGeneration: z.null(),
+    credentialGeneration: z.null(),
+    activeCredentialId: z.null(),
+    credentialState: z.literal("unknown"),
+    reason: z.enum([
+      "legacy_projection_unbackfilled",
+      "credential_projection_inconsistent",
+    ]),
+    nextAction: z.literal("operator_projection_migration_required"),
+    observedAt: ControlTimestampSchema,
+  })
+  .strict();
+
+export const RunnerCredentialCurrentStateResponseV1Schema =
+  z.discriminatedUnion("projectionStatus", [
+    RunnerCredentialReadyCurrentStateResponseV1Schema,
+    RunnerCredentialPendingCurrentStateResponseV1Schema,
+  ]);
 
 const RunnerCredentialMutationConflictResponseV1Schema = z
   .object({

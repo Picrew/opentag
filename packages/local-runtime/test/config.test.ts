@@ -90,6 +90,7 @@ function freshHostedRotation(
 const currentAfterLostRotation = {
   schemaVersion: 1 as const,
   protocolVersion: "1.0" as const,
+  projectionStatus: "ready" as const,
   runnerId: "runner_hosted",
   registrationGeneration: 1,
   credentialGeneration: 2,
@@ -808,6 +809,7 @@ describe("Hosted Control V1 credential state", () => {
     const current = {
       schemaVersion: 1 as const,
       protocolVersion: "1.0" as const,
+      projectionStatus: "ready" as const,
       runnerId: "runner_hosted",
       registrationGeneration: 1,
       credentialGeneration: 2,
@@ -1002,6 +1004,43 @@ describe("Hosted Control V1 credential state", () => {
       state: "unpaired",
       recoveryReason: "current_state_unsafe"
     });
+
+    const pendingProjection = recordHostedCredentialConflict(rotationUnknown, {
+      replay: replayedHostedRotation,
+      current: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        projectionStatus: "pending",
+        runnerId: "runner_hosted",
+        registrationGeneration: null,
+        credentialGeneration: null,
+        activeCredentialId: null,
+        credentialState: "unknown",
+        reason: "legacy_projection_unbackfilled",
+        nextAction: "operator_projection_migration_required",
+        observedAt: "2026-08-08T00:03:00.000Z"
+      }
+    });
+    expect(pendingProjection.runnerToken).toBeUndefined();
+    expect(pendingProjection.controlRegistration).toMatchObject({
+      state: "unpaired",
+      reason: "recovery_required",
+      recoveryReason: "current_state_unsafe",
+      evidence: {
+        current: {
+          projectionStatus: "pending",
+          registrationGeneration: null,
+          credentialGeneration: null,
+          credentialState: "unknown"
+        },
+        provenance: { source: "current_state_unsafe" }
+      }
+    });
+    expect(() => beginHostedCredentialRotationSuccessor(pendingProjection, {
+      request: successorRotationRequest
+    })).toThrow(/unattempted credential-conflict/iu);
+    expect(parseDaemonConfig(JSON.parse(JSON.stringify(pendingProjection))))
+      .toEqual(pendingProjection);
   });
 
   it("records membership and current-read failures as redacted terminal evidence", () => {

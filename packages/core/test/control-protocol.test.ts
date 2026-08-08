@@ -683,6 +683,7 @@ describe("runner credential rotation and revocation", () => {
       body: {
         schemaVersion: 1,
         protocolVersion: "1.0",
+        projectionStatus: "ready",
         runnerId: "runner_1",
         registrationGeneration: 3,
         credentialGeneration: 8,
@@ -715,19 +716,99 @@ describe("runner credential rotation and revocation", () => {
       }).success,
     ).toBe(true);
 
+    for (const reason of [
+      "legacy_projection_unbackfilled",
+      "credential_projection_inconsistent",
+    ] as const) {
+      expect(
+        RunnerCredentialCurrentStateHttpResponseV1Schema.safeParse({
+          status: 200,
+          body: {
+            schemaVersion: 1,
+            protocolVersion: "1.0",
+            projectionStatus: "pending",
+            runnerId: "runner_1",
+            registrationGeneration: null,
+            credentialGeneration: null,
+            activeCredentialId: null,
+            credentialState: "unknown",
+            reason,
+            nextAction: "operator_projection_migration_required",
+            observedAt,
+          },
+        }).success,
+      ).toBe(true);
+    }
+
+    const pending = {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      projectionStatus: "pending",
+      runnerId: "runner_1",
+      registrationGeneration: null,
+      credentialGeneration: null,
+      activeCredentialId: null,
+      credentialState: "unknown",
+      reason: "legacy_projection_unbackfilled",
+      nextAction: "operator_projection_migration_required",
+      observedAt,
+    } as const;
+
+    const responseWithoutProjectionStatus: Record<string, unknown> = {
+      ...active.body,
+    };
+    delete responseWithoutProjectionStatus.projectionStatus;
+    expect(
+      RunnerCredentialCurrentStateHttpResponseV1Schema.safeParse({
+        status: 200,
+        body: responseWithoutProjectionStatus,
+      }).success,
+    ).toBe(false);
+
+    for (const invalidBody of [
+      { ...active.body, registrationGeneration: null },
+      { ...active.body, credentialGeneration: null },
+      { ...active.body, credentialState: "unknown" },
+      { ...active.body, reason: "legacy_projection_unbackfilled" },
+      {
+        ...active.body,
+        credentialState: "revoked",
+        activeCredentialId: "runtime_credential_8",
+      },
+      { ...pending, registrationGeneration: 3 },
+      { ...pending, credentialGeneration: 8 },
+      { ...pending, activeCredentialId: "runtime_credential_8" },
+      { ...pending, credentialState: "revoked" },
+      { ...pending, reason: "projection_temporarily_unavailable" },
+      { ...pending, nextAction: "retry_later" },
+      { ...pending, extra: true },
+    ]) {
+      expect(
+        RunnerCredentialCurrentStateHttpResponseV1Schema.safeParse({
+          status: 200,
+          body: invalidBody,
+        }).success,
+      ).toBe(false);
+    }
+
     for (const forbiddenField of [
       "runnerToken",
       "organizationId",
       "operatorId",
       "operatorScope",
       "grantedScopes",
+      "verifier",
+      "credentialPrefix",
+      "scope",
     ]) {
-      expect(
-        RunnerCredentialCurrentStateHttpResponseV1Schema.safeParse({
-          ...active,
-          body: { ...active.body, [forbiddenField]: "forbidden" },
-        }).success,
-      ).toBe(false);
+      for (const body of [active.body, pending]) {
+        expect(
+          RunnerCredentialCurrentStateHttpResponseV1Schema.safeParse({
+            ...active,
+            body: { ...body, [forbiddenField]: "forbidden" },
+          }).success,
+        ).toBe(false);
+      }
     }
 
     for (const errorResponse of [

@@ -319,7 +319,8 @@ function currentStateMatchesRotationReplay(
   current: RunnerCredentialCurrentStateResponseV1,
   replay: ReplayedRunnerCredentialRotationResponseV1
 ): boolean {
-  return current.credentialState === "active"
+  return current.projectionStatus === "ready"
+    && current.credentialState === "active"
     && current.runnerId === replay.runnerId
     && current.registrationGeneration === replay.registrationGeneration
     && current.credentialGeneration === replay.credentialGeneration
