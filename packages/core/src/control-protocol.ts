@@ -196,7 +196,14 @@ export const ControlConcealedNotFoundResponseV1Schema = z
 export const ControlConflictResponseV1Schema = z
   .object({
     ...VersionedResponseShape,
-    error: z.enum(["stale_attempt", "idempotency_conflict", "invalid_state_transition"]),
+    error: z.enum([
+      "stale_attempt",
+      "stale_registration",
+      "stale_readiness",
+      "target_binding_stale",
+      "idempotency_conflict",
+      "invalid_state_transition",
+    ]),
     message: z.string().min(1),
     requestId: NonEmptyIdSchema,
   })

@@ -225,6 +225,24 @@ describe("OpenTag Control V1 status semantics", () => {
     ).toBe(true);
   });
 
+  it.each(["stale_registration", "stale_readiness", "target_binding_stale"] as const)(
+    "accepts readiness conflict reason %s",
+    (error) => {
+      expect(
+        ControlErrorHttpResponseV1Schema.safeParse({
+          status: 409,
+          body: {
+            schemaVersion: 1,
+            protocolVersion: "1.0",
+            error,
+            message: "The readiness receipt is stale.",
+            requestId: "req_readiness_1",
+          },
+        }).success,
+      ).toBe(true);
+    },
+  );
+
   it("does not let a 202 waiting receipt claim authorization", () => {
     expect(
       ControlWaitingHttpResponseV1Schema.safeParse({
