@@ -345,7 +345,11 @@ describe("Control V1 typed receipt transport", () => {
     }],
     ["attempt", () => {
       const receipt = assessment();
-      const changedAttempt = { ...receipt.attempt, attemptNumber: 2 };
+      const changedAttempt = {
+        ...receipt.attempt,
+        attemptNumber: 2,
+        epoch: 2,
+      };
       return {
         ...receipt,
         attempt: changedAttempt,

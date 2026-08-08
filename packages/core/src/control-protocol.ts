@@ -533,7 +533,16 @@ export const ReceiptAttemptRefV1Schema = z
     epoch: z.number().int().positive(),
     fencingTokenDigest: ReceiptDigestSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((attempt, ctx) => {
+    if (attempt.epoch !== attempt.attemptNumber) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["epoch"],
+        message: "Attempt epoch must equal the Run-scoped attempt number.",
+      });
+    }
+  });
 
 export const ReceiptProducerV1Schema = z
   .object({

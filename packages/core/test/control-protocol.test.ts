@@ -874,6 +874,30 @@ describe("ReceiptEnvelope V1", () => {
     expect(CompletionAssessmentReceiptEnvelopeV1Schema.safeParse(assessmentReceipt()).success).toBe(true);
   });
 
+  it("uses the Run-scoped attempt number as the receipt fencing epoch", () => {
+    const receipt = assessmentReceipt();
+    expect(
+      CompletionAssessmentReceiptEnvelopeV1Schema.safeParse({
+        ...receipt,
+        attempt: { ...receipt.attempt, epoch: 2 },
+        payload: {
+          ...receipt.payload,
+          attempt: { ...receipt.payload.attempt, epoch: 2 },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      CompletionAssessmentReceiptEnvelopeV1Schema.safeParse({
+        ...receipt,
+        attempt: { ...receipt.attempt, attemptNumber: 2 },
+        payload: {
+          ...receipt.payload,
+          attempt: { ...receipt.payload.attempt, attemptNumber: 2 },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   it("rejects unknown envelope and payload fields", () => {
     const receipt = assessmentReceipt();
     expect(CompletionAssessmentReceiptEnvelopeV1Schema.safeParse({ ...receipt, metadata: {} }).success).toBe(false);
