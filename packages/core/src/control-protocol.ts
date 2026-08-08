@@ -640,6 +640,13 @@ export const RunnerReadinessPayloadV1Schema = z
       ["targets", readiness.targets],
     ] as const) {
       entries.forEach((entry, index) => {
+        if (entry.state === "ready" && entry.reasonCode !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [collectionName, index, "reasonCode"],
+            message: "Ready attestations must not include a failure reason code.",
+          });
+        }
         if (entry.state !== "ready" && entry.reasonCode === undefined) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,

@@ -1034,6 +1034,22 @@ describe("ReceiptEnvelope V1", () => {
         },
       }).success,
     ).toBe(false);
+    for (const collectionName of ["executors", "targets"] as const) {
+      expect(
+        RunnerReadinessReceiptEnvelopeV1Schema.safeParse({
+          ...readiness,
+          payload: {
+            ...readiness.payload,
+            [collectionName]: [
+              {
+                ...readiness.payload[collectionName][0],
+                reasonCode: "executor_unavailable",
+              },
+            ],
+          },
+        }).success,
+      ).toBe(false);
+    }
   });
 
   it("keeps policy snapshots executor-neutral and free of policy bodies", () => {
