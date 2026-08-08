@@ -205,6 +205,13 @@ describe("OpenTag Control V1 status semantics", () => {
       supported: { schemaVersions: [1], protocolVersions: ["1.0"] },
       nextAction: "upgrade_client",
     },
+    {
+      status: 429,
+      error: "rate_limited",
+      message: "Retry later.",
+      requestId: "req_1",
+      retryAfterSeconds: 30,
+    },
   ])("accepts the normalized $status response shape", (response) => {
     expect(
       ControlErrorHttpResponseV1Schema.safeParse({
@@ -475,8 +482,45 @@ describe("runner credential rotation and revocation", () => {
         status: 200,
         body: {
           ...rotationMetadata,
+          replayed: true,
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      RunnerCredentialRotationHttpResponseV1Schema.safeParse({
+        status: 200,
+        body: {
+          ...rotationMetadata,
           runnerToken: "must-not-replay",
           replayed: true,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerCredentialRotationHttpResponseV1Schema.safeParse({
+        status: 200,
+        body: {
+          ...rotationMetadata,
+          runnerToken: "fresh-token-at-wrong-status",
+          replayed: false,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerCredentialRotationHttpResponseV1Schema.safeParse({
+        status: 201,
+        body: {
+          ...rotationMetadata,
+          replayed: true,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerCredentialRotationHttpResponseV1Schema.safeParse({
+        status: 201,
+        body: {
+          ...rotationMetadata,
+          replayed: false,
         },
       }).success,
     ).toBe(false);
@@ -522,6 +566,19 @@ describe("runner credential rotation and revocation", () => {
         }).success,
       ).toBe(false);
     }
+
+    for (const invalidBody of [
+      { ...revoked, replayed: false, activeCredentialId: "still-active" },
+      { ...revoked, replayed: false, credentialId: "unexpected" },
+      { ...revoked, replayed: false, credentialState: "active" },
+    ]) {
+      expect(
+        RunnerCredentialRevocationHttpResponseV1Schema.safeParse({
+          status: 200,
+          body: invalidBody,
+        }).success,
+      ).toBe(false);
+    }
   });
 
   it.each([
@@ -531,18 +588,23 @@ describe("runner credential rotation and revocation", () => {
   ] as const)(
     "accepts the endpoint-specific 409 %s response",
     (error) => {
-      expect(
-        RunnerCredentialRotationHttpResponseV1Schema.safeParse({
-          status: 409,
-          body: {
-            schemaVersion: 1,
-            protocolVersion: "1.0",
-            error,
-            message: "Credential mutation conflict.",
-            requestId: "req_rotate_1",
-          },
-        }).success,
-      ).toBe(true);
+      for (const schema of [
+        RunnerCredentialRotationHttpResponseV1Schema,
+        RunnerCredentialRevocationHttpResponseV1Schema,
+      ]) {
+        expect(
+          schema.safeParse({
+            status: 409,
+            body: {
+              schemaVersion: 1,
+              protocolVersion: "1.0",
+              error,
+              message: "Credential mutation conflict.",
+              requestId: "req_rotate_1",
+            },
+          }).success,
+        ).toBe(true);
+      }
     },
   );
 
@@ -554,16 +616,33 @@ describe("runner credential rotation and revocation", () => {
       requestId: "req_rotate_1",
     } as const;
 
+    for (const schema of [
+      RunnerCredentialRotationHttpResponseV1Schema,
+      RunnerCredentialRevocationHttpResponseV1Schema,
+    ]) {
+      expect(
+        schema.safeParse({
+          status: 409,
+          body: { ...body, error: "stale_attempt" },
+        }).success,
+      ).toBe(false);
+      expect(
+        schema.safeParse({
+          status: 422,
+          body: { ...body, error: "observation_policy_mismatch" },
+        }).success,
+      ).toBe(false);
+    }
     expect(
-      RunnerCredentialRotationHttpResponseV1Schema.safeParse({
+      RunnerCredentialHttpResponseV1Schema.safeParse({
         status: 409,
-        body: { ...body, error: "stale_attempt" },
+        body: { ...body, error: "stale_credential" },
       }).success,
     ).toBe(false);
     expect(
-      RunnerCredentialRevocationHttpResponseV1Schema.safeParse({
-        status: 422,
-        body: { ...body, error: "observation_policy_mismatch" },
+      ControlErrorHttpResponseV1Schema.safeParse({
+        status: 409,
+        body: { ...body, error: "stale_credential" },
       }).success,
     ).toBe(false);
   });
@@ -582,6 +661,8 @@ describe("runner credential rotation and revocation", () => {
     } as const;
 
     expect(RunnerCredentialRotationHttpResponseV1Schema.safeParse(response).success).toBe(true);
+    expect(RunnerCredentialRevocationHttpResponseV1Schema.safeParse(response).success).toBe(true);
+    expect(ControlErrorHttpResponseV1Schema.safeParse(response).success).toBe(true);
     expect(
       RunnerCredentialRotationHttpResponseV1Schema.safeParse({
         ...response,
@@ -630,6 +711,53 @@ describe("runner credential rotation and revocation", () => {
           ...active.body,
           activeCredentialId: null,
           credentialState: "revoked",
+        },
+      }).success,
+    ).toBe(true);
+
+    for (const forbiddenField of [
+      "runnerToken",
+      "organizationId",
+      "operatorId",
+      "operatorScope",
+      "grantedScopes",
+    ]) {
+      expect(
+        RunnerCredentialCurrentStateHttpResponseV1Schema.safeParse({
+          ...active,
+          body: { ...active.body, [forbiddenField]: "forbidden" },
+        }).success,
+      ).toBe(false);
+    }
+
+    for (const errorResponse of [
+      { status: 401, error: "invalid_credential" },
+      { status: 403, error: "insufficient_scope" },
+      { status: 404, error: "missing_or_concealed" },
+    ] as const) {
+      expect(
+        RunnerCredentialCurrentStateHttpResponseV1Schema.safeParse({
+          status: errorResponse.status,
+          body: {
+            schemaVersion: 1,
+            protocolVersion: "1.0",
+            error: errorResponse.error,
+            message: "Credential current state is unavailable.",
+            requestId: "req_current_1",
+          },
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      RunnerCredentialCurrentStateHttpResponseV1Schema.safeParse({
+        status: 429,
+        body: {
+          schemaVersion: 1,
+          protocolVersion: "1.0",
+          error: "rate_limited",
+          message: "Retry later.",
+          requestId: "req_current_1",
+          retryAfterSeconds: 30,
         },
       }).success,
     ).toBe(true);
