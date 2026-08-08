@@ -602,7 +602,7 @@ describe("local-runtime doctor", () => {
       {
         repositoryFree: true,
         runnerResponse: () => Response.json(
-          { error: "unauthorized", detail: "remote_body_secret_must_not_leak" },
+          { error: "secret_shaped_error_must_not_leak", detail: "remote_body_secret_must_not_leak" },
           { status: 401 }
         )
       }
@@ -610,9 +610,10 @@ describe("local-runtime doctor", () => {
 
     const formatted = formatDoctorChecks(checks);
     expect(doctorHasFailures(checks)).toBe(true);
-    expect(formatted).toContain("FAIL runner registration: Dispatcher request failed with HTTP 401 (unauthorized).");
+    expect(formatted).toContain("FAIL runner registration: Dispatcher request failed with HTTP 401.");
     expect(formatted).toContain("remote authentication is checked separately");
     expect(formatted).not.toContain("remote_body_secret_must_not_leak");
+    expect(formatted).not.toContain("secret_shaped_error_must_not_leak");
     expect(formatted).not.toContain("runtime_paired_secret");
   });
 

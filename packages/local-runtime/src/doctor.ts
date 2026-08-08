@@ -27,6 +27,12 @@ type SafeRemoteError = {
   code?: string;
 };
 
+const SAFE_REMOTE_ERROR_CODES = new Set([
+  "runner_not_found",
+  "repo_binding_not_found",
+  "channel_binding_not_found"
+]);
+
 function safeRemoteError(error: unknown): SafeRemoteError {
   if (!(error instanceof OpenTagClientHttpError)) {
     return { message: error instanceof Error ? error.message : String(error) };
@@ -35,7 +41,7 @@ function safeRemoteError(error: unknown): SafeRemoteError {
   let code: string | undefined;
   try {
     const parsed = JSON.parse(error.responseBody) as { error?: unknown };
-    if (typeof parsed.error === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(parsed.error)) {
+    if (typeof parsed.error === "string" && SAFE_REMOTE_ERROR_CODES.has(parsed.error)) {
       code = parsed.error;
     }
   } catch {
