@@ -26,6 +26,7 @@ import {
   RunnerRegistrationRequestV1Schema,
   RunnerRegistrationResponseV1Schema,
   type CompletionAssessmentReceiptEnvelopeV1,
+  type RunnerReadinessReceiptEnvelopeV1,
 } from "../src/control-protocol.js";
 
 const digest = `sha256:${"a".repeat(64)}`;
@@ -390,6 +391,18 @@ describe("runner registration and credential re-provision", () => {
 });
 
 describe("ReceiptEnvelope V1", () => {
+  it("types readiness producer authority exactly", () => {
+    expectTypeOf<
+      RunnerReadinessReceiptEnvelopeV1["producer"]["kind"]
+    >().toEqualTypeOf<"runner">();
+    expectTypeOf<
+      RunnerReadinessReceiptEnvelopeV1["producer"]["credentialId"]
+    >().toEqualTypeOf<string>();
+    expectTypeOf<
+      RunnerReadinessReceiptEnvelopeV1["producer"]["registrationGeneration"]
+    >().toEqualTypeOf<number>();
+  });
+
   it("preserves each callback receipt kind as a concrete literal type", () => {
     expectTypeOf<
       typeof CallbackIntentObservationReceiptEnvelopeV1Schema._output.receiptKind

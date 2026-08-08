@@ -374,6 +374,15 @@ export const ReceiptProducerV1Schema = z
   })
   .strict();
 
+export const RunnerReadinessProducerV1Schema = z
+  .object({
+    kind: z.literal("runner"),
+    id: NonEmptyIdSchema,
+    credentialId: NonEmptyIdSchema,
+    registrationGeneration: z.number().int().positive(),
+  })
+  .strict();
+
 export const ReceiptIdentityV1Schema = z
   .object({
     namespace: z.string().regex(/^opentag\.control\.receipt\/[a-z0-9-]+\/v1$/u),
@@ -466,6 +475,7 @@ export const RunnerReadinessPayloadV1Schema = z
 export const RunnerReadinessReceiptEnvelopeV1Schema = z
   .object({
     ...ReceiptEnvelopeBaseShape,
+    producer: RunnerReadinessProducerV1Schema,
     receiptKind: z.literal("runner_readiness"),
     payload: RunnerReadinessPayloadV1Schema,
   })
@@ -474,14 +484,8 @@ export const RunnerReadinessReceiptEnvelopeV1Schema = z
     if (!receipt.requiredCapabilities.includes("relay.readiness.v1")) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requiredCapabilities"], message: "Readiness capability is required." });
     }
-    if (receipt.producer.kind !== "runner") {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["producer", "kind"], message: "Readiness receipts must be produced by the Runner." });
-    }
     if (receipt.producer.id !== receipt.payload.runnerId) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["producer", "id"], message: "Readiness producer must match the attested Runner." });
-    }
-    if (receipt.producer.credentialId === undefined) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["producer", "credentialId"], message: "Readiness producer credential identity is required." });
     }
     if (receipt.producer.registrationGeneration !== receipt.payload.registrationGeneration) {
       ctx.addIssue({
