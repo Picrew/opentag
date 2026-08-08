@@ -985,8 +985,15 @@ export const PermissionResolutionReceiptEnvelopeV1Schema = z
   })
   .strict()
   .superRefine((receipt, ctx) => {
-    if (!receipt.requiredCapabilities.includes("relay.permission.v1")) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requiredCapabilities"], message: "Permission capability is required." });
+    if (
+      receipt.requiredCapabilities.length !== 1 ||
+      receipt.requiredCapabilities[0] !== "relay.permission.v1"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["requiredCapabilities"],
+        message: "Permission receipts require only relay.permission.v1.",
+      });
     }
     if (!hasExactReceiptIdentity(receipt.identity, "opentag.control.receipt/permission-resolution/v1", [
       receipt.organizationId,

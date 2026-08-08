@@ -484,6 +484,10 @@ describe("permission V1 control protocol", () => {
 
   it("keeps waiting and terminal permission receipts strict, sanitized, and status-bound", () => {
     expect(PermissionResolutionReceiptEnvelopeV1Schema.safeParse(waitingReceipt).success).toBe(true);
+    expect(PermissionResolutionReceiptEnvelopeV1Schema.safeParse({
+      ...waitingReceipt,
+      requiredCapabilities: ["relay.permission.v1", "relay.readiness.v1"],
+    }).success).toBe(false);
     expect(RunnerPermissionRequestHttpResponseV1Schema.safeParse({ status: 202, body: waitingReceipt }).success).toBe(true);
     expect(RunnerPermissionRequestHttpResponseV1Schema.safeParse({ status: 200, body: waitingReceipt }).success).toBe(false);
     expect(PermissionResolutionCurrentHttpResponseV1Schema.safeParse({ status: 200, body: waitingReceipt }).success).toBe(false);
