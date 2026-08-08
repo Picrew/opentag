@@ -19,7 +19,12 @@ import {
   NpmPackageVersionSchema,
   RelayCapabilitiesResponseV1Schema,
   RunnerCredentialReprovisionRequestV1Schema,
+  RunnerCredentialCurrentStateHttpResponseV1Schema,
   RunnerCredentialMetadataV1Schema,
+  RunnerCredentialRevocationHttpResponseV1Schema,
+  RunnerCredentialRevocationRequestV1Schema,
+  RunnerCredentialRotationHttpResponseV1Schema,
+  RunnerCredentialRotationRequestV1Schema,
   RunnerCredentialResponseV1Schema,
   RunnerCredentialHttpResponseV1Schema,
   RunnerReadinessReasonCodeV1Schema,
@@ -390,6 +395,244 @@ describe("runner registration and credential re-provision", () => {
 
   it.each([" req_1", "req_1 ", " "])("rejects canonical request IDs with whitespace: %j", (requestId) => {
     expect(RunnerRegistrationRequestV1Schema.safeParse({ ...registration, requestId }).success).toBe(false);
+  });
+});
+
+describe("runner credential rotation and revocation", () => {
+  const mutation = {
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    requiredCapabilities: ["relay.credential-rotation.v1"],
+    requestId: "req_rotate_1",
+    operationId: "op_rotate_1",
+    runnerId: "runner_1",
+    expectedRegistrationGeneration: 3,
+    expectedCredentialGeneration: 7,
+    expectedCredentialId: "runtime_credential_7",
+  } as const;
+
+  const rotationMetadata = {
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    operationId: "op_rotate_1",
+    runnerId: "runner_1",
+    registrationGeneration: 3,
+    credentialGeneration: 8,
+    replacedCredentialId: "runtime_credential_7",
+    credentialId: "runtime_credential_8",
+    credentialPurpose: "runtime",
+    createdAt: observedAt,
+  } as const;
+
+  it("accepts strict generation-fenced rotate and revoke requests", () => {
+    expect(RunnerCredentialRotationRequestV1Schema.parse(mutation)).toEqual(mutation);
+    expect(RunnerCredentialRevocationRequestV1Schema.parse(mutation)).toEqual(mutation);
+
+    expect(
+      RunnerCredentialRotationRequestV1Schema.safeParse({
+        ...mutation,
+        credentialGeneration: 8,
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerCredentialRevocationRequestV1Schema.safeParse({
+        ...mutation,
+        requiredCapabilities: ["relay.lifecycle.v1"],
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerCredentialRotationRequestV1Schema.safeParse({
+        ...mutation,
+        requiredCapabilities: [
+          "relay.credential-rotation.v1",
+          "relay.lifecycle.v1",
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerCredentialRotationRequestV1Schema.safeParse({
+        ...mutation,
+        expectedCredentialGeneration: 0,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("returns plaintext only for a fresh rotation and requires a new credential ID", () => {
+    expect(rotationMetadata.registrationGeneration).toBe(mutation.expectedRegistrationGeneration);
+    expect(rotationMetadata.credentialGeneration).toBe(mutation.expectedCredentialGeneration + 1);
+    expect(
+      RunnerCredentialRotationHttpResponseV1Schema.safeParse({
+        status: 201,
+        body: {
+          ...rotationMetadata,
+          runnerToken: "one-time-plaintext",
+          replayed: false,
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      RunnerCredentialRotationHttpResponseV1Schema.safeParse({
+        status: 200,
+        body: {
+          ...rotationMetadata,
+          runnerToken: "must-not-replay",
+          replayed: true,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerCredentialRotationHttpResponseV1Schema.safeParse({
+        status: 201,
+        body: {
+          ...rotationMetadata,
+          credentialId: rotationMetadata.replacedCredentialId,
+          runnerToken: "one-time-plaintext",
+          replayed: false,
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("represents revoke as a token-free terminal tombstone on first response and replay", () => {
+    const revoked = {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      operationId: "op_revoke_1",
+      runnerId: "runner_1",
+      registrationGeneration: 3,
+      credentialGeneration: 8,
+      credentialState: "revoked",
+      revokedCredentialId: "runtime_credential_7",
+      credentialPurpose: "runtime",
+      activeCredentialId: null,
+      revokedAt: observedAt,
+    } as const;
+
+    for (const replayed of [false, true] as const) {
+      expect(
+        RunnerCredentialRevocationHttpResponseV1Schema.safeParse({
+          status: 200,
+          body: { ...revoked, replayed },
+        }).success,
+      ).toBe(true);
+      expect(
+        RunnerCredentialRevocationHttpResponseV1Schema.safeParse({
+          status: 200,
+          body: { ...revoked, replayed, runnerToken: "forbidden" },
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it.each([
+    "stale_credential",
+    "idempotency_conflict",
+    "invalid_state_transition",
+  ] as const)(
+    "accepts the endpoint-specific 409 %s response",
+    (error) => {
+      expect(
+        RunnerCredentialRotationHttpResponseV1Schema.safeParse({
+          status: 409,
+          body: {
+            schemaVersion: 1,
+            protocolVersion: "1.0",
+            error,
+            message: "Credential mutation conflict.",
+            requestId: "req_rotate_1",
+          },
+        }).success,
+      ).toBe(true);
+    },
+  );
+
+  it("rejects non-credential conflicts and observation-only errors", () => {
+    const body = {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      message: "Wrong endpoint error.",
+      requestId: "req_rotate_1",
+    } as const;
+
+    expect(
+      RunnerCredentialRotationHttpResponseV1Schema.safeParse({
+        status: 409,
+        body: { ...body, error: "stale_attempt" },
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerCredentialRevocationHttpResponseV1Schema.safeParse({
+        status: 422,
+        body: { ...body, error: "observation_policy_mismatch" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts only the strict rate-limited response body at 429", () => {
+    const response = {
+      status: 429,
+      body: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        error: "rate_limited",
+        message: "Try again later.",
+        requestId: "req_rotate_1",
+        retryAfterSeconds: 30,
+      },
+    } as const;
+
+    expect(RunnerCredentialRotationHttpResponseV1Schema.safeParse(response).success).toBe(true);
+    expect(
+      RunnerCredentialRotationHttpResponseV1Schema.safeParse({
+        ...response,
+        body: { ...response.body, retryAfterSeconds: 0 },
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerCredentialRotationHttpResponseV1Schema.safeParse({
+        ...response,
+        body: { ...response.body, error: "stale_credential" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("exposes a strict operator current-generation projection without credential material", () => {
+    const active = {
+      status: 200,
+      body: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        runnerId: "runner_1",
+        registrationGeneration: 3,
+        credentialGeneration: 8,
+        activeCredentialId: "runtime_credential_8",
+        credentialState: "active",
+        observedAt,
+      },
+    } as const;
+    expect(RunnerCredentialCurrentStateHttpResponseV1Schema.safeParse(active).success).toBe(true);
+    expect(
+      RunnerCredentialCurrentStateHttpResponseV1Schema.safeParse({
+        ...active,
+        body: { ...active.body, activeCredentialId: null },
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerCredentialCurrentStateHttpResponseV1Schema.safeParse({
+        ...active,
+        body: { ...active.body, runnerToken: "forbidden" },
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerCredentialCurrentStateHttpResponseV1Schema.safeParse({
+        ...active,
+        body: {
+          ...active.body,
+          activeCredentialId: null,
+          credentialState: "revoked",
+        },
+      }).success,
+    ).toBe(true);
   });
 });
 

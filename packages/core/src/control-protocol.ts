@@ -196,9 +196,19 @@ export const ControlConcealedNotFoundResponseV1Schema = z
 export const ControlConflictResponseV1Schema = z
   .object({
     ...VersionedResponseShape,
-    error: z.enum(["stale_attempt", "idempotency_conflict", "invalid_state_transition"]),
+    error: z.enum(["stale_attempt", "stale_credential", "idempotency_conflict", "invalid_state_transition"]),
     message: z.string().min(1),
     requestId: NonEmptyIdSchema,
+  })
+  .strict();
+
+export const ControlRateLimitedResponseV1Schema = z
+  .object({
+    ...VersionedResponseShape,
+    error: z.literal("rate_limited"),
+    message: z.string().min(1),
+    requestId: NonEmptyIdSchema,
+    retryAfterSeconds: z.number().int().positive(),
   })
   .strict();
 
@@ -273,6 +283,9 @@ const ControlObservationPolicyMismatchHttpResponseV1Schema = z
 const ControlProtocolUpgradeHttpResponseV1Schema = z
   .object({ status: z.literal(426), body: ControlProtocolUpgradeResponseV1Schema })
   .strict();
+const ControlRateLimitedHttpResponseV1Schema = z
+  .object({ status: z.literal(429), body: ControlRateLimitedResponseV1Schema })
+  .strict();
 
 export const ControlErrorHttpResponseV1Schema = z.union([
   ControlInvalidRequestHttpResponseV1Schema,
@@ -284,6 +297,7 @@ export const ControlErrorHttpResponseV1Schema = z.union([
   ControlRequestBodyTooLargeHttpResponseV1Schema,
   ControlObservationPolicyMismatchHttpResponseV1Schema,
   ControlProtocolUpgradeHttpResponseV1Schema,
+  ControlRateLimitedHttpResponseV1Schema,
 ]);
 
 export const RunnerRegistrationRequestV1Schema = z
@@ -350,6 +364,141 @@ export const RunnerCredentialHttpResponseV1Schema = z.union([
   z.object({ status: z.literal(201), body: FreshRunnerCredentialResponseV1Schema }).strict(),
   z.object({ status: z.literal(200), body: ReplayedRunnerCredentialResponseV1Schema }).strict(),
   ControlErrorHttpResponseV1Schema,
+]);
+
+const RunnerCredentialMutationRequestV1Shape = {
+  ...ControlMutationRequestV1Shape,
+  requiredCapabilities: z.tuple([z.literal("relay.credential-rotation.v1")]),
+  runnerId: NonEmptyIdSchema,
+  expectedRegistrationGeneration: z.number().int().positive(),
+  expectedCredentialGeneration: z.number().int().positive(),
+  expectedCredentialId: NonEmptyIdSchema,
+};
+
+export const RunnerCredentialRotationRequestV1Schema = z
+  .object(RunnerCredentialMutationRequestV1Shape)
+  .strict();
+
+export const RunnerCredentialRevocationRequestV1Schema = z
+  .object(RunnerCredentialMutationRequestV1Shape)
+  .strict();
+
+export const RunnerCredentialRotationMetadataV1Schema = z
+  .object({
+    ...VersionedResponseShape,
+    operationId: NonEmptyIdSchema,
+    runnerId: NonEmptyIdSchema,
+    registrationGeneration: z.number().int().positive(),
+    credentialGeneration: z.number().int().positive(),
+    replacedCredentialId: NonEmptyIdSchema,
+    credentialId: NonEmptyIdSchema,
+    credentialPurpose: z.literal("runtime"),
+    createdAt: ControlTimestampSchema,
+  })
+  .strict()
+  .refine((response) => response.credentialId !== response.replacedCredentialId, {
+    path: ["credentialId"],
+    message: "Rotated credential must have a new credential ID.",
+  });
+
+export const FreshRunnerCredentialRotationResponseV1Schema =
+  RunnerCredentialRotationMetadataV1Schema.safeExtend({
+    runnerToken: z.string().min(1),
+    replayed: z.literal(false),
+  });
+
+export const ReplayedRunnerCredentialRotationResponseV1Schema =
+  RunnerCredentialRotationMetadataV1Schema.safeExtend({
+    replayed: z.literal(true),
+  });
+
+export const RunnerCredentialRotationResponseV1Schema = z.discriminatedUnion("replayed", [
+  FreshRunnerCredentialRotationResponseV1Schema,
+  ReplayedRunnerCredentialRotationResponseV1Schema,
+]);
+
+export const RunnerCredentialRevocationResponseV1Schema = z
+  .object({
+    ...VersionedResponseShape,
+    operationId: NonEmptyIdSchema,
+    runnerId: NonEmptyIdSchema,
+    registrationGeneration: z.number().int().positive(),
+    credentialGeneration: z.number().int().positive(),
+    credentialState: z.literal("revoked"),
+    revokedCredentialId: NonEmptyIdSchema,
+    credentialPurpose: z.literal("runtime"),
+    activeCredentialId: z.null(),
+    revokedAt: ControlTimestampSchema,
+    replayed: z.boolean(),
+  })
+  .strict();
+
+export const RunnerCredentialCurrentStateResponseV1Schema = z
+  .object({
+    ...VersionedResponseShape,
+    runnerId: NonEmptyIdSchema,
+    registrationGeneration: z.number().int().positive(),
+    credentialGeneration: z.number().int().positive(),
+    activeCredentialId: NonEmptyIdSchema.nullable(),
+    credentialState: z.enum(["active", "revoked"]),
+    observedAt: ControlTimestampSchema,
+  })
+  .strict()
+  .superRefine((response, context) => {
+    if (response.credentialState === "active" && response.activeCredentialId === null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["activeCredentialId"],
+        message: "Active credential state requires an active credential ID.",
+      });
+    }
+    if (response.credentialState === "revoked" && response.activeCredentialId !== null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["activeCredentialId"],
+        message: "Revoked credential state cannot expose an active credential ID.",
+      });
+    }
+  });
+
+const RunnerCredentialMutationConflictResponseV1Schema = z
+  .object({
+    ...VersionedResponseShape,
+    error: z.enum(["stale_credential", "idempotency_conflict", "invalid_state_transition"]),
+    message: z.string().min(1),
+    requestId: NonEmptyIdSchema,
+  })
+  .strict();
+
+const RunnerCredentialMutationErrorHttpResponseV1Schema = z.union([
+  ControlInvalidRequestHttpResponseV1Schema,
+  ControlInvalidCredentialHttpResponseV1Schema,
+  ControlInsufficientScopeHttpResponseV1Schema,
+  ControlConcealedNotFoundHttpResponseV1Schema,
+  z.object({ status: z.literal(409), body: RunnerCredentialMutationConflictResponseV1Schema }).strict(),
+  ControlCapabilityRequiredHttpResponseV1Schema,
+  ControlRequestBodyTooLargeHttpResponseV1Schema,
+  ControlProtocolUpgradeHttpResponseV1Schema,
+  ControlRateLimitedHttpResponseV1Schema,
+]);
+
+export const RunnerCredentialRotationHttpResponseV1Schema = z.union([
+  z.object({ status: z.literal(201), body: FreshRunnerCredentialRotationResponseV1Schema }).strict(),
+  z.object({ status: z.literal(200), body: ReplayedRunnerCredentialRotationResponseV1Schema }).strict(),
+  RunnerCredentialMutationErrorHttpResponseV1Schema,
+]);
+
+export const RunnerCredentialRevocationHttpResponseV1Schema = z.union([
+  z.object({ status: z.literal(200), body: RunnerCredentialRevocationResponseV1Schema }).strict(),
+  RunnerCredentialMutationErrorHttpResponseV1Schema,
+]);
+
+export const RunnerCredentialCurrentStateHttpResponseV1Schema = z.union([
+  z.object({ status: z.literal(200), body: RunnerCredentialCurrentStateResponseV1Schema }).strict(),
+  ControlInvalidCredentialHttpResponseV1Schema,
+  ControlInsufficientScopeHttpResponseV1Schema,
+  ControlConcealedNotFoundHttpResponseV1Schema,
+  ControlRateLimitedHttpResponseV1Schema,
 ]);
 
 export const ReceiptAttemptRefV1Schema = z
@@ -911,6 +1060,13 @@ export type RunnerRegistrationRequestV1 = z.infer<typeof RunnerRegistrationReque
 export type RunnerCredentialReprovisionRequestV1 = z.infer<typeof RunnerCredentialReprovisionRequestV1Schema>;
 export type RunnerCredentialMetadataV1 = z.infer<typeof RunnerCredentialMetadataV1Schema>;
 export type RunnerCredentialResponseV1 = z.infer<typeof RunnerCredentialResponseV1Schema>;
+export type RunnerCredentialRotationRequestV1 = z.infer<typeof RunnerCredentialRotationRequestV1Schema>;
+export type RunnerCredentialRevocationRequestV1 = z.infer<typeof RunnerCredentialRevocationRequestV1Schema>;
+export type RunnerCredentialRotationResponseV1 = z.infer<typeof RunnerCredentialRotationResponseV1Schema>;
+export type RunnerCredentialRevocationResponseV1 = z.infer<typeof RunnerCredentialRevocationResponseV1Schema>;
+export type RunnerCredentialCurrentStateResponseV1 = z.infer<
+  typeof RunnerCredentialCurrentStateResponseV1Schema
+>;
 export type RunnerReadinessReceiptEnvelopeV1 = z.infer<typeof RunnerReadinessReceiptEnvelopeV1Schema>;
 export type AdmissionPolicySnapshotReceiptEnvelopeV1 = z.infer<typeof AdmissionPolicySnapshotReceiptEnvelopeV1Schema>;
 export type WorkThreadRefReceiptEnvelopeV1 = z.infer<typeof WorkThreadRefReceiptEnvelopeV1Schema>;
