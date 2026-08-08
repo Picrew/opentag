@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { canonicalJsonStringify } from "./canonical-json.js";
+import { isCredentialSafeText } from "./credential-safety.js";
 import { CompletionReasonCodeSchema } from "./schema.js";
 
 export const CONTROL_SCHEMA_VERSION = 1 as const;
@@ -96,6 +98,196 @@ export const CallbackObservationReasonCodeV1Schema = z.enum([
   "provider_rejected",
   "provider_timeout",
 ]);
+
+export const PermissionResolutionReasonCodeV1Schema = z.enum([
+  "human_approval_required",
+  "human_approved",
+  "human_denied",
+  "attempt_stale",
+  "policy_stale",
+]);
+
+export const PermissionDecisionV1Schema = z.enum(["allow_once", "deny"]);
+export const PermissionResolutionStateV1Schema = z.enum([
+  "waiting",
+  "authorized",
+  "denied",
+  "stale",
+]);
+
+export const PermissionStableIdV1Schema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u)
+  .refine(isCredentialSafeText, "Stable ID must not contain credential-like data.");
+
+export const PermissionActionFamilyV1Schema = z
+  .string()
+  .regex(/^[a-z][a-z0-9._-]{0,63}$/u)
+  .refine(isCredentialSafeText, "Action family must not contain credential-like data.");
+
+export const PermissionScopeV1Schema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z][a-z0-9._-]{0,63}:[a-z][a-z0-9._-]{0,62}$/u)
+  .refine(isCredentialSafeText, "Permission scope must not contain credential-like data.");
+
+export const PermissionScopesV1Schema = sortedUniqueArray(PermissionScopeV1Schema).min(1).max(32);
+
+const PermissionActionSummaryV1Shape = {
+  actionId: PermissionStableIdV1Schema,
+  actionFamily: PermissionActionFamilyV1Schema,
+  riskTier: z.enum(["low", "medium", "high", "critical"]),
+  targetFingerprint: ReceiptDigestSchema,
+  permissionScopes: PermissionScopesV1Schema,
+};
+
+const PermissionMutationRequestV1Shape = {
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: RequiredRelayCapabilitiesSchema,
+  requestId: PermissionStableIdV1Schema,
+  operationId: PermissionStableIdV1Schema,
+};
+
+const PermissionAttemptRefV1Schema = z
+  .object({
+    attemptId: PermissionStableIdV1Schema,
+    attemptNumber: z.number().int().positive(),
+    epoch: z.number().int().positive(),
+    fencingTokenDigest: ReceiptDigestSchema,
+  })
+  .strict()
+  .superRefine((attempt, ctx) => {
+    if (attempt.epoch !== attempt.attemptNumber) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["epoch"],
+        message: "Attempt epoch must equal the Run-scoped attempt number.",
+      });
+    }
+  });
+
+export const RunnerPermissionAttemptV1Schema = z
+  .object({
+    attemptId: PermissionStableIdV1Schema,
+    attemptNumber: z.number().int().positive(),
+    epoch: z.number().int().positive(),
+    fencingToken: z.string().min(1).max(4096),
+    fencingTokenDigest: ReceiptDigestSchema,
+  })
+  .strict()
+  .superRefine((attempt, ctx) => {
+    if (attempt.epoch !== attempt.attemptNumber) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["epoch"],
+        message: "Attempt epoch must equal the Run-scoped attempt number.",
+      });
+    }
+  });
+
+export const RunnerPermissionRequestV1Schema = z
+  .object({
+    ...PermissionMutationRequestV1Shape,
+    organizationId: PermissionStableIdV1Schema,
+    runnerId: PermissionStableIdV1Schema,
+    runId: PermissionStableIdV1Schema,
+    attempt: RunnerPermissionAttemptV1Schema,
+    permissionRequestId: PermissionStableIdV1Schema,
+    ...PermissionActionSummaryV1Shape,
+    policySnapshotRef: PermissionStableIdV1Schema,
+    policySnapshotDigest: ReceiptDigestSchema,
+    permissionRequestDigest: ReceiptDigestSchema,
+    requestedAt: ControlTimestampSchema,
+  })
+  .strict()
+  .superRefine((request, ctx) => {
+    if (!request.requiredCapabilities.includes("relay.permission.v1")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["requiredCapabilities"],
+        message: "Permission capability is required.",
+      });
+    }
+  });
+
+export const PermissionRequestDigestInputV1Schema = z
+  .object({
+    schemaVersion: ControlSchemaVersionSchema,
+    protocolVersion: ControlProtocolVersionSchema,
+    requiredCapabilities: RequiredRelayCapabilitiesSchema,
+    organizationId: PermissionStableIdV1Schema,
+    runnerId: PermissionStableIdV1Schema,
+    runId: PermissionStableIdV1Schema,
+    attempt: PermissionAttemptRefV1Schema,
+    permissionRequestId: PermissionStableIdV1Schema,
+    ...PermissionActionSummaryV1Shape,
+    policySnapshotRef: PermissionStableIdV1Schema,
+    policySnapshotDigest: ReceiptDigestSchema,
+    requestedAt: ControlTimestampSchema,
+  })
+  .strict();
+
+export function buildPermissionRequestDigestInputV1(
+  input: z.input<typeof PermissionRequestDigestInputV1Schema>,
+): z.output<typeof PermissionRequestDigestInputV1Schema> {
+  return PermissionRequestDigestInputV1Schema.parse(input);
+}
+
+async function sha256Utf8V1(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+export function computePermissionFencingTokenDigestV1(rawFencingToken: string): Promise<string> {
+  return sha256Utf8V1(rawFencingToken);
+}
+
+export function computePermissionRequestDigestV1(
+  source: z.input<typeof PermissionRequestDigestInputV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(buildPermissionRequestDigestInputV1(source)));
+}
+
+export const HumanPermissionDecisionRequestV1Schema = z
+  .object({
+    ...PermissionMutationRequestV1Shape,
+    organizationId: PermissionStableIdV1Schema,
+    runId: PermissionStableIdV1Schema,
+    attempt: PermissionAttemptRefV1Schema,
+    actionId: PermissionStableIdV1Schema,
+    permissionRequestId: PermissionStableIdV1Schema,
+    permissionRequestDigest: ReceiptDigestSchema,
+    policySnapshotDigest: ReceiptDigestSchema,
+    decisionId: PermissionStableIdV1Schema,
+    decision: PermissionDecisionV1Schema,
+    decidedAt: ControlTimestampSchema,
+  })
+  .strict()
+  .superRefine((request, ctx) => {
+    if (!request.requiredCapabilities.includes("relay.permission.v1")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["requiredCapabilities"],
+        message: "Permission capability is required.",
+      });
+    }
+  });
+
+export const RunnerPermissionCurrentQueryV1Schema = z
+  .object({
+    organizationId: PermissionStableIdV1Schema,
+    runnerId: PermissionStableIdV1Schema,
+    runId: PermissionStableIdV1Schema,
+    attempt: PermissionAttemptRefV1Schema,
+    actionId: PermissionStableIdV1Schema,
+    permissionRequestId: PermissionStableIdV1Schema,
+    permissionRequestDigest: ReceiptDigestSchema,
+  })
+  .strict();
 
 export const ControlVersionNegotiationV1Schema = z
   .object({
@@ -704,6 +896,138 @@ export const RunnerReadinessReceiptEnvelopeV1Schema = z
     }
   });
 
+export const PermissionResolutionPayloadV1Schema = z
+  .object({
+    resolutionId: PermissionStableIdV1Schema,
+    permissionRequestId: PermissionStableIdV1Schema,
+    permissionRequestDigest: ReceiptDigestSchema,
+    ...PermissionActionSummaryV1Shape,
+    policySnapshotRef: PermissionStableIdV1Schema,
+    policySnapshotDigest: ReceiptDigestSchema,
+    state: PermissionResolutionStateV1Schema,
+    decision: PermissionDecisionV1Schema.optional(),
+    decisionRef: PermissionStableIdV1Schema.optional(),
+    decisionActorRef: PermissionStableIdV1Schema.optional(),
+    reasonCode: PermissionResolutionReasonCodeV1Schema,
+    requestedAt: ControlTimestampSchema,
+    decidedAt: ControlTimestampSchema.optional(),
+    observedAt: ControlTimestampSchema,
+    nextAction: z.literal("wait_for_operator").optional(),
+  })
+  .strict()
+  .superRefine((resolution, ctx) => {
+    const humanDecisionFields = [
+      resolution.decision,
+      resolution.decisionRef,
+      resolution.decisionActorRef,
+      resolution.decidedAt,
+    ];
+    if (resolution.state === "waiting") {
+      if (resolution.reasonCode !== "human_approval_required") {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reasonCode"], message: "Waiting requires human_approval_required." });
+      }
+      if (resolution.nextAction === undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["nextAction"], message: "Waiting requires a safe next action." });
+      }
+      if (humanDecisionFields.some((value) => value !== undefined)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["decision"], message: "Waiting must not claim a decision." });
+      }
+      return;
+    }
+    if (resolution.nextAction !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["nextAction"], message: "Terminal resolution must not include a waiting next action." });
+    }
+    if (resolution.state === "authorized" || resolution.state === "denied") {
+      const expectedDecision = resolution.state === "authorized" ? "allow_once" : "deny";
+      const expectedReason = resolution.state === "authorized" ? "human_approved" : "human_denied";
+      if (resolution.decision !== expectedDecision) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["decision"], message: `State requires ${expectedDecision}.` });
+      }
+      if (resolution.reasonCode !== expectedReason) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reasonCode"], message: `State requires ${expectedReason}.` });
+      }
+      for (const [field, value] of [
+        ["decisionRef", resolution.decisionRef],
+        ["decisionActorRef", resolution.decisionActorRef],
+        ["decidedAt", resolution.decidedAt],
+      ] as const) {
+        if (value === undefined) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: "Human decision attribution is required." });
+        }
+      }
+      return;
+    }
+    if (resolution.reasonCode !== "attempt_stale" && resolution.reasonCode !== "policy_stale") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reasonCode"], message: "Stale requires an allowlisted stale reason." });
+    }
+    if (humanDecisionFields.some((value) => value !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["decision"], message: "Stale must not claim a human decision." });
+    }
+  });
+
+export const PermissionResolutionReceiptEnvelopeV1Schema = z
+  .object({
+    ...ReceiptEnvelopeBaseShape,
+    receiptId: PermissionStableIdV1Schema,
+    organizationId: PermissionStableIdV1Schema,
+    operationId: PermissionStableIdV1Schema,
+    producer: z.object({ kind: z.literal("cloud"), id: PermissionStableIdV1Schema }).strict(),
+    identity: z
+      .object({
+        namespace: z.literal("opentag.control.receipt/permission-resolution/v1"),
+        parts: z.array(PermissionStableIdV1Schema).length(5),
+      })
+      .strict(),
+    receiptKind: z.literal("permission_resolution"),
+    runId: PermissionStableIdV1Schema,
+    attempt: PermissionAttemptRefV1Schema,
+    payload: PermissionResolutionPayloadV1Schema,
+  })
+  .strict()
+  .superRefine((receipt, ctx) => {
+    if (!receipt.requiredCapabilities.includes("relay.permission.v1")) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requiredCapabilities"], message: "Permission capability is required." });
+    }
+    if (!hasExactReceiptIdentity(receipt.identity, "opentag.control.receipt/permission-resolution/v1", [
+      receipt.organizationId,
+      receipt.runId,
+      receipt.attempt.attemptId,
+      receipt.payload.actionId,
+      receipt.payload.resolutionId,
+    ])) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["identity"], message: "Permission resolution identity tuple is invalid." });
+    }
+    if (receipt.payload.observedAt !== receipt.observedAt) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["payload", "observedAt"], message: "Permission observation time must match the envelope." });
+    }
+  });
+
+const PermissionResolutionTerminalReceiptEnvelopeV1Schema = PermissionResolutionReceiptEnvelopeV1Schema.refine(
+  (receipt) => receipt.payload.state !== "waiting",
+  { path: ["payload", "state"], message: "HTTP 200 permission result must be terminal." },
+);
+const PermissionResolutionDecisionReceiptEnvelopeV1Schema = PermissionResolutionReceiptEnvelopeV1Schema.refine(
+  (receipt) => receipt.payload.state === "authorized" || receipt.payload.state === "denied",
+  { path: ["payload", "state"], message: "A human decision must authorize or deny." },
+);
+const PermissionResolutionWaitingReceiptEnvelopeV1Schema = PermissionResolutionReceiptEnvelopeV1Schema.refine(
+  (receipt) => receipt.payload.state === "waiting",
+  { path: ["payload", "state"], message: "HTTP 202 permission result must be waiting." },
+);
+
+export const RunnerPermissionRequestHttpResponseV1Schema = z
+  .object({ status: z.literal(202), body: PermissionResolutionWaitingReceiptEnvelopeV1Schema })
+  .strict();
+
+export const HumanPermissionDecisionHttpResponseV1Schema = z
+  .object({ status: z.literal(200), body: PermissionResolutionDecisionReceiptEnvelopeV1Schema })
+  .strict();
+
+export const PermissionResolutionCurrentHttpResponseV1Schema = z.union([
+  z.object({ status: z.literal(200), body: PermissionResolutionTerminalReceiptEnvelopeV1Schema }).strict(),
+  z.object({ status: z.literal(202), body: PermissionResolutionWaitingReceiptEnvelopeV1Schema }).strict(),
+]);
+
 export const AdmissionPolicySnapshotPayloadV1Schema = z
   .object({
     snapshotId: NonEmptyIdSchema,
@@ -1116,6 +1440,22 @@ export type RunnerCredentialCurrentStateResponseV1 = z.infer<
   typeof RunnerCredentialCurrentStateResponseV1Schema
 >;
 export type RunnerReadinessReceiptEnvelopeV1 = z.infer<typeof RunnerReadinessReceiptEnvelopeV1Schema>;
+export type RunnerPermissionRequestV1 = z.infer<typeof RunnerPermissionRequestV1Schema>;
+export type PermissionRequestDigestInputV1 = z.infer<typeof PermissionRequestDigestInputV1Schema>;
+export type HumanPermissionDecisionRequestV1 = z.infer<typeof HumanPermissionDecisionRequestV1Schema>;
+export type RunnerPermissionCurrentQueryV1 = z.infer<typeof RunnerPermissionCurrentQueryV1Schema>;
+export type PermissionResolutionReceiptEnvelopeV1 = z.infer<
+  typeof PermissionResolutionReceiptEnvelopeV1Schema
+>;
+export type RunnerPermissionRequestHttpResponseV1 = z.infer<
+  typeof RunnerPermissionRequestHttpResponseV1Schema
+>;
+export type HumanPermissionDecisionHttpResponseV1 = z.infer<
+  typeof HumanPermissionDecisionHttpResponseV1Schema
+>;
+export type PermissionResolutionCurrentHttpResponseV1 = z.infer<
+  typeof PermissionResolutionCurrentHttpResponseV1Schema
+>;
 export type AdmissionPolicySnapshotReceiptEnvelopeV1 = z.infer<typeof AdmissionPolicySnapshotReceiptEnvelopeV1Schema>;
 export type WorkThreadRefReceiptEnvelopeV1 = z.infer<typeof WorkThreadRefReceiptEnvelopeV1Schema>;
 export type CompletionContractRefReceiptEnvelopeV1 = z.infer<typeof CompletionContractRefReceiptEnvelopeV1Schema>;

@@ -17,11 +17,19 @@ import {
   CallbackAttemptObservationReceiptEnvelopeV1Schema,
   CallbackIntentObservationReceiptEnvelopeV1Schema,
   CallbackProviderObservationReceiptEnvelopeV1Schema,
+  computePermissionFencingTokenDigestV1,
+  computePermissionRequestDigestV1,
   canonicalJsonStringify,
   CompletionAssessmentReceiptEnvelopeV1Schema,
   CompletionContractRefReceiptEnvelopeV1Schema,
   ControlErrorHttpResponseV1Schema,
+  HumanPermissionDecisionHttpResponseV1Schema,
+  HumanPermissionDecisionRequestV1Schema,
+  PermissionResolutionCurrentHttpResponseV1Schema,
   RelayCapabilitiesResponseV1Schema,
+  RunnerPermissionCurrentQueryV1Schema,
+  RunnerPermissionRequestHttpResponseV1Schema,
+  RunnerPermissionRequestV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
   RunnerCredentialHttpResponseV1Schema,
   RunnerCredentialReprovisionRequestV1Schema,
@@ -67,6 +75,10 @@ import {
   type RunnerDirectoryEntry,
   type RunnerRegistrationRequestV1,
   type RunnerReadinessReceiptEnvelopeV1,
+  type HumanPermissionDecisionRequestV1,
+  type PermissionResolutionReceiptEnvelopeV1,
+  type RunnerPermissionCurrentQueryV1,
+  type RunnerPermissionRequestV1,
   type WorkThreadRefReceiptEnvelopeV1,
   type CompletionContractRefReceiptEnvelopeV1,
   type CompletionAssessmentReceiptEnvelopeV1,
@@ -89,6 +101,10 @@ import {
 export type {
   FactoryRecipeSnapshot,
   FactoryRecipeSnapshotInput,
+  HumanPermissionDecisionRequestV1,
+  PermissionResolutionReceiptEnvelopeV1,
+  RunnerPermissionCurrentQueryV1,
+  RunnerPermissionRequestV1,
   Workstream,
   WorkstreamAdmissionBatchInput,
   WorkstreamAdmissionBatchReceipt,
@@ -322,6 +338,22 @@ export type CallbackObservationControlReceiptResult =
       receipt: CallbackObservationReceiptEnvelopeV1;
     };
 
+export type RunnerPermissionRequestControlV1Result = {
+  status: 202;
+  outcome: "waiting";
+  receipt: PermissionResolutionReceiptEnvelopeV1;
+};
+
+export type HumanPermissionDecisionControlV1Result = {
+  status: 200;
+  outcome: "resolved";
+  receipt: PermissionResolutionReceiptEnvelopeV1;
+};
+
+export type PermissionResolutionCurrentControlV1Result =
+  | RunnerPermissionRequestControlV1Result
+  | HumanPermissionDecisionControlV1Result;
+
 export type OpenTagClientOptions = {
   dispatcherUrl: string;
   pairingToken?: string;
@@ -545,6 +577,9 @@ export type OpenTagClient = {
   registerRunnerControlV1(input: RunnerRegistrationRequestV1): Promise<RunnerCredentialResponseV1>;
   reprovisionRunnerControlV1(input: RunnerCredentialReprovisionRequestV1): Promise<RunnerCredentialResponseV1>;
   reportRunnerReadinessControlV1(input: RunnerReadinessReceiptEnvelopeV1): Promise<ControlReceiptResult<RunnerReadinessReceiptEnvelopeV1>>;
+  requestActionPermissionControlV1(input: RunnerPermissionRequestV1): Promise<RunnerPermissionRequestControlV1Result>;
+  resolveActionPermissionControlV1(input: { runnerId: string; decision: HumanPermissionDecisionRequestV1 }): Promise<HumanPermissionDecisionControlV1Result>;
+  getActionPermissionCurrentControlV1(input: RunnerPermissionCurrentQueryV1): Promise<PermissionResolutionCurrentControlV1Result>;
   projectWorkThreadRefControlV1(input: WorkThreadRefReceiptEnvelopeV1): Promise<ControlReceiptResult<WorkThreadRefReceiptEnvelopeV1>>;
   projectCompletionContractRefControlV1(input: CompletionContractRefReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionContractRefReceiptEnvelopeV1>>;
   projectCompletionAssessmentControlV1(input: CompletionAssessmentReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionAssessmentReceiptEnvelopeV1>>;
@@ -911,6 +946,183 @@ async function parseControlReceiptResponse<T extends {
   };
 }
 
+type PermissionResolutionExpectedIdentity = {
+  operationId?: string;
+  organizationId: string;
+  runId: string;
+  attemptId: string;
+  attemptNumber?: number;
+  epoch?: number;
+  fencingTokenDigest?: string;
+  actionId: string;
+  permissionRequestId: string;
+  permissionRequestDigest: string;
+  policySnapshotDigest?: string;
+  decisionId?: string;
+  decision?: "allow_once" | "deny";
+  decidedAt?: string;
+};
+
+async function canonicalSha256Digest(value: unknown): Promise<string> {
+  const bytes = new TextEncoder().encode(canonicalJsonStringify(value));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function assertPermissionResolutionDigests(
+  receipt: PermissionResolutionReceiptEnvelopeV1,
+  action: string,
+  status: number
+): Promise<void> {
+  const expectedPayloadDigest = await canonicalSha256Digest(receipt.payload);
+  const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
+  const expectedReceiptDigest = await canonicalSha256Digest(receiptDigestInput);
+  if (
+    receipt.payloadDigest !== expectedPayloadDigest
+    || receipt.receiptDigest !== expectedReceiptDigest
+  ) {
+    throw new OpenTagClientHttpError(action, status, "invalid_control_v1_response");
+  }
+}
+
+function assertPermissionResolutionIdentity(
+  receipt: PermissionResolutionReceiptEnvelopeV1,
+  expected: PermissionResolutionExpectedIdentity,
+  action: string,
+  status: number
+): void {
+  if (
+    (expected.operationId !== undefined && receipt.operationId !== expected.operationId)
+    || receipt.organizationId !== expected.organizationId
+    || receipt.runId !== expected.runId
+    || receipt.attempt.attemptId !== expected.attemptId
+    || (expected.attemptNumber !== undefined
+      && receipt.attempt.attemptNumber !== expected.attemptNumber)
+    || (expected.epoch !== undefined && receipt.attempt.epoch !== expected.epoch)
+    || (expected.fencingTokenDigest !== undefined
+      && receipt.attempt.fencingTokenDigest !== expected.fencingTokenDigest)
+    || receipt.payload.actionId !== expected.actionId
+    || receipt.payload.permissionRequestId !== expected.permissionRequestId
+    || receipt.payload.permissionRequestDigest !== expected.permissionRequestDigest
+    || (expected.policySnapshotDigest !== undefined
+      && receipt.payload.policySnapshotDigest !== expected.policySnapshotDigest)
+    || (expected.decisionId !== undefined && receipt.payload.decisionRef !== expected.decisionId)
+    || (expected.decision !== undefined && receipt.payload.decision !== expected.decision)
+    || (expected.decidedAt !== undefined && receipt.payload.decidedAt !== expected.decidedAt)
+  ) {
+    throw new OpenTagClientHttpError(action, status, "response_identity_mismatch");
+  }
+}
+
+async function parseRunnerPermissionRequestControlV1Response(
+  response: Response,
+  action: string,
+  trustedOrigin: string,
+  request: RunnerPermissionRequestV1
+): Promise<RunnerPermissionRequestControlV1Result> {
+  const body = await parseControlJson(response, action, trustedOrigin);
+  if (response.status !== 202) {
+    throwControlV1Error(response, body, action, request.requestId);
+  }
+  const parsed = RunnerPermissionRequestHttpResponseV1Schema.safeParse({ status: response.status, body });
+  if (!parsed.success) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+  const receipt = parsed.data.body;
+  await assertPermissionResolutionDigests(receipt, action, response.status);
+  assertPermissionResolutionIdentity(receipt, {
+    operationId: request.operationId,
+    organizationId: request.organizationId,
+    runId: request.runId,
+    attemptId: request.attempt.attemptId,
+    attemptNumber: request.attempt.attemptNumber,
+    epoch: request.attempt.epoch,
+    fencingTokenDigest: request.attempt.fencingTokenDigest,
+    actionId: request.actionId,
+    permissionRequestId: request.permissionRequestId,
+    permissionRequestDigest: request.permissionRequestDigest,
+    policySnapshotDigest: request.policySnapshotDigest,
+  }, action, response.status);
+  if (
+    receipt.payload.actionFamily !== request.actionFamily
+    || receipt.payload.riskTier !== request.riskTier
+    || receipt.payload.targetFingerprint !== request.targetFingerprint
+    || canonicalJsonStringify(receipt.payload.permissionScopes)
+      !== canonicalJsonStringify(request.permissionScopes)
+    || receipt.payload.policySnapshotRef !== request.policySnapshotRef
+    || receipt.payload.requestedAt !== request.requestedAt
+  ) {
+    throw new OpenTagClientHttpError(action, response.status, "response_identity_mismatch");
+  }
+  return { status: 202, outcome: "waiting", receipt };
+}
+
+async function parseHumanPermissionDecisionControlV1Response(
+  response: Response,
+  action: string,
+  trustedOrigin: string,
+  request: HumanPermissionDecisionRequestV1
+): Promise<HumanPermissionDecisionControlV1Result> {
+  const body = await parseControlJson(response, action, trustedOrigin);
+  if (response.status !== 200) {
+    throwControlV1Error(response, body, action, request.requestId);
+  }
+  const parsed = HumanPermissionDecisionHttpResponseV1Schema.safeParse({ status: response.status, body });
+  if (!parsed.success) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+  const receipt = parsed.data.body;
+  await assertPermissionResolutionDigests(receipt, action, response.status);
+  assertPermissionResolutionIdentity(receipt, {
+    operationId: request.operationId,
+    organizationId: request.organizationId,
+    runId: request.runId,
+    attemptId: request.attempt.attemptId,
+    attemptNumber: request.attempt.attemptNumber,
+    epoch: request.attempt.epoch,
+    fencingTokenDigest: request.attempt.fencingTokenDigest,
+    actionId: request.actionId,
+    permissionRequestId: request.permissionRequestId,
+    permissionRequestDigest: request.permissionRequestDigest,
+    policySnapshotDigest: request.policySnapshotDigest,
+    decisionId: request.decisionId,
+    decision: request.decision,
+    decidedAt: request.decidedAt,
+  }, action, response.status);
+  return { status: 200, outcome: "resolved", receipt };
+}
+
+async function parsePermissionResolutionCurrentControlV1Response(
+  response: Response,
+  action: string,
+  trustedOrigin: string,
+  query: RunnerPermissionCurrentQueryV1
+): Promise<PermissionResolutionCurrentControlV1Result> {
+  const body = await parseControlJson(response, action, trustedOrigin);
+  if (response.status !== 200 && response.status !== 202) {
+    throwControlV1Error(response, body, action);
+  }
+  const parsed = PermissionResolutionCurrentHttpResponseV1Schema.safeParse({
+    status: response.status,
+    body,
+  });
+  if (!parsed.success) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+  const receipt = parsed.data.body;
+  await assertPermissionResolutionDigests(receipt, action, response.status);
+  assertPermissionResolutionIdentity(receipt, {
+    ...query,
+    attemptId: query.attempt.attemptId,
+    attemptNumber: query.attempt.attemptNumber,
+    epoch: query.attempt.epoch,
+    fencingTokenDigest: query.attempt.fencingTokenDigest,
+  }, action, response.status);
+  return response.status === 202
+    ? { status: 202, outcome: "waiting", receipt }
+    : { status: 200, outcome: "resolved", receipt };
+}
+
 async function parseRunnerCredentialControlV1Response(
   response: Response,
   action: string,
@@ -1126,6 +1338,115 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         RunnerReadinessReceiptEnvelopeV1Schema,
         undefined
       ) as Promise<ControlReceiptResult<RunnerReadinessReceiptEnvelopeV1>>;
+    },
+
+    async requestActionPermissionControlV1(input) {
+      const action = "requestActionPermissionControlV1";
+      const request = RunnerPermissionRequestV1Schema.parse(input);
+      const expectedFencingTokenDigest = await computePermissionFencingTokenDigestV1(
+        request.attempt.fencingToken
+      );
+      if (request.attempt.fencingTokenDigest !== expectedFencingTokenDigest) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_permission_fencing_token_digest"
+        );
+      }
+      const expectedPermissionRequestDigest = await computePermissionRequestDigestV1({
+        schemaVersion: request.schemaVersion,
+        protocolVersion: request.protocolVersion,
+        requiredCapabilities: request.requiredCapabilities,
+        organizationId: request.organizationId,
+        runnerId: request.runnerId,
+        runId: request.runId,
+        attempt: {
+          attemptId: request.attempt.attemptId,
+          attemptNumber: request.attempt.attemptNumber,
+          epoch: request.attempt.epoch,
+          fencingTokenDigest: request.attempt.fencingTokenDigest,
+        },
+        permissionRequestId: request.permissionRequestId,
+        actionId: request.actionId,
+        actionFamily: request.actionFamily,
+        riskTier: request.riskTier,
+        targetFingerprint: request.targetFingerprint,
+        permissionScopes: request.permissionScopes,
+        policySnapshotRef: request.policySnapshotRef,
+        policySnapshotDigest: request.policySnapshotDigest,
+        requestedAt: request.requestedAt,
+      });
+      if (request.permissionRequestDigest !== expectedPermissionRequestDigest) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_permission_request_digest"
+        );
+      }
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/runs/${encodeURIComponent(request.runId)}/action-permissions`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action
+      );
+      return parseRunnerPermissionRequestControlV1Response(
+        response,
+        action,
+        trustedControlOrigin,
+        request
+      );
+    },
+
+    async resolveActionPermissionControlV1(input) {
+      const runnerId = RunnerPermissionCurrentQueryV1Schema.shape.runnerId.parse(input.runnerId);
+      const decision = HumanPermissionDecisionRequestV1Schema.parse(input.decision);
+      const action = "resolveActionPermissionControlV1";
+      const token = requireControlCredential(options.controlCredential, "operator");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(runnerId)}/runs/${encodeURIComponent(decision.runId)}/action-permissions/${encodeURIComponent(decision.actionId)}/resolve`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(decision),
+        },
+        action
+      );
+      return parseHumanPermissionDecisionControlV1Response(
+        response,
+        action,
+        trustedControlOrigin,
+        decision
+      );
+    },
+
+    async getActionPermissionCurrentControlV1(input) {
+      const query = RunnerPermissionCurrentQueryV1Schema.parse(input);
+      const action = "getActionPermissionCurrentControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const search = new URLSearchParams({
+        organizationId: query.organizationId,
+        attemptId: query.attempt.attemptId,
+        attemptNumber: String(query.attempt.attemptNumber),
+        epoch: String(query.attempt.epoch),
+        fencingTokenDigest: query.attempt.fencingTokenDigest,
+        permissionRequestId: query.permissionRequestId,
+        permissionRequestDigest: query.permissionRequestDigest,
+      });
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(query.runnerId)}/runs/${encodeURIComponent(query.runId)}/action-permissions/${encodeURIComponent(query.actionId)}/current?${search.toString()}`,
+        { method: "GET", headers: authHeaders(token) },
+        action
+      );
+      return parsePermissionResolutionCurrentControlV1Response(
+        response,
+        action,
+        trustedControlOrigin,
+        query
+      );
     },
 
     async projectWorkThreadRefControlV1(input) {

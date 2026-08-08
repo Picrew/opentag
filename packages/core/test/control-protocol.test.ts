@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   CONTROL_PROTOCOL_VERSION,
@@ -15,6 +16,14 @@ import {
   ControlMutationRequestV1Schema,
   ControlErrorHttpResponseV1Schema,
   ControlWaitingHttpResponseV1Schema,
+  buildPermissionRequestDigestInputV1,
+  computePermissionFencingTokenDigestV1,
+  computePermissionRequestDigestV1,
+  HumanPermissionDecisionHttpResponseV1Schema,
+  HumanPermissionDecisionRequestV1Schema,
+  PermissionRequestDigestInputV1Schema,
+  PermissionResolutionCurrentHttpResponseV1Schema,
+  PermissionResolutionReceiptEnvelopeV1Schema,
   ReceiptDigestSchema,
   NpmPackageVersionSchema,
   RelayCapabilitiesResponseV1Schema,
@@ -29,15 +38,24 @@ import {
   RunnerCredentialHttpResponseV1Schema,
   RunnerReadinessReasonCodeV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
+  RunnerPermissionCurrentQueryV1Schema,
+  RunnerPermissionRequestHttpResponseV1Schema,
+  RunnerPermissionRequestV1Schema,
   RunnerRegistrationRequestV1Schema,
   RunnerRegistrationResponseV1Schema,
   type CompletionAssessmentReceiptEnvelopeV1,
   type RunnerReadinessReceiptEnvelopeV1,
 } from "../src/control-protocol.js";
+import { canonicalJsonStringify } from "../src/canonical-json.js";
 
 const digest = `sha256:${"a".repeat(64)}`;
 const otherDigest = `sha256:${"b".repeat(64)}`;
 const observedAt = "2026-08-08T00:00:00.000Z";
+const publicFenceDigest = `sha256:${createHash("sha256").update("fence_secret_canary", "utf8").digest("hex")}`;
+
+function digestCanonical(value: unknown): string {
+  return `sha256:${createHash("sha256").update(canonicalJsonStringify(value)).digest("hex")}`;
+}
 
 function assessmentReceipt(): CompletionAssessmentReceiptEnvelopeV1 {
   return {
@@ -178,6 +196,362 @@ describe("OpenTag Control V1 version and capability negotiation", () => {
         idempotencyKey: "parallel-key",
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("permission V1 control protocol", () => {
+  const attempt = {
+    attemptId: "attempt_1",
+    attemptNumber: 2,
+    epoch: 2,
+    fencingTokenDigest: publicFenceDigest,
+  } as const;
+  const request = {
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    requiredCapabilities: ["relay.permission.v1"],
+    requestId: "transport_request_1",
+    operationId: "permission_operation_1",
+    organizationId: "org_1",
+    runnerId: "runner_1",
+    runId: "run_1",
+    attempt: {
+      attemptId: attempt.attemptId,
+      attemptNumber: attempt.attemptNumber,
+      epoch: attempt.epoch,
+      fencingToken: "fence_secret_canary",
+      fencingTokenDigest: attempt.fencingTokenDigest,
+    },
+    permissionRequestId: "permission_request_1",
+    actionId: "action_1",
+    actionFamily: "publish",
+    riskTier: "high",
+    targetFingerprint: otherDigest,
+    permissionScopes: ["npm:publish", "package:write"],
+    policySnapshotRef: "policy_1",
+    policySnapshotDigest: digest,
+    permissionRequestDigest: otherDigest,
+    requestedAt: observedAt,
+  } as const;
+  const digestSource = {
+    schemaVersion: request.schemaVersion,
+    protocolVersion: request.protocolVersion,
+    requiredCapabilities: request.requiredCapabilities,
+    organizationId: request.organizationId,
+    runnerId: request.runnerId,
+    runId: request.runId,
+    attempt,
+    permissionRequestId: request.permissionRequestId,
+    actionId: request.actionId,
+    actionFamily: request.actionFamily,
+    riskTier: request.riskTier,
+    targetFingerprint: request.targetFingerprint,
+    permissionScopes: request.permissionScopes,
+    policySnapshotRef: request.policySnapshotRef,
+    policySnapshotDigest: request.policySnapshotDigest,
+    requestedAt: request.requestedAt,
+  } as const;
+  const waitingReceipt = {
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    receiptKind: "permission_resolution",
+    receiptId: "permission_receipt_1",
+    organizationId: "org_1",
+    operationId: "permission_operation_1",
+    requiredCapabilities: ["relay.permission.v1"],
+    producer: { kind: "cloud", id: "control_1" },
+    identity: {
+      namespace: "opentag.control.receipt/permission-resolution/v1",
+      parts: ["org_1", "run_1", "attempt_1", "action_1", "resolution_1"],
+    },
+    observedAt,
+    payloadDigest: digest,
+    receiptDigest: otherDigest,
+    runId: "run_1",
+    attempt,
+    payload: {
+      resolutionId: "resolution_1",
+      permissionRequestId: "permission_request_1",
+      permissionRequestDigest: otherDigest,
+      actionId: "action_1",
+      actionFamily: "publish",
+      riskTier: "high",
+      targetFingerprint: otherDigest,
+      permissionScopes: ["npm:publish", "package:write"],
+      policySnapshotRef: "policy_1",
+      policySnapshotDigest: digest,
+      state: "waiting",
+      reasonCode: "human_approval_required",
+      requestedAt: observedAt,
+      observedAt,
+      nextAction: "wait_for_operator",
+    },
+  } as const;
+
+  it("accepts only a normalized, fenced Runner permission request", () => {
+    expect(RunnerPermissionRequestV1Schema.safeParse(request).success).toBe(true);
+    expect(RunnerPermissionCurrentQueryV1Schema.safeParse({
+      organizationId: request.organizationId,
+      runnerId: request.runnerId,
+      runId: request.runId,
+      attempt,
+      actionId: request.actionId,
+      permissionRequestId: request.permissionRequestId,
+      permissionRequestDigest: request.permissionRequestDigest,
+    }).success).toBe(true);
+    for (const [field, value] of [
+      ["action", { id: "action_1" }],
+      ["toolCallId", "tool_1"],
+      ["rawArgs", { command: "npm publish" }],
+      ["title", "Publish from /private/repo"],
+      ["path", "/private/repo"],
+      ["provider", "npm"],
+      ["metadata", {}],
+    ] as const) {
+      expect(RunnerPermissionRequestV1Schema.safeParse({ ...request, [field]: value }).success).toBe(false);
+    }
+    expect(RunnerPermissionRequestV1Schema.safeParse({
+      ...request,
+      permissionScopes: ["package:write", "npm:publish"],
+    }).success).toBe(false);
+    expect(RunnerPermissionRequestV1Schema.safeParse({
+      ...request,
+      attempt: { ...request.attempt, epoch: 3 },
+    }).success).toBe(false);
+  });
+
+  it("freezes public fence and permission request digest inputs without transport circularity", async () => {
+    expect(await computePermissionFencingTokenDigestV1("fence_secret_canary")).toBe(
+      "sha256:a512da91cdeeb1f7d044b56cabe5e37335094c4045e07ce6680630109e7cfef5",
+    );
+    const input = buildPermissionRequestDigestInputV1(digestSource);
+    expect(PermissionRequestDigestInputV1Schema.parse(input)).toEqual(digestSource);
+    expect(Object.keys(input)).not.toContain("requestId");
+    expect(Object.keys(input)).not.toContain("operationId");
+    expect(Object.keys(input)).not.toContain("permissionRequestDigest");
+    expect(Object.keys(input.attempt)).not.toContain("fencingToken");
+
+    const expectedDigest = await computePermissionRequestDigestV1(digestSource);
+    expect(expectedDigest).toBe(
+      "sha256:bc7e39fcc63caab71661680c54ec90dc7a98fd043082b8af45c1d78cffb19154",
+    );
+    expect(await computePermissionRequestDigestV1(buildPermissionRequestDigestInputV1(digestSource))).toBe(expectedDigest);
+
+    for (const excludedField of [
+      { requestId: "transport_request_2" },
+      { operationId: "permission_operation_2" },
+      { permissionRequestDigest: digest },
+    ]) {
+      expect(PermissionRequestDigestInputV1Schema.safeParse({
+        ...digestSource,
+        ...excludedField,
+      }).success).toBe(false);
+    }
+    expect(PermissionRequestDigestInputV1Schema.safeParse({
+      ...digestSource,
+      attempt: { ...attempt, fencingToken: "different_raw_fence" },
+    }).success).toBe(false);
+
+    const businessMutations = [
+      { ...digestSource, requiredCapabilities: ["relay.lifecycle.v1", "relay.permission.v1"] as const },
+      { ...digestSource, organizationId: "org_2" },
+      { ...digestSource, runnerId: "runner_2" },
+      { ...digestSource, runId: "run_2" },
+      { ...digestSource, attempt: { ...attempt, attemptId: "attempt_2" } },
+      { ...digestSource, attempt: { ...attempt, attemptNumber: 3, epoch: 3 } },
+      { ...digestSource, attempt: { ...attempt, fencingTokenDigest: otherDigest } },
+      { ...digestSource, permissionRequestId: "permission_request_2" },
+      { ...digestSource, actionId: "action_2" },
+      { ...digestSource, actionFamily: "deploy" },
+      { ...digestSource, riskTier: "critical" as const },
+      { ...digestSource, targetFingerprint: digest },
+      { ...digestSource, permissionScopes: ["npm:publish"] as const },
+      { ...digestSource, policySnapshotRef: "policy_2" },
+      { ...digestSource, policySnapshotDigest: otherDigest },
+      { ...digestSource, requestedAt: "2026-08-08T00:00:01.000Z" },
+    ];
+    for (const mutation of businessMutations) {
+      expect(await computePermissionRequestDigestV1(mutation)).not.toBe(expectedDigest);
+    }
+  });
+
+  it("limits human decisions to allow_once or deny without Runner credentials", () => {
+    const decision = {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      requiredCapabilities: ["relay.permission.v1"],
+      requestId: "decision_transport_1",
+      operationId: "decision_operation_1",
+      organizationId: "org_1",
+      runId: "run_1",
+      attempt,
+      actionId: "action_1",
+      permissionRequestId: "permission_request_1",
+      permissionRequestDigest: otherDigest,
+      policySnapshotDigest: digest,
+      decisionId: "decision_1",
+      decision: "allow_once",
+      decidedAt: observedAt,
+    } as const;
+    expect(HumanPermissionDecisionRequestV1Schema.safeParse(decision).success).toBe(true);
+    expect(HumanPermissionDecisionRequestV1Schema.safeParse({ ...decision, decision: "allow_run" }).success).toBe(false);
+    expect(HumanPermissionDecisionRequestV1Schema.safeParse({ ...decision, runnerToken: "secret" }).success).toBe(false);
+    expect(HumanPermissionDecisionRequestV1Schema.safeParse({ ...decision, fencingToken: "secret" }).success).toBe(false);
+    expect(HumanPermissionDecisionRequestV1Schema.safeParse({ ...decision, reason: "Approved." }).success).toBe(false);
+  });
+
+  it("rejects bounded-field smuggling across requests and receipts", () => {
+    for (const actionFamily of [
+      "Publish",
+      "publish/path",
+      `p${"a".repeat(64)}`,
+      "sk_live_abcdefgh",
+    ]) {
+      expect(RunnerPermissionRequestV1Schema.safeParse({ ...request, actionFamily }).success).toBe(false);
+    }
+
+    for (const permissionScopes of [
+      ["publish"],
+      ["NPM:publish"],
+      ["npm:/private/repo"],
+      [`${"a".repeat(64)}:${"b".repeat(64)}`],
+      Array.from({ length: 33 }, (_, index) => `scope:item${String(index).padStart(2, "0")}`),
+      ["npm:ghp_abcdefgh"],
+    ]) {
+      expect(RunnerPermissionRequestV1Schema.safeParse({ ...request, permissionScopes }).success).toBe(false);
+    }
+
+    for (const field of [
+      "requestId",
+      "operationId",
+      "organizationId",
+      "runnerId",
+      "runId",
+      "permissionRequestId",
+      "actionId",
+      "policySnapshotRef",
+    ] as const) {
+      for (const unsafe of [
+        "/private/repo",
+        "https://control.example/id",
+        `a${"b".repeat(128)}`,
+        "bad\nid",
+        "ghp_abcdefgh",
+      ]) {
+        expect(RunnerPermissionRequestV1Schema.safeParse({ ...request, [field]: unsafe }).success).toBe(false);
+      }
+    }
+
+    expect(PermissionResolutionReceiptEnvelopeV1Schema.safeParse({
+      ...waitingReceipt,
+      producer: { kind: "cloud", id: "/private/control" },
+    }).success).toBe(false);
+    expect(PermissionResolutionReceiptEnvelopeV1Schema.safeParse({
+      ...waitingReceipt,
+      nextAction: "wait_for_operator",
+    }).success).toBe(false);
+    expect(PermissionResolutionReceiptEnvelopeV1Schema.safeParse({
+      ...waitingReceipt,
+      payload: { ...waitingReceipt.payload, nextAction: "poll_later" },
+    }).success).toBe(false);
+
+    const { nextAction: _nextAction, ...terminalPayload } = waitingReceipt.payload;
+    const authorized = {
+      ...waitingReceipt,
+      payload: {
+        ...terminalPayload,
+        state: "authorized",
+        decision: "allow_once",
+        decisionRef: "decision_1",
+        decisionActorRef: "user_1",
+        reasonCode: "human_approved",
+        decidedAt: observedAt,
+      },
+    } as const;
+    for (const field of ["decisionRef", "decisionActorRef"] as const) {
+      expect(PermissionResolutionReceiptEnvelopeV1Schema.safeParse({
+        ...authorized,
+        payload: { ...authorized.payload, [field]: "/private/actor" },
+      }).success).toBe(false);
+    }
+    for (const reason of ["relative/path", "Original tool title", "https://control.example/private"]) {
+      expect(PermissionResolutionReceiptEnvelopeV1Schema.safeParse({
+        ...waitingReceipt,
+        payload: { ...waitingReceipt.payload, reason },
+      }).success).toBe(false);
+    }
+  });
+
+  it("keeps waiting and terminal permission receipts strict, sanitized, and status-bound", () => {
+    expect(PermissionResolutionReceiptEnvelopeV1Schema.safeParse(waitingReceipt).success).toBe(true);
+    expect(RunnerPermissionRequestHttpResponseV1Schema.safeParse({ status: 202, body: waitingReceipt }).success).toBe(true);
+    expect(RunnerPermissionRequestHttpResponseV1Schema.safeParse({ status: 200, body: waitingReceipt }).success).toBe(false);
+    expect(PermissionResolutionCurrentHttpResponseV1Schema.safeParse({ status: 200, body: waitingReceipt }).success).toBe(false);
+
+    const authorized = {
+      ...waitingReceipt,
+      payload: {
+        ...waitingReceipt.payload,
+        state: "authorized",
+        decision: "allow_once",
+        decisionRef: "decision_1",
+        decisionActorRef: "user_1",
+        reasonCode: "human_approved",
+        decidedAt: observedAt,
+        nextAction: undefined,
+      },
+    } as const;
+    expect(HumanPermissionDecisionHttpResponseV1Schema.safeParse({ status: 200, body: authorized }).success).toBe(true);
+    expect(HumanPermissionDecisionHttpResponseV1Schema.safeParse({ status: 202, body: authorized }).success).toBe(false);
+    expect(HumanPermissionDecisionHttpResponseV1Schema.safeParse({ status: 200, body: waitingReceipt }).success).toBe(false);
+    expect(PermissionResolutionCurrentHttpResponseV1Schema.safeParse({ status: 202, body: authorized }).success).toBe(false);
+
+    const denied = {
+      ...authorized,
+      payload: {
+        ...authorized.payload,
+        state: "denied",
+        decision: "deny",
+        reasonCode: "human_denied",
+      },
+    } as const;
+    expect(HumanPermissionDecisionHttpResponseV1Schema.safeParse({ status: 200, body: denied }).success).toBe(true);
+    expect(PermissionResolutionCurrentHttpResponseV1Schema.safeParse({ status: 200, body: denied }).success).toBe(true);
+    for (const payload of [
+      { ...denied.payload, decision: "allow_once" },
+      { ...denied.payload, reasonCode: "human_approved" },
+      { ...denied.payload, decisionRef: undefined },
+      { ...denied.payload, decisionActorRef: undefined },
+      { ...denied.payload, decidedAt: undefined },
+      { ...denied.payload, nextAction: "wait_for_operator" },
+      { ...authorized.payload, decision: "deny" },
+      { ...authorized.payload, reasonCode: "human_denied" },
+    ]) {
+      expect(PermissionResolutionReceiptEnvelopeV1Schema.safeParse({
+        ...denied,
+        payload,
+      }).success).toBe(false);
+    }
+
+    for (const [field, value] of [
+      ["action", { id: "action_1" }],
+      ["rawArgs", { command: "npm publish" }],
+      ["title", "Publish package"],
+      ["path", "/private/repo"],
+      ["providerPayload", { token: "secret" }],
+      ["metadata", {}],
+      ["fencingToken", "fence_secret_canary"],
+    ] as const) {
+      expect(PermissionResolutionReceiptEnvelopeV1Schema.safeParse({ ...waitingReceipt, [field]: value }).success).toBe(false);
+      expect(PermissionResolutionReceiptEnvelopeV1Schema.safeParse({
+        ...waitingReceipt,
+        payload: { ...waitingReceipt.payload, [field]: value },
+      }).success).toBe(false);
+    }
+    expect(PermissionResolutionReceiptEnvelopeV1Schema.safeParse({
+      ...authorized,
+      payload: { ...authorized.payload, decision: "allow_run" },
+    }).success).toBe(false);
   });
 });
 
