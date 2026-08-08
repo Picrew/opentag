@@ -25,6 +25,14 @@ import {
   ControlErrorHttpResponseV1Schema,
   HumanPermissionDecisionHttpResponseV1Schema,
   HumanPermissionDecisionRequestV1Schema,
+  MaterialActionReconcileHttpResponseV1Schema,
+  MaterialActionReceiptEnvelopeV1Schema,
+  MaterialActionStableIdV1Schema,
+  RunnerMaterialActionReconcileAttemptV1Schema,
+  RunnerMaterialActionReconcileRequestV1Schema,
+  computeMaterialActionFencingTokenDigestV1,
+  computeMaterialActionPayloadDigestV1,
+  computeMaterialActionReceiptDigestV1,
   PermissionResolutionCurrentHttpResponseV1Schema,
   RelayCapabilitiesResponseV1Schema,
   RunnerPermissionCurrentQueryV1Schema,
@@ -76,6 +84,8 @@ import {
   type RunnerRegistrationRequestV1,
   type RunnerReadinessReceiptEnvelopeV1,
   type HumanPermissionDecisionRequestV1,
+  type RunnerMaterialActionReconcileRequestV1,
+  type MaterialActionReceiptEnvelopeV1,
   type PermissionResolutionReceiptEnvelopeV1,
   type RunnerPermissionCurrentQueryV1,
   type RunnerPermissionRequestV1,
@@ -102,7 +112,9 @@ export type {
   FactoryRecipeSnapshot,
   FactoryRecipeSnapshotInput,
   HumanPermissionDecisionRequestV1,
+  MaterialActionReceiptEnvelopeV1,
   PermissionResolutionReceiptEnvelopeV1,
+  RunnerMaterialActionReconcileRequestV1,
   RunnerPermissionCurrentQueryV1,
   RunnerPermissionRequestV1,
   Workstream,
@@ -337,6 +349,18 @@ export type CallbackObservationControlReceiptResult =
       replayed: false;
       outcome: "outcome_unknown";
       receipt: CallbackObservationReceiptEnvelopeV1;
+    };
+
+export type MaterialActionReconcileControlV1Result =
+  | {
+      status: 200;
+      outcome: "resolved";
+      receipt: MaterialActionReceiptEnvelopeV1;
+    }
+  | {
+      status: 202;
+      outcome: "outcome_unknown";
+      receipt: MaterialActionReceiptEnvelopeV1;
     };
 
 export type RunnerPermissionRequestControlV1Result = {
@@ -581,6 +605,8 @@ export type OpenTagClient = {
   requestActionPermissionControlV1(input: RunnerPermissionRequestV1): Promise<RunnerPermissionRequestControlV1Result>;
   resolveActionPermissionControlV1(input: { runnerId: string; decision: HumanPermissionDecisionRequestV1 }): Promise<HumanPermissionDecisionControlV1Result>;
   getActionPermissionCurrentControlV1(input: RunnerPermissionCurrentQueryV1): Promise<PermissionResolutionCurrentControlV1Result>;
+  recordMaterialActionReceiptControlV1(input: { runnerId: string; fencingToken: string; receipt: MaterialActionReceiptEnvelopeV1 }): Promise<ControlReceiptResult<MaterialActionReceiptEnvelopeV1>>;
+  reconcileMaterialActionControlV1(input: RunnerMaterialActionReconcileRequestV1): Promise<MaterialActionReconcileControlV1Result>;
   projectWorkThreadRefControlV1(input: WorkThreadRefReceiptEnvelopeV1): Promise<ControlReceiptResult<WorkThreadRefReceiptEnvelopeV1>>;
   projectCompletionContractRefControlV1(input: CompletionContractRefReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionContractRefReceiptEnvelopeV1>>;
   projectCompletionAssessmentControlV1(input: CompletionAssessmentReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionAssessmentReceiptEnvelopeV1>>;
@@ -945,6 +971,112 @@ async function parseControlReceiptResponse<T extends {
     outcome: "outcome_unknown",
     receipt: parsed.data
   };
+}
+
+async function assertMaterialActionReceiptControlV1(
+  receipt: MaterialActionReceiptEnvelopeV1,
+  expected: {
+    organizationId: string;
+    runnerId: string;
+    runId: string;
+    actionId: string;
+    attemptId: string;
+    attemptNumber: number;
+    epoch: number;
+    fencingTokenDigest: string;
+    expectedCurrentReceiptId?: string;
+    expectedCurrentReceiptDigest?: string;
+  },
+  action: string,
+  status: number
+): Promise<void> {
+  const expectedPayloadDigest = await computeMaterialActionPayloadDigestV1(
+    receipt.payload
+  );
+  const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
+  const expectedReceiptDigest = await computeMaterialActionReceiptDigestV1(
+    receiptDigestInput
+  );
+  if (
+    receipt.payloadDigest !== expectedPayloadDigest
+    || receipt.receiptDigest !== expectedReceiptDigest
+  ) {
+    throw new OpenTagClientHttpError(
+      action,
+      status,
+      "invalid_material_receipt_digest"
+    );
+  }
+  if (
+    receipt.organizationId !== expected.organizationId
+    || receipt.producer.id !== expected.runnerId
+    || receipt.runId !== expected.runId
+    || receipt.payload.actionId !== expected.actionId
+    || receipt.attempt.attemptId !== expected.attemptId
+    || receipt.attempt.attemptNumber !== expected.attemptNumber
+    || receipt.attempt.epoch !== expected.epoch
+    || receipt.attempt.fencingTokenDigest !== expected.fencingTokenDigest
+    || (
+      expected.expectedCurrentReceiptId !== undefined
+      && receipt.receiptId !== expected.expectedCurrentReceiptId
+    )
+    || (
+      expected.expectedCurrentReceiptDigest !== undefined
+      && receipt.receiptDigest !== expected.expectedCurrentReceiptDigest
+    )
+  ) {
+    throw new OpenTagClientHttpError(
+      action,
+      status,
+      "response_identity_mismatch"
+    );
+  }
+}
+
+async function parseMaterialActionReconcileControlV1Response(
+  response: Response,
+  action: string,
+  trustedOrigin: string,
+  request: RunnerMaterialActionReconcileRequestV1
+): Promise<MaterialActionReconcileControlV1Result> {
+  const body = await parseControlJson(response, action, trustedOrigin);
+  const parsed = MaterialActionReconcileHttpResponseV1Schema.safeParse({
+    status: response.status,
+    body,
+  });
+  if (!parsed.success) {
+    throw new OpenTagClientHttpError(
+      action,
+      response.status,
+      "invalid_control_v1_response"
+    );
+  }
+  if (parsed.data.status !== 200 && parsed.data.status !== 202) {
+    throwControlV1Error(response, body, action, request.requestId);
+  }
+  const receipt = parsed.data.body;
+  await assertMaterialActionReceiptControlV1(
+    receipt,
+    {
+      organizationId: request.organizationId,
+      runnerId: request.runnerId,
+      runId: request.runId,
+      actionId: request.actionId,
+      attemptId: request.attempt.attemptId,
+      attemptNumber: request.attempt.attemptNumber,
+      epoch: request.attempt.epoch,
+      fencingTokenDigest: request.attempt.fencingTokenDigest,
+      ...(request.expectedCurrentReceiptId === undefined ? {} : {
+        expectedCurrentReceiptId: request.expectedCurrentReceiptId,
+        expectedCurrentReceiptDigest: request.expectedCurrentReceiptDigest!,
+      }),
+    },
+    action,
+    response.status
+  );
+  return parsed.data.status === 200
+    ? { status: 200, outcome: "resolved", receipt }
+    : { status: 202, outcome: "outcome_unknown", receipt };
 }
 
 type PermissionResolutionExpectedIdentity = {
@@ -1447,6 +1579,99 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         action,
         trustedControlOrigin,
         query
+      );
+    },
+
+    async recordMaterialActionReceiptControlV1(input) {
+      const action = "recordMaterialActionReceiptControlV1";
+      const runnerId = MaterialActionStableIdV1Schema.parse(input.runnerId);
+      const fencingToken =
+        RunnerMaterialActionReconcileAttemptV1Schema.shape.fencingToken.parse(
+          input.fencingToken
+        );
+      const receipt = MaterialActionReceiptEnvelopeV1Schema.parse(input.receipt);
+      const expectedFenceDigest = await computeMaterialActionFencingTokenDigestV1(
+        fencingToken
+      );
+      const expectedPayloadDigest = await computeMaterialActionPayloadDigestV1(
+        receipt.payload
+      );
+      const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
+      const expectedReceiptDigest = await computeMaterialActionReceiptDigestV1(
+        receiptDigestInput
+      );
+      if (receipt.attempt.fencingTokenDigest !== expectedFenceDigest) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_material_fencing_token_digest"
+        );
+      }
+      if (receipt.producer.id !== runnerId) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_material_receipt_identity"
+        );
+      }
+      if (
+        receipt.payloadDigest !== expectedPayloadDigest
+        || receipt.receiptDigest !== expectedReceiptDigest
+      ) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_material_receipt_digest"
+        );
+      }
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(runnerId)}/runs/${encodeURIComponent(receipt.runId)}/material-actions/${encodeURIComponent(receipt.payload.actionId)}/receipt`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify({ fencingToken, receipt })
+        },
+        action
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        receipt,
+        MaterialActionReceiptEnvelopeV1Schema,
+        undefined
+      ) as Promise<ControlReceiptResult<MaterialActionReceiptEnvelopeV1>>;
+    },
+
+    async reconcileMaterialActionControlV1(input) {
+      const request = RunnerMaterialActionReconcileRequestV1Schema.parse(input);
+      const action = "reconcileMaterialActionControlV1";
+      const expectedFenceDigest = await computeMaterialActionFencingTokenDigestV1(
+        request.attempt.fencingToken
+      );
+      if (request.attempt.fencingTokenDigest !== expectedFenceDigest) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_material_fencing_token_digest"
+        );
+      }
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/material-actions/${encodeURIComponent(request.actionId)}/reconcile`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action
+      );
+      return parseMaterialActionReconcileControlV1Response(
+        response,
+        action,
+        trustedControlOrigin,
+        request
       );
     },
 
