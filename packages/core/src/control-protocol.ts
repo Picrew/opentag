@@ -318,31 +318,27 @@ export const RunnerCredentialReprovisionRequestV1Schema = z
     message: "Credential re-provision requires relay.credential-reprovision.v1.",
   });
 
-const RunnerCredentialMetadataV1Shape = {
-  ...VersionedResponseShape,
-  operationId: NonEmptyIdSchema,
-  runnerId: NonEmptyIdSchema,
-  registrationGeneration: z.number().int().positive(),
-  credentialGeneration: z.number().int().positive(),
-  credentialId: NonEmptyIdSchema,
-  credentialPurpose: z.literal("runtime"),
-  createdAt: ControlTimestampSchema,
-};
-
-export const FreshRunnerCredentialResponseV1Schema = z
+export const RunnerCredentialMetadataV1Schema = z
   .object({
-    ...RunnerCredentialMetadataV1Shape,
-    runnerToken: z.string().min(1),
-    replayed: z.literal(false),
+    ...VersionedResponseShape,
+    operationId: NonEmptyIdSchema,
+    runnerId: NonEmptyIdSchema,
+    registrationGeneration: z.number().int().positive(),
+    credentialGeneration: z.number().int().positive(),
+    credentialId: NonEmptyIdSchema,
+    credentialPurpose: z.literal("runtime"),
+    createdAt: ControlTimestampSchema,
   })
   .strict();
 
-export const ReplayedRunnerCredentialResponseV1Schema = z
-  .object({
-    ...RunnerCredentialMetadataV1Shape,
-    replayed: z.literal(true),
-  })
-  .strict();
+export const FreshRunnerCredentialResponseV1Schema = RunnerCredentialMetadataV1Schema.extend({
+  runnerToken: z.string().min(1),
+  replayed: z.literal(false),
+});
+
+export const ReplayedRunnerCredentialResponseV1Schema = RunnerCredentialMetadataV1Schema.extend({
+  replayed: z.literal(true),
+});
 
 export const RunnerCredentialResponseV1Schema = z.discriminatedUnion("replayed", [
   FreshRunnerCredentialResponseV1Schema,
@@ -913,6 +909,7 @@ export type RelayCapability = z.infer<typeof RelayCapabilitySchema>;
 export type ControlMutationRequestV1 = z.infer<typeof ControlMutationRequestV1Schema>;
 export type RunnerRegistrationRequestV1 = z.infer<typeof RunnerRegistrationRequestV1Schema>;
 export type RunnerCredentialReprovisionRequestV1 = z.infer<typeof RunnerCredentialReprovisionRequestV1Schema>;
+export type RunnerCredentialMetadataV1 = z.infer<typeof RunnerCredentialMetadataV1Schema>;
 export type RunnerCredentialResponseV1 = z.infer<typeof RunnerCredentialResponseV1Schema>;
 export type RunnerReadinessReceiptEnvelopeV1 = z.infer<typeof RunnerReadinessReceiptEnvelopeV1Schema>;
 export type AdmissionPolicySnapshotReceiptEnvelopeV1 = z.infer<typeof AdmissionPolicySnapshotReceiptEnvelopeV1Schema>;

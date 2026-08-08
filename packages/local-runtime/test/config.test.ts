@@ -469,6 +469,7 @@ describe("Hosted Control V1 credential state", () => {
 
     for (const registration of [
       { ...hostedRegistration, createdAt: "not-a-timestamp" },
+      { ...hostedRegistration, createdAt: "2026-08-08T08:00:00.000+08:00" },
       { ...hostedRegistration, registrationGeneration: 0 },
       { ...hostedRegistration, credentialGeneration: -1 },
       { ...hostedRegistration, unexpected: true }
@@ -479,6 +480,12 @@ describe("Hosted Control V1 credential state", () => {
         controlRegistration: hostedControl("credential_staged", registration as typeof hostedRegistration)
       })).toThrow();
     }
+
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_staged",
+      controlRegistration: hostedControl("credential_staged", hostedRegistration)
+    })).not.toThrow();
   });
 
   it("enforces initial registration and re-provision replay state", () => {

@@ -2,7 +2,10 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { OpenTagManagedChannelBindingOwnershipSchema } from "@opentag/core";
+import {
+  OpenTagManagedChannelBindingOwnershipSchema,
+  RunnerCredentialMetadataV1Schema,
+} from "@opentag/core";
 import { z } from "zod";
 
 const BUILT_IN_EXECUTOR_IDS = ["echo", "codex", "claude-code", "cursor", "opencode", "hermes", "openclaw"] as const;
@@ -13,18 +16,9 @@ const ExecutorSchema = z.string().trim().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
 
-export const HostedControlRegistrationMetadataSchema = z
-  .object({
-    schemaVersion: z.literal(1),
-    protocolVersion: z.literal("1.0"),
-    runnerId: z.string().trim().min(1),
-    registrationGeneration: PositiveIntegerSchema,
-    credentialGeneration: PositiveIntegerSchema,
-    credentialId: z.string().trim().min(1),
-    credentialPurpose: z.literal("runtime"),
-    createdAt: z.string().datetime({ offset: true })
-  })
-  .strict();
+export const HostedControlRegistrationMetadataSchema = RunnerCredentialMetadataV1Schema.omit({
+  operationId: true,
+});
 
 export type HostedControlRegistrationMetadata = z.infer<typeof HostedControlRegistrationMetadataSchema>;
 

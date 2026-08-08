@@ -19,6 +19,7 @@ import {
   NpmPackageVersionSchema,
   RelayCapabilitiesResponseV1Schema,
   RunnerCredentialReprovisionRequestV1Schema,
+  RunnerCredentialMetadataV1Schema,
   RunnerCredentialResponseV1Schema,
   RunnerCredentialHttpResponseV1Schema,
   RunnerReadinessReasonCodeV1Schema,
@@ -320,6 +321,10 @@ describe("runner registration and credential re-provision", () => {
         replayed: false,
       }).success,
     ).toBe(true);
+    expect(RunnerCredentialMetadataV1Schema.parse(metadata)).toEqual(metadata);
+    expect(
+      RunnerCredentialMetadataV1Schema.safeParse({ ...metadata, replayed: false }).success,
+    ).toBe(false);
     expect(
       RunnerRegistrationResponseV1Schema.safeParse({
         ...metadata,
@@ -334,18 +339,16 @@ describe("runner registration and credential re-provision", () => {
         replayed: true,
       }).success,
     ).toBe(false);
-    expect(
-      RunnerCredentialHttpResponseV1Schema.safeParse({
-        status: 201,
-        body: { ...metadata, runnerToken: "one-time-plaintext", replayed: false },
-      }).success,
-    ).toBe(true);
-    expect(
-      RunnerCredentialHttpResponseV1Schema.safeParse({
-        status: 200,
-        body: { ...metadata, replayed: true },
-      }).success,
-    ).toBe(true);
+    const freshResponse = {
+      status: 201,
+      body: { ...metadata, runnerToken: "one-time-plaintext", replayed: false },
+    } as const;
+    const replayedResponse = {
+      status: 200,
+      body: { ...metadata, replayed: true },
+    } as const;
+    expect(RunnerCredentialHttpResponseV1Schema.parse(freshResponse)).toEqual(freshResponse);
+    expect(RunnerCredentialHttpResponseV1Schema.parse(replayedResponse)).toEqual(replayedResponse);
     expect(
       RunnerCredentialHttpResponseV1Schema.safeParse({
         status: 200,
