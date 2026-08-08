@@ -64,6 +64,12 @@ function hostedPatch() {
   return {
     dispatcherUrl: "https://control.example",
     relayUrl: "https://control.example",
+    trustedRelay: {
+      schemaVersion: 1 as const,
+      origin: "https://control.example",
+      authorizedAt: "2026-08-08T00:00:00.000Z",
+      authorizationMethod: "explicit_cli" as const
+    },
     controlRegistration: {
       kind: "hosted_control_v1" as const,
       state: "unpaired" as const,
@@ -72,6 +78,15 @@ function hostedPatch() {
       reason: "pending" as const
     },
     runnerToken: null
+  };
+}
+
+function hostedTrust(origin = "https://relay.example") {
+  return {
+    schemaVersion: 1 as const,
+    origin,
+    authorizedAt: "2026-08-08T00:00:00.000Z",
+    authorizationMethod: "explicit_cli" as const
   };
 }
 
@@ -770,6 +785,7 @@ describe("OpenTag CLI config", () => {
         dispatcherUrl: "https://control.example",
         relayProvider: "custom",
         relayUrl: "https://control.example",
+        trustedRelay: hostedTrust("https://control.example"),
         controlRegistration: {
           kind: "hosted_control_v1",
           state: "unpaired",
@@ -797,6 +813,32 @@ describe("OpenTag CLI config", () => {
         operationId: "operation_1",
         reason: "pending"
       });
+      expect(persisted.daemon.trustedRelay).toEqual(
+        hostedTrust("https://control.example")
+      );
+      writeHostedControlConfigAtomic(path, {
+        dispatcherUrl: "https://control.example",
+        relayProvider: "custom",
+        relayUrl: "https://control.example",
+        controlRegistration: {
+          kind: "hosted_control_v1",
+          state: "unpaired",
+          flow: "registration",
+          operationId: "operation_2",
+          reason: "outcome_unknown"
+        },
+        runnerToken: null
+      });
+      const preserved = JSON.parse(readFileSync(path, "utf8")) as {
+        daemon: Record<string, unknown>;
+        platforms: { lark: { appSecret: unknown } };
+      };
+      expect(preserved.daemon.trustedRelay).toEqual(
+        hostedTrust("https://control.example")
+      );
+      expect(preserved.platforms.lark.appSecret).toEqual(
+        raw.platforms.lark.appSecret
+      );
       expect(readCliConfig(path).daemon.pairingToken).toBe("resolved_pairing_secret");
       expect(statSync(path).mode & 0o777).toBe(0o600);
     } finally {
@@ -833,6 +875,7 @@ describe("OpenTag CLI config", () => {
       writeHostedControlConfigAtomic(path, {
         dispatcherUrl: "https://control.example",
         relayUrl: "https://control.example",
+        trustedRelay: hostedTrust("https://control.example"),
         controlRegistration: {
           kind: "hosted_control_v1",
           state: "unpaired",
@@ -859,6 +902,7 @@ describe("OpenTag CLI config", () => {
       writeHostedControlConfigAtomic(path, {
         dispatcherUrl: "https://control.example",
         relayUrl: "https://control.example",
+        trustedRelay: hostedTrust("https://control.example"),
         controlRegistration: {
           kind: "hosted_control_v1",
           state: "unpaired",
@@ -915,6 +959,7 @@ describe("OpenTag CLI config", () => {
     source.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
     source.daemon.dispatcherUrl = "https://relay.example";
     source.daemon.runnerToken = "runtime_runner_token";
+    source.daemon.trustedRelay = hostedTrust();
     delete source.daemon.pairingToken;
     source.daemon.controlRegistration = {
       kind: "hosted_control_v1",
@@ -945,11 +990,78 @@ describe("OpenTag CLI config", () => {
       operationId: "operation-1",
       reason: "pending"
     };
+    source.daemon.trustedRelay = hostedTrust("http://localhost:3030");
     expect(() => parseCliConfig(source)).toThrow("runtime.mode=relay");
 
     source.runtime = { mode: "relay", relayUrl: "https://other.example", relayProvider: "custom" };
     source.daemon.dispatcherUrl = "https://relay.example";
-    expect(() => parseCliConfig(source)).toThrow("relayUrl must match daemon.dispatcherUrl");
+    source.daemon.trustedRelay = hostedTrust();
+    expect(() => parseCliConfig(source)).toThrow("relay origin does not match dispatcher origin");
+  });
+
+  it("fails closed on hosted trust before resolving SecretRefs", () => {
+    const source = config() as unknown as Record<string, unknown>;
+    const daemon = source.daemon as Record<string, unknown>;
+    source.runtime = { mode: "relay", relayUrl: "https://relay.example" };
+    daemon.dispatcherUrl = "https://relay.example";
+    daemon.runnerToken = { kind: "file", path: "/definitely/not/read/hosted-token" };
+    delete daemon.pairingToken;
+    daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "paired",
+      operationId: "operation-no-trust",
+      registration: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        runnerId: daemon.runnerId,
+        registrationGeneration: 1,
+        credentialGeneration: 1,
+        credentialId: "credential-1",
+        credentialPurpose: "runtime",
+        createdAt: "2026-08-08T00:00:00.000Z"
+      }
+    };
+
+    expect(() => parseCliConfig(source)).toThrow(/explicit trustedRelay authorization/iu);
+  });
+
+  it.each([
+    ["canonical host case", "https://RELAY.Example:443", "https://relay.example"],
+    ["different port", "https://relay.example:444", "https://relay.example"],
+    ["subdomain", "https://api.relay.example", "https://relay.example"],
+    ["suffix", "https://relay.example.evil.test", "https://relay.example"],
+    ["scheme", "http://relay.example", "https://relay.example"],
+    ["path", "https://relay.example/control", "https://relay.example"],
+    ["query", "https://relay.example?runner=1", "https://relay.example"],
+    ["userinfo", "https://user@relay.example", "https://relay.example"]
+  ])("enforces hosted relay origin: %s", (_name, dispatcherUrl, trustedOrigin) => {
+    const source = config();
+    source.runtime = { mode: "relay", relayUrl: dispatcherUrl };
+    source.daemon.dispatcherUrl = dispatcherUrl;
+    source.daemon.runnerToken = "runtime_runner_token";
+    source.daemon.trustedRelay = hostedTrust(trustedOrigin);
+    delete source.daemon.pairingToken;
+    source.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "paired",
+      operationId: "operation-origin",
+      registration: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        runnerId: source.daemon.runnerId,
+        registrationGeneration: 1,
+        credentialGeneration: 1,
+        credentialId: "credential-1",
+        credentialPurpose: "runtime",
+        createdAt: "2026-08-08T00:00:00.000Z"
+      }
+    };
+
+    if (_name === "canonical host case") {
+      expect(parseCliConfig(source).daemon.dispatcherUrl).toBe(dispatcherUrl);
+    } else {
+      expect(() => parseCliConfig(source)).toThrow();
+    }
   });
 
   it("accepts a repository-free managed Slack channel backed by an ACP agent", () => {

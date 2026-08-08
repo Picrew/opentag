@@ -60,7 +60,12 @@ import { linearLocalWebhookUrl, linearPublicWebhookUrlPlaceholder, linearWebhook
 import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_LINEAR_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "./platforms/ports.js";
 import { teamsLocalWebhookUrl, teamsPublicWebhookUrlPlaceholder } from "./platforms/teams/display.js";
 import { telegramLocalWebhookUrl, telegramPublicWebhookUrlPlaceholder } from "./platforms/telegram/display.js";
-import { assertRelayTransportAllowed, relayTrustWarning } from "./relay-security.js";
+import {
+  assertHostedRelayAuthorization,
+  assertRelayTransportAllowed,
+  canonicalHostedRelayOrigin,
+  relayTrustWarning
+} from "./relay-security.js";
 import { createSlackLinearBacklogHandler } from "./slack-linear-backlog.js";
 
 export type StartCommandOptions = {
@@ -1253,6 +1258,22 @@ async function startRelayMode(input: StartFromConfigInput, abortController: Abor
 }
 
 export async function startFromConfig(input: StartFromConfigInput): Promise<void> {
+  if (input.config.daemon.controlRegistration) {
+    assertHostedRelayAuthorization({
+      dispatcherUrl: input.config.daemon.dispatcherUrl,
+      trustedRelay: input.config.daemon.trustedRelay
+    });
+    const relayUrl = relayUrlFromConfig(input.config);
+    if (!relayUrl) {
+      throw new Error("Hosted Control V1 requires runtime.mode=relay before secrets or network access.");
+    }
+    if (
+      canonicalHostedRelayOrigin(relayUrl)
+      !== canonicalHostedRelayOrigin(input.config.daemon.dispatcherUrl)
+    ) {
+      throw new Error("Hosted Control V1 relay origin does not match dispatcher origin.");
+    }
+  }
   const hostedAuthProblem = hostedRunnerAuthProblem(input.config.daemon);
   if (hostedAuthProblem) throw new Error(hostedAuthProblem);
 

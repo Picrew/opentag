@@ -9,7 +9,12 @@ import {
   type RunnerSecurityPolicy
 } from "@opentag/runner";
 import type { RunnerExecutorRegistration } from "@opentag/core";
-import { hostedRunnerAuthProblem, runnerDispatcherToken, type OpenTagDaemonConfig } from "./config.js";
+import {
+  assertHostedRelayAuthorization,
+  hostedRunnerAuthProblem,
+  runnerDispatcherToken,
+  type OpenTagDaemonConfig
+} from "./config.js";
 import type { DaemonClient } from "./daemon.js";
 import type { PullRequestOptions } from "./pr.js";
 
@@ -103,6 +108,12 @@ export function runnerExecutorRegistrations(
 }
 
 export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
+  if (config.controlRegistration) {
+    assertHostedRelayAuthorization({
+      dispatcherUrl: config.dispatcherUrl,
+      trustedRelay: config.trustedRelay
+    });
+  }
   const hostedAuthProblem = hostedRunnerAuthProblem(config);
   if (hostedAuthProblem) {
     throw new Error(hostedAuthProblem);

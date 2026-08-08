@@ -1186,6 +1186,12 @@ describe("OpenTag CLI start wiring", () => {
     built.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
     built.daemon.dispatcherUrl = "https://relay.example";
     built.daemon.runnerToken = "hosted_runtime_token";
+    built.daemon.trustedRelay = {
+      schemaVersion: 1,
+      origin: "https://relay.example",
+      authorizedAt: "2026-08-08T00:00:00.000Z",
+      authorizationMethod: "explicit_cli"
+    };
     delete built.daemon.pairingToken;
     built.daemon.controlRegistration = {
       kind: "hosted_control_v1",
@@ -1224,6 +1230,12 @@ describe("OpenTag CLI start wiring", () => {
     const built = githubConfig();
     built.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
     built.daemon.dispatcherUrl = "https://relay.example";
+    built.daemon.trustedRelay = {
+      schemaVersion: 1,
+      origin: "https://relay.example",
+      authorizedAt: "2026-08-08T00:00:00.000Z",
+      authorizationMethod: "explicit_cli"
+    };
     built.daemon.controlRegistration = {
       kind: "hosted_control_v1",
       state: "unpaired",
@@ -1243,6 +1255,48 @@ describe("OpenTag CLI start wiring", () => {
         async serveDaemon() { calls.push("daemon"); }
       }
     })).rejects.toThrow("Hosted Control V1 runner is not paired");
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects a hosted dispatcher rebind before wait or client startup", async () => {
+    const built = githubConfig();
+    built.runtime = { mode: "relay", relayUrl: "https://other.example" };
+    built.daemon.dispatcherUrl = "https://other.example";
+    built.daemon.runnerToken = "hosted_runtime_token";
+    built.daemon.trustedRelay = {
+      schemaVersion: 1,
+      origin: "https://relay.example",
+      authorizedAt: "2026-08-08T00:00:00.000Z",
+      authorizationMethod: "explicit_cli"
+    };
+    delete built.daemon.pairingToken;
+    built.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "paired",
+      operationId: "operation-rebind",
+      registration: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        runnerId: built.daemon.runnerId,
+        registrationGeneration: 1,
+        credentialGeneration: 1,
+        credentialId: "credential-1",
+        credentialPurpose: "runtime",
+        createdAt: "2026-08-08T00:00:00.000Z"
+      }
+    };
+    const calls: string[] = [];
+
+    await expect(startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      listenForProcessSignals: false,
+      dependencies: {
+        async waitForDispatcher() { calls.push("wait"); },
+        async bootstrapDispatcher() { calls.push("bootstrap"); },
+        async serveDaemon() { calls.push("daemon"); }
+      }
+    })).rejects.toThrow(/does not match the explicitly trusted relay origin/iu);
     expect(calls).toEqual([]);
   });
 

@@ -22,6 +22,9 @@ import {
 } from "@opentag/core";
 import {
   HostedControlRegistrationSchema,
+  TrustedRelayAuthorizationV1Schema,
+  assertHostedRelayAuthorization,
+  canonicalHostedRelayOrigin,
   formatConfigError as formatDaemonConfigError,
   hostedRunnerAuthProblem,
   parseDaemonConfig,
@@ -273,6 +276,7 @@ const DaemonConfigSchema = z
     revokedRunnerTokenFingerprints: z.array(z.string().trim().min(1)).optional(),
     pairingToken: SecretStringSchema.optional(),
     controlRegistration: HostedControlRegistrationSchema.optional(),
+    trustedRelay: TrustedRelayAuthorizationV1Schema.optional(),
     pollIntervalMs: PositiveIntegerSchema,
     heartbeatIntervalMs: PositiveIntegerSchema,
     runTimeoutMs: PositiveIntegerSchema.optional()
@@ -576,11 +580,36 @@ export const OpenTagCliConfigSchema = z
       });
       return;
     }
-    if (config.runtime.relayUrl !== config.daemon.dispatcherUrl) {
+    let relayOrigin: string | undefined;
+    let dispatcherOrigin: string | undefined;
+    try {
+      relayOrigin = canonicalHostedRelayOrigin(config.runtime.relayUrl);
+      dispatcherOrigin = canonicalHostedRelayOrigin(config.daemon.dispatcherUrl);
+    } catch (error) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["runtime", "relayUrl"],
-        message: "Hosted Control V1 relayUrl must match daemon.dispatcherUrl."
+        message: error instanceof Error ? error.message : "Hosted relay URL is invalid."
+      });
+      return;
+    }
+    if (relayOrigin !== dispatcherOrigin) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runtime", "relayUrl"],
+        message: "Hosted Control V1 relay origin must match daemon.dispatcher origin."
+      });
+    }
+    try {
+      assertHostedRelayAuthorization({
+        dispatcherUrl: config.daemon.dispatcherUrl,
+        trustedRelay: config.daemon.trustedRelay
+      });
+    } catch (error) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["daemon", "trustedRelay"],
+        message: error instanceof Error ? error.message : "Hosted relay authorization is invalid."
       });
     }
   });
@@ -631,7 +660,37 @@ export function formatCliConfigError(error: unknown): string {
   return formatDaemonConfigError(error);
 }
 
+function assertHostedControlRawTrust(value: unknown): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const raw = value as Record<string, unknown>;
+  if (!raw.daemon || typeof raw.daemon !== "object" || Array.isArray(raw.daemon)) return;
+  const daemon = raw.daemon as Record<string, unknown>;
+  if (daemon.controlRegistration === undefined) return;
+
+  if (!raw.runtime || typeof raw.runtime !== "object" || Array.isArray(raw.runtime)) {
+    throw new Error("Hosted Control V1 requires runtime.mode=relay before secrets or network access.");
+  }
+  const runtime = raw.runtime as Record<string, unknown>;
+  if (runtime.mode !== "relay") {
+    throw new Error("Hosted Control V1 requires runtime.mode=relay before secrets or network access.");
+  }
+  const relayUrl = z.string().url().parse(runtime.relayUrl);
+  const dispatcherUrl = z.string().url().parse(daemon.dispatcherUrl);
+  const relayOrigin = canonicalHostedRelayOrigin(relayUrl);
+  const dispatcherOrigin = canonicalHostedRelayOrigin(dispatcherUrl);
+  if (relayOrigin !== dispatcherOrigin) {
+    throw new Error("Hosted Control V1 relay origin does not match dispatcher origin.");
+  }
+  assertHostedRelayAuthorization({
+    dispatcherUrl,
+    trustedRelay: daemon.trustedRelay === undefined
+      ? undefined
+      : TrustedRelayAuthorizationV1Schema.parse(daemon.trustedRelay)
+  });
+}
+
 export function parseCliConfig(value: unknown): OpenTagCliConfig {
+  assertHostedControlRawTrust(value);
   const parsed = OpenTagCliConfigSchema.parse(value);
   return {
     ...parsed,
@@ -949,6 +1008,7 @@ export type HostedControlConfigPatch = {
   dispatcherUrl: string;
   relayProvider?: string;
   relayUrl: string;
+  trustedRelay?: NonNullable<OpenTagDaemonConfig["trustedRelay"]>;
   removePairingToken?: boolean;
   runnerToken?: string | null;
 };
@@ -1068,10 +1128,16 @@ function validateHostedControlRawConfig(value: unknown): void {
   }
   const daemon = requireRawConfigObject(raw.daemon);
   const dispatcherUrl = z.string().url().parse(daemon.dispatcherUrl);
-  if (runtime.relayUrl !== dispatcherUrl) {
-    throw new Error("Hosted Control V1 relayUrl must match daemon.dispatcherUrl.");
+  const relayOrigin = canonicalHostedRelayOrigin(runtime.relayUrl);
+  const dispatcherOrigin = canonicalHostedRelayOrigin(dispatcherUrl);
+  if (relayOrigin !== dispatcherOrigin) {
+    throw new Error("Hosted Control V1 relay origin must match daemon.dispatcher origin.");
   }
   HostedControlRegistrationSchema.parse(daemon.controlRegistration);
+  assertHostedRelayAuthorization({
+    dispatcherUrl,
+    trustedRelay: TrustedRelayAuthorizationV1Schema.parse(daemon.trustedRelay)
+  });
   if (daemon.runnerToken !== undefined) {
     z.string().min(1).parse(daemon.runnerToken);
   }
@@ -1092,7 +1158,8 @@ export function writeHostedControlConfigAtomic(
     const patchedDaemon: Record<string, unknown> = {
       ...daemon,
       dispatcherUrl: patch.dispatcherUrl,
-      controlRegistration: patch.controlRegistration
+      controlRegistration: patch.controlRegistration,
+      trustedRelay: patch.trustedRelay ?? daemon.trustedRelay
     };
     if (patch.removePairingToken) delete patchedDaemon.pairingToken;
     if (patch.runnerToken === null) delete patchedDaemon.runnerToken;

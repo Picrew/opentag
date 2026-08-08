@@ -288,6 +288,73 @@ export const HostedControlRegistrationSchema = z.union([
 
 export type HostedControlRegistration = z.infer<typeof HostedControlRegistrationSchema>;
 
+export const TrustedRelayAuthorizationV1Schema = z
+  .object({
+    schemaVersion: z.literal(1),
+    origin: z.string().trim().min(1),
+    authorizedAt: z.iso.datetime({ offset: true }),
+    authorizationMethod: z.literal("explicit_cli")
+  })
+  .strict()
+  .superRefine((authorization, ctx) => {
+    try {
+      if (canonicalHostedRelayOrigin(authorization.origin) !== authorization.origin) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["origin"],
+          message: "Trusted relay origin must be the exact canonical HTTPS origin."
+        });
+      }
+    } catch (error) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["origin"],
+        message: error instanceof Error ? error.message : "Trusted relay origin is invalid."
+      });
+    }
+  });
+
+export type TrustedRelayAuthorizationV1 = z.infer<typeof TrustedRelayAuthorizationV1Schema>;
+
+export function canonicalHostedRelayOrigin(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Hosted relay URL must be a valid HTTPS origin.");
+  }
+  if (url.protocol !== "https:") {
+    throw new Error("Hosted relay URL must use HTTPS.");
+  }
+  if (url.username || url.password) {
+    throw new Error("Hosted relay URL must not contain userinfo.");
+  }
+  if (url.pathname !== "/") {
+    throw new Error("Hosted relay URL must be origin-only and must not contain a path.");
+  }
+  if (url.search) {
+    throw new Error("Hosted relay URL must not contain a query.");
+  }
+  if (url.hash) {
+    throw new Error("Hosted relay URL must not contain a fragment.");
+  }
+  return url.origin;
+}
+
+export function assertHostedRelayAuthorization(input: {
+  dispatcherUrl: string;
+  trustedRelay: TrustedRelayAuthorizationV1 | undefined;
+}): void {
+  if (!input.trustedRelay) {
+    throw new Error("Hosted Control V1 requires an explicit trustedRelay authorization before secrets or network access.");
+  }
+  const trusted = TrustedRelayAuthorizationV1Schema.parse(input.trustedRelay);
+  const dispatcherOrigin = canonicalHostedRelayOrigin(input.dispatcherUrl);
+  if (dispatcherOrigin !== trusted.origin) {
+    throw new Error("Hosted Control V1 dispatcher origin does not match the explicitly trusted relay origin.");
+  }
+}
+
 export function hostedCredentialMutationRequestDigest(requestValue: HostedCredentialMutationRequest): string {
   const request = RunnerCredentialRotationRequestV1Schema.parse(requestValue);
   return `sha256:${createHash("sha256").update(canonicalJsonStringify(request)).digest("hex")}`;
@@ -524,6 +591,7 @@ export const OpenTagDaemonConfigSchema = z
     revokedRunnerTokenFingerprints: z.array(z.string().trim().min(1)).optional(),
     pairingToken: SecretStringSchema.optional(),
     controlRegistration: HostedControlRegistrationSchema.optional(),
+    trustedRelay: TrustedRelayAuthorizationV1Schema.optional(),
     pollIntervalMs: PositiveIntegerSchema.default(5000),
     heartbeatIntervalMs: PositiveIntegerSchema.default(15000),
     runTimeoutMs: PositiveIntegerSchema.optional()
@@ -939,6 +1007,17 @@ export function formatConfigError(error: unknown): string {
 }
 
 export function parseDaemonConfig(value: unknown): OpenTagDaemonConfig {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const raw = value as Record<string, unknown>;
+    if (raw.controlRegistration !== undefined) {
+      assertHostedRelayAuthorization({
+        dispatcherUrl: z.string().url().parse(raw.dispatcherUrl),
+        trustedRelay: raw.trustedRelay === undefined
+          ? undefined
+          : TrustedRelayAuthorizationV1Schema.parse(raw.trustedRelay)
+      });
+    }
+  }
   const parsed = OpenTagDaemonConfigSchema.parse(value);
   normalizeChannelBindings(parsed);
   return parsed;

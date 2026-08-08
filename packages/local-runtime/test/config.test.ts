@@ -13,7 +13,7 @@ import {
   loadConfigFromEnv,
   markHostedCredentialRevocationOutcomeUnknown,
   markHostedCredentialRotationOutcomeUnknown,
-  parseDaemonConfig,
+  parseDaemonConfig as parseDaemonConfigStrict,
   readKeychainSecret,
   reconcileHostedCredentialRotationSuccessorReplay,
   recordHostedCredentialConflict,
@@ -28,6 +28,27 @@ const baseRepository = {
   repo: "widgets",
   checkoutPath: "/tmp/acme-widgets"
 };
+
+const hostedTrust = {
+  schemaVersion: 1 as const,
+  origin: "https://control.example",
+  authorizedAt: "2026-08-08T00:00:00.000Z",
+  authorizationMethod: "explicit_cli" as const
+};
+
+function parseDaemonConfig(value: unknown) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const raw = value as Record<string, unknown>;
+    if (raw.controlRegistration !== undefined) {
+      return parseDaemonConfigStrict({
+        dispatcherUrl: "https://control.example",
+        trustedRelay: hostedTrust,
+        ...raw
+      });
+    }
+  }
+  return parseDaemonConfigStrict(value);
+}
 
 const hostedRegistration = {
   schemaVersion: 1 as const,
@@ -526,6 +547,35 @@ describe("parseDaemonConfig run timeout", () => {
 });
 
 describe("Hosted Control V1 credential state", () => {
+  it("requires canonical explicit relay trust before resolving hosted secrets", () => {
+    expect(() => parseDaemonConfigStrict({
+      runnerId: "runner_hosted",
+      dispatcherUrl: "https://control.example",
+      runnerToken: { kind: "file", path: "/definitely/not-read/runtime-token" },
+      controlRegistration: hostedControl("paired")
+    })).toThrow(/explicit trustedRelay authorization/iu);
+
+    expect(() => parseDaemonConfigStrict({
+      runnerId: "runner_hosted",
+      dispatcherUrl: "https://CONTROL.example:443",
+      runnerToken: "runtime-token",
+      trustedRelay: hostedTrust,
+      controlRegistration: hostedControl("paired")
+    })).not.toThrow();
+  });
+
+  it("blocks dispatcher rebinding before runtime client creation", () => {
+    const paired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime-token",
+      controlRegistration: hostedControl("paired")
+    });
+    expect(() => createDaemonClient({
+      ...paired,
+      dispatcherUrl: "https://other.example"
+    })).toThrow(/does not match the explicitly trusted relay origin/iu);
+  });
+
   it("keeps marker-free legacy token resolution unchanged", () => {
     const config = parseDaemonConfig({
       runnerId: "runner_legacy",
