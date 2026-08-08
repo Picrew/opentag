@@ -29,8 +29,9 @@ function canonicalizeJson(value: unknown, ancestors: WeakSet<object>): Canonical
       if (Object.getOwnPropertySymbols(value).length > 0) invalidJsonValue();
       const canonical: CanonicalJsonValue[] = [];
       for (let index = 0; index < value.length; index += 1) {
-        if (!Object.hasOwn(value, index)) invalidJsonValue();
-        canonical.push(canonicalizeJson(value[index], ancestors));
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor?.enumerable || !("value" in descriptor)) invalidJsonValue();
+        canonical.push(canonicalizeJson(descriptor.value, ancestors));
       }
       const extraKeys = Object.getOwnPropertyNames(value).filter((key) => {
         if (key === "length") return false;

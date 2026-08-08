@@ -46,6 +46,42 @@ describe("canonicalJsonStringify", () => {
     }
   });
 
+  it("rejects array accessors without invoking them", () => {
+    const accessor: unknown[] = [];
+    let invoked = false;
+    Object.defineProperty(accessor, "0", {
+      enumerable: true,
+      get() {
+        invoked = true;
+        return "value";
+      },
+    });
+    accessor.length = 1;
+
+    expect(() => canonicalJsonStringify(accessor)).toThrow(
+      /finite, acyclic JSON data tree/iu
+    );
+    expect(invoked).toBe(false);
+  });
+
+  it("rejects non-enumerable array indexes and extra own properties", () => {
+    const nonEnumerable = ["value"];
+    Object.defineProperty(nonEnumerable, "0", {
+      enumerable: false,
+      value: "value",
+    });
+    const named = ["value"] as unknown[] & { metadata?: string };
+    named.metadata = "extra";
+    const symbol = ["value"];
+    Object.defineProperty(symbol, Symbol("extra"), { value: "extra" });
+
+    for (const value of [nonEnumerable, named, symbol]) {
+      expect(() => canonicalJsonStringify(value)).toThrow(
+        /finite, acyclic JSON data tree/iu
+      );
+    }
+  });
+
   it("does not collapse canonically distinct Unicode strings", () => {
     expect(canonicalJsonStringify({ value: "\u00e9" })).not.toBe(
       canonicalJsonStringify({ value: "e\u0301" })
