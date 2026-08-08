@@ -1,6 +1,17 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -665,6 +676,80 @@ export function writeCliConfigAtomic(path: string, config: OpenTagCliConfig): vo
     renameSync(tempPath, path);
     chmodSync(path, 0o600);
   } catch (error) {
+    rmSync(tempPath, { force: true });
+    throw error;
+  }
+}
+
+export type HostedControlConfigPatch = {
+  controlRegistration: NonNullable<OpenTagDaemonConfig["controlRegistration"]>;
+  dispatcherUrl: string;
+  relayProvider?: string;
+  relayUrl: string;
+  removePairingToken?: boolean;
+  runnerToken?: string | null;
+};
+
+function requireRawConfigObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("OpenTag config must be a JSON object.");
+  }
+  return value as Record<string, unknown>;
+}
+
+function fsyncDirectory(path: string): void {
+  if (process.platform === "win32") return;
+  const directory = openSync(path, "r");
+  try {
+    fsyncSync(directory);
+  } finally {
+    closeSync(directory);
+  }
+}
+
+export function writeHostedControlConfigAtomic(
+  path: string,
+  patch: HostedControlConfigPatch
+): void {
+  assertPrivateConfigFile(path);
+  const raw = requireRawConfigObject(JSON.parse(readFileSync(path, "utf8")));
+  const daemon = requireRawConfigObject(raw.daemon);
+  const patchedDaemon: Record<string, unknown> = {
+    ...daemon,
+    dispatcherUrl: patch.dispatcherUrl,
+    controlRegistration: patch.controlRegistration
+  };
+  if (patch.removePairingToken) delete patchedDaemon.pairingToken;
+  if (patch.runnerToken === null) delete patchedDaemon.runnerToken;
+  else if (patch.runnerToken !== undefined) patchedDaemon.runnerToken = patch.runnerToken;
+
+  const patched: Record<string, unknown> = {
+    ...raw,
+    runtime: {
+      mode: "relay",
+      relayUrl: patch.relayUrl,
+      ...(patch.relayProvider ? { relayProvider: patch.relayProvider } : {})
+    },
+    daemon: patchedDaemon
+  };
+  parseCliConfig(patched);
+
+  ensurePrivateDirectory(dirname(path));
+  const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  let tempFile: number | undefined;
+  try {
+    tempFile = openSync(tempPath, "wx", 0o600);
+    writeFileSync(tempFile, `${JSON.stringify(patched, null, 2)}\n`, "utf8");
+    fsyncSync(tempFile);
+    closeSync(tempFile);
+    tempFile = undefined;
+    chmodSync(tempPath, 0o600);
+    renameSync(tempPath, path);
+    chmodSync(path, 0o600);
+    fsyncDirectory(dirname(path));
+    parseCliConfig(JSON.parse(readFileSync(path, "utf8")));
+  } catch (error) {
+    if (tempFile !== undefined) closeSync(tempFile);
     rmSync(tempPath, { force: true });
     throw error;
   }

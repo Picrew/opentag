@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -15,6 +15,7 @@ import {
   runnerDispatcherToken,
   runtimeModeFromConfig,
   writeCliConfigAtomic,
+  writeHostedControlConfigAtomic,
   type OpenTagCliConfig
 } from "../src/config.js";
 import { legacyLarkConfigPath, readLegacyLarkCredentials } from "../src/platforms/lark/saved-config.js";
@@ -151,6 +152,70 @@ describe("OpenTag CLI config", () => {
 
     expect(readCliConfig(path)).toEqual(expected);
     expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it("patches hosted control state without materializing unrelated SecretRefs", () => {
+    const path = join(tempDir(), "config.json");
+    const source = config();
+    const previousAppSecret = process.env.OPENTAG_TEST_LARK_APP_SECRET;
+    const previousPairingToken = process.env.OPENTAG_TEST_PAIRING_TOKEN;
+    process.env.OPENTAG_TEST_LARK_APP_SECRET = "resolved_lark_secret";
+    process.env.OPENTAG_TEST_PAIRING_TOKEN = "resolved_pairing_secret";
+    try {
+      const raw = JSON.parse(JSON.stringify(source)) as {
+        daemon: Record<string, unknown>;
+        platforms: { lark: { appSecret: unknown } };
+      };
+      raw.platforms.lark.appSecret = {
+        kind: "env",
+        name: "OPENTAG_TEST_LARK_APP_SECRET"
+      };
+      raw.daemon.pairingToken = {
+        kind: "env",
+        name: "OPENTAG_TEST_PAIRING_TOKEN"
+      };
+      writeFileSync(path, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+      chmodSync(path, 0o600);
+
+      writeHostedControlConfigAtomic(path, {
+        dispatcherUrl: "https://control.example",
+        relayProvider: "custom",
+        relayUrl: "https://control.example",
+        controlRegistration: {
+          kind: "hosted_control_v1",
+          state: "unpaired",
+          flow: "registration",
+          operationId: "operation_1",
+          reason: "pending"
+        },
+        runnerToken: null
+      });
+
+      const persisted = JSON.parse(readFileSync(path, "utf8")) as {
+        daemon: Record<string, unknown>;
+        platforms: { lark: { appSecret: unknown } };
+      };
+      expect(persisted.platforms.lark.appSecret).toEqual({
+        kind: "env",
+        name: "OPENTAG_TEST_LARK_APP_SECRET"
+      });
+      expect(persisted.daemon.pairingToken).toEqual({
+        kind: "env",
+        name: "OPENTAG_TEST_PAIRING_TOKEN"
+      });
+      expect(persisted.daemon.controlRegistration).toMatchObject({
+        state: "unpaired",
+        operationId: "operation_1",
+        reason: "pending"
+      });
+      expect(readCliConfig(path).daemon.pairingToken).toBe("resolved_pairing_secret");
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    } finally {
+      if (previousAppSecret === undefined) delete process.env.OPENTAG_TEST_LARK_APP_SECRET;
+      else process.env.OPENTAG_TEST_LARK_APP_SECRET = previousAppSecret;
+      if (previousPairingToken === undefined) delete process.env.OPENTAG_TEST_PAIRING_TOKEN;
+      else process.env.OPENTAG_TEST_PAIRING_TOKEN = previousPairingToken;
+    }
   });
 
   it("parses explicit relay runtime without dropping daemon fields", () => {
