@@ -475,6 +475,27 @@ function completionStatusFetch(input: {
 }
 
 describe("OpenTag CLI status", () => {
+  it("rejects invalid hosted auth before any status fetch", async () => {
+    const configured = config();
+    configured.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
+    configured.daemon.dispatcherUrl = "https://relay.example";
+    configured.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "unpaired",
+      flow: "registration",
+      operationId: "operation-1",
+      reason: "pending"
+    };
+    const fetchImpl = vi.fn();
+
+    await expect(statusFromConfig({
+      config: configured,
+      configPath: "/tmp/opentag/config.json",
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    })).rejects.toThrow("Hosted Control V1 runner is not paired");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("explains completion independently from executor success", () => {
     const formatted = formatCompletionExplanation(completionExplanationFixture()).join("\n");
 

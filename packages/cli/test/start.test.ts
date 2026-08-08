@@ -1181,6 +1181,71 @@ describe("OpenTag CLI start wiring", () => {
     expect(logs.join("\n")).toContain("OpenTag will use the fixed profile 'opentag-fixed'");
   });
 
+  it("starts a paired Hosted Control V1 runner with wait then daemon and no bootstrap", async () => {
+    const built = githubConfig();
+    built.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
+    built.daemon.dispatcherUrl = "https://relay.example";
+    built.daemon.runnerToken = "hosted_runtime_token";
+    delete built.daemon.pairingToken;
+    built.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "paired",
+      operationId: "operation-1",
+      registration: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        runnerId: built.daemon.runnerId,
+        registrationGeneration: 1,
+        credentialGeneration: 1,
+        credentialId: "credential-1",
+        credentialPurpose: "runtime",
+        createdAt: "2026-08-08T00:00:00.000Z"
+      }
+    };
+    const calls: string[] = [];
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async waitForDispatcher() { calls.push("wait"); },
+        async bootstrapDispatcher() { calls.push("bootstrap"); },
+        async serveDaemon() { calls.push("daemon"); },
+        logger: { log() {} }
+      }
+    });
+
+    expect(calls).toEqual(["wait", "daemon"]);
+  });
+
+  it("rejects invalid hosted auth before wait, bootstrap, or daemon startup", async () => {
+    const built = githubConfig();
+    built.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
+    built.daemon.dispatcherUrl = "https://relay.example";
+    built.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "unpaired",
+      flow: "registration",
+      operationId: "operation-1",
+      reason: "pending"
+    };
+    const calls: string[] = [];
+
+    await expect(startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      listenForProcessSignals: false,
+      dependencies: {
+        async waitForDispatcher() { calls.push("wait"); },
+        async bootstrapDispatcher() { calls.push("bootstrap"); },
+        async serveDaemon() { calls.push("daemon"); }
+      }
+    })).rejects.toThrow("Hosted Control V1 runner is not paired");
+    expect(calls).toEqual([]);
+  });
+
   it("starts relay mode for GitLab without local dispatcher, local port checks, or local GitLab ingress", async () => {
     const built = gitlabConfig();
     built.runtime = {

@@ -8,8 +8,11 @@ import {
   OpenTagManagedChannelBindingOwnershipSchema
 } from "@opentag/core";
 import {
+  HostedControlRegistrationSchema,
   formatConfigError as formatDaemonConfigError,
+  hostedRunnerAuthProblem,
   parseDaemonConfig,
+  runnerDispatcherToken,
   type LocalDispatcherRuntimeInput,
   type OpenTagDaemonConfig
 } from "@opentag/local-runtime";
@@ -255,7 +258,8 @@ const DaemonConfigSchema = z
     runnerToken: SecretStringSchema.optional(),
     runnerTokens: z.array(SecretStringSchema).optional(),
     revokedRunnerTokenFingerprints: z.array(z.string().trim().min(1)).optional(),
-    pairingToken: SecretStringSchema,
+    pairingToken: SecretStringSchema.optional(),
+    controlRegistration: HostedControlRegistrationSchema.optional(),
     pollIntervalMs: PositiveIntegerSchema,
     heartbeatIntervalMs: PositiveIntegerSchema,
     runTimeoutMs: PositiveIntegerSchema.optional()
@@ -539,7 +543,34 @@ export const OpenTagCliConfigSchema = z
       })
       .strict()
   })
-  .strict();
+  .strict()
+  .superRefine((config, context) => {
+    if (!config.daemon.controlRegistration) {
+      if (!config.daemon.pairingToken) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["daemon", "pairingToken"],
+          message: "Legacy OpenTag configuration requires daemon.pairingToken."
+        });
+      }
+      return;
+    }
+    if (config.runtime?.mode !== "relay") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runtime", "mode"],
+        message: "Hosted Control V1 configuration requires runtime.mode=relay."
+      });
+      return;
+    }
+    if (config.runtime.relayUrl !== config.daemon.dispatcherUrl) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runtime", "relayUrl"],
+        message: "Hosted Control V1 relayUrl must match daemon.dispatcherUrl."
+      });
+    }
+  });
 
 export type OpenTagCliConfig = Omit<z.infer<typeof OpenTagCliConfigSchema>, "daemon"> & {
   daemon: OpenTagDaemonConfig & {
@@ -603,9 +634,7 @@ export function parseCliConfig(value: unknown): OpenTagCliConfig {
   };
 }
 
-export function runnerDispatcherToken(config: Pick<OpenTagDaemonConfig, "runnerToken" | "pairingToken">): string | undefined {
-  return config.runnerToken ?? config.pairingToken;
-}
+export { hostedRunnerAuthProblem, runnerDispatcherToken };
 
 export function runtimeModeFromConfig(config: OpenTagCliConfig): OpenTagRuntimeMode {
   return config.runtime?.mode ?? "local";

@@ -44,6 +44,7 @@ import {
 import {
   defaultConfigPath,
   ensurePrivateDirectory,
+  hostedRunnerAuthProblem,
   readCliConfig,
   relayUrlFromConfig,
   runtimeModeFromConfig,
@@ -1199,7 +1200,9 @@ async function startRelayMode(input: StartFromConfigInput, abortController: Abor
   assertRelayTransportAllowed(relayUrl);
 
   await dependencies.waitForDispatcher({ dispatcherUrl: config.daemon.dispatcherUrl });
-  await dependencies.bootstrapDispatcher(config);
+  if (!config.daemon.controlRegistration) {
+    await dependencies.bootstrapDispatcher(config);
+  }
 
   try {
     const daemonPromise = dependencies.serveDaemon({
@@ -1250,6 +1253,9 @@ async function startRelayMode(input: StartFromConfigInput, abortController: Abor
 }
 
 export async function startFromConfig(input: StartFromConfigInput): Promise<void> {
+  const hostedAuthProblem = hostedRunnerAuthProblem(input.config.daemon);
+  if (hostedAuthProblem) throw new Error(hostedAuthProblem);
+
   ensurePrivateDirectory(input.config.state.directory);
   ensurePrivateDirectory(input.config.state.worktreeRoot);
 

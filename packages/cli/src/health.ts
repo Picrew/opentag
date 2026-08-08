@@ -1,3 +1,7 @@
+import { RelayCapabilitiesResponseV1Schema } from "@opentag/core";
+
+type RelayCapabilitiesResponseV1 = ReturnType<typeof RelayCapabilitiesResponseV1Schema.parse>;
+
 export async function fetchWithTimeout(input: {
   url: string;
   fetchImpl?: typeof fetch;
@@ -76,8 +80,81 @@ export type RelayCapabilitiesProbeResult =
       reason: string;
     };
 
+export type ControlV1ProbeResult =
+  | { status: "control_v1"; capabilities: RelayCapabilitiesResponseV1 }
+  | { status: "not_control_v1" }
+  | { status: "incompatible_control"; reason: string }
+  | { status: "unavailable"; reason: string };
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isExplicitLegacyCapabilitiesDocument(value: unknown): boolean {
+  return isRecord(value)
+    && value["schemaVersion"] === 1
+    && value["relay"] === true
+    && Array.isArray(value["platforms"]);
+}
+
+function looksLikeControlV1Document(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  return ["protocolVersion", "registryVersion", "capabilities", "minimumClient", "deployment"]
+    .some((key) => key in value);
+}
+
+function hasIncompatibleControlVersion(value: Record<string, unknown>): boolean {
+  if ("schemaVersion" in value && value["schemaVersion"] !== 1) return true;
+  if ("protocolVersion" in value && value["protocolVersion"] !== "1.0") return true;
+  if (
+    "registryVersion" in value
+    && value["registryVersion"] !== "opentag.control.capabilities/v1"
+  ) return true;
+  const minimumClient = value["minimumClient"];
+  return isRecord(minimumClient)
+    && (minimumClient["schemaVersion"] !== 1 || minimumClient["protocolVersion"] !== "1.0");
+}
+
+export async function probeControlV1Capabilities(input: {
+  dispatcherUrl: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs: number;
+}): Promise<ControlV1ProbeResult> {
+  const capabilitiesUrl = `${input.dispatcherUrl.replace(/\/$/, "")}/v1/relay/capabilities`;
+  let response: Response;
+  try {
+    response = await fetchWithTimeout({
+      url: capabilitiesUrl,
+      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+      timeoutMs: input.timeoutMs
+    });
+  } catch (error) {
+    return {
+      status: "unavailable",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+  if (!response.ok) {
+    return { status: "unavailable", reason: `HTTP ${response.status}` };
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return { status: "unavailable", reason: "capabilities response was not JSON" };
+  }
+  const parsed = RelayCapabilitiesResponseV1Schema.safeParse(body);
+  if (parsed.success) return { status: "control_v1", capabilities: parsed.data };
+  if (isExplicitLegacyCapabilitiesDocument(body)) return { status: "not_control_v1" };
+  if (looksLikeControlV1Document(body)) {
+    return {
+      status: "incompatible_control",
+      reason: hasIncompatibleControlVersion(body)
+        ? "relay advertises an incompatible OpenTag Control version"
+        : "relay returned a malformed OpenTag Control V1 capabilities document"
+    };
+  }
+  return { status: "unavailable", reason: "capabilities response was not an OpenTag Control document" };
 }
 
 function parseRelayCapabilitiesDocument(value: unknown): RelayCapabilitiesDocument | null {

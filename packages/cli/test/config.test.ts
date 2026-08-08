@@ -12,6 +12,7 @@ import {
   readRedactedCliConfig,
   redactedCliConfig,
   relayUrlFromConfig,
+  runnerDispatcherToken,
   runtimeModeFromConfig,
   writeCliConfigAtomic,
   type OpenTagCliConfig
@@ -182,6 +183,54 @@ describe("OpenTag CLI config", () => {
 
     expect(runtimeModeFromConfig(parsed)).toBe("local");
     expect(relayUrlFromConfig(parsed)).toBeUndefined();
+  });
+
+  it("requires the legacy pairing token when no hosted authority marker exists", () => {
+    const source = config();
+    delete source.daemon.pairingToken;
+    expect(() => parseCliConfig(source)).toThrow("Legacy OpenTag configuration requires daemon.pairingToken");
+  });
+
+  it("accepts a paired Hosted Control V1 relay and uses only its runner credential", () => {
+    const source = config();
+    source.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
+    source.daemon.dispatcherUrl = "https://relay.example";
+    source.daemon.runnerToken = "runtime_runner_token";
+    delete source.daemon.pairingToken;
+    source.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "paired",
+      operationId: "operation-1",
+      registration: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        runnerId: source.daemon.runnerId,
+        registrationGeneration: 1,
+        credentialGeneration: 1,
+        credentialId: "credential-1",
+        credentialPurpose: "runtime",
+        createdAt: "2026-08-08T00:00:00.000Z"
+      }
+    };
+
+    const parsed = parseCliConfig(source);
+    expect(runnerDispatcherToken(parsed.daemon)).toBe("runtime_runner_token");
+  });
+
+  it("rejects hosted authority outside relay mode or with a mismatched relay URL", () => {
+    const source = config();
+    source.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "unpaired",
+      flow: "registration",
+      operationId: "operation-1",
+      reason: "pending"
+    };
+    expect(() => parseCliConfig(source)).toThrow("runtime.mode=relay");
+
+    source.runtime = { mode: "relay", relayUrl: "https://other.example", relayProvider: "custom" };
+    source.daemon.dispatcherUrl = "https://relay.example";
+    expect(() => parseCliConfig(source)).toThrow("relayUrl must match daemon.dispatcherUrl");
   });
 
   it("accepts a repository-free managed Slack channel backed by an ACP agent", () => {
