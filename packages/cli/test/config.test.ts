@@ -8,13 +8,16 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  CLI_CONFIG_FILESYSTEM_OPS,
   CLI_CONFIG_DIRECTORY_DURABILITY,
+  CliConfigWriteOutcomeUnknownError,
   defaultConfigPath,
   defaultStateDirectory,
   formatCliConfigError,
@@ -28,6 +31,7 @@ import {
   runtimeModeFromConfig,
   writeCliConfigAtomic,
   writeHostedControlConfigAtomic,
+  type CliConfigFilesystemOps,
   type OpenTagCliConfig
 } from "../src/config.js";
 import { legacyLarkConfigPath, readLegacyLarkCredentials } from "../src/platforms/lark/saved-config.js";
@@ -54,6 +58,61 @@ function config(): OpenTagCliConfig {
       bindingMethod: "default_project"
     }
   });
+}
+
+function hostedPatch() {
+  return {
+    dispatcherUrl: "https://control.example",
+    relayUrl: "https://control.example",
+    controlRegistration: {
+      kind: "hosted_control_v1" as const,
+      state: "unpaired" as const,
+      flow: "registration" as const,
+      operationId: "operation_transaction_test",
+      reason: "pending" as const
+    },
+    runnerToken: null
+  };
+}
+
+function tracingFilesystem(): {
+  calls: string[];
+  filesystem: CliConfigFilesystemOps;
+} {
+  const calls: string[] = [];
+  const filesystem = new Proxy(CLI_CONFIG_FILESYSTEM_OPS, {
+    get(target, property: keyof CliConfigFilesystemOps) {
+      const operation = target[property];
+      if (typeof operation !== "function") return operation;
+      return (...args: unknown[]) => {
+        calls.push(String(property));
+        return (operation as (...parameters: unknown[]) => unknown)(...args);
+      };
+    }
+  }) as CliConfigFilesystemOps;
+  return { calls, filesystem };
+}
+
+function filesystemFailingAt(
+  operationToFail: keyof CliConfigFilesystemOps,
+  occurrenceToFail: number
+): CliConfigFilesystemOps {
+  let occurrence = 0;
+  return new Proxy(CLI_CONFIG_FILESYSTEM_OPS, {
+    get(target, property: keyof CliConfigFilesystemOps) {
+      const operation = target[property];
+      if (typeof operation !== "function") return operation;
+      return (...args: unknown[]) => {
+        if (property === operationToFail) {
+          occurrence += 1;
+          if (occurrence === occurrenceToFail) {
+            throw new Error(`injected ${String(property)} failure ${occurrence}`);
+          }
+        }
+        return (operation as (...parameters: unknown[]) => unknown)(...args);
+      };
+    }
+  }) as CliConfigFilesystemOps;
 }
 
 describe("OpenTag CLI config", () => {
@@ -180,9 +239,25 @@ describe("OpenTag CLI config", () => {
     const lockPath = `${path}.lock`;
     const lockFile = openSync(lockPath, "wx", 0o600);
     try {
-      expect(() => writeCliConfigAtomic(path, { ...source, language: "zh-CN" })).toThrow(
-        /locked by another writer/iu
-      );
+      writeFileSync(lockFile, `${JSON.stringify({
+        schemaVersion: 1,
+        pid: 4242,
+        configPath: path,
+        createdAt: "2026-08-08T00:00:00.000Z"
+      })}\n`);
+      let lockError: unknown;
+      try {
+        writeCliConfigAtomic(path, { ...source, language: "zh-CN" });
+      } catch (error) {
+        lockError = error;
+      }
+      expect(lockError).toBeInstanceOf(Error);
+      const lockMessage = (lockError as Error).message;
+      expect(lockMessage).toContain("Lock record:");
+      expect(lockMessage).toContain('"pid":4242');
+      expect(lockMessage).toContain("verify the recorded process identity first");
+      expect(lockMessage).toContain(`manually delete the exact lock path ${JSON.stringify(lockPath)}`);
+      expect(lockMessage).toContain("will not delete a lock based on PID alone");
       expect(() =>
         writeHostedControlConfigAtomic(path, {
           dispatcherUrl: "https://control.example",
@@ -202,6 +277,470 @@ describe("OpenTag CLI config", () => {
       closeSync(lockFile);
       rmSync(lockPath, { force: true });
     }
+  });
+
+  it.each([
+    [
+      "unknown fields",
+      JSON.stringify({
+        schemaVersion: 1,
+        pid: 4242,
+        configPath: "/tmp/config.json",
+        createdAt: "2026-08-08T00:00:00.000Z",
+        token: "SENTINEL_LOCK_TOKEN",
+        nested: { credential: "SENTINEL_NESTED_CREDENTIAL" }
+      })
+    ],
+    [
+      "a noncanonical createdAt value",
+      JSON.stringify({
+        schemaVersion: 1,
+        pid: 4242,
+        configPath: "/tmp/config.json",
+        createdAt: "Sat, 08 Aug 2026 00:00:00 GMT (SENTINEL_CREATED_AT)"
+      })
+    ],
+    ["an oversized record", JSON.stringify({ payload: "SENTINEL_OVERSIZED".repeat(1_000) })]
+  ])("never renders credentials from %s in lock diagnostics", (_case, contents) => {
+    const path = join(tempDir(), "config.json");
+    writeCliConfigAtomic(path, config());
+    const lockPath = `${path}.lock`;
+    writeFileSync(lockPath, contents, { mode: 0o600, flag: "wx" });
+
+    let error: unknown;
+    try {
+      writeCliConfigAtomic(path, config());
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('"status":"unreadable_or_invalid"');
+    expect((error as Error).message).not.toContain("SENTINEL_LOCK_TOKEN");
+    expect((error as Error).message).not.toContain("SENTINEL_NESTED_CREDENTIAL");
+    expect((error as Error).message).not.toContain("SENTINEL_CREATED_AT");
+    expect((error as Error).message).not.toContain("SENTINEL_OVERSIZED");
+    rmSync(lockPath, { force: true });
+  });
+
+  it("does not follow a symbolic-link config lock for diagnostics", () => {
+    const directory = tempDir();
+    const path = join(directory, "config.json");
+    writeCliConfigAtomic(path, config());
+    const lockPath = `${path}.lock`;
+    const target = join(directory, "foreign-lock.json");
+    writeFileSync(target, JSON.stringify({
+      schemaVersion: 1,
+      pid: 424242,
+      configPath: "SENTINEL_SYMLINK_PATH",
+      createdAt: "2026-08-08T00:00:00.000Z"
+    }), { mode: 0o600 });
+    symlinkSync(target, lockPath);
+
+    let error: unknown;
+    try {
+      writeCliConfigAtomic(path, config());
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('"status":"unreadable_or_invalid"');
+    expect((error as Error).message).not.toContain("424242");
+    expect((error as Error).message).not.toContain("SENTINEL_SYMLINK_PATH");
+    rmSync(lockPath, { force: true });
+  });
+
+  it.each([
+    ["schemaVersion", (raw: Record<string, unknown>) => { raw.schemaVersion = 2; }],
+    ["platform", (raw: Record<string, unknown>) => {
+      const platforms = raw.platforms as { lark: Record<string, unknown> };
+      platforms.lark.unexpected = true;
+    }],
+    ["runnerTokens", (raw: Record<string, unknown>) => {
+      const daemon = raw.daemon as Record<string, unknown>;
+      daemon.runnerTokens = [42];
+    }]
+  ])("rejects an invalid unrelated raw %s field without replacing the old config", (_field, mutate) => {
+    const path = join(tempDir(), "config.json");
+    const raw = JSON.parse(JSON.stringify(config())) as Record<string, unknown>;
+    mutate(raw);
+    const before = `${JSON.stringify(raw, null, 2)}\n`;
+    writeFileSync(path, before, { mode: 0o600 });
+
+    expect(() => writeHostedControlConfigAtomic(path, hostedPatch())).toThrow();
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(() => statSync(`${path}.lock`)).toThrow();
+  });
+
+  it("does not accept a SecretRef-shaped object in a non-secret raw field", () => {
+    const path = join(tempDir(), "config.json");
+    const raw = JSON.parse(JSON.stringify(config())) as Record<string, unknown>;
+    const daemon = raw.daemon as Record<string, unknown>;
+    daemon.runnerId = { kind: "env", name: "NOT_A_SECRET_FIELD" };
+    const before = `${JSON.stringify(raw, null, 2)}\n`;
+    writeFileSync(path, before, { mode: 0o600 });
+
+    expect(() => writeHostedControlConfigAtomic(path, hostedPatch())).toThrow();
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(() => statSync(`${path}.lock`)).toThrow();
+  });
+
+  it("performs the hosted replacement in lock-write-fsync-rename-readback-unlock order", () => {
+    const path = join(tempDir(), "config.json");
+    writeCliConfigAtomic(path, config());
+    const { calls, filesystem } = tracingFilesystem();
+
+    writeHostedControlConfigAtomic(path, hostedPatch(), filesystem);
+
+    expect(calls).toEqual([
+      "mkdir",
+      "open", "fchmod", "writeFile", "fsync",
+      ...(process.platform === "win32" ? [] : ["stat"]),
+      "readFile",
+      "open", "fchmod", "writeFile", "fsync", "close", "rename",
+      ...(process.platform === "win32" ? [] : ["open", "fsync", "close"]),
+      "readFile",
+      "close", "remove",
+      ...(process.platform === "win32" ? [] : ["open", "fsync", "close"])
+    ]);
+    expect(() => statSync(`${path}.lock`)).toThrow();
+  });
+
+  it("uses the filesystem seam for the ordinary atomic writer too", () => {
+    const path = join(tempDir(), "config.json");
+    const { calls, filesystem } = tracingFilesystem();
+
+    writeCliConfigAtomic(path, config(), filesystem);
+
+    expect(calls).toContain("rename");
+    expect(calls.filter((call) => call === "writeFile")).toHaveLength(2);
+    expect(() => statSync(`${path}.lock`)).toThrow();
+  });
+
+  it.each([
+    ["lock fchmod", "fchmod", 1],
+    ["lock write", "writeFile", 1],
+    ["lock fsync", "fsync", 1],
+    ["temp fchmod", "fchmod", 2],
+    ["temp write", "writeFile", 2],
+    ["temp fsync", "fsync", 2]
+  ] as const)("keeps the old file and releases the lock after a pre-rename %s failure", (
+    _stage,
+    operation,
+    occurrence
+  ) => {
+    const path = join(tempDir(), "config.json");
+    writeCliConfigAtomic(path, config());
+    const before = readFileSync(path, "utf8");
+
+    expect(() => writeHostedControlConfigAtomic(
+      path,
+      hostedPatch(),
+      filesystemFailingAt(operation, occurrence)
+    )).toThrow(`injected ${operation} failure ${occurrence}`);
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(() => statSync(`${path}.lock`)).toThrow();
+  });
+
+  it("does not retry an ambiguous temporary-file close failure", () => {
+    const path = join(tempDir(), "config.json");
+    writeCliConfigAtomic(path, config());
+    const before = readFileSync(path, "utf8");
+    const closeFailure = new Error("injected post-close failure");
+    let tempFile: number | undefined;
+    let tempCloseCalls = 0;
+    const filesystem: CliConfigFilesystemOps = {
+      ...CLI_CONFIG_FILESYSTEM_OPS,
+      open(target, flags, mode) {
+        const file = CLI_CONFIG_FILESYSTEM_OPS.open(target, flags, mode);
+        if (target.startsWith(`${path}.`) && target.endsWith(".tmp")) tempFile = file;
+        return file;
+      },
+      close(file) {
+        if (file !== tempFile) {
+          CLI_CONFIG_FILESYSTEM_OPS.close(file);
+          return;
+        }
+        tempCloseCalls += 1;
+        CLI_CONFIG_FILESYSTEM_OPS.close(file);
+        throw closeFailure;
+      }
+    };
+
+    expect(() => writeHostedControlConfigAtomic(path, hostedPatch(), filesystem))
+      .toThrow(closeFailure);
+    expect(tempCloseCalls).toBe(1);
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(() => statSync(`${path}.lock`)).toThrow();
+  });
+
+  it("keeps an ambiguous close failure primary when temporary cleanup also fails", () => {
+    const path = join(tempDir(), "config.json");
+    writeCliConfigAtomic(path, config());
+    const before = readFileSync(path, "utf8");
+    const closeFailure = new Error("injected post-close failure");
+    const removeFailure = new Error("injected temp remove failure");
+    let tempFile: number | undefined;
+    let tempPath: string | undefined;
+    const filesystem: CliConfigFilesystemOps = {
+      ...CLI_CONFIG_FILESYSTEM_OPS,
+      open(target, flags, mode) {
+        const file = CLI_CONFIG_FILESYSTEM_OPS.open(target, flags, mode);
+        if (target.startsWith(`${path}.`) && target.endsWith(".tmp")) {
+          tempFile = file;
+          tempPath = target;
+        }
+        return file;
+      },
+      close(file) {
+        CLI_CONFIG_FILESYSTEM_OPS.close(file);
+        if (file === tempFile) throw closeFailure;
+      },
+      remove(target) {
+        if (target === tempPath) throw removeFailure;
+        CLI_CONFIG_FILESYSTEM_OPS.remove(target);
+      }
+    };
+
+    let error: unknown;
+    try {
+      writeHostedControlConfigAtomic(path, hostedPatch(), filesystem);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(AggregateError);
+    const aggregate = error as AggregateError;
+    expect(aggregate.cause).toBe(closeFailure);
+    expect(aggregate.errors).toEqual([closeFailure, removeFailure]);
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(() => statSync(`${path}.lock`)).toThrow();
+    if (tempPath) rmSync(tempPath, { force: true });
+  });
+
+  it("keeps the original config and releases the lock when rename fails", () => {
+    const path = join(tempDir(), "config.json");
+    writeCliConfigAtomic(path, config());
+    const before = readFileSync(path, "utf8");
+    const filesystem: CliConfigFilesystemOps = {
+      ...CLI_CONFIG_FILESYSTEM_OPS,
+      rename() {
+        throw new Error("injected pre-rename failure");
+      }
+    };
+
+    expect(() => writeHostedControlConfigAtomic(path, hostedPatch(), filesystem))
+      .toThrow("injected pre-rename failure");
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(() => statSync(`${path}.lock`)).toThrow();
+  });
+
+  it("reports outcome unknown after rename and still releases the lock", () => {
+    const path = join(tempDir(), "config.json");
+    writeCliConfigAtomic(path, config());
+    let renamed = false;
+    const filesystem: CliConfigFilesystemOps = {
+      ...CLI_CONFIG_FILESYSTEM_OPS,
+      rename(from, to) {
+        CLI_CONFIG_FILESYSTEM_OPS.rename(from, to);
+        renamed = true;
+      },
+      readFile(target) {
+        if (renamed && target === path) throw new Error("injected readback failure");
+        return CLI_CONFIG_FILESYSTEM_OPS.readFile(target);
+      }
+    };
+
+    expect(() => writeHostedControlConfigAtomic(path, hostedPatch(), filesystem))
+      .toThrow(CliConfigWriteOutcomeUnknownError);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({
+      runtime: { mode: "relay", relayUrl: "https://control.example" },
+      daemon: {
+        dispatcherUrl: "https://control.example",
+        controlRegistration: { operationId: "operation_transaction_test" }
+      }
+    });
+    expect(() => statSync(`${path}.lock`)).toThrow();
+  });
+
+  it("runs the complete raw schema again during post-rename readback", () => {
+    const path = join(tempDir(), "config.json");
+    writeCliConfigAtomic(path, config());
+    let renamed = false;
+    const filesystem: CliConfigFilesystemOps = {
+      ...CLI_CONFIG_FILESYSTEM_OPS,
+      rename(from, to) {
+        CLI_CONFIG_FILESYSTEM_OPS.rename(from, to);
+        renamed = true;
+      },
+      readFile(target) {
+        const contents = CLI_CONFIG_FILESYSTEM_OPS.readFile(target);
+        if (!renamed || target !== path) return contents;
+        const invalid = JSON.parse(contents) as Record<string, unknown>;
+        invalid.schemaVersion = 2;
+        return JSON.stringify(invalid);
+      }
+    };
+
+    expect(() => writeHostedControlConfigAtomic(path, hostedPatch(), filesystem))
+      .toThrow(CliConfigWriteOutcomeUnknownError);
+    expect(() => statSync(`${path}.lock`)).toThrow();
+  });
+
+  it("keeps directory fsync as the primary cause when directory close also fails", () => {
+    if (process.platform === "win32") return;
+    const path = join(tempDir(), "config.json");
+    writeCliConfigAtomic(path, config());
+    const fsyncFailure = new Error("injected directory fsync failure");
+    const closeFailure = new Error("injected directory close failure");
+    let renamed = false;
+    let failedDirectory: number | undefined;
+    const filesystem: CliConfigFilesystemOps = {
+      ...CLI_CONFIG_FILESYSTEM_OPS,
+      rename(from, to) {
+        CLI_CONFIG_FILESYSTEM_OPS.rename(from, to);
+        renamed = true;
+      },
+      open(target, flags, mode) {
+        const file = CLI_CONFIG_FILESYSTEM_OPS.open(target, flags, mode);
+        if (renamed && target === dirname(path) && failedDirectory === undefined) {
+          failedDirectory = file;
+        }
+        return file;
+      },
+      fsync(file) {
+        if (file === failedDirectory) throw fsyncFailure;
+        CLI_CONFIG_FILESYSTEM_OPS.fsync(file);
+      },
+      close(file) {
+        if (file === failedDirectory) throw closeFailure;
+        CLI_CONFIG_FILESYSTEM_OPS.close(file);
+      }
+    };
+
+    let error: unknown;
+    try {
+      writeHostedControlConfigAtomic(path, hostedPatch(), filesystem);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(CliConfigWriteOutcomeUnknownError);
+    expect((error as Error).cause).toBeInstanceOf(AggregateError);
+    const cause = (error as Error).cause as AggregateError;
+    expect(cause.cause).toBe(fsyncFailure);
+    expect(cause.errors).toEqual([fsyncFailure, closeFailure]);
+    expect(() => statSync(`${path}.lock`)).toThrow();
+  });
+
+  it("reports outcome unknown when a successful ordinary write cannot close its lock", () => {
+    const path = join(tempDir(), "config.json");
+    let lockFile: number | undefined;
+    const filesystem: CliConfigFilesystemOps = {
+      ...CLI_CONFIG_FILESYSTEM_OPS,
+      open(target, flags, mode) {
+        const file = CLI_CONFIG_FILESYSTEM_OPS.open(target, flags, mode);
+        if (target === `${path}.lock`) lockFile = file;
+        return file;
+      },
+      close(file) {
+        if (file === lockFile) throw new Error("injected lock close failure");
+        CLI_CONFIG_FILESYSTEM_OPS.close(file);
+      }
+    };
+
+    expect(() => writeCliConfigAtomic(path, config(), filesystem))
+      .toThrow(CliConfigWriteOutcomeUnknownError);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ schemaVersion: 1 });
+    expect(() => statSync(`${path}.lock`)).toThrow();
+  });
+
+  it("preserves outcome-unknown typing when post-rename failure and lock cleanup both fail", () => {
+    const path = join(tempDir(), "config.json");
+    writeCliConfigAtomic(path, config());
+    const lockPath = `${path}.lock`;
+    let renamed = false;
+    const filesystem: CliConfigFilesystemOps = {
+      ...CLI_CONFIG_FILESYSTEM_OPS,
+      rename(from, to) {
+        CLI_CONFIG_FILESYSTEM_OPS.rename(from, to);
+        renamed = true;
+      },
+      readFile(target) {
+        if (renamed && target === path) throw new Error("injected readback failure");
+        return CLI_CONFIG_FILESYSTEM_OPS.readFile(target);
+      },
+      remove(target) {
+        if (target === lockPath) throw new Error("injected lock cleanup failure");
+        CLI_CONFIG_FILESYSTEM_OPS.remove(target);
+      }
+    };
+
+    let error: unknown;
+    try {
+      writeHostedControlConfigAtomic(path, hostedPatch(), filesystem);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(CliConfigWriteOutcomeUnknownError);
+    expect((error as Error & { code?: string }).code).toBe("config_write_outcome_unknown");
+    expect((error as Error).cause).toBeInstanceOf(AggregateError);
+    expect(statSync(lockPath).isFile()).toBe(true);
+    rmSync(lockPath, { force: true });
+  });
+
+  it("never removes an existing lock whose record is invalid", () => {
+    const path = join(tempDir(), "config.json");
+    writeCliConfigAtomic(path, config());
+    const lockPath = `${path}.lock`;
+    writeFileSync(lockPath, "not-json\n", { mode: 0o600, flag: "wx" });
+    let removeCalls = 0;
+    const filesystem: CliConfigFilesystemOps = {
+      ...CLI_CONFIG_FILESYSTEM_OPS,
+      remove(target) {
+        removeCalls += 1;
+        CLI_CONFIG_FILESYSTEM_OPS.remove(target);
+      }
+    };
+
+    expect(() => writeHostedControlConfigAtomic(path, hostedPatch(), filesystem))
+      .toThrow('"status":"unreadable_or_invalid"');
+    expect(removeCalls).toBe(0);
+    expect(readFileSync(lockPath, "utf8")).toBe("not-json\n");
+    rmSync(lockPath, { force: true });
+  });
+
+  it("preserves ref-shaped ordinary metadata instead of treating it as a secret", () => {
+    const path = join(tempDir(), "config.json");
+    const raw = JSON.parse(JSON.stringify(config())) as {
+      daemon: Record<string, unknown>;
+    };
+    raw.daemon.channelBindings = [{
+      provider: "lark",
+      accountId: "account-1",
+      conversationId: "conversation-1",
+      metadata: {
+        annotation: { kind: "env", name: "ORDINARY_METADATA" }
+      }
+    }];
+    writeFileSync(path, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+
+    writeHostedControlConfigAtomic(path, hostedPatch());
+
+    const persisted = JSON.parse(readFileSync(path, "utf8")) as typeof raw;
+    expect(persisted.daemon.channelBindings).toEqual(raw.daemon.channelBindings);
+  });
+
+  it("rejects a malformed SecretRef in a known raw secret field", () => {
+    const path = join(tempDir(), "config.json");
+    const raw = JSON.parse(JSON.stringify(config())) as {
+      platforms: { lark: Record<string, unknown> };
+    };
+    raw.platforms.lark.appSecret = { kind: "env", name: "", extra: true };
+    const before = `${JSON.stringify(raw, null, 2)}\n`;
+    writeFileSync(path, before, { mode: 0o600 });
+
+    expect(() => writeHostedControlConfigAtomic(path, hostedPatch())).toThrow();
+    expect(readFileSync(path, "utf8")).toBe(before);
   });
 
   it("patches hosted control state without materializing unrelated SecretRefs", () => {
