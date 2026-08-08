@@ -136,6 +136,137 @@ export const PermissionScopeV1Schema = z
 
 export const PermissionScopesV1Schema = sortedUniqueArray(PermissionScopeV1Schema).min(1).max(32);
 
+export const MaterialActionStableIdV1Schema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u)
+  .refine(isCredentialSafeText, "Stable ID must not contain credential-like data.");
+
+export const MaterialActionNormalizedNameV1Schema = z
+  .string()
+  .regex(/^[a-z][a-z0-9._-]{0,63}$/u)
+  .refine(isCredentialSafeText, "Normalized name must not contain credential-like data.");
+
+export const MaterialActionExternalUriV1Schema = z
+  .string()
+  .max(2048)
+  .superRefine((value, ctx) => {
+    try {
+      const url = new URL(value);
+      if (
+        (url.protocol !== "https:" && url.protocol !== "http:")
+        || url.username !== ""
+        || url.password !== ""
+        || url.search !== ""
+        || url.hash !== ""
+        || url.toString() !== value
+        || !isCredentialSafeText(value)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "External URI must be a canonical sanitized HTTP(S) URL.",
+        });
+      }
+    } catch {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "External URI must be a valid URL." });
+    }
+  });
+
+export const MaterialActionReasonCodeV1Schema = z.enum([
+  "provider_accepted",
+  "provider_error",
+  "provider_rejected",
+  "provider_receipt_missing",
+  "provider_timeout",
+]);
+
+export const MaterialActionAttemptRefV1Schema = z
+  .object({
+    attemptId: MaterialActionStableIdV1Schema,
+    attemptNumber: z.number().int().positive(),
+    epoch: z.number().int().positive(),
+    fencingTokenDigest: ReceiptDigestSchema,
+  })
+  .strict()
+  .superRefine((attempt, ctx) => {
+    if (attempt.epoch !== attempt.attemptNumber) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["epoch"],
+        message: "Attempt epoch must equal the Run-scoped attempt number.",
+      });
+    }
+  });
+
+export const MaterialActionPayloadV1Schema = z
+  .object({
+    actionId: MaterialActionStableIdV1Schema,
+    actionFamily: MaterialActionNormalizedNameV1Schema,
+    provider: MaterialActionNormalizedNameV1Schema,
+    connectionRef: MaterialActionStableIdV1Schema,
+    targetFingerprint: ReceiptDigestSchema,
+    operationId: MaterialActionStableIdV1Schema,
+    requestDigest: ReceiptDigestSchema,
+    actionPayloadDigest: ReceiptDigestSchema,
+    outcome: z.enum(["succeeded", "failed", "outcome_unknown"]),
+    externalId: MaterialActionStableIdV1Schema.optional(),
+    externalUri: MaterialActionExternalUriV1Schema.optional(),
+    observedAt: ControlTimestampSchema,
+    evidenceRefs: sortedUniqueArray(MaterialActionStableIdV1Schema).min(1).max(32).optional(),
+    evidenceDigests: DigestSetSchema.min(1).max(32).optional(),
+    reasonCode: MaterialActionReasonCodeV1Schema,
+    nextAction: MaterialActionStableIdV1Schema.optional(),
+    owner: MaterialActionStableIdV1Schema.optional(),
+  })
+  .strict()
+  .superRefine((payload, ctx) => {
+    const compatibleReasonCodes = {
+      succeeded: ["provider_accepted"],
+      failed: ["provider_error", "provider_rejected"],
+      outcome_unknown: ["provider_receipt_missing", "provider_timeout"],
+    } as const;
+    if (!(compatibleReasonCodes[payload.outcome] as readonly string[]).includes(payload.reasonCode)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reasonCode"],
+        message: "Material action reason code is incompatible with its outcome.",
+      });
+    }
+    if (payload.outcome === "outcome_unknown") {
+      if (payload.nextAction === undefined || payload.owner === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["outcome"],
+          message: "Unknown material action outcomes require a next action and owner.",
+        });
+      }
+    } else if (payload.nextAction !== undefined || payload.owner !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["nextAction"],
+        message: "Terminal material action outcomes must not include reconciliation ownership.",
+      });
+    }
+    if ((payload.evidenceRefs === undefined) !== (payload.evidenceDigests === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["evidenceRefs"],
+        message: "Evidence refs and digests must be supplied together.",
+      });
+    } else if (
+      payload.evidenceRefs !== undefined
+      && payload.evidenceDigests !== undefined
+      && payload.evidenceRefs.length !== payload.evidenceDigests.length
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["evidenceDigests"],
+        message: "Evidence refs and digests must have matching cardinality.",
+      });
+    }
+  });
+
 const PermissionActionSummaryV1Shape = {
   actionId: PermissionStableIdV1Schema,
   actionFamily: PermissionActionFamilyV1Schema,
@@ -790,6 +921,92 @@ function hasExactReceiptIdentity(
   return identity.namespace === namespace &&
     identity.parts.length === parts.length &&
     identity.parts.every((part, index) => part === parts[index]);
+}
+
+const MaterialActionReceiptEnvelopeBaseV1Schema = z
+  .object({
+    ...VersionedResponseShape,
+    receiptId: MaterialActionStableIdV1Schema,
+    organizationId: MaterialActionStableIdV1Schema,
+    operationId: MaterialActionStableIdV1Schema,
+    requiredCapabilities: z.tuple([z.literal("relay.material-receipt.v1")]),
+    producer: z
+      .object({
+        kind: z.literal("local_opentag"),
+        id: MaterialActionStableIdV1Schema,
+      })
+      .strict(),
+    identity: z
+      .object({
+        namespace: z.literal("opentag.control.receipt/material-action/v1"),
+        parts: z.array(MaterialActionStableIdV1Schema).length(5),
+      })
+      .strict(),
+    predecessorReceiptDigests: DigestSetSchema.optional(),
+    observedAt: ControlTimestampSchema,
+    payloadDigest: ReceiptDigestSchema,
+    receiptDigest: ReceiptDigestSchema,
+    receiptKind: z.literal("material_action"),
+    runId: MaterialActionStableIdV1Schema,
+    attempt: MaterialActionAttemptRefV1Schema,
+    payload: MaterialActionPayloadV1Schema,
+  })
+  .strict();
+
+export const MaterialActionReceiptDigestInputV1Schema =
+  MaterialActionReceiptEnvelopeBaseV1Schema.omit({ receiptDigest: true });
+
+export const MaterialActionReceiptEnvelopeV1Schema =
+  MaterialActionReceiptEnvelopeBaseV1Schema.superRefine((receipt, ctx) => {
+    if (receipt.payload.operationId !== receipt.operationId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["payload", "operationId"],
+        message: "Material action operation identity must match the envelope.",
+      });
+    }
+    if (receipt.payload.observedAt !== receipt.observedAt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["payload", "observedAt"],
+        message: "Material action observation time must match the envelope.",
+      });
+    }
+    if (!hasExactReceiptIdentity(
+      receipt.identity,
+      "opentag.control.receipt/material-action/v1",
+      [
+        receipt.organizationId,
+        receipt.runId,
+        receipt.attempt.attemptId,
+        receipt.payload.actionId,
+        receipt.receiptId,
+      ],
+    )) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["identity"],
+        message: "Material action identity tuple is invalid.",
+      });
+    }
+  });
+
+export function buildMaterialActionReceiptDigestInputV1(
+  input: z.input<typeof MaterialActionReceiptDigestInputV1Schema>,
+): z.output<typeof MaterialActionReceiptDigestInputV1Schema> {
+  return MaterialActionReceiptDigestInputV1Schema.parse(input);
+}
+
+export function computeMaterialActionPayloadDigestV1(
+  payload: z.input<typeof MaterialActionPayloadV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(MaterialActionPayloadV1Schema.parse(payload)));
+}
+
+export function computeMaterialActionReceiptDigestV1(
+  receipt: z.input<typeof MaterialActionReceiptDigestInputV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(buildMaterialActionReceiptDigestInputV1(receipt)));
 }
 
 export const ReadinessStateV1Schema = z.enum(["ready", "degraded", "blocked", "unknown"]);
@@ -1447,6 +1664,14 @@ export type RunnerCredentialCurrentStateResponseV1 = z.infer<
   typeof RunnerCredentialCurrentStateResponseV1Schema
 >;
 export type RunnerReadinessReceiptEnvelopeV1 = z.infer<typeof RunnerReadinessReceiptEnvelopeV1Schema>;
+export type MaterialActionAttemptRefV1 = z.infer<typeof MaterialActionAttemptRefV1Schema>;
+export type MaterialActionPayloadV1 = z.infer<typeof MaterialActionPayloadV1Schema>;
+export type MaterialActionReceiptDigestInputV1 = z.infer<
+  typeof MaterialActionReceiptDigestInputV1Schema
+>;
+export type MaterialActionReceiptEnvelopeV1 = z.infer<
+  typeof MaterialActionReceiptEnvelopeV1Schema
+>;
 export type RunnerPermissionRequestV1 = z.infer<typeof RunnerPermissionRequestV1Schema>;
 export type PermissionRequestDigestInputV1 = z.infer<typeof PermissionRequestDigestInputV1Schema>;
 export type HumanPermissionDecisionRequestV1 = z.infer<typeof HumanPermissionDecisionRequestV1Schema>;

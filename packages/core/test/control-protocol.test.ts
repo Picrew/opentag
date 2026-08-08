@@ -16,11 +16,17 @@ import {
   ControlMutationRequestV1Schema,
   ControlErrorHttpResponseV1Schema,
   ControlWaitingHttpResponseV1Schema,
+  buildMaterialActionReceiptDigestInputV1,
   buildPermissionRequestDigestInputV1,
+  computeMaterialActionPayloadDigestV1,
+  computeMaterialActionReceiptDigestV1,
   computePermissionFencingTokenDigestV1,
   computePermissionRequestDigestV1,
   HumanPermissionDecisionHttpResponseV1Schema,
   HumanPermissionDecisionRequestV1Schema,
+  MaterialActionPayloadV1Schema,
+  MaterialActionReceiptDigestInputV1Schema,
+  MaterialActionReceiptEnvelopeV1Schema,
   PermissionRequestDigestInputV1Schema,
   PermissionResolutionCurrentHttpResponseV1Schema,
   PermissionResolutionReceiptEnvelopeV1Schema,
@@ -556,6 +562,160 @@ describe("permission V1 control protocol", () => {
       ...authorized,
       payload: { ...authorized.payload, decision: "allow_run" },
     }).success).toBe(false);
+  });
+});
+
+describe("material action receipt V1 control protocol", () => {
+  const payload = {
+    actionId: "action_1",
+    actionFamily: "publish",
+    provider: "npm",
+    connectionRef: "connection_1",
+    targetFingerprint: digest,
+    operationId: "material_operation_1",
+    requestDigest: otherDigest,
+    actionPayloadDigest: digest,
+    outcome: "succeeded",
+    externalId: "publish_1",
+    externalUri: "https://registry.example/packages/opentag/1.0.0",
+    observedAt,
+    evidenceRefs: ["evidence_1", "evidence_2"],
+    evidenceDigests: [digest, otherDigest],
+    reasonCode: "provider_accepted",
+  } as const;
+  const receipt = {
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    receiptId: "material_receipt_1",
+    organizationId: "org_1",
+    operationId: "material_operation_1",
+    requiredCapabilities: ["relay.material-receipt.v1"],
+    producer: { kind: "local_opentag", id: "local_opentag_1" },
+    identity: {
+      namespace: "opentag.control.receipt/material-action/v1",
+      parts: ["org_1", "run_1", "attempt_1", "action_1", "material_receipt_1"],
+    },
+    observedAt,
+    payloadDigest: digest,
+    receiptDigest: otherDigest,
+    receiptKind: "material_action",
+    runId: "run_1",
+    attempt: {
+      attemptId: "attempt_1",
+      attemptNumber: 2,
+      epoch: 2,
+      fencingTokenDigest: digest,
+    },
+    payload,
+  } as const;
+
+  it("accepts the strict locally authoritative material receipt and canonical digest inputs", async () => {
+    expect(MaterialActionPayloadV1Schema.safeParse(payload).success).toBe(true);
+    expect(MaterialActionReceiptEnvelopeV1Schema.safeParse(receipt).success).toBe(true);
+    const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
+    expect(MaterialActionReceiptDigestInputV1Schema.parse(receiptDigestInput)).toEqual(
+      receiptDigestInput,
+    );
+    expect(buildMaterialActionReceiptDigestInputV1(receiptDigestInput)).toEqual(
+      receiptDigestInput,
+    );
+    expect(await computeMaterialActionPayloadDigestV1(payload)).toBe(digestCanonical(payload));
+    expect(await computeMaterialActionReceiptDigestV1(receiptDigestInput)).toBe(
+      digestCanonical(receiptDigestInput),
+    );
+  });
+
+  it("rejects unknown, nullable, or raw custody fields", () => {
+    for (const [field, value] of [
+      ["metadata", {}],
+      ["context", { source: "private" }],
+      ["rawBody", "provider response"],
+      ["command", "npm publish"],
+      ["path", "/private/repo"],
+      ["token", "npm_token_canary"],
+    ] as const) {
+      expect(MaterialActionPayloadV1Schema.safeParse({ ...payload, [field]: value }).success).toBe(false);
+    }
+    for (const field of ["externalId", "externalUri", "evidenceRefs", "evidenceDigests"] as const) {
+      expect(MaterialActionPayloadV1Schema.safeParse({ ...payload, [field]: null }).success).toBe(false);
+    }
+    expect(MaterialActionReceiptEnvelopeV1Schema.safeParse({
+      ...receipt,
+      attempt: { ...receipt.attempt, fencingToken: "raw_fence_canary" },
+    }).success).toBe(false);
+    expect(MaterialActionReceiptEnvelopeV1Schema.safeParse({
+      ...receipt,
+      producer: { ...receipt.producer, credentialId: "runtime_credential_1" },
+    }).success).toBe(false);
+  });
+
+  it("binds outcomes to allowlisted reasons and reconciliation ownership", () => {
+    for (const mutation of [
+      { outcome: "succeeded", reasonCode: "provider_error" },
+      { outcome: "failed", reasonCode: "provider_accepted" },
+      { outcome: "outcome_unknown", reasonCode: "provider_rejected" },
+      { outcome: "made_up", reasonCode: "provider_accepted" },
+    ]) {
+      expect(MaterialActionPayloadV1Schema.safeParse({ ...payload, ...mutation }).success).toBe(false);
+    }
+    const unknown = {
+      ...payload,
+      outcome: "outcome_unknown",
+      reasonCode: "provider_timeout",
+      nextAction: "reconcile_provider_receipt",
+      owner: "local_opentag",
+    } as const;
+    expect(MaterialActionPayloadV1Schema.safeParse(unknown).success).toBe(true);
+    expect(MaterialActionPayloadV1Schema.safeParse({ ...unknown, nextAction: undefined }).success).toBe(false);
+    expect(MaterialActionPayloadV1Schema.safeParse({ ...unknown, owner: undefined }).success).toBe(false);
+    expect(MaterialActionPayloadV1Schema.safeParse({ ...payload, nextAction: "retry" }).success).toBe(false);
+    expect(MaterialActionPayloadV1Schema.safeParse({
+      ...payload,
+      outcome: "failed",
+      reasonCode: "provider_rejected",
+      owner: "local_opentag",
+    }).success).toBe(false);
+  });
+
+  it("accepts only sanitized canonical HTTP(S) external URIs", () => {
+    for (const externalUri of [
+      "ftp://provider.example/receipt/1",
+      "https://user:password@provider.example/receipt/1",
+      "https://provider.example/receipt/1?token=secret",
+      "https://provider.example/receipt/1#access_token",
+      "https://provider.example",
+      "not-a-url",
+    ]) {
+      expect(MaterialActionPayloadV1Schema.safeParse({ ...payload, externalUri }).success).toBe(false);
+    }
+  });
+
+  it("binds capability, producer, attempt, operation, time, and exact identity", () => {
+    for (const mutation of [
+      { requiredCapabilities: ["relay.lifecycle.v1"] },
+      { requiredCapabilities: ["relay.material-receipt.v1", "relay.permission.v1"] },
+      { producer: { kind: "cloud", id: "control_1" } },
+      { producer: { kind: "runner", id: "runner_1" } },
+      { identity: { ...receipt.identity, parts: [...receipt.identity.parts.slice(0, 4), "other_receipt"] } },
+      { identity: { ...receipt.identity, parts: ["org_1", "run_1", "attempt_1", "other_action", "material_receipt_1"] } },
+      { attempt: { ...receipt.attempt, epoch: 3 } },
+      { payload: { ...payload, operationId: "other_operation" } },
+      { payload: { ...payload, observedAt: "2026-08-08T00:00:01.000Z" } },
+    ]) {
+      expect(MaterialActionReceiptEnvelopeV1Schema.safeParse({ ...receipt, ...mutation }).success).toBe(false);
+    }
+    for (const mutation of [
+      { actionId: "/private/action" },
+      { connectionRef: "https://provider.example/connection" },
+      { externalId: "ghp_abcdefgh" },
+      { actionFamily: "Publish" },
+      { provider: "npm/provider" },
+      { evidenceRefs: ["evidence_1"], evidenceDigests: [digest, otherDigest] },
+      { evidenceRefs: undefined },
+      { evidenceDigests: undefined },
+    ]) {
+      expect(MaterialActionPayloadV1Schema.safeParse({ ...payload, ...mutation }).success).toBe(false);
+    }
   });
 });
 
