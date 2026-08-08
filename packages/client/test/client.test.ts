@@ -61,6 +61,16 @@ function replayedRunnerCredentialResponse(input = runnerRegistrationRequest()) {
   return { ...response, replayed: true as const };
 }
 
+const bootstrapControlCredential = {
+  kind: "bootstrap_pairing" as const,
+  token: "bootstrap_pairing_secret"
+};
+
+const recoveryControlCredential = {
+  kind: "recovery_pairing" as const,
+  token: "recovery_pairing_secret"
+};
+
 function completionExplanationFixture() {
   const waivedAt = "2026-07-21T10:05:00.000Z";
   const waiver = {
@@ -1927,13 +1937,114 @@ describe("@opentag/client", () => {
     })).resolves.toBeUndefined();
   });
 
+  it("does not authorize Control V1 registration with only the legacy pairing token", async () => {
+    const legacySecret = "legacy_pairing_secret_must_not_escape";
+    let requested = false;
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: legacySecret,
+      fetchImpl: async () => {
+        requested = true;
+        return jsonResponse(freshRunnerCredentialResponse(), 201);
+      }
+    });
+
+    const failure = await client
+      .registerRunnerControlV1(runnerRegistrationRequest())
+      .catch((caught: unknown) => caught);
+
+    expect(requested).toBe(false);
+    expect(String(failure)).toContain(
+      "required=bootstrap_pairing actual=missing"
+    );
+    expect(String(failure)).not.toContain(legacySecret);
+  });
+
+  it("rejects an operator credential before Control V1 registration transport", async () => {
+    const secret = "operator_secret_must_not_escape";
+    let requested = false;
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      controlCredential: { kind: "operator", token: secret },
+      fetchImpl: async () => {
+        requested = true;
+        return jsonResponse(freshRunnerCredentialResponse(), 201);
+      }
+    });
+
+    const failure = await client
+      .registerRunnerControlV1(runnerRegistrationRequest())
+      .catch((caught: unknown) => caught);
+
+    expect(requested).toBe(false);
+    expect(String(failure)).toContain(
+      "required=bootstrap_pairing actual=operator"
+    );
+    expect(String(failure)).not.toContain(secret);
+  });
+
+  it.each([
+    ["empty", ""],
+    ["all-whitespace", " \t "]
+  ])("rejects an %s bootstrap token before Control V1 transport", async (_caseName, token) => {
+    let requested = false;
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      controlCredential: { kind: "bootstrap_pairing", token },
+      fetchImpl: async () => {
+        requested = true;
+        return jsonResponse(freshRunnerCredentialResponse(), 201);
+      }
+    });
+
+    const failure = await client
+      .registerRunnerControlV1(runnerRegistrationRequest())
+      .catch((caught: unknown) => caught);
+
+    expect(requested).toBe(false);
+    expect(String(failure)).toContain(
+      "required=bootstrap_pairing actual=bootstrap_pairing"
+    );
+  });
+
+  it("rejects a runtime credential before Control V1 re-provision transport", async () => {
+    const secret = "runtime_secret_must_not_escape";
+    let requested = false;
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      controlCredential: { kind: "runtime", token: secret },
+      fetchImpl: async () => {
+        requested = true;
+        return jsonResponse(freshRunnerCredentialResponse(), 201);
+      }
+    });
+
+    const failure = await client.reprovisionRunnerControlV1({
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      requiredCapabilities: ["relay.credential-reprovision.v1"],
+      requestId: "request_wrong_runtime_kind",
+      operationId: "operation_wrong_runtime_kind",
+      runnerId: "runner_private_1",
+      recoveryCredentialId: "recovery_credential_1",
+      expectedRegistrationGeneration: 1,
+      expectedCredentialGeneration: 1
+    }).catch((caught: unknown) => caught);
+
+    expect(requested).toBe(false);
+    expect(String(failure)).toContain(
+      "required=recovery_pairing actual=runtime"
+    );
+    expect(String(failure)).not.toContain(secret);
+  });
+
   it("registers a Control V1 runner and returns only the strict fresh credential body", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const input = runnerRegistrationRequest();
     const responseBody = freshRunnerCredentialResponse(input);
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test/",
-      pairingToken: "pairing_secret_value",
+      controlCredential: bootstrapControlCredential,
       fetchImpl: async (url, init) => {
         requests.push({ url: String(url), init });
         return jsonResponse(responseBody, 201);
@@ -1945,7 +2056,7 @@ describe("@opentag/client", () => {
     expect(requests[0]?.url).toBe("http://dispatcher.test/v1/runners");
     expect(requests[0]?.init?.method).toBe("POST");
     expect(new Headers(requests[0]?.init?.headers).get("authorization"))
-      .toBe("Bearer pairing_secret_value");
+      .toBe("Bearer bootstrap_pairing_secret");
     expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(input);
   });
 
@@ -1954,6 +2065,7 @@ describe("@opentag/client", () => {
     const responseBody = replayedRunnerCredentialResponse(input);
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
+      controlCredential: bootstrapControlCredential,
       fetchImpl: async () => jsonResponse(responseBody, 200)
     });
 
@@ -1973,6 +2085,7 @@ describe("@opentag/client", () => {
       : replayedRunnerCredentialResponse(input);
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
+      controlCredential: bootstrapControlCredential,
       fetchImpl: async () => jsonResponse({ ...baseResponse, ...override }, status)
     });
 
@@ -1990,6 +2103,7 @@ describe("@opentag/client", () => {
   ])("fails closed for %s", async (_caseName, body, status) => {
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
+      controlCredential: bootstrapControlCredential,
       fetchImpl: async () => jsonResponse(body, status)
     });
 
@@ -2006,6 +2120,7 @@ describe("@opentag/client", () => {
   ])("fails closed for a %s identity mismatch", async (_caseName, override) => {
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
+      controlCredential: bootstrapControlCredential,
       fetchImpl: async () => jsonResponse({ ...freshRunnerCredentialResponse(), ...override }, 201)
     });
 
@@ -2020,6 +2135,7 @@ describe("@opentag/client", () => {
     let requested = false;
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
+      controlCredential: bootstrapControlCredential,
       fetchImpl: async () => {
         requested = true;
         return jsonResponse(freshRunnerCredentialResponse(), 201);
@@ -2056,7 +2172,7 @@ describe("@opentag/client", () => {
     };
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
-      pairingToken: "operator_recovery_secret",
+      controlCredential: recoveryControlCredential,
       fetchImpl: async (url, init) => {
         requests.push({ url: String(url), init });
         return jsonResponse(responseBody, 201);
@@ -2068,7 +2184,7 @@ describe("@opentag/client", () => {
       "http://dispatcher.test/v1/runners/runner%2Fprivate%201/credentials/reprovision"
     );
     expect(new Headers(requests[0]?.init?.headers).get("authorization"))
-      .toBe("Bearer operator_recovery_secret");
+      .toBe("Bearer recovery_pairing_secret");
     expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(input);
   });
 
@@ -2092,6 +2208,7 @@ describe("@opentag/client", () => {
     };
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
+      controlCredential: recoveryControlCredential,
       fetchImpl: async () => jsonResponse(responseBody, 200)
     });
 
@@ -2128,6 +2245,7 @@ describe("@opentag/client", () => {
     if (status === 200) delete (responseBody as { runnerToken?: string }).runnerToken;
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
+      controlCredential: recoveryControlCredential,
       fetchImpl: async () => jsonResponse(responseBody, status)
     });
 
@@ -2163,6 +2281,7 @@ describe("@opentag/client", () => {
     };
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
+      controlCredential: bootstrapControlCredential,
       fetchImpl: async () => jsonResponse(body, status)
     });
 
@@ -2190,6 +2309,7 @@ describe("@opentag/client", () => {
     };
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
+      controlCredential: bootstrapControlCredential,
       fetchImpl: async () => jsonResponse(body, 401)
     });
 
@@ -2206,6 +2326,7 @@ describe("@opentag/client", () => {
   it("reports invalid JSON without retaining response content", async () => {
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
+      controlCredential: bootstrapControlCredential,
       fetchImpl: async () => new Response("not-json-runtime_secret_value", { status: 201 })
     });
 
@@ -2220,6 +2341,7 @@ describe("@opentag/client", () => {
     const failure = new TypeError("network unavailable");
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
+      controlCredential: bootstrapControlCredential,
       fetchImpl: async () => {
         throw failure;
       }

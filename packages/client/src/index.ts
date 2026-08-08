@@ -277,9 +277,16 @@ export type SourceDeliveryPruneResult = {
   retainedActive: number;
 };
 
+export type ControlCredential =
+  | { kind: "bootstrap_pairing"; token: string }
+  | { kind: "recovery_pairing"; token: string }
+  | { kind: "operator"; token: string }
+  | { kind: "runtime"; token: string };
+
 export type OpenTagClientOptions = {
   dispatcherUrl: string;
   pairingToken?: string;
+  controlCredential?: ControlCredential;
   channelPrincipalCredential?: string;
   fetchImpl?: typeof fetch;
 };
@@ -669,6 +676,24 @@ function jsonHeaders(pairingToken: string | undefined): Record<string, string> {
   return { "content-type": "application/json", ...authHeaders(pairingToken) };
 }
 
+function requireControlCredential(
+  credential: ControlCredential | undefined,
+  requiredKind: ControlCredential["kind"]
+): string {
+  const actualKind = credential?.kind ?? "missing";
+  if (
+    !credential
+    || credential.kind !== requiredKind
+    || typeof credential.token !== "string"
+    || credential.token.trim().length === 0
+  ) {
+    throw new Error(
+      `Control credential rejected: required=${requiredKind} actual=${actualKind}`
+    );
+  }
+  return credential.token;
+}
+
 function parseRunTimeoutPolicy(value: unknown): RunTimeoutPolicy {
   if (!value || typeof value !== "object") return {};
   const hardTimeoutMs = (value as { hardTimeoutMs?: unknown }).hardTimeoutMs;
@@ -840,9 +865,13 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
 
     async registerRunnerControlV1(input) {
       const request = RunnerRegistrationRequestV1Schema.parse(input);
+      const controlToken = requireControlCredential(
+        options.controlCredential,
+        "bootstrap_pairing"
+      );
       const response = await fetchImpl(`${baseUrl}/v1/runners`, {
         method: "POST",
-        headers: jsonHeaders(options.pairingToken),
+        headers: jsonHeaders(controlToken),
         body: JSON.stringify(request)
       });
       return parseRunnerCredentialControlV1Response(
@@ -858,11 +887,15 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
 
     async reprovisionRunnerControlV1(input) {
       const request = RunnerCredentialReprovisionRequestV1Schema.parse(input);
+      const controlToken = requireControlCredential(
+        options.controlCredential,
+        "recovery_pairing"
+      );
       const response = await fetchImpl(
         `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/credentials/reprovision`,
         {
           method: "POST",
-          headers: jsonHeaders(options.pairingToken),
+          headers: jsonHeaders(controlToken),
           body: JSON.stringify(request)
         }
       );
