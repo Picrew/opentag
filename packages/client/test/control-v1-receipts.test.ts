@@ -401,6 +401,27 @@ describe("Control V1 typed receipt transport", () => {
       .rejects.toMatchObject({ responseBody: "invalid_control_v1_response" });
   });
 
+  it("rejects unsafe callback receipt and operation IDs before transport", async () => {
+    let fetchCalls = 0;
+    const sdk = client(async () => {
+      fetchCalls += 1;
+      return jsonResponse({}, 500);
+    });
+    for (const receipt of [
+      {
+        ...callbackProvider(),
+        receiptId: "receipt_github_pat_abcdefghijklmnopqrstuvwxyz123456"
+      },
+      {
+        ...callbackProvider(),
+        operationId: "operation_nested_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk"
+      }
+    ]) {
+      await expect(sdk.projectCallbackObservationControlV1(receipt)).rejects.toBeInstanceOf(Error);
+    }
+    expect(fetchCalls).toBe(0);
+  });
+
   it.each([
     [404, "missing_or_concealed", {}],
     [409, "stale_attempt", {}],

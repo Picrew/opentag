@@ -48,7 +48,10 @@ function workThreadReceipt(overrides: Record<string, unknown> = {}) {
   });
 }
 
-function callbackProviderReceipt(resourceIdentity = "github:comment:123") {
+function callbackProviderReceipt(
+  resourceIdentity = "github:comment:123",
+  overrides: Record<string, unknown> = {}
+) {
   return withProjectionDigests({
     schemaVersion: 1,
     protocolVersion: "1.0",
@@ -73,6 +76,7 @@ function callbackProviderReceipt(resourceIdentity = "github:comment:123") {
       outcome: "succeeded",
       observedAt: NOW.toISOString()
     },
+    ...overrides,
   });
 }
 
@@ -1020,6 +1024,24 @@ describe("control_plane_projection_outbox", () => {
         destinationId: "cloud", envelope: callbackProviderReceipt(unsafe), now: NOW
       })).rejects;
       await expectation.toMatchObject({ code: "projection_envelope_invalid" });
+    }
+    for (const [field, unsafeId] of [
+      ["receiptId", "receipt_github_pat_abcdefghijklmnopqrstuvwxyz123456"],
+      [
+        "operationId",
+        "operation_nested_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk"
+      ],
+      ["receiptId", "https://example.test/callback?token=secret"],
+      ["operationId", "/tmp/callback-operation"],
+      ["receiptId", '{"body":"callback"}'],
+      ["operationId", "Authorization: Bearer abcdefghijklmnopqrstuvwxyz"],
+      ["receiptId", "callback; curl https://example.test/upload"]
+    ] as const) {
+      await expect(repo.enqueueControlPlaneProjection({
+        destinationId: "cloud",
+        envelope: callbackProviderReceipt("github:comment:123", { [field]: unsafeId }),
+        now: NOW
+      })).rejects.toMatchObject({ code: "projection_envelope_invalid" });
     }
     expect(sqlite.prepare("SELECT count(*) AS count FROM control_plane_projection_outbox").get()).toEqual({ count: 0 });
     sqlite.close();

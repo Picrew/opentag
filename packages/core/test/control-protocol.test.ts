@@ -12,6 +12,7 @@ import {
   CallbackProviderObservationReceiptEnvelopeV1Schema,
   CallbackProviderObservationPayloadV1Schema,
   CallbackNextActionV1Schema,
+  CallbackOpaqueStableIdV1Schema,
   CallbackObservationReasonCodeV1Schema,
   CallbackProviderV1Schema,
   CompletionContractRefPayloadV1Schema,
@@ -1672,6 +1673,7 @@ describe("ReceiptEnvelope V1", () => {
     >().toEqualTypeOf<"callback_provider_observation">();
     expectTypeOf<typeof CallbackProviderV1Schema._output>().toEqualTypeOf<"github">();
     expectTypeOf<typeof CallbackNextActionV1Schema._output>().toEqualTypeOf<"reconcile-provider">();
+    expectTypeOf<typeof CallbackOpaqueStableIdV1Schema._output>().toEqualTypeOf<string>();
   });
 
   it("accepts an executor-neutral, locally authored completion assessment", () => {
@@ -2189,6 +2191,25 @@ describe("ReceiptEnvelope V1", () => {
       payloadDigest: digest,
       receiptDigest: otherDigest,
     } as const;
+    const intentEnvelope = {
+      ...baseEnvelope,
+      receiptKind: "callback_intent_observation",
+      receiptId: "callback_intent_receipt_1",
+      identity: {
+        namespace: "opentag.control.receipt/callback-intent-observation/v1",
+        parts: ["org_1", "wt_1", "intent_1"],
+      },
+      payload: {
+        localIntentId: "intent_1",
+        assessmentRef: "assessment_1",
+        assessmentDigest: digest,
+        provider: "github",
+        sourceThreadIdentityDigest: digest,
+        operationId: baseEnvelope.operationId,
+        payloadDigest: digest,
+        createdAt: observedAt,
+      },
+    } as const;
     const attemptEnvelope = {
       ...baseEnvelope,
       receiptKind: "callback_attempt_observation",
@@ -2227,8 +2248,35 @@ describe("ReceiptEnvelope V1", () => {
       },
     } as const;
 
+    expect(CallbackIntentObservationReceiptEnvelopeV1Schema.safeParse(intentEnvelope).success).toBe(true);
     expect(CallbackAttemptObservationReceiptEnvelopeV1Schema.safeParse(attemptEnvelope).success).toBe(true);
     expect(CallbackProviderObservationReceiptEnvelopeV1Schema.safeParse(providerEnvelope).success).toBe(true);
+    for (const [schema, envelope] of [
+      [CallbackIntentObservationReceiptEnvelopeV1Schema, intentEnvelope],
+      [CallbackAttemptObservationReceiptEnvelopeV1Schema, attemptEnvelope],
+      [CallbackProviderObservationReceiptEnvelopeV1Schema, providerEnvelope],
+    ] as const) {
+      for (const [field, unsafeId] of [
+        ["receiptId", "receipt_github_pat_abcdefghijklmnopqrstuvwxyz123456"],
+        [
+          "operationId",
+          "operation_nested_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk",
+        ],
+        ["receiptId", "https://example.test/callback?token=secret"],
+        ["operationId", "/tmp/callback-operation"],
+        ["receiptId", "../callback-receipt"],
+        ["operationId", '{"body":"callback"}'],
+        ["receiptId", "Authorization: Bearer abcdefghijklmnopqrstuvwxyz"],
+        ["operationId", "callback; curl https://example.test/upload"],
+        ["receiptId", "callback\r\nX-Token: secret"],
+      ] as const) {
+        const changed = { ...envelope, [field]: unsafeId };
+        const candidate = envelope.receiptKind === "callback_intent_observation" && field === "operationId"
+          ? { ...changed, payload: { ...envelope.payload, operationId: unsafeId } }
+          : changed;
+        expect(schema.safeParse(candidate).success, `${envelope.receiptKind} ${field}: ${unsafeId}`).toBe(false);
+      }
+    }
     const unknownAttemptEnvelope = {
       ...attemptEnvelope,
       payload: {

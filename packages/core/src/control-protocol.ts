@@ -124,6 +124,11 @@ const CallbackSafeStableReferenceSchema = z
     "Callback reference must not contain credential-like data.",
   );
 
+export const CallbackOpaqueStableIdV1Schema = CallbackSafeStableReferenceSchema.regex(
+  /^[A-Za-z0-9][A-Za-z0-9._-]*$/u,
+  "Callback opaque ID must contain only stable identifier characters.",
+);
+
 export const CallbackLocalIntentIdV1Schema = CallbackSafeStableReferenceSchema.regex(
   /^intent[-_][A-Za-z0-9][A-Za-z0-9._-]*$/u,
   "Callback intent ID must use the intent- or intent_ stable reference prefix.",
@@ -1719,6 +1724,8 @@ function callbackEnvelope<const TReceiptKind extends string, TPayload extends z.
   return z
     .object({
       ...GovernedReceiptEnvelopeShape,
+      receiptId: CallbackOpaqueStableIdV1Schema,
+      operationId: CallbackOpaqueStableIdV1Schema,
       receiptKind: z.literal(receiptKind),
       payload,
     })
