@@ -23,6 +23,40 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function runnerRegistrationRequest() {
+  return {
+    schemaVersion: 1 as const,
+    protocolVersion: "1.0" as const,
+    requiredCapabilities: ["relay.registration.v1"] as const,
+    requestId: "request_registration_1",
+    operationId: "operation_registration_1",
+    runnerId: "runner_private_1",
+    displayName: "Private runner",
+    capabilities: ["relay.registration.v1"] as const
+  };
+}
+
+function freshRunnerCredentialResponse(input = runnerRegistrationRequest()) {
+  return {
+    schemaVersion: 1 as const,
+    protocolVersion: "1.0" as const,
+    operationId: input.operationId,
+    runnerId: input.runnerId,
+    registrationGeneration: 1,
+    credentialGeneration: 1,
+    credentialId: "credential_runtime_1",
+    credentialPurpose: "runtime" as const,
+    createdAt: "2026-08-08T00:00:00.000Z",
+    runnerToken: "runtime_secret_value",
+    replayed: false as const
+  };
+}
+
+function replayedRunnerCredentialResponse(input = runnerRegistrationRequest()) {
+  const { runnerToken: _runnerToken, ...response } = freshRunnerCredentialResponse(input);
+  return { ...response, replayed: true as const };
+}
+
 function completionExplanationFixture() {
   const waivedAt = "2026-07-21T10:05:00.000Z";
   const waiver = {
@@ -1874,5 +1908,200 @@ describe("@opentag/client", () => {
       "http://dispatcher.test/v1/repo-bindings/github/acme/demo/metrics",
       "http://dispatcher.test/v1/work-thread-metrics?threadId=thread%2Fgithub%2Facme%2Fdemo%231"
     ]);
+  });
+
+  it("keeps legacy runner registration compatible without parsing a response body", async () => {
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "legacy_pairing_credential",
+      fetchImpl: async () => new Response(null, { status: 204 })
+    });
+
+    await expect(client.registerRunner({
+      runnerId: "runner_legacy",
+      locality: "private"
+    })).resolves.toBeUndefined();
+  });
+
+  it("registers a Control V1 runner and returns only the strict fresh credential body", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const input = runnerRegistrationRequest();
+    const responseBody = freshRunnerCredentialResponse(input);
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test/",
+      pairingToken: "pairing_secret_value",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse(responseBody, 201);
+      }
+    });
+
+    await expect(client.registerRunnerControlV1(input)).resolves.toEqual(responseBody);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/runners");
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect(new Headers(requests[0]?.init?.headers).get("authorization"))
+      .toBe("Bearer pairing_secret_value");
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(input);
+  });
+
+  it("accepts a metadata-only Control V1 registration replay", async () => {
+    const input = runnerRegistrationRequest();
+    const responseBody = replayedRunnerCredentialResponse(input);
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => jsonResponse(responseBody, 200)
+    });
+
+    await expect(client.registerRunnerControlV1(input)).resolves.toEqual(responseBody);
+    expect(responseBody).not.toHaveProperty("runnerToken");
+  });
+
+  it.each([
+    ["status-body mismatch", replayedRunnerCredentialResponse(), 201],
+    ["unknown response field", { ...freshRunnerCredentialResponse(), unexpected: true }, 201],
+    ["legacy response body", { ok: true }, 201]
+  ])("fails closed for %s", async (_caseName, body, status) => {
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => jsonResponse(body, status)
+    });
+
+    await expect(client.registerRunnerControlV1(runnerRegistrationRequest())).rejects.toMatchObject({
+      name: "OpenTagClientHttpError",
+      status,
+      responseBody: "invalid_control_v1_response"
+    });
+  });
+
+  it.each([
+    ["operation", { operationId: "operation_other" }],
+    ["runner", { runnerId: "runner_other" }]
+  ])("fails closed for a %s identity mismatch", async (_caseName, override) => {
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => jsonResponse({ ...freshRunnerCredentialResponse(), ...override }, 201)
+    });
+
+    await expect(client.registerRunnerControlV1(runnerRegistrationRequest())).rejects.toMatchObject({
+      name: "OpenTagClientHttpError",
+      status: 201,
+      responseBody: "response_identity_mismatch"
+    });
+  });
+
+  it("rejects unknown Control V1 request fields before transport", async () => {
+    let requested = false;
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => {
+        requested = true;
+        return jsonResponse(freshRunnerCredentialResponse(), 201);
+      }
+    });
+    const input = { ...runnerRegistrationRequest(), unexpected: true } as Parameters<
+      typeof client.registerRunnerControlV1
+    >[0];
+
+    await expect(client.registerRunnerControlV1(input)).rejects.toMatchObject({ name: "ZodError" });
+    expect(requested).toBe(false);
+  });
+
+  it("re-provisions through the runner-scoped endpoint using the recovery credential channel", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const input = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.credential-reprovision.v1"] as const,
+      requestId: "request_reprovision_1",
+      operationId: "operation_reprovision_1",
+      runnerId: "runner/private 1",
+      recoveryCredentialId: "recovery_credential_1",
+      expectedRegistrationGeneration: 1,
+      expectedCredentialGeneration: 1
+    };
+    const responseBody = {
+      ...freshRunnerCredentialResponse(),
+      operationId: input.operationId,
+      runnerId: input.runnerId,
+      registrationGeneration: 2,
+      credentialGeneration: 2,
+      credentialId: "credential_runtime_2"
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "operator_recovery_secret",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse(responseBody, 201);
+      }
+    });
+
+    await expect(client.reprovisionRunnerControlV1(input)).resolves.toEqual(responseBody);
+    expect(requests[0]?.url).toBe(
+      "http://dispatcher.test/v1/runners/runner%2Fprivate%201/credentials/reprovision"
+    );
+    expect(new Headers(requests[0]?.init?.headers).get("authorization"))
+      .toBe("Bearer operator_recovery_secret");
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(input);
+  });
+
+  it.each([
+    [400, "invalid_request_body", {}],
+    [401, "invalid_credential", {}],
+    [403, "insufficient_scope", {}],
+    [404, "missing_or_concealed", {}],
+    [409, "idempotency_conflict", {}],
+    [412, "capability_required", { requiredCapabilities: ["relay.registration.v1"] }],
+    [413, "request_body_too_large", {}],
+    [422, "observation_policy_mismatch", {}],
+    [426, "protocol_upgrade_required", {
+      supported: { schemaVersions: [1], protocolVersions: ["1.0"] },
+      nextAction: "upgrade_client"
+    }]
+  ])("maps typed Control V1 error status %i without retaining its raw body", async (status, error, extra) => {
+    const body = {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      error,
+      message: "Diagnostic detail must not be retained with response content.",
+      requestId: `request_error_${status}`,
+      ...extra
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => jsonResponse(body, status)
+    });
+
+    await expect(client.registerRunnerControlV1(runnerRegistrationRequest())).rejects.toMatchObject({
+      name: "OpenTagClientHttpError",
+      status,
+      responseBody: JSON.stringify({ error, requestId: `request_error_${status}` })
+    });
+  });
+
+  it("reports invalid JSON without retaining response content", async () => {
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => new Response("not-json-runtime_secret_value", { status: 201 })
+    });
+
+    await expect(client.registerRunnerControlV1(runnerRegistrationRequest())).rejects.toMatchObject({
+      name: "OpenTagClientHttpError",
+      status: 201,
+      responseBody: "invalid_json_response"
+    });
+  });
+
+  it("propagates transport failures without synthesizing a credential response", async () => {
+    const failure = new TypeError("network unavailable");
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async () => {
+        throw failure;
+      }
+    });
+
+    await expect(client.registerRunnerControlV1(runnerRegistrationRequest())).rejects.toBe(failure);
   });
 });

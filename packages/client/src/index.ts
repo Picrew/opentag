@@ -14,7 +14,10 @@ import {
   FactoryRecipeSnapshotInputSchema,
   FactoryRecipeSnapshotSchema,
   RoutingDecisionSchema,
+  RunnerCredentialHttpResponseV1Schema,
+  RunnerCredentialReprovisionRequestV1Schema,
   RunnerDirectoryEntrySchema,
+  RunnerRegistrationRequestV1Schema,
   RunAdmissionDecisionSchema,
   WorkstreamAdmissionBatchInputSchema,
   WorkstreamAdmissionBatchReceiptSchema,
@@ -49,7 +52,10 @@ import {
   type PolicyRule,
   type ProposalLineage,
   type RoutingDecision,
+  type RunnerCredentialReprovisionRequestV1,
+  type RunnerCredentialResponseV1,
   type RunnerDirectoryEntry,
+  type RunnerRegistrationRequestV1,
   type RunnerRegistrationConfig,
   type RunnerRegistrationInput,
   type RunEventImportance,
@@ -489,6 +495,8 @@ export type LinearOAuthInstallationStart = {
 
 export type OpenTagClient = {
   registerRunner(input: RegisterRunnerInput): Promise<void>;
+  registerRunnerControlV1(input: RunnerRegistrationRequestV1): Promise<RunnerCredentialResponseV1>;
+  reprovisionRunnerControlV1(input: RunnerCredentialReprovisionRequestV1): Promise<RunnerCredentialResponseV1>;
   getRunner(input: { runnerId: string }): Promise<{ runner: RunnerRegistration }>;
   listRunners(): Promise<{ runners: RunnerDirectoryEntry[] }>;
   listControlPlaneAlerts(input?: { limit?: number; since?: string }): Promise<{ alerts: ControlPlaneAlert[] }>;
@@ -680,6 +688,46 @@ async function assertOk(response: Response, action: string): Promise<void> {
   }
 }
 
+async function parseRunnerCredentialControlV1Response(
+  response: Response,
+  action: string,
+  expected: { operationId: string; runnerId: string }
+): Promise<RunnerCredentialResponseV1> {
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_json_response");
+  }
+
+  const envelope = RunnerCredentialHttpResponseV1Schema.safeParse({
+    status: response.status,
+    body
+  });
+  if (!envelope.success) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+
+  if (envelope.data.status !== 200 && envelope.data.status !== 201) {
+    throw new OpenTagClientHttpError(
+      action,
+      envelope.data.status,
+      JSON.stringify({
+        error: envelope.data.body.error,
+        requestId: envelope.data.body.requestId
+      })
+    );
+  }
+
+  if (
+    envelope.data.body.operationId !== expected.operationId
+    || envelope.data.body.runnerId !== expected.runnerId
+  ) {
+    throw new OpenTagClientHttpError(action, response.status, "response_identity_mismatch");
+  }
+  return envelope.data.body;
+}
+
 function parseSourceDeliveryPruneResult(value: unknown): SourceDeliveryPruneResult {
   const result = value as Partial<SourceDeliveryPruneResult> | null;
   if (
@@ -744,6 +792,29 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         body: JSON.stringify({ ...input, name: input.name ?? input.runnerId })
       });
       await assertOk(response, "registerRunner");
+    },
+
+    async registerRunnerControlV1(input) {
+      const request = RunnerRegistrationRequestV1Schema.parse(input);
+      const response = await fetchImpl(`${baseUrl}/v1/runners`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify(request)
+      });
+      return parseRunnerCredentialControlV1Response(response, "registerRunnerControlV1", request);
+    },
+
+    async reprovisionRunnerControlV1(input) {
+      const request = RunnerCredentialReprovisionRequestV1Schema.parse(input);
+      const response = await fetchImpl(
+        `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/credentials/reprovision`,
+        {
+          method: "POST",
+          headers: jsonHeaders(options.pairingToken),
+          body: JSON.stringify(request)
+        }
+      );
+      return parseRunnerCredentialControlV1Response(response, "reprovisionRunnerControlV1", request);
     },
 
     async getRunner(input) {
