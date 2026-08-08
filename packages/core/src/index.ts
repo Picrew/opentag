@@ -3,6 +3,7 @@ export * from "./capability.js";
 export * from "./credential-safety.js";
 export * from "./factory.js";
 export * from "./channel-protocol.js";
+export * from "./control-protocol.js";
 export * from "./integration-protocol.js";
 export * from "./json-schema.js";
 export * from "./mention.js";
