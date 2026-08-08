@@ -23,4 +23,32 @@ describe("canonicalJsonStringify", () => {
 
     expect(canonicalJsonStringify(left)).toBe(canonicalJsonStringify(right));
   });
+
+  it("rejects JavaScript-only values instead of silently changing digest input", () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const sparse = Array.from({ length: 1 });
+    delete sparse[0];
+
+    for (const value of [
+      undefined,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      1n,
+      new Date("2026-08-08T00:00:00.000Z"),
+      new Map([["key", "value"]]),
+      { missing: undefined },
+      { executable: () => undefined },
+      cyclic,
+      sparse,
+    ]) {
+      expect(() => canonicalJsonStringify(value)).toThrow(/finite, acyclic JSON data tree/iu);
+    }
+  });
+
+  it("does not collapse canonically distinct Unicode strings", () => {
+    expect(canonicalJsonStringify({ value: "\u00e9" })).not.toBe(
+      canonicalJsonStringify({ value: "e\u0301" })
+    );
+  });
 });
