@@ -22,6 +22,9 @@ import {
   computeControlReceiptDigestV1,
   computeHostedLifecycleRequestDigestV1,
   computeHostedLifecycleRequestIdV1,
+  computeHostedLifecycleOperationIdV1,
+  computeHostedLifecycleReceiptIdV1,
+  computeHostedClaimFencingTokenDigestV1,
   CompletionAssessmentReceiptEnvelopeV1Schema,
   CompletionContractRefReceiptEnvelopeV1Schema,
   CallbackAttemptObservationReceiptEnvelopeV1Schema,
@@ -67,6 +70,11 @@ import {
   HostedClaimRequestV1Schema,
   HostedClaimV1Schema,
   HostedHeartbeatRequestV1Schema,
+  HostedProgressRequestV1Schema,
+  HostedRejectStartRequestV1Schema,
+  HostedRunningRequestV1Schema,
+  HostedCompleteRequestV1Schema,
+  HostedLifecycleRequestV1Schema,
   HostedLifecycleReceiptEnvelopeV1Schema,
   VerificationEvidenceSchema,
   WorkThreadRefReceiptEnvelopeV1Schema,
@@ -75,6 +83,7 @@ import {
   WorkstreamInputSchema,
   verifyHostedAdmissionEnvelopeDigestV1,
   verifyHostedClaimFencingTokenDigestV1,
+  verifyHostedLifecycleReceiptV1,
   type ApprovalDecision,
   type AgentAccessProfileSnapshot,
   type ActorIdentity,
@@ -99,6 +108,12 @@ import {
   type HostedClaimRequestV1,
   type HostedClaimV1,
   type HostedHeartbeatRequestV1,
+  type HostedProgressRequestV1,
+  type HostedRejectStartRequestV1,
+  type HostedRunningRequestV1,
+  type HostedCompleteRequestV1,
+  type HostedLifecycleActionV1,
+  type HostedLifecycleRequestV1,
   type HostedLifecycleReceiptEnvelopeV1,
   type MutationIntentActionability,
   type OpenTagEvent,
@@ -155,7 +170,7 @@ import {
   governanceEvents,
   hostedAttemptImports,
   hostedClaimOperations,
-  hostedHeartbeatOperations,
+  hostedLifecycleOperations,
   hostedRunImports,
   humanEscalations,
   linearOAuthInstallStates,
@@ -198,6 +213,8 @@ export type ControlPlaneProjectionOutboxEntry = {
   receiptKind: ControlPlaneProjectionEnvelope["receiptKind"];
   identity: { namespace: string; parts: string[]; key: string };
   operationId: string;
+  dependsOnReceiptId?: string;
+  requiresLifecycleOperationId?: string;
   payloadDigest: string;
   receiptDigest: string;
   envelope: ControlPlaneProjectionEnvelope;
@@ -217,6 +234,8 @@ export type ControlPlaneProjectionOutboxEntry = {
 export type EnqueueControlPlaneProjectionInput = {
   destinationId: string;
   envelope: unknown;
+  dependsOnReceiptId?: string;
+  requiresLifecycleOperationId?: string;
   now?: Date;
 };
 
@@ -229,7 +248,11 @@ export type ClaimControlPlaneProjectionsResult = {
   rejected: Array<{
     receiptId?: string;
     rowIdentityDigest: string;
-    reasonCode: "stored_row_invalid";
+    reasonCode:
+      | "stored_row_invalid"
+      | "dependency_missing"
+      | "dependency_cross_destination"
+      | "dependency_invalid";
   }>;
 };
 
@@ -366,6 +389,18 @@ export class HostedImportConflictError extends Error {
   }
 }
 
+export class HostedLifecycleOperationConflictError extends Error {
+  override readonly name = "HostedLifecycleOperationConflictError";
+
+  constructor(readonly code:
+    | "HOSTED_LIFECYCLE_OPERATION_INVALID"
+    | "HOSTED_LIFECYCLE_OPERATION_CONFLICT"
+    | "HOSTED_LIFECYCLE_PREDECESSOR_NOT_ACKNOWLEDGED"
+    | "HOSTED_LIFECYCLE_ATOMIC_API_REQUIRED") {
+    super(code);
+  }
+}
+
 export type HostedImportAuthority = HostedClaimV1["authority"] & {
   admissionId: string;
   admissionOperationId: string;
@@ -450,6 +485,39 @@ export type HostedHeartbeatOperation = {
   receiptDigest?: string;
   receipt?: HostedLifecycleReceiptEnvelopeV1;
   acceptedLeaseExpiresAt?: string;
+  acknowledgedAt?: string;
+};
+
+export type HostedLifecycleOperationState = "pending" | "leased" | "acknowledged" | "attention";
+
+export type HostedLifecycleOperation = {
+  destinationId: string;
+  organizationId: string;
+  runnerId: string;
+  credentialId: string;
+  operationId: string;
+  requestId: string;
+  action: HostedLifecycleActionV1;
+  runId: string;
+  attemptId: string;
+  attemptNumber: number;
+  fencingTokenDigest: string;
+  requestDigest: string;
+  businessKeyDigest: string;
+  sequence: number;
+  request: HostedLifecycleRequestV1;
+  state: HostedLifecycleOperationState;
+  attemptCount: number;
+  nextAttemptAt?: string;
+  leaseOwner?: string;
+  leaseToken?: string;
+  leaseExpiresAt?: string;
+  receiptId?: string;
+  receiptDigest?: string;
+  receipt?: HostedLifecycleReceiptEnvelopeV1;
+  lastReasonCode?: string;
+  createdAt: string;
+  updatedAt: string;
   acknowledgedAt?: string;
 };
 
@@ -1016,6 +1084,10 @@ function projectionOutboxEntryFromRow(
     if (row.lastReasonCode !== null) assertProjectionMutableReference(row.lastReasonCode);
     if (row.leaseOwner !== null) assertProjectionMutableReference(row.leaseOwner);
     if (row.leaseToken !== null) assertProjectionMutableReference(row.leaseToken);
+    if (row.dependsOnReceiptId !== null) assertProjectionMutableReference(row.dependsOnReceiptId);
+    if (row.requiresLifecycleOperationId !== null) {
+      assertProjectionMutableReference(row.requiresLifecycleOperationId);
+    }
   } catch {
     throw new Error("control_plane_projection_outbox_row_invalid");
   }
@@ -1051,6 +1123,10 @@ function projectionOutboxEntryFromRow(
       key: row.identityKey
     },
     operationId: row.operationId,
+    ...(row.dependsOnReceiptId ? { dependsOnReceiptId: row.dependsOnReceiptId } : {}),
+    ...(row.requiresLifecycleOperationId
+      ? { requiresLifecycleOperationId: row.requiresLifecycleOperationId }
+      : {}),
     payloadDigest: row.payloadDigest,
     receiptDigest: row.receiptDigest,
     envelope,
@@ -1373,9 +1449,9 @@ function hostedClaimOperationFromRow(
   };
 }
 
-function hostedHeartbeatOperationFromRow(
-  row: typeof hostedHeartbeatOperations.$inferSelect
-): HostedHeartbeatOperation {
+function hostedLifecycleOperationFromRow(
+  row: typeof hostedLifecycleOperations.$inferSelect
+): HostedLifecycleOperation {
   return {
     destinationId: row.destinationId,
     organizationId: row.organizationId,
@@ -1383,25 +1459,225 @@ function hostedHeartbeatOperationFromRow(
     credentialId: row.credentialId,
     operationId: row.operationId,
     requestId: row.requestId,
+    action: row.action as HostedLifecycleActionV1,
     runId: row.runId,
     attemptId: row.attemptId,
     attemptNumber: row.attemptNumber,
     fencingTokenDigest: row.fencingTokenDigest,
-    expectedLeaseExpiresAt: row.expectedLeaseExpiresAt,
     requestDigest: row.requestDigest,
-    request: HostedHeartbeatRequestV1Schema.parse(JSON.parse(row.requestJson)),
-    state: row.state as HostedHeartbeatOperation["state"],
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+    businessKeyDigest: row.businessKeyDigest,
+    sequence: row.sequence,
+    request: HostedLifecycleRequestV1Schema.parse(JSON.parse(row.requestJson)),
+    state: row.state as HostedLifecycleOperationState,
+    attemptCount: row.attemptCount,
+    ...(row.nextAttemptAt ? { nextAttemptAt: row.nextAttemptAt } : {}),
+    ...(row.leaseOwner ? { leaseOwner: row.leaseOwner } : {}),
+    ...(row.leaseToken ? { leaseToken: row.leaseToken } : {}),
+    ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt } : {}),
+    ...(row.receiptId ? { receiptId: row.receiptId } : {}),
     ...(row.receiptDigest ? { receiptDigest: row.receiptDigest } : {}),
     ...(row.receiptJson
       ? { receipt: HostedLifecycleReceiptEnvelopeV1Schema.parse(JSON.parse(row.receiptJson)) }
       : {}),
-    ...(row.acceptedLeaseExpiresAt
-      ? { acceptedLeaseExpiresAt: row.acceptedLeaseExpiresAt }
-      : {}),
+    ...(row.lastReasonCode ? { lastReasonCode: row.lastReasonCode } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
     ...(row.acknowledgedAt ? { acknowledgedAt: row.acknowledgedAt } : {})
   };
+}
+
+function hostedLifecycleRequestDigestSync(input: {
+  organizationId: string;
+  runnerId: string;
+  runId: string;
+  action: HostedLifecycleActionV1;
+  request: HostedLifecycleRequestV1;
+}): string {
+  const { request } = input;
+  const common = {
+    operation: input.action,
+    organizationId: input.organizationId,
+    runnerId: input.runnerId,
+    runId: input.runId,
+    schemaVersion: request.schemaVersion,
+    protocolVersion: request.protocolVersion,
+    requiredCapabilities: request.requiredCapabilities,
+    attempt: {
+      attemptId: request.attempt.attemptId,
+      attemptNumber: request.attempt.attemptNumber,
+      epoch: request.attempt.epoch,
+      fencingTokenDigest: request.attempt.fencingTokenDigest,
+    },
+    occurredAt: request.occurredAt,
+  };
+  const actionFields = input.action === "heartbeat"
+    ? {
+        expectedLeaseExpiresAt:
+          HostedHeartbeatRequestV1Schema.parse(request).expectedLeaseExpiresAt,
+      }
+    : input.action === "running"
+      ? (() => {
+          const value = request as Extract<HostedLifecycleRequestV1, { executorCapabilityDigest: string }>;
+          return {
+            executorId: value.executorId,
+            executorCapabilityDigest: value.executorCapabilityDigest,
+            ...(value.runTimeoutMs ? { runTimeoutMs: value.runTimeoutMs } : {}),
+          };
+        })()
+      : input.action === "reject-start"
+        ? (() => {
+            const value = request as Extract<HostedLifecycleRequestV1, { reasonCode: string; executorId: string }>;
+            return { executorId: value.executorId, reasonCode: value.reasonCode };
+          })()
+        : input.action === "progress"
+          ? (() => {
+              const value = request as Extract<HostedLifecycleRequestV1, { progressId: string }>;
+              return { progressId: value.progressId, progressDigest: value.progressDigest };
+            })()
+          : (() => {
+              const value = HostedCompleteRequestV1Schema.parse(request);
+              return {
+                conclusion: value.conclusion,
+                reasonCode: value.reasonCode,
+                resultDigest: value.resultDigest,
+                artifactDigests: value.artifactDigests,
+                evidenceDigests: value.evidenceDigests,
+              };
+            })();
+  return canonicalSha256Json({ ...common, ...actionFields });
+}
+
+function validAcknowledgedLifecycleDependency(
+  row: typeof hostedLifecycleOperations.$inferSelect,
+): boolean {
+  try {
+    if (row.state !== "acknowledged" || !row.receiptJson) return false;
+    const action = row.action as HostedLifecycleActionV1;
+    const request = HostedLifecycleRequestV1Schema.parse(JSON.parse(row.requestJson));
+    const receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(
+      JSON.parse(row.receiptJson),
+    );
+    const expectedOperation = action === "reject-start"
+      ? "reject_start"
+      : action === "complete"
+        ? "executor_result"
+        : action;
+    const expectedRequestDigest = hostedLifecycleRequestDigestSync({
+      organizationId: row.organizationId,
+      runnerId: row.runnerId,
+      runId: row.runId,
+      action,
+      request,
+    });
+    const expectedOperationId = computeHostedLifecycleOperationIdV1(
+      expectedRequestDigest,
+    );
+    const expectedRequestId = `req_${canonicalSha256Json({
+      purpose: "opentag-hosted-lifecycle-request-id-v1",
+      operationId: expectedOperationId,
+      requestDigest: expectedRequestDigest,
+    }).slice("sha256:".length)}`;
+    const expectedReceiptId = `lifecycle_${canonicalSha256Json({
+      organizationId: row.organizationId,
+      operationId: expectedOperationId,
+    }).slice("sha256:".length)}`;
+    const expectedPayload = action === "heartbeat"
+      ? {
+          operation: expectedOperation,
+          occurredAt: request.occurredAt,
+          leaseExpiresAt: (receipt.payload as { leaseExpiresAt: string }).leaseExpiresAt,
+        }
+      : action === "running"
+        ? (() => {
+            const value = request as Extract<HostedLifecycleRequestV1, { executorCapabilityDigest: string }>;
+            return {
+              operation: expectedOperation,
+              occurredAt: value.occurredAt,
+              executorId: value.executorId,
+              executorCapabilityDigest: value.executorCapabilityDigest,
+              ...(value.runTimeoutMs ? { runTimeoutMs: value.runTimeoutMs } : {}),
+            };
+          })()
+        : action === "reject-start"
+          ? (() => {
+              const value = request as Extract<HostedLifecycleRequestV1, { reasonCode: string; executorId: string }>;
+              return {
+                operation: expectedOperation,
+                occurredAt: value.occurredAt,
+                executorId: value.executorId,
+                reasonCode: value.reasonCode,
+              };
+            })()
+          : action === "progress"
+            ? (() => {
+                const value = request as Extract<HostedLifecycleRequestV1, { progressId: string }>;
+                return {
+                  operation: expectedOperation,
+                  occurredAt: value.occurredAt,
+                  progressId: value.progressId,
+                  progressDigest: value.progressDigest,
+                };
+              })()
+            : (() => {
+                const value = HostedCompleteRequestV1Schema.parse(request);
+                return {
+                  operation: expectedOperation,
+                  occurredAt: value.occurredAt,
+                  conclusion: value.conclusion,
+                  reasonCode: value.reasonCode,
+                  resultDigest: value.resultDigest,
+                  artifactDigests: value.artifactDigests,
+                  evidenceDigests: value.evidenceDigests,
+                };
+              })();
+    const { receiptDigest: _receiptDigest, ...receiptWithoutDigest } = receipt;
+    return row.requestJson === canonicalJsonStringify(request)
+      && row.receiptJson === canonicalJsonStringify(receipt)
+      && row.action === action
+      && row.operationId === expectedOperationId
+      && row.requestId === expectedRequestId
+      && row.requestDigest === expectedRequestDigest
+      && row.attemptId === request.attempt.attemptId
+      && row.attemptNumber === request.attempt.attemptNumber
+      && row.fencingTokenDigest === request.attempt.fencingTokenDigest
+      && request.requestDigest === expectedRequestDigest
+      && request.operationId === expectedOperationId
+      && request.requestId === expectedRequestId
+      && request.attempt.epoch === request.attempt.attemptNumber
+      && row.receiptId === expectedReceiptId
+      && row.receiptDigest === receipt.receiptDigest
+      && receipt.receiptId === expectedReceiptId
+      && receipt.organizationId === row.organizationId
+      && receipt.runId === row.runId
+      && receipt.operationId === row.operationId
+      && receipt.requestId === row.requestId
+      && receipt.requestDigest === row.requestDigest
+      && receipt.producer.id === row.runnerId
+      && receipt.producer.credentialId === row.credentialId
+      && receipt.attempt.attemptId === row.attemptId
+      && receipt.attempt.attemptNumber === row.attemptNumber
+      && receipt.attempt.epoch === row.attemptNumber
+      && receipt.attempt.fencingTokenDigest === row.fencingTokenDigest
+      && receipt.payload.operation === expectedOperation
+      && canonicalJsonStringify(receipt.payload)
+        === canonicalJsonStringify(expectedPayload)
+      && canonicalJsonStringify(receipt.identity.parts) === canonicalJsonStringify([
+        row.organizationId,
+        row.runId,
+        row.attemptId,
+        expectedOperation,
+        row.operationId,
+      ])
+      && receipt.payloadDigest === canonicalSha256Json(receipt.payload)
+      && receipt.receiptDigest === canonicalSha256Json(receiptWithoutDigest)
+      && (
+        action !== "heartbeat"
+        || Date.parse((receipt.payload as { leaseExpiresAt: string }).leaseExpiresAt)
+          > Date.parse(HostedHeartbeatRequestV1Schema.parse(request).expectedLeaseExpiresAt)
+      );
+  } catch {
+    return false;
+  }
 }
 
 function actionFromRow(row: typeof materialActions.$inferSelect): Action {
@@ -3161,6 +3437,170 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
 
   type ProjectionTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
+  type PreparedHostedLifecycleOperation = {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+    credentialId: string;
+    runId: string;
+    action: HostedLifecycleActionV1;
+    request: HostedLifecycleRequestV1;
+    requestJson: string;
+    businessKeyDigest: string;
+    createdAt: string;
+  };
+
+  async function prepareHostedLifecycleOperation(input: {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+    credentialId: string;
+    runId: string;
+    action: HostedLifecycleActionV1;
+    request: HostedLifecycleRequestV1;
+    now?: Date;
+  }): Promise<PreparedHostedLifecycleOperation> {
+    let request: HostedLifecycleRequestV1;
+    try {
+      request = HostedLifecycleRequestV1Schema.parse(input.request);
+    } catch {
+      throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_INVALID");
+    }
+    const requestDigest = await computeHostedLifecycleRequestDigestV1({
+      organizationId: input.organizationId,
+      runnerId: input.runnerId,
+      runId: input.runId,
+      action: input.action,
+      request
+    });
+    const requestId = await computeHostedLifecycleRequestIdV1({
+      operationId: request.operationId,
+      requestDigest: request.requestDigest
+    });
+    if (
+      request.requestDigest !== requestDigest
+      || request.requestId !== requestId
+      || request.operationId !== computeHostedLifecycleOperationIdV1(request.requestDigest)
+      || request.attempt.attemptId.length === 0
+      || request.attempt.attemptNumber !== request.attempt.epoch
+    ) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_INVALID");
+    const businessKeyDigest = canonicalSha256Json({
+      destinationId: input.destinationId,
+      organizationId: input.organizationId,
+      runnerId: input.runnerId,
+      credentialId: input.credentialId,
+      runId: input.runId,
+      attemptId: request.attempt.attemptId,
+      attemptNumber: request.attempt.attemptNumber,
+      action: input.action,
+      discriminator: input.action === "heartbeat"
+        ? (request as HostedHeartbeatRequestV1).expectedLeaseExpiresAt
+        : input.action === "progress"
+          ? (request as HostedProgressRequestV1).progressId
+          : "single_action_per_attempt"
+    });
+    return {
+      ...input,
+      request,
+      requestJson: canonicalJsonStringify(request),
+      businessKeyDigest,
+      createdAt: (input.now ?? new Date()).toISOString()
+    };
+  }
+
+  function enqueueHostedLifecycleOperationTx(
+    tx: ProjectionTransaction,
+    input: PreparedHostedLifecycleOperation
+  ): { outcome: "created" | "replayed"; operation: HostedLifecycleOperation } {
+    const scope = [
+      eq(hostedLifecycleOperations.destinationId, input.destinationId),
+      eq(hostedLifecycleOperations.organizationId, input.organizationId),
+      eq(hostedLifecycleOperations.runnerId, input.runnerId),
+      eq(hostedLifecycleOperations.credentialId, input.credentialId)
+    ];
+    const existing = tx.select().from(hostedLifecycleOperations).where(or(
+      and(...scope, eq(hostedLifecycleOperations.operationId, input.request.operationId)),
+      and(...scope, eq(hostedLifecycleOperations.requestId, input.request.requestId)),
+      and(...scope, eq(hostedLifecycleOperations.businessKeyDigest, input.businessKeyDigest))
+    )).limit(1).get();
+    if (existing) {
+      const exact = existing.operationId === input.request.operationId
+        && existing.requestId === input.request.requestId
+        && existing.action === input.action
+        && existing.runId === input.runId
+        && existing.attemptId === input.request.attempt.attemptId
+        && existing.attemptNumber === input.request.attempt.attemptNumber
+        && existing.fencingTokenDigest === input.request.attempt.fencingTokenDigest
+        && existing.requestDigest === input.request.requestDigest
+        && existing.businessKeyDigest === input.businessKeyDigest
+        && existing.requestJson === input.requestJson;
+      if (!exact) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_CONFLICT");
+      return { outcome: "replayed", operation: hostedLifecycleOperationFromRow(existing) };
+    }
+    const terminal = tx.select({ operationId: hostedLifecycleOperations.operationId })
+      .from(hostedLifecycleOperations).where(and(
+        eq(hostedLifecycleOperations.destinationId, input.destinationId),
+        eq(hostedLifecycleOperations.organizationId, input.organizationId),
+        eq(hostedLifecycleOperations.runId, input.runId),
+        eq(hostedLifecycleOperations.attemptId, input.request.attempt.attemptId),
+        inArray(hostedLifecycleOperations.action, ["complete", "reject-start"])
+      )).limit(1).get();
+    if (terminal) {
+      throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_CONFLICT");
+    }
+    if (["heartbeat", "progress", "complete"].includes(input.action)) {
+      const running = tx.select().from(hostedLifecycleOperations).where(and(
+        eq(hostedLifecycleOperations.destinationId, input.destinationId),
+        eq(hostedLifecycleOperations.organizationId, input.organizationId),
+        eq(hostedLifecycleOperations.runnerId, input.runnerId),
+        eq(hostedLifecycleOperations.credentialId, input.credentialId),
+        eq(hostedLifecycleOperations.runId, input.runId),
+        eq(hostedLifecycleOperations.attemptId, input.request.attempt.attemptId),
+        eq(hostedLifecycleOperations.action, "running"),
+        eq(hostedLifecycleOperations.state, "acknowledged")
+      )).limit(1).get();
+      if (!running || !validAcknowledgedLifecycleDependency(running)) {
+        throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_PREDECESSOR_NOT_ACKNOWLEDGED");
+      }
+    }
+    const sequenceRow = tx.select({
+      value: sql<number>`coalesce(max(${hostedLifecycleOperations.sequence}), 0)`
+    }).from(hostedLifecycleOperations).where(and(
+      eq(hostedLifecycleOperations.destinationId, input.destinationId),
+      eq(hostedLifecycleOperations.organizationId, input.organizationId),
+      eq(hostedLifecycleOperations.runId, input.runId),
+      eq(hostedLifecycleOperations.attemptId, input.request.attempt.attemptId)
+    )).get();
+    tx.insert(hostedLifecycleOperations).values({
+      destinationId: input.destinationId,
+      organizationId: input.organizationId,
+      runnerId: input.runnerId,
+      credentialId: input.credentialId,
+      operationId: input.request.operationId,
+      requestId: input.request.requestId,
+      action: input.action,
+      runId: input.runId,
+      attemptId: input.request.attempt.attemptId,
+      attemptNumber: input.request.attempt.attemptNumber,
+      fencingTokenDigest: input.request.attempt.fencingTokenDigest,
+      requestDigest: input.request.requestDigest,
+      businessKeyDigest: input.businessKeyDigest,
+      sequence: Number(sequenceRow?.value ?? 0) + 1,
+      requestJson: input.requestJson,
+      state: "pending",
+      attemptCount: 0,
+      nextAttemptAt: input.createdAt,
+      createdAt: input.createdAt,
+      updatedAt: input.createdAt
+    }).run();
+    const created = tx.select().from(hostedLifecycleOperations).where(and(
+      ...scope,
+      eq(hostedLifecycleOperations.operationId, input.request.operationId)
+    )).limit(1).get();
+    if (!created) throw new Error("hosted_lifecycle_operation_insert_lost");
+    return { outcome: "created", operation: hostedLifecycleOperationFromRow(created) };
+  }
+
   function projectionDestination(value: string): string {
     if (
       !PROJECTION_SAFE_REFERENCE.test(value)
@@ -3203,6 +3643,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       identityPartsJson: JSON.stringify(envelope.identity.parts),
       identityKey,
       operationId: envelope.operationId,
+      dependsOnReceiptId: input.dependsOnReceiptId ?? null,
+      requiresLifecycleOperationId: input.requiresLifecycleOperationId ?? null,
       payloadDigest: envelope.payloadDigest,
       receiptDigest: envelope.receiptDigest,
       envelopeJson,
@@ -3240,6 +3682,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         && conflict.identityPartsJson === values.identityPartsJson
         && conflict.identityKey === values.identityKey
         && conflict.operationId === values.operationId
+        && conflict.dependsOnReceiptId === values.dependsOnReceiptId
+        && conflict.requiresLifecycleOperationId === values.requiresLifecycleOperationId
         && conflict.payloadDigest === values.payloadDigest
         && conflict.receiptDigest === values.receiptDigest
         && conflict.envelopeJson === values.envelopeJson;
@@ -3287,6 +3731,174 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     }
     return value;
   }
+
+  function acknowledgeHostedLifecycleOperationTx(input: {
+    tx: ProjectionTransaction;
+    row: typeof hostedLifecycleOperations.$inferSelect;
+    receipt: HostedLifecycleReceiptEnvelopeV1;
+    acknowledgedAt: string;
+    expectedState: "pending" | "leased";
+    leaseToken?: string;
+  }): boolean {
+    const { tx, row, receipt, acknowledgedAt } = input;
+    let preImportRejectClaim: typeof hostedClaimOperations.$inferSelect | undefined;
+    if (row.action === "reject-start") {
+      const importedAttempt = tx.select().from(hostedAttemptImports).where(and(
+        eq(hostedAttemptImports.attemptId, row.attemptId),
+        eq(hostedAttemptImports.runId, row.runId),
+        eq(hostedAttemptImports.attemptNumber, row.attemptNumber),
+        eq(hostedAttemptImports.fencingTokenDigest, row.fencingTokenDigest)
+      )).limit(1).get();
+      if (!importedAttempt) {
+        preImportRejectClaim = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.destinationId, row.destinationId),
+          eq(hostedClaimOperations.organizationId, row.organizationId),
+          eq(hostedClaimOperations.runnerId, row.runnerId),
+          eq(hostedClaimOperations.credentialId, row.credentialId),
+          eq(hostedClaimOperations.runId, row.runId),
+          eq(hostedClaimOperations.attemptId, row.attemptId),
+          eq(hostedClaimOperations.attemptNumber, row.attemptNumber),
+          eq(hostedClaimOperations.fencingTokenDigest, row.fencingTokenDigest),
+          eq(hostedClaimOperations.state, "claimed"),
+          isNotNull(hostedClaimOperations.activeKey),
+          isNull(hostedClaimOperations.terminalReasonCode)
+        )).limit(1).get();
+        if (!preImportRejectClaim) {
+          throw new Error("hosted_reject_start_claim_authority_missing");
+        }
+      }
+    }
+    if (row.action === "heartbeat") {
+      if (receipt.payload.operation !== "heartbeat") return false;
+      const request = HostedHeartbeatRequestV1Schema.parse(JSON.parse(row.requestJson));
+      const run = tx.select().from(runs).where(eq(runs.id, row.runId)).limit(1).get();
+      const attempt = tx.select().from(attempts).where(and(
+        eq(attempts.id, row.attemptId),
+        eq(attempts.runId, row.runId),
+        eq(attempts.fencingToken, request.attempt.fencingToken)
+      )).limit(1).get();
+      const importedAttempt = tx.select().from(hostedAttemptImports)
+        .where(eq(hostedAttemptImports.attemptId, row.attemptId)).limit(1).get();
+      const claimOperation = importedAttempt
+        ? tx.select().from(hostedClaimOperations).where(and(
+            eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
+            eq(hostedClaimOperations.state, "claimed"),
+            isNull(hostedClaimOperations.terminalReasonCode)
+          )).limit(1).get()
+        : undefined;
+      const oldExpiry = Date.parse(request.expectedLeaseExpiresAt);
+      const newExpiry = Date.parse(receipt.payload.leaseExpiresAt);
+      if (
+        !run || !attempt || !claimOperation
+        || run.currentAttemptId !== row.attemptId
+        || run.assignedRunnerId !== row.runnerId
+        || run.leaseExpiresAt !== request.expectedLeaseExpiresAt
+        || attempt.runnerId !== row.runnerId
+        || attempt.number !== request.attempt.attemptNumber
+        || importedAttempt?.attemptNumber !== request.attempt.attemptNumber
+        || request.attempt.epoch !== request.attempt.attemptNumber
+        || attempt.leaseExpiresAt !== request.expectedLeaseExpiresAt
+        || !["assigned", "running"].includes(attempt.status)
+        || !Number.isFinite(oldExpiry) || !Number.isFinite(newExpiry)
+        || oldExpiry <= Date.parse(acknowledgedAt)
+        || newExpiry <= oldExpiry || newExpiry <= Date.parse(acknowledgedAt)
+      ) return false;
+      const attemptUpdated = tx.update(attempts).set({
+        heartbeatAt: acknowledgedAt,
+        leaseExpiresAt: receipt.payload.leaseExpiresAt,
+        updatedAt: acknowledgedAt
+      }).where(and(
+        eq(attempts.id, row.attemptId),
+        eq(attempts.leaseExpiresAt, request.expectedLeaseExpiresAt)
+      )).run();
+      const runUpdated = tx.update(runs).set({
+        heartbeatAt: acknowledgedAt,
+        leaseExpiresAt: receipt.payload.leaseExpiresAt,
+        updatedAt: acknowledgedAt
+      }).where(and(
+        eq(runs.id, row.runId),
+        eq(runs.currentAttemptId, row.attemptId),
+        eq(runs.leaseExpiresAt, request.expectedLeaseExpiresAt)
+      )).run();
+      if (attemptUpdated.changes !== 1 || runUpdated.changes !== 1) {
+        throw new Error("hosted_heartbeat_lease_update_lost");
+      }
+    }
+    const receiptJson = canonicalJsonStringify(receipt);
+    const conditions = [
+      eq(hostedLifecycleOperations.destinationId, row.destinationId),
+      eq(hostedLifecycleOperations.organizationId, row.organizationId),
+      eq(hostedLifecycleOperations.runnerId, row.runnerId),
+      eq(hostedLifecycleOperations.credentialId, row.credentialId),
+      eq(hostedLifecycleOperations.operationId, row.operationId),
+      eq(hostedLifecycleOperations.state, input.expectedState)
+    ];
+    if (input.expectedState === "leased" && input.leaseToken) {
+      conditions.push(eq(hostedLifecycleOperations.leaseToken, input.leaseToken));
+      conditions.push(gt(hostedLifecycleOperations.leaseExpiresAt, acknowledgedAt));
+    }
+    const acknowledged = tx.update(hostedLifecycleOperations).set({
+      state: "acknowledged",
+      nextAttemptAt: null,
+      leaseOwner: null,
+      leaseToken: null,
+      leaseExpiresAt: null,
+      receiptId: receipt.receiptId,
+      receiptDigest: receipt.receiptDigest,
+      receiptJson,
+      updatedAt: acknowledgedAt,
+      acknowledgedAt
+    }).where(and(...conditions)).run().changes === 1;
+    if (!acknowledged && row.action === "heartbeat") {
+      throw new Error("hosted_heartbeat_journal_update_lost");
+    }
+    if (acknowledged && preImportRejectClaim?.activeKey) {
+      const claimUpdated = tx.update(hostedClaimOperations).set({
+        activeKey: null,
+        updatedAt: acknowledgedAt
+      }).where(and(
+        eq(hostedClaimOperations.operationId, preImportRejectClaim.operationId),
+        eq(hostedClaimOperations.destinationId, preImportRejectClaim.destinationId),
+        eq(hostedClaimOperations.organizationId, preImportRejectClaim.organizationId),
+        eq(hostedClaimOperations.runnerId, preImportRejectClaim.runnerId),
+        eq(hostedClaimOperations.credentialId, preImportRejectClaim.credentialId!),
+        eq(hostedClaimOperations.runId, preImportRejectClaim.runId!),
+        eq(hostedClaimOperations.attemptId, preImportRejectClaim.attemptId!),
+        eq(hostedClaimOperations.attemptNumber, preImportRejectClaim.attemptNumber!),
+        eq(hostedClaimOperations.fencingTokenDigest, preImportRejectClaim.fencingTokenDigest!),
+        eq(hostedClaimOperations.activeKey, preImportRejectClaim.activeKey),
+        eq(hostedClaimOperations.state, "claimed"),
+        isNull(hostedClaimOperations.terminalReasonCode)
+      )).run();
+      if (claimUpdated.changes !== 1) {
+        throw new Error("hosted_reject_start_claim_update_lost");
+      }
+    }
+    return acknowledged;
+  }
+
+  type CompleteRunInput = {
+    runId: string;
+    result: OpenTagRunResult;
+    humanEscalation?: HumanEscalation;
+    runnerId?: string;
+    attemptId?: string;
+    fencingToken?: string;
+    idempotencyKey?: string;
+  };
+  type HostedCompletionLifecycleOperation = {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+    credentialId: string;
+    request: HostedCompleteRequestV1;
+    requestJson: string;
+    businessKeyDigest: string;
+  };
+  let completeRunWithHostedLifecycle: (
+    input: CompleteRunInput,
+    lifecycle: HostedCompletionLifecycleOperation,
+  ) => Promise<CompleteRunOutcome>;
 
   return {
     appendRunEvent,
@@ -3392,8 +4004,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               receiptId: row.receiptId
             };
             if (claimed.length >= limit) break;
+            let currentEntry: ControlPlaneProjectionOutboxEntry;
             try {
-              projectionOutboxEntryFromRow(row);
+              currentEntry = projectionOutboxEntryFromRow(row);
             } catch {
               if (rejected.length < 100) {
                 const safeReceiptId = PROJECTION_SAFE_REFERENCE.test(row.receiptId)
@@ -3411,6 +4024,73 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               }
               continue;
             }
+            let dependencyReason:
+              | "dependency_missing"
+              | "dependency_cross_destination"
+              | "dependency_invalid"
+              | undefined;
+            let dependencyPending = false;
+            if (row.dependsOnReceiptId) {
+              const parent = tx.select().from(controlPlaneProjectionOutbox).where(and(
+                eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+                eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+                eq(controlPlaneProjectionOutbox.receiptId, row.dependsOnReceiptId)
+              )).limit(1).get();
+              if (!parent) {
+                const elsewhere = tx.select({ receiptId: controlPlaneProjectionOutbox.receiptId })
+                  .from(controlPlaneProjectionOutbox)
+                  .where(eq(controlPlaneProjectionOutbox.receiptId, row.dependsOnReceiptId))
+                  .limit(1).get();
+                dependencyReason = elsewhere ? "dependency_cross_destination" : "dependency_missing";
+              } else if (parent.state !== "acknowledged") {
+                dependencyPending = true;
+              } else {
+                try {
+                  projectionOutboxEntryFromRow(parent);
+                } catch {
+                  dependencyReason = "dependency_invalid";
+                }
+              }
+            }
+            if (!dependencyReason && !dependencyPending && row.requiresLifecycleOperationId) {
+              const lifecycle = tx.select().from(hostedLifecycleOperations).where(and(
+                eq(hostedLifecycleOperations.destinationId, destinationId),
+                eq(hostedLifecycleOperations.organizationId, organizationId),
+                eq(hostedLifecycleOperations.operationId, row.requiresLifecycleOperationId)
+              )).limit(1).get();
+              if (!lifecycle) {
+                const elsewhere = tx.select({ operationId: hostedLifecycleOperations.operationId })
+                  .from(hostedLifecycleOperations)
+                  .where(eq(hostedLifecycleOperations.operationId, row.requiresLifecycleOperationId))
+                  .limit(1).get();
+                dependencyReason = elsewhere ? "dependency_cross_destination" : "dependency_missing";
+              } else if (lifecycle.state !== "acknowledged") {
+                dependencyPending = true;
+              } else if (!validAcknowledgedLifecycleDependency(lifecycle)) {
+                dependencyReason = "dependency_invalid";
+              } else if (currentEntry.receiptKind === "completion_assessment") {
+                const reference = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+                  currentEntry.envelope,
+                ).payload.executorResultReceiptRef;
+                if (lifecycle.action !== "complete") {
+                  dependencyReason = "dependency_invalid";
+                } else {
+                  const request = HostedCompleteRequestV1Schema.parse(
+                    JSON.parse(lifecycle.requestJson),
+                  );
+                  if (
+                    reference.receiptId !== lifecycle.receiptId
+                  || reference.operationId !== lifecycle.operationId
+                  || reference.requestId !== lifecycle.requestId
+                  || reference.requestDigest !== lifecycle.requestDigest
+                  || reference.resultDigest !== request.resultDigest
+                  ) {
+                    dependencyReason = "dependency_invalid";
+                  }
+                }
+              }
+            }
+            if (dependencyPending) continue;
             const leaseToken = randomUUID();
             const updated = tx.update(controlPlaneProjectionOutbox).set({
               state: "leased",
@@ -3427,6 +4107,33 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               lte(controlPlaneProjectionOutbox.nextAttemptAt, at)
             )).run();
             if (updated.changes !== 1) continue;
+            if (dependencyReason) {
+              tx.update(controlPlaneProjectionOutbox).set({
+                state: "attention",
+                nextAttemptAt: null,
+                leaseOwner: null,
+                leaseToken: null,
+                leaseExpiresAt: null,
+                lastReasonCode: dependencyReason,
+                updatedAt: at
+              }).where(and(
+                eq(controlPlaneProjectionOutbox.receiptId, row.receiptId),
+                eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+                eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+                eq(controlPlaneProjectionOutbox.state, "leased"),
+                eq(controlPlaneProjectionOutbox.leaseToken, leaseToken)
+              )).run();
+              rejected.push({
+                receiptId: row.receiptId,
+                rowIdentityDigest: canonicalSha256Json({
+                  destinationId,
+                  organizationId,
+                  receiptId: row.receiptId
+                }),
+                reasonCode: dependencyReason
+              });
+              continue;
+            }
             claimed.push(projectionOutboxEntryFromRow({
               ...row,
               state: "leased",
@@ -6282,6 +6989,114 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return row ? hostedClaimOperationFromRow(row) : null;
     },
 
+    async getHostedPreImportAuthorityRecovery(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+    }): Promise<
+      | { state: "claim_retry"; operation: HostedClaimOperation }
+      | {
+          state: "reject_pending" | "reject_attention";
+          operation: HostedClaimOperation;
+          lifecycleOperation: HostedLifecycleOperation;
+        }
+      | null
+    > {
+      const activeKey = canonicalSha256Json(input);
+      const shell = await db.select().from(hostedClaimOperations).where(and(
+        eq(hostedClaimOperations.activeKey, activeKey),
+        eq(hostedClaimOperations.state, "claimed")
+      )).limit(1).get();
+      if (!shell || !shell.runId || !shell.attemptId || !shell.claimDigest || !shell.authorityDigest) return null;
+      const imported = await db.select({ attemptId: hostedAttemptImports.attemptId })
+        .from(hostedAttemptImports)
+        .where(eq(hostedAttemptImports.claimOperationId, shell.operationId)).limit(1).get();
+      if (imported) return null;
+      const rejection = await db.select().from(hostedLifecycleOperations).where(and(
+        eq(hostedLifecycleOperations.destinationId, input.destinationId),
+        eq(hostedLifecycleOperations.organizationId, input.organizationId),
+        eq(hostedLifecycleOperations.runnerId, input.runnerId),
+        eq(hostedLifecycleOperations.credentialId, shell.credentialId ?? ""),
+        eq(hostedLifecycleOperations.runId, shell.runId),
+        eq(hostedLifecycleOperations.attemptId, shell.attemptId),
+        eq(hostedLifecycleOperations.action, "reject-start")
+      )).limit(1).get();
+      if (!rejection) return { state: "claim_retry", operation: hostedClaimOperationFromRow(shell) };
+      if (rejection.state === "acknowledged") return null;
+      return {
+        state: rejection.state === "attention" ? "reject_attention" : "reject_pending",
+        operation: hostedClaimOperationFromRow(shell),
+        lifecycleOperation: hostedLifecycleOperationFromRow(rejection)
+      };
+    },
+
+    async persistHostedClaimAuthorityShell(input: {
+      destinationId: string;
+      credentialId: string;
+      request: HostedClaimRequestV1;
+      claim: HostedClaimV1;
+    }): Promise<{ outcome: "created" | "replayed"; operation: HostedClaimOperation }> {
+      const request = HostedClaimRequestV1Schema.parse(input.request);
+      const claim = HostedClaimV1Schema.parse(input.claim);
+      if (
+        claim.operationId !== request.operationId
+        || claim.requestId !== request.requestId
+        || claim.authority.credentialId !== input.credentialId
+        || !(await verifyHostedClaimFencingTokenDigestV1(claim))
+      ) throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+      const claimDigest = canonicalSha256Json(claim);
+      const authorityDigest = canonicalSha256Json(claim.authority);
+      const authorityJson = canonicalJsonStringify(claim.authority);
+      const acknowledgedAt = nowIso();
+      return db.transaction((tx) => {
+        const current = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.operationId, request.operationId),
+          eq(hostedClaimOperations.requestId, request.requestId),
+          eq(hostedClaimOperations.destinationId, input.destinationId),
+          eq(hostedClaimOperations.organizationId, claim.organizationId),
+          eq(hostedClaimOperations.runnerId, claim.runnerId)
+        )).limit(1).get();
+        if (!current) throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+        const exact = current.state === "claimed"
+          && current.runId === claim.runId
+          && current.claimDigest === claimDigest
+          && current.authorityDigest === authorityDigest
+          && current.authorityJson === authorityJson
+          && current.attemptId === claim.attempt.id
+          && current.attemptNumber === claim.attempt.number
+          && current.fencingTokenDigest === claim.attempt.fencingTokenDigest
+          && current.credentialId === input.credentialId
+          && current.leaseExpiresAt === claim.attempt.leaseExpiresAt
+          && current.executorId === claim.executorId;
+        if (exact) return { outcome: "replayed" as const, operation: hostedClaimOperationFromRow(current) };
+        if (current.state !== "pending") {
+          throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+        }
+        const updated = tx.update(hostedClaimOperations).set({
+          state: "claimed",
+          runId: claim.runId,
+          claimDigest,
+          authorityDigest,
+          authorityJson,
+          attemptId: claim.attempt.id,
+          attemptNumber: claim.attempt.number,
+          fencingTokenDigest: claim.attempt.fencingTokenDigest,
+          credentialId: input.credentialId,
+          leaseExpiresAt: claim.attempt.leaseExpiresAt,
+          executorId: claim.executorId,
+          updatedAt: acknowledgedAt,
+          acknowledgedAt
+        }).where(and(
+          eq(hostedClaimOperations.operationId, request.operationId),
+          eq(hostedClaimOperations.state, "pending")
+        )).run();
+        if (updated.changes !== 1) throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+        const row = tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.operationId, request.operationId)).limit(1).get()!;
+        return { outcome: "created" as const, operation: hostedClaimOperationFromRow(row) };
+      }, { behavior: "immediate" });
+    },
+
     async getHostedAssignedRunForRecovery(input: {
       destinationId: string;
       organizationId: string;
@@ -6302,14 +7117,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         if (!operation.runId || operation.executionStartedAt) continue;
         const runRow = await db.select().from(runs).where(and(
           eq(runs.id, operation.runId),
-          eq(runs.status, "assigned"),
+          inArray(runs.status, ["assigned", "running"]),
           eq(runs.assignedRunnerId, input.runnerId)
         )).limit(1).get();
         if (!runRow?.currentAttemptId) continue;
         const attemptRow = await db.select().from(attempts).where(and(
           eq(attempts.id, runRow.currentAttemptId),
           eq(attempts.runId, runRow.id),
-          eq(attempts.status, "assigned")
+          inArray(attempts.status, ["assigned", "running"])
         )).limit(1).get();
         const importRow = await db.select().from(hostedRunImports)
           .where(eq(hostedRunImports.runId, runRow.id)).limit(1).get();
@@ -6360,6 +7175,290 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return null;
     },
 
+    async markHostedRunRunningLocally(input: {
+      runId: string;
+      runnerId: string;
+      attemptId: string;
+      fencingToken: string;
+      executor: string;
+      executorCapability?: unknown;
+      runTimeoutMs?: number;
+      idempotencyKey?: string;
+      destinationId: string;
+      organizationId: string;
+      credentialId: string;
+      request: HostedRunningRequestV1;
+    }): Promise<{ outcome: MarkRunningOutcome; operation: HostedLifecycleOperation }> {
+      const request = HostedRunningRequestV1Schema.parse(input.request);
+      const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
+      if (
+        request.attempt.attemptId !== input.attemptId
+        || request.attempt.fencingTokenDigest !== await computeHostedClaimFencingTokenDigestV1(input.fencingToken)
+        || request.executorId !== safeInput.executor
+        || request.runTimeoutMs !== safeInput.runTimeoutMs
+      ) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_INVALID");
+      const prepared = await prepareHostedLifecycleOperation({
+        destinationId: input.destinationId,
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        credentialId: input.credentialId,
+        runId: input.runId,
+        action: "running",
+        request
+      });
+      return db.transaction((tx) => {
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports)
+          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const claim = importedAttempt
+          ? tx.select().from(hostedClaimOperations).where(and(
+              eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
+              eq(hostedClaimOperations.destinationId, input.destinationId),
+              eq(hostedClaimOperations.organizationId, input.organizationId),
+              eq(hostedClaimOperations.runnerId, input.runnerId),
+              eq(hostedClaimOperations.runId, input.runId),
+              eq(hostedClaimOperations.state, "claimed")
+            )).limit(1).get()
+          : undefined;
+        const authority = importedAttempt
+          ? JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]
+          : undefined;
+        if (!run || !attempt || !importedAttempt || !claim || authority?.credentialId !== input.credentialId) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
+        if (
+          run.assignedRunnerId !== input.runnerId
+          || run.currentAttemptId !== input.attemptId
+          || !["assigned", "running"].includes(run.status)
+          || attempt.runId !== input.runId
+          || attempt.runnerId !== input.runnerId
+          || attempt.fencingToken !== input.fencingToken
+          || !["assigned", "running"].includes(attempt.status)
+          || (attempt.selectedExecutorId !== null && attempt.selectedExecutorId !== safeInput.executor)
+          || !hasActiveAttemptLease(attempt)
+        ) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
+        const duplicate = run.status === "running" && attempt.status === "running";
+        if (!duplicate) {
+          tx.update(runs).set({ status: "running", executor: safeInput.executor, updatedAt: prepared.createdAt })
+            .where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId))).run();
+          tx.update(attempts).set({ status: "running", heartbeatAt: prepared.createdAt, updatedAt: prepared.createdAt })
+            .where(eq(attempts.id, input.attemptId)).run();
+          tx.insert(runEvents).values(runEventValues({
+            runId: input.runId,
+            type: "run.running",
+            payload: {
+              runnerId: input.runnerId,
+              attemptId: input.attemptId,
+              ...(safeInput.idempotencyKey ? { idempotencyKey: safeInput.idempotencyKey } : {}),
+              executor: safeInput.executor,
+              ...(safeInput.runTimeoutMs ? { runTimeoutMs: safeInput.runTimeoutMs } : {})
+            },
+            visibility: "audit",
+            importance: "normal",
+            createdAt: prepared.createdAt
+          })).run();
+          if (safeInput.executorCapability) tx.insert(runEvents).values(runEventValues({
+            runId: input.runId,
+            type: "executor.capability.snapshot",
+            payload: { executor: safeInput.executor, capability: safeInput.executorCapability },
+            visibility: "audit",
+            importance: "normal",
+            message: `Executor capability snapshot recorded for ${safeInput.executor}.`,
+            createdAt: prepared.createdAt
+          })).run();
+        }
+        return { outcome: duplicate ? "duplicate" : "running", operation: journal.operation };
+      }, { behavior: "immediate" });
+    },
+
+    async recordHostedProgressLocally(input: {
+      runId: string;
+      runnerId: string;
+      attemptId: string;
+      fencingToken: string;
+      message: string;
+      type?: string;
+      at?: string;
+      visibility?: RunEventVisibility;
+      importance?: RunEventImportance;
+      idempotencyKey: string;
+      destinationId: string;
+      organizationId: string;
+      credentialId: string;
+      request: HostedProgressRequestV1;
+    }): Promise<{ outcome: "recorded" | "duplicate"; operation: HostedLifecycleOperation }> {
+      const request = HostedProgressRequestV1Schema.parse(input.request);
+      const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
+      const createdAt = safeInput.at ?? request.occurredAt;
+      const expectedProgressDigest = await computeControlPayloadDigestV1({ type: "status", occurredAt: createdAt });
+      if (
+        request.attempt.attemptId !== input.attemptId
+        || request.attempt.fencingTokenDigest !== await computeHostedClaimFencingTokenDigestV1(input.fencingToken)
+        || request.progressDigest !== expectedProgressDigest
+        || request.progressId !== `progress_${expectedProgressDigest.slice("sha256:".length)}`
+      ) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_INVALID");
+      const prepared = await prepareHostedLifecycleOperation({
+        destinationId: input.destinationId,
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        credentialId: input.credentialId,
+        runId: input.runId,
+        action: "progress",
+        request
+      });
+      return db.transaction((tx) => {
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports)
+          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const claim = importedAttempt
+          ? tx.select().from(hostedClaimOperations).where(and(
+              eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
+              eq(hostedClaimOperations.destinationId, input.destinationId),
+              eq(hostedClaimOperations.organizationId, input.organizationId),
+              eq(hostedClaimOperations.runnerId, input.runnerId),
+              eq(hostedClaimOperations.runId, input.runId),
+              eq(hostedClaimOperations.state, "claimed")
+            )).limit(1).get()
+          : undefined;
+        const authority = importedAttempt
+          ? JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]
+          : undefined;
+        if (
+          !run || !attempt || !importedAttempt || !claim || authority?.credentialId !== input.credentialId
+          || run.assignedRunnerId !== input.runnerId
+          || run.currentAttemptId !== input.attemptId || run.status !== "running"
+          || attempt.runId !== input.runId || attempt.runnerId !== input.runnerId
+          || attempt.fencingToken !== input.fencingToken || attempt.status !== "running"
+          || !hasActiveAttemptLease(attempt)
+        ) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
+        const digest = progressIdempotencyDigest(input.idempotencyKey);
+        const inserted = tx.insert(runEvents).values({
+          runId: input.runId,
+          type: "run.progress",
+          payloadJson: JSON.stringify({
+            runnerId: input.runnerId,
+            attemptId: input.attemptId,
+            type: safeInput.type ?? "progress",
+            message: safeInput.message,
+            at: createdAt
+          }),
+          progressIdempotencyDigest: digest,
+          visibility: safeInput.visibility ?? "audit",
+          importance: safeInput.importance ?? "normal",
+          message: safeInput.message,
+          createdAt
+        }).onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] }).run();
+        return { outcome: inserted.changes === 1 ? "recorded" : "duplicate", operation: journal.operation };
+      }, { behavior: "immediate" });
+    },
+
+    async rejectHostedAttemptStartLocally(input: {
+      runId: string;
+      runnerId: string;
+      attemptId: string;
+      fencingToken: string;
+      executorId: string;
+      reason: string;
+      destinationId: string;
+      organizationId: string;
+      credentialId: string;
+      request: HostedRejectStartRequestV1;
+    }): Promise<{ outcome: RejectAttemptStartOutcome | "journaled"; operation: HostedLifecycleOperation }> {
+      const request = HostedRejectStartRequestV1Schema.parse(input.request);
+      const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
+      if (
+        request.attempt.attemptId !== input.attemptId
+        || request.attempt.fencingTokenDigest !== await computeHostedClaimFencingTokenDigestV1(input.fencingToken)
+        || request.executorId !== safeInput.executorId
+      ) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_INVALID");
+      const prepared = await prepareHostedLifecycleOperation({
+        destinationId: input.destinationId,
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        credentialId: input.credentialId,
+        runId: input.runId,
+        action: "reject-start",
+        request
+      });
+      return db.transaction((tx) => {
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const claim = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.destinationId, input.destinationId),
+          eq(hostedClaimOperations.organizationId, input.organizationId),
+          eq(hostedClaimOperations.runnerId, input.runnerId),
+          eq(hostedClaimOperations.runId, input.runId),
+          eq(hostedClaimOperations.attemptId, input.attemptId),
+          eq(hostedClaimOperations.attemptNumber, request.attempt.attemptNumber),
+          eq(hostedClaimOperations.fencingTokenDigest, request.attempt.fencingTokenDigest),
+          eq(hostedClaimOperations.credentialId, input.credentialId),
+          eq(hostedClaimOperations.executorId, safeInput.executorId),
+          eq(hostedClaimOperations.state, "claimed")
+        )).limit(1).get();
+        const shellAuthority = claim?.authorityJson
+          ? JSON.parse(claim.authorityJson) as HostedClaimV1["authority"]
+          : undefined;
+        const validShell = Boolean(
+          claim?.claimDigest && claim.authorityDigest && shellAuthority
+          && canonicalSha256Json(shellAuthority) === claim.authorityDigest
+          && shellAuthority.organizationId === input.organizationId
+          && shellAuthority.runnerId === input.runnerId
+          && shellAuthority.runId === input.runId
+          && shellAuthority.credentialId === input.credentialId
+          && Number.isFinite(Date.parse(claim.leaseExpiresAt ?? ""))
+          && Date.parse(claim.leaseExpiresAt ?? "") > Date.parse(prepared.createdAt)
+        );
+        if (!run || !attempt) {
+          if (!validShell) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+          const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
+          return { outcome: "journaled" as const, operation: journal.operation };
+        }
+        const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
+        const alreadyRejected = routingRejectionsFromJson(run.routingRejectionsJson).some(
+          (rejection) => rejection.runnerId === input.runnerId && rejection.executorId === safeInput.executorId
+        );
+        if (alreadyRejected && run.currentAttemptId !== input.attemptId) {
+          return { outcome: "duplicate" as const, operation: journal.operation };
+        }
+        if (
+          run.status !== "assigned" || run.currentAttemptId !== input.attemptId
+          || run.assignedRunnerId !== input.runnerId || attempt.runId !== input.runId
+          || attempt.runnerId !== input.runnerId || attempt.fencingToken !== input.fencingToken
+          || attempt.status !== "assigned" || attempt.selectedExecutorId !== safeInput.executorId
+          || !hasActiveAttemptLease(attempt)
+        ) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        const rejections = routingRejectionsFromJson(run.routingRejectionsJson);
+        rejections.push({ runnerId: input.runnerId, executorId: safeInput.executorId, reason: safeInput.reason });
+        tx.update(attempts).set({
+          status: "interrupted", finishedAt: prepared.createdAt,
+          resultJson: JSON.stringify({ conclusion: "interrupted", summary: safeInput.reason }),
+          updatedAt: prepared.createdAt
+        }).where(eq(attempts.id, input.attemptId)).run();
+        tx.update(runs).set({
+          status: "queued", assignedRunnerId: null, executor: null, leasedAt: null,
+          leaseExpiresAt: null, heartbeatAt: null, currentAttemptId: null,
+          currentRoutingDecisionId: null, routingRejectionsJson: JSON.stringify(rejections),
+          updatedAt: prepared.createdAt
+        }).where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId))).run();
+        tx.insert(runEvents).values(runEventValues({
+          runId: input.runId,
+          type: "routing.preflight_rejected",
+          payload: {
+            runnerId: input.runnerId, executorId: safeInput.executorId,
+            attemptId: input.attemptId, routingDecisionId: attempt.routingDecisionId,
+            reason: safeInput.reason
+          },
+          visibility: "audit", importance: "blocking", message: safeInput.reason,
+          createdAt: prepared.createdAt
+        })).run();
+        return { outcome: "requeued" as const, operation: journal.operation };
+      }, { behavior: "immediate" });
+    },
+
     async acquireHostedExecutionStart(input: {
       runId: string;
       attemptId: string;
@@ -6378,14 +7477,30 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           eq(hostedClaimOperations.state, "claimed"),
           eq(hostedClaimOperations.runId, input.runId)
         )).limit(1).get();
+        const credentialId = importedAttempt
+          ? (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId
+          : "";
+        const runningOperation = operation
+          ? tx.select().from(hostedLifecycleOperations).where(and(
+              eq(hostedLifecycleOperations.destinationId, operation.destinationId),
+              eq(hostedLifecycleOperations.organizationId, operation.organizationId),
+              eq(hostedLifecycleOperations.runnerId, operation.runnerId),
+              eq(hostedLifecycleOperations.credentialId, credentialId),
+              eq(hostedLifecycleOperations.runId, input.runId),
+              eq(hostedLifecycleOperations.attemptId, input.attemptId),
+              eq(hostedLifecycleOperations.action, "running"),
+              eq(hostedLifecycleOperations.state, "acknowledged")
+            )).limit(1).get()
+          : undefined;
         if (
-          !imported || !importedAttempt || !run || !attempt || !operation
+          !imported || !importedAttempt || !run || !attempt || !operation || !runningOperation
           || importedAttempt.runId !== input.runId
-          || run.status !== "assigned"
+          || run.status !== "running"
           || run.currentAttemptId !== input.attemptId
           || attempt.runId !== input.runId
-          || attempt.status !== "assigned"
+          || attempt.status !== "running"
           || attempt.fencingToken !== input.fencingToken
+          || !validAcknowledgedLifecycleDependency(runningOperation)
         ) {
           throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
         }
@@ -6488,6 +7603,267 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       });
     },
 
+    async enqueueHostedLifecycleOperation(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      credentialId: string;
+      runId: string;
+      action: HostedLifecycleActionV1;
+      request: HostedLifecycleRequestV1;
+      now?: Date;
+    }): Promise<{ outcome: "created" | "replayed"; operation: HostedLifecycleOperation }> {
+      throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_ATOMIC_API_REQUIRED");
+    },
+
+    async claimDueHostedLifecycleOperations(input: {
+      destinationId: string;
+      organizationId: string;
+      leaseOwner: string;
+      leaseSeconds: number;
+      limit?: number;
+      now?: Date;
+    }): Promise<HostedLifecycleOperation[]> {
+      if (!input.leaseOwner || !Number.isFinite(input.leaseSeconds) || input.leaseSeconds <= 0) {
+        throw new Error("hosted_lifecycle_operation_lease_invalid");
+      }
+      const limit = Math.min(100, Math.max(1, Math.trunc(input.limit ?? 50)));
+      const now = input.now ?? new Date();
+      const at = now.toISOString();
+      const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000).toISOString();
+      return db.transaction((tx) => {
+        const predecessor = alias(hostedLifecycleOperations, "hosted_lifecycle_predecessor");
+        const due = tx.select().from(hostedLifecycleOperations).where(and(
+          eq(hostedLifecycleOperations.destinationId, input.destinationId),
+          eq(hostedLifecycleOperations.organizationId, input.organizationId),
+          notExists(
+            tx.select({ operationId: predecessor.operationId })
+              .from(predecessor)
+              .where(and(
+                eq(predecessor.destinationId, hostedLifecycleOperations.destinationId),
+                eq(predecessor.organizationId, hostedLifecycleOperations.organizationId),
+                eq(predecessor.runId, hostedLifecycleOperations.runId),
+                eq(predecessor.attemptId, hostedLifecycleOperations.attemptId),
+                lt(predecessor.sequence, hostedLifecycleOperations.sequence),
+                sql`${predecessor.state} <> 'acknowledged'`
+              ))
+          ),
+          or(
+            and(eq(hostedLifecycleOperations.state, "pending"), lte(hostedLifecycleOperations.nextAttemptAt, at)),
+            and(eq(hostedLifecycleOperations.state, "leased"), lte(hostedLifecycleOperations.leaseExpiresAt, at))
+          )
+        )).orderBy(
+          asc(hostedLifecycleOperations.runId),
+          asc(hostedLifecycleOperations.attemptId),
+          asc(hostedLifecycleOperations.sequence),
+          asc(hostedLifecycleOperations.operationId)
+        ).limit(limit).all();
+        const claimed: HostedLifecycleOperation[] = [];
+        for (const row of due) {
+          const leaseToken = randomUUID();
+          const updated = tx.update(hostedLifecycleOperations).set({
+            state: "leased",
+            attemptCount: row.attemptCount + 1,
+            leaseOwner: input.leaseOwner,
+            leaseToken,
+            leaseExpiresAt,
+            updatedAt: at
+          }).where(and(
+            eq(hostedLifecycleOperations.destinationId, row.destinationId),
+            eq(hostedLifecycleOperations.organizationId, row.organizationId),
+            eq(hostedLifecycleOperations.runnerId, row.runnerId),
+            eq(hostedLifecycleOperations.credentialId, row.credentialId),
+            eq(hostedLifecycleOperations.operationId, row.operationId),
+            or(
+              and(eq(hostedLifecycleOperations.state, "pending"), lte(hostedLifecycleOperations.nextAttemptAt, at)),
+              and(eq(hostedLifecycleOperations.state, "leased"), lte(hostedLifecycleOperations.leaseExpiresAt, at))
+            )
+          )).run();
+          if (updated.changes !== 1) continue;
+          claimed.push(hostedLifecycleOperationFromRow({
+            ...row,
+            state: "leased",
+            attemptCount: row.attemptCount + 1,
+            leaseOwner: input.leaseOwner,
+            leaseToken,
+            leaseExpiresAt,
+            updatedAt: at
+          }));
+        }
+        return claimed;
+      }, { behavior: "immediate" });
+    },
+
+    async acknowledgeHostedLifecycleOperation(input: {
+      destinationId: string;
+      organizationId: string;
+      operationId: string;
+      leaseToken: string;
+      receipt: HostedLifecycleReceiptEnvelopeV1;
+      now?: Date;
+    }): Promise<"acknowledged" | "stale_lease" | "not_found"> {
+      const receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(input.receipt);
+      const at = (input.now ?? new Date()).toISOString();
+      const preflightRow = await db.select().from(hostedLifecycleOperations).where(and(
+        eq(hostedLifecycleOperations.destinationId, input.destinationId),
+        eq(hostedLifecycleOperations.organizationId, input.organizationId),
+        eq(hostedLifecycleOperations.operationId, input.operationId)
+      )).limit(1).get();
+      if (!preflightRow) return "not_found";
+      const request = HostedLifecycleRequestV1Schema.parse(JSON.parse(preflightRow.requestJson));
+      const expectedReceiptId = await computeHostedLifecycleReceiptIdV1({
+        organizationId: preflightRow.organizationId,
+        operationId: preflightRow.operationId
+      });
+      if (
+        receipt.receiptId !== expectedReceiptId
+        || !(await verifyHostedLifecycleReceiptV1({
+          receipt,
+          request,
+          action: preflightRow.action as HostedLifecycleActionV1,
+          organizationId: preflightRow.organizationId,
+          runnerId: preflightRow.runnerId,
+          runId: preflightRow.runId,
+          credentialId: preflightRow.credentialId
+        }))
+      ) return "stale_lease";
+      return db.transaction((tx) => {
+        const row = tx.select().from(hostedLifecycleOperations).where(and(
+          eq(hostedLifecycleOperations.destinationId, input.destinationId),
+          eq(hostedLifecycleOperations.organizationId, input.organizationId),
+          eq(hostedLifecycleOperations.operationId, input.operationId)
+        )).limit(1).get();
+        if (!row) return "not_found" as const;
+        if (row.state === "acknowledged") {
+          return row.receiptId === receipt.receiptId
+            && row.receiptDigest === receipt.receiptDigest
+            && row.receiptJson === canonicalJsonStringify(receipt)
+            ? "acknowledged" as const
+            : "stale_lease" as const;
+        }
+        if (
+          row.state !== "leased" || row.leaseToken !== input.leaseToken
+          || !row.leaseExpiresAt || row.leaseExpiresAt <= at
+          || receipt.organizationId !== row.organizationId
+          || receipt.runId !== row.runId
+          || receipt.operationId !== row.operationId
+          || receipt.requestId !== row.requestId
+          || receipt.requestDigest !== row.requestDigest
+          || receipt.producer.id !== row.runnerId
+          || receipt.producer.credentialId !== row.credentialId
+          || receipt.attempt.attemptId !== row.attemptId
+          || receipt.attempt.attemptNumber !== row.attemptNumber
+          || receipt.attempt.fencingTokenDigest !== row.fencingTokenDigest
+        ) return "stale_lease" as const;
+        return acknowledgeHostedLifecycleOperationTx({
+          tx,
+          row,
+          receipt,
+          acknowledgedAt: at,
+          expectedState: "leased",
+          leaseToken: input.leaseToken
+        }) ? "acknowledged" as const : "stale_lease" as const;
+      }, { behavior: "immediate" });
+    },
+
+    async retryHostedLifecycleOperation(input: {
+      destinationId: string;
+      organizationId: string;
+      operationId: string;
+      leaseToken: string;
+      nextAttemptAt: string;
+      reasonCode: string;
+      now?: Date;
+    }): Promise<"retried" | "stale_lease" | "not_found"> {
+      const at = (input.now ?? new Date()).toISOString();
+      if (input.nextAttemptAt < at) throw new Error("hosted_lifecycle_retry_time_in_past");
+      return db.transaction((tx) => {
+        const row = tx.select().from(hostedLifecycleOperations).where(and(
+          eq(hostedLifecycleOperations.destinationId, input.destinationId),
+          eq(hostedLifecycleOperations.organizationId, input.organizationId),
+          eq(hostedLifecycleOperations.operationId, input.operationId)
+        )).limit(1).get();
+        if (!row) return "not_found" as const;
+        if (row.state !== "leased" || row.leaseToken !== input.leaseToken || !row.leaseExpiresAt || row.leaseExpiresAt <= at) {
+          return "stale_lease" as const;
+        }
+        const updated = tx.update(hostedLifecycleOperations).set({
+          state: "pending",
+          nextAttemptAt: input.nextAttemptAt,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          lastReasonCode: input.reasonCode,
+          updatedAt: at
+        }).where(and(
+          eq(hostedLifecycleOperations.operationId, row.operationId),
+          eq(hostedLifecycleOperations.state, "leased"),
+          eq(hostedLifecycleOperations.leaseToken, input.leaseToken),
+          gt(hostedLifecycleOperations.leaseExpiresAt, at)
+        )).run();
+        return updated.changes === 1 ? "retried" as const : "stale_lease" as const;
+      }, { behavior: "immediate" });
+    },
+
+    async markHostedLifecycleOperationAttention(input: {
+      destinationId: string;
+      organizationId: string;
+      operationId: string;
+      leaseToken: string;
+      reasonCode: string;
+      now?: Date;
+    }): Promise<"attention" | "stale_lease" | "not_found"> {
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const row = tx.select().from(hostedLifecycleOperations).where(and(
+          eq(hostedLifecycleOperations.destinationId, input.destinationId),
+          eq(hostedLifecycleOperations.organizationId, input.organizationId),
+          eq(hostedLifecycleOperations.operationId, input.operationId)
+        )).limit(1).get();
+        if (!row) return "not_found" as const;
+        if (row.state !== "leased" || row.leaseToken !== input.leaseToken || !row.leaseExpiresAt || row.leaseExpiresAt <= at) {
+          return "stale_lease" as const;
+        }
+        const updated = tx.update(hostedLifecycleOperations).set({
+          state: "attention",
+          nextAttemptAt: null,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          lastReasonCode: input.reasonCode,
+          updatedAt: at
+        }).where(and(
+          eq(hostedLifecycleOperations.operationId, row.operationId),
+          eq(hostedLifecycleOperations.state, "leased"),
+          eq(hostedLifecycleOperations.leaseToken, input.leaseToken),
+          gt(hostedLifecycleOperations.leaseExpiresAt, at)
+        )).run();
+        return updated.changes === 1 ? "attention" as const : "stale_lease" as const;
+      }, { behavior: "immediate" });
+    },
+
+    async recoverExpiredHostedLifecycleOperations(input: {
+      destinationId: string;
+      organizationId: string;
+      now?: Date;
+    }): Promise<number> {
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => tx.update(hostedLifecycleOperations).set({
+        state: "pending",
+        nextAttemptAt: at,
+        leaseOwner: null,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        lastReasonCode: "lease_expired",
+        updatedAt: at
+      }).where(and(
+        eq(hostedLifecycleOperations.destinationId, input.destinationId),
+        eq(hostedLifecycleOperations.organizationId, input.organizationId),
+        eq(hostedLifecycleOperations.state, "leased"),
+        lte(hostedLifecycleOperations.leaseExpiresAt, at)
+      )).run().changes, { behavior: "immediate" });
+    },
+
     async beginHostedHeartbeatOperation(input: {
       destinationId: string;
       organizationId: string;
@@ -6498,195 +7874,28 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       fencingToken: string;
       request: HostedHeartbeatRequestV1;
     }): Promise<{ outcome: "created" | "replayed"; operation: HostedHeartbeatOperation }> {
-      let request: HostedHeartbeatRequestV1;
-      try {
-        request = HostedHeartbeatRequestV1Schema.parse(input.request);
-      } catch {
-        throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_INVALID");
-      }
-      const computedRequestDigest = await computeHostedLifecycleRequestDigestV1({
-        organizationId: input.organizationId,
-        runnerId: input.runnerId,
-        runId: input.runId,
-        action: "heartbeat",
-        request
-      });
-      const computedRequestId = await computeHostedLifecycleRequestIdV1({
-        operationId: request.operationId,
-        requestDigest: request.requestDigest
-      });
-      if (
-        request.requestDigest !== computedRequestDigest
-        || request.requestId !== computedRequestId
-      ) {
-        throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_INVALID");
-      }
-      const activeKey = canonicalSha256Json({
+      const prepared = await prepareHostedLifecycleOperation({
         destinationId: input.destinationId,
         organizationId: input.organizationId,
         runnerId: input.runnerId,
         credentialId: input.credentialId,
         runId: input.runId,
-        attemptId: input.attemptId,
-        fencingTokenDigest: request.attempt.fencingTokenDigest
+        action: "heartbeat",
+        request: input.request
       });
-      const requestJson = JSON.stringify(request);
-      const createdAt = nowIso();
-      return db.transaction((tx) => {
-        const pending = tx.select().from(hostedHeartbeatOperations)
-          .where(eq(hostedHeartbeatOperations.activeKey, activeKey)).limit(1).get();
-        if (pending) {
-          const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
-          const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
-          const importedAttempt = tx.select().from(hostedAttemptImports)
-            .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
-          const operation = importedAttempt
-            ? tx.select().from(hostedClaimOperations).where(and(
-                eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
-                eq(hostedClaimOperations.destinationId, input.destinationId),
-                eq(hostedClaimOperations.organizationId, input.organizationId),
-                eq(hostedClaimOperations.runnerId, input.runnerId),
-                eq(hostedClaimOperations.state, "claimed"),
-                eq(hostedClaimOperations.runId, input.runId),
-                isNotNull(hostedClaimOperations.executionStartedAt),
-                isNull(hostedClaimOperations.terminalReasonCode)
-              )).limit(1).get()
-            : undefined;
-          if (
-            !run || !attempt || !importedAttempt || !operation
-            || run.currentAttemptId !== input.attemptId
-            || run.assignedRunnerId !== input.runnerId
-            || !["assigned", "running", "needs_approval"].includes(run.status)
-            || run.leaseExpiresAt !== pending.expectedLeaseExpiresAt
-            || attempt.runId !== input.runId
-            || attempt.runnerId !== input.runnerId
-            || !["assigned", "running"].includes(attempt.status)
-            || attempt.fencingToken !== input.fencingToken
-            || attempt.leaseExpiresAt !== pending.expectedLeaseExpiresAt
-            || Date.parse(attempt.leaseExpiresAt) <= Date.parse(createdAt)
-            || (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId !== input.credentialId
-          ) {
-            throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
-          }
-          return { outcome: "replayed" as const, operation: hostedHeartbeatOperationFromRow(pending) };
-        }
-        const sameOperation = tx.select().from(hostedHeartbeatOperations)
-          .where(and(
-            eq(hostedHeartbeatOperations.destinationId, input.destinationId),
-            eq(hostedHeartbeatOperations.organizationId, input.organizationId),
-            eq(hostedHeartbeatOperations.runnerId, input.runnerId),
-            eq(hostedHeartbeatOperations.credentialId, input.credentialId),
-            eq(hostedHeartbeatOperations.operationId, request.operationId)
-          )).limit(1).get();
-        const sameRequest = tx.select().from(hostedHeartbeatOperations)
-          .where(and(
-            eq(hostedHeartbeatOperations.destinationId, input.destinationId),
-            eq(hostedHeartbeatOperations.organizationId, input.organizationId),
-            eq(hostedHeartbeatOperations.runnerId, input.runnerId),
-            eq(hostedHeartbeatOperations.credentialId, input.credentialId),
-            eq(hostedHeartbeatOperations.requestId, request.requestId)
-          )).limit(1).get();
-        if (sameOperation || sameRequest) {
-          const existing = sameOperation ?? sameRequest!;
-          if (
-            existing.operationId !== request.operationId
-            || existing.requestId !== request.requestId
-            || existing.runId !== input.runId
-            || existing.attemptId !== input.attemptId
-            || existing.requestJson !== requestJson
-          ) {
-            throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
-          }
-          return { outcome: "replayed" as const, operation: hostedHeartbeatOperationFromRow(existing) };
-        }
-        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
-        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
-        const importedAttempt = tx.select().from(hostedAttemptImports)
-          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
-        const operation = importedAttempt
-          ? tx.select().from(hostedClaimOperations).where(and(
-              eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
-              eq(hostedClaimOperations.destinationId, input.destinationId),
-              eq(hostedClaimOperations.organizationId, input.organizationId),
-              eq(hostedClaimOperations.runnerId, input.runnerId),
-              eq(hostedClaimOperations.state, "claimed"),
-              eq(hostedClaimOperations.runId, input.runId),
-              isNotNull(hostedClaimOperations.executionStartedAt),
-              isNull(hostedClaimOperations.terminalReasonCode)
-            )).limit(1).get()
-          : undefined;
-        if (
-          !run || !attempt || !importedAttempt || !operation
-          || run.currentAttemptId !== input.attemptId
-          || run.assignedRunnerId !== input.runnerId
-          || !["assigned", "running", "needs_approval"].includes(run.status)
-          || run.leaseExpiresAt !== attempt.leaseExpiresAt
-          || attempt.runId !== input.runId
-          || attempt.runnerId !== input.runnerId
-          || !["assigned", "running"].includes(attempt.status)
-          || attempt.fencingToken !== input.fencingToken
-          || importedAttempt.runId !== input.runId
-          || importedAttempt.attemptNumber !== attempt.number
-          || (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId !== input.credentialId
-          || importedAttempt.fencingTokenDigest !== request.attempt.fencingTokenDigest
-          || request.attempt.attemptId !== attempt.id
-          || request.attempt.attemptNumber !== attempt.number
-          || request.attempt.epoch !== attempt.number
-          || request.attempt.fencingToken !== input.fencingToken
-          || request.expectedLeaseExpiresAt !== attempt.leaseExpiresAt
-          || Date.parse(attempt.leaseExpiresAt) <= Date.parse(createdAt)
-        ) {
-          throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
-        }
-        tx.insert(hostedHeartbeatOperations).values({
-          destinationId: input.destinationId,
-          organizationId: input.organizationId,
-          runnerId: input.runnerId,
-          credentialId: input.credentialId,
-          operationId: request.operationId,
-          requestId: request.requestId,
-          runId: input.runId,
-          attemptId: input.attemptId,
-          attemptNumber: attempt.number,
-          fencingTokenDigest: request.attempt.fencingTokenDigest,
-          expectedLeaseExpiresAt: request.expectedLeaseExpiresAt,
-          requestDigest: request.requestDigest,
-          requestJson,
-          activeKey,
-          state: "pending",
-          createdAt,
-          updatedAt: createdAt
-        }).run();
-        const row = tx.select().from(hostedHeartbeatOperations)
-          .where(and(
-            eq(hostedHeartbeatOperations.destinationId, input.destinationId),
-            eq(hostedHeartbeatOperations.organizationId, input.organizationId),
-            eq(hostedHeartbeatOperations.runnerId, input.runnerId),
-            eq(hostedHeartbeatOperations.credentialId, input.credentialId),
-            eq(hostedHeartbeatOperations.operationId, request.operationId)
-          )).limit(1).get()!;
-        return { outcome: "created" as const, operation: hostedHeartbeatOperationFromRow(row) };
-      });
-    },
-
-    async getHostedHeartbeatOperationForRetry(input: {
-      destinationId: string;
-      organizationId: string;
-      runnerId: string;
-      credentialId: string;
-      runId: string;
-      attemptId: string;
-      fencingToken: string;
-    }): Promise<HostedHeartbeatOperation | null> {
+      const request = prepared.request as HostedHeartbeatRequestV1;
       return db.transaction((tx) => {
         const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
         const attempt = tx.select().from(attempts).where(and(
           eq(attempts.id, input.attemptId),
           eq(attempts.runId, input.runId),
+          eq(attempts.runnerId, input.runnerId),
           eq(attempts.fencingToken, input.fencingToken)
         )).limit(1).get();
-        const importedAttempt = tx.select().from(hostedAttemptImports)
-          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports).where(and(
+          eq(hostedAttemptImports.attemptId, input.attemptId),
+          eq(hostedAttemptImports.runId, input.runId)
+        )).limit(1).get();
         const claimOperation = importedAttempt
           ? tx.select().from(hostedClaimOperations).where(and(
               eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
@@ -6699,34 +7908,105 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               isNull(hostedClaimOperations.terminalReasonCode)
             )).limit(1).get()
           : undefined;
+        const authorityCredentialId = importedAttempt
+          ? (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId
+          : undefined;
         if (
           !run || !attempt || !importedAttempt || !claimOperation
+          || request.attempt.attemptId !== input.attemptId
+          || request.attempt.attemptNumber !== attempt.number
+          || request.attempt.epoch !== attempt.number
+          || request.attempt.fencingToken !== input.fencingToken
+          || request.attempt.fencingTokenDigest !== importedAttempt.fencingTokenDigest
+          || request.expectedLeaseExpiresAt !== attempt.leaseExpiresAt
           || run.currentAttemptId !== input.attemptId
           || run.assignedRunnerId !== input.runnerId
-          || !["assigned", "running", "needs_approval"].includes(run.status)
+          || !["running", "needs_approval"].includes(run.status)
           || run.leaseExpiresAt !== attempt.leaseExpiresAt
-          || attempt.runnerId !== input.runnerId
-          || !["assigned", "running"].includes(attempt.status)
-          || Date.parse(attempt.leaseExpiresAt) <= Date.now()
-          || (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId !== input.credentialId
-        ) return null;
-        const activeKey = canonicalSha256Json({
-          destinationId: input.destinationId,
-          organizationId: input.organizationId,
-          runnerId: input.runnerId,
-          credentialId: input.credentialId,
-          runId: input.runId,
-          attemptId: input.attemptId,
-          fencingTokenDigest: tx.select({ fencingTokenDigest: hostedAttemptImports.fencingTokenDigest })
-            .from(hostedAttemptImports).where(eq(hostedAttemptImports.attemptId, input.attemptId))
-            .limit(1).get()?.fencingTokenDigest ?? ""
-        });
-        const row = tx.select().from(hostedHeartbeatOperations)
-          .where(eq(hostedHeartbeatOperations.activeKey, activeKey)).limit(1).get();
-        return row && row.expectedLeaseExpiresAt === attempt.leaseExpiresAt
-          ? hostedHeartbeatOperationFromRow(row)
-          : null;
-      });
+          || attempt.status !== "running"
+          || importedAttempt.attemptNumber !== attempt.number
+          || authorityCredentialId !== input.credentialId
+          || !Number.isFinite(Date.parse(attempt.leaseExpiresAt))
+          || Date.parse(attempt.leaseExpiresAt) <= Date.parse(prepared.createdAt)
+        ) {
+          throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
+        }
+        const result = enqueueHostedLifecycleOperationTx(tx, prepared);
+        const operation = result.operation;
+        if (operation.state !== "pending" && operation.state !== "acknowledged") {
+          throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
+        }
+        return {
+          outcome: result.outcome,
+          operation: {
+            destinationId: operation.destinationId,
+            organizationId: operation.organizationId,
+            runnerId: operation.runnerId,
+            credentialId: operation.credentialId,
+            operationId: operation.operationId,
+            requestId: operation.requestId,
+            runId: operation.runId,
+            attemptId: operation.attemptId,
+            attemptNumber: operation.attemptNumber,
+            fencingTokenDigest: operation.fencingTokenDigest,
+            expectedLeaseExpiresAt: request.expectedLeaseExpiresAt,
+            requestDigest: operation.requestDigest,
+            request,
+            state: operation.state,
+            createdAt: operation.createdAt,
+            updatedAt: operation.updatedAt,
+            ...(operation.receiptDigest ? { receiptDigest: operation.receiptDigest } : {}),
+            ...(operation.receipt ? { receipt: operation.receipt } : {}),
+            ...(operation.receipt?.payload.operation === "heartbeat"
+              ? { acceptedLeaseExpiresAt: operation.receipt.payload.leaseExpiresAt }
+              : {}),
+            ...(operation.acknowledgedAt ? { acknowledgedAt: operation.acknowledgedAt } : {})
+          }
+        };
+      }, { behavior: "immediate" });
+    },
+
+    async getHostedHeartbeatOperationForRetry(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      credentialId: string;
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+    }): Promise<HostedHeartbeatOperation | null> {
+      const row = await db.select().from(hostedLifecycleOperations).where(and(
+        eq(hostedLifecycleOperations.destinationId, input.destinationId),
+        eq(hostedLifecycleOperations.organizationId, input.organizationId),
+        eq(hostedLifecycleOperations.runnerId, input.runnerId),
+        eq(hostedLifecycleOperations.credentialId, input.credentialId),
+        eq(hostedLifecycleOperations.runId, input.runId),
+        eq(hostedLifecycleOperations.attemptId, input.attemptId),
+        eq(hostedLifecycleOperations.action, "heartbeat"),
+        eq(hostedLifecycleOperations.state, "pending")
+      )).orderBy(desc(hostedLifecycleOperations.createdAt)).limit(1).get();
+      if (!row) return null;
+      const request = HostedHeartbeatRequestV1Schema.parse(JSON.parse(row.requestJson));
+      const lease = await this.getHostedExecutionLease(input);
+      if (!lease || request.expectedLeaseExpiresAt !== lease.leaseExpiresAt) return null;
+      return {
+        destinationId: row.destinationId,
+        organizationId: row.organizationId,
+        runnerId: row.runnerId,
+        credentialId: row.credentialId,
+        operationId: row.operationId,
+        requestId: row.requestId,
+        runId: row.runId,
+        attemptId: row.attemptId,
+        attemptNumber: row.attemptNumber,
+        fencingTokenDigest: row.fencingTokenDigest,
+        expectedLeaseExpiresAt: request.expectedLeaseExpiresAt,
+        requestDigest: row.requestDigest,
+        request,
+        state: "pending",
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt
+      };
     },
 
     async applyHostedHeartbeatReceipt(input: {
@@ -6741,127 +8021,65 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       requestId: string;
       receipt: HostedLifecycleReceiptEnvelopeV1;
     }): Promise<"accepted" | "replayed" | "rejected"> {
-      let receipt: HostedLifecycleReceiptEnvelopeV1;
-      try {
-        receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(input.receipt);
-      } catch {
-        return "rejected";
-      }
-      const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
-      if (
-        receipt.payloadDigest !== await computeControlPayloadDigestV1(receipt.payload)
-        || receipt.receiptDigest !== await computeControlReceiptDigestV1(receiptDigestInput)
-      ) {
-        return "rejected";
-      }
-      const receiptJson = JSON.stringify(receipt);
-      return db.transaction((tx) => {
-        const journal = tx.select().from(hostedHeartbeatOperations).where(and(
-          eq(hostedHeartbeatOperations.destinationId, input.destinationId),
-          eq(hostedHeartbeatOperations.organizationId, input.organizationId),
-          eq(hostedHeartbeatOperations.runnerId, input.runnerId),
-          eq(hostedHeartbeatOperations.credentialId, input.credentialId),
-          eq(hostedHeartbeatOperations.operationId, input.operationId),
-          eq(hostedHeartbeatOperations.requestId, input.requestId)
+      return await (async () => {
+        const parsed = HostedLifecycleReceiptEnvelopeV1Schema.safeParse(input.receipt);
+        if (!parsed.success || parsed.data.payload.operation !== "heartbeat") return "rejected" as const;
+        const receipt = parsed.data;
+        const journal = await db.select().from(hostedLifecycleOperations).where(and(
+          eq(hostedLifecycleOperations.destinationId, input.destinationId),
+          eq(hostedLifecycleOperations.organizationId, input.organizationId),
+          eq(hostedLifecycleOperations.runnerId, input.runnerId),
+          eq(hostedLifecycleOperations.credentialId, input.credentialId),
+          eq(hostedLifecycleOperations.operationId, input.operationId),
+          eq(hostedLifecycleOperations.requestId, input.requestId),
+          eq(hostedLifecycleOperations.action, "heartbeat")
         )).limit(1).get();
         if (!journal) return "rejected" as const;
-        if (journal.state === "acknowledged") {
-          return journal.receiptDigest === receipt.receiptDigest
-            ? "replayed" as const
-            : "rejected" as const;
-        }
-        const newLeaseExpiresAt = receipt.payload.operation === "heartbeat"
-          ? receipt.payload.leaseExpiresAt
-          : null;
-        const acknowledgedAt = nowIso();
-        const now = Date.parse(acknowledgedAt);
-        const oldExpiry = Date.parse(journal.expectedLeaseExpiresAt);
-        const newExpiry = newLeaseExpiresAt ? Date.parse(newLeaseExpiresAt) : Number.NaN;
-        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
-        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
-        const importedAttempt = tx.select().from(hostedAttemptImports)
-          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
-        const claimOperation = importedAttempt
-          ? tx.select().from(hostedClaimOperations).where(and(
-              eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
-              eq(hostedClaimOperations.destinationId, input.destinationId),
-              eq(hostedClaimOperations.organizationId, input.organizationId),
-              eq(hostedClaimOperations.runnerId, input.runnerId),
-              eq(hostedClaimOperations.state, "claimed"),
-              eq(hostedClaimOperations.runId, input.runId),
-              isNotNull(hostedClaimOperations.executionStartedAt),
-              isNull(hostedClaimOperations.terminalReasonCode)
-            )).limit(1).get()
-          : undefined;
+        const request = HostedHeartbeatRequestV1Schema.parse(JSON.parse(journal.requestJson));
+        const expectedReceiptId = await computeHostedLifecycleReceiptIdV1({
+          organizationId: input.organizationId,
+          operationId: input.operationId
+        });
         if (
-          !run || !attempt || !importedAttempt || !claimOperation || !newLeaseExpiresAt
-          || journal.runId !== input.runId || journal.attemptId !== input.attemptId
-          || run.currentAttemptId !== input.attemptId
-          || run.assignedRunnerId !== input.runnerId
-          || !["assigned", "running", "needs_approval"].includes(run.status)
-          || run.leaseExpiresAt !== journal.expectedLeaseExpiresAt
-          || attempt.runId !== input.runId
-          || attempt.runnerId !== input.runnerId
-          || !["assigned", "running"].includes(attempt.status)
-          || attempt.fencingToken !== input.fencingToken
-          || attempt.leaseExpiresAt !== journal.expectedLeaseExpiresAt
-          || importedAttempt.runId !== input.runId
-          || importedAttempt.attemptNumber !== journal.attemptNumber
-          || (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId !== input.credentialId
-          || importedAttempt.fencingTokenDigest !== journal.fencingTokenDigest
-          || receipt.runId !== input.runId
-          || receipt.organizationId !== input.organizationId
-          || receipt.producer.id !== input.runnerId
-          || receipt.producer.credentialId !== input.credentialId
-          || receipt.requestId !== journal.requestId
-          || receipt.operationId !== journal.operationId
-          || receipt.requestDigest !== journal.requestDigest
-          || receipt.attempt.attemptId !== input.attemptId
-          || receipt.attempt.attemptNumber !== journal.attemptNumber
-          || receipt.attempt.epoch !== journal.attemptNumber
-          || receipt.attempt.fencingTokenDigest !== journal.fencingTokenDigest
-          || !Number.isFinite(oldExpiry) || oldExpiry <= now
-          || !Number.isFinite(newExpiry) || newExpiry <= oldExpiry || newExpiry <= now
-        ) {
-          return "rejected" as const;
-        }
-        const attemptUpdated = tx.update(attempts).set({
-          heartbeatAt: acknowledgedAt,
-          leaseExpiresAt: newLeaseExpiresAt,
-          updatedAt: acknowledgedAt
-        }).where(and(
-          eq(attempts.id, input.attemptId),
-          eq(attempts.leaseExpiresAt, journal.expectedLeaseExpiresAt)
-        )).run();
-        const runUpdated = tx.update(runs).set({
-          heartbeatAt: acknowledgedAt,
-          leaseExpiresAt: newLeaseExpiresAt,
-          updatedAt: acknowledgedAt
-        }).where(and(
-          eq(runs.id, input.runId),
-          eq(runs.currentAttemptId, input.attemptId),
-          eq(runs.leaseExpiresAt, journal.expectedLeaseExpiresAt)
-        )).run();
-        const journalUpdated = tx.update(hostedHeartbeatOperations).set({
-          activeKey: null,
-          state: "acknowledged",
-          receiptDigest: receipt.receiptDigest,
-          receiptJson,
-          acceptedLeaseExpiresAt: newLeaseExpiresAt,
-          updatedAt: acknowledgedAt,
-          acknowledgedAt
-        }).where(and(
-          eq(hostedHeartbeatOperations.destinationId, input.destinationId),
-          eq(hostedHeartbeatOperations.organizationId, input.organizationId),
-          eq(hostedHeartbeatOperations.runnerId, input.runnerId),
-          eq(hostedHeartbeatOperations.credentialId, input.credentialId),
-          eq(hostedHeartbeatOperations.operationId, journal.operationId),
-          eq(hostedHeartbeatOperations.state, "pending")
-        )).run();
-        return attemptUpdated.changes === 1 && runUpdated.changes === 1 && journalUpdated.changes === 1
-          ? "accepted" as const
-          : "rejected" as const;
-      });
+          receipt.receiptId !== expectedReceiptId
+          || !(await verifyHostedLifecycleReceiptV1({
+            receipt,
+            request,
+            action: "heartbeat",
+            organizationId: input.organizationId,
+            runnerId: input.runnerId,
+            runId: input.runId,
+            credentialId: input.credentialId
+          }))
+        ) return "rejected" as const;
+        const receiptJson = canonicalJsonStringify(receipt);
+        const acknowledgedAt = nowIso();
+        return db.transaction((tx) => {
+          const current = tx.select().from(hostedLifecycleOperations).where(and(
+            eq(hostedLifecycleOperations.destinationId, input.destinationId),
+            eq(hostedLifecycleOperations.organizationId, input.organizationId),
+            eq(hostedLifecycleOperations.runnerId, input.runnerId),
+            eq(hostedLifecycleOperations.credentialId, input.credentialId),
+            eq(hostedLifecycleOperations.operationId, input.operationId),
+            eq(hostedLifecycleOperations.requestId, input.requestId)
+          )).limit(1).get();
+          if (!current) return "rejected" as const;
+          if (current.state === "acknowledged") {
+            return current.receiptId === receipt.receiptId
+              && current.receiptDigest === receipt.receiptDigest
+              && current.receiptJson === receiptJson
+              ? "replayed" as const
+              : "rejected" as const;
+          }
+          return current.state === "pending" && acknowledgeHostedLifecycleOperationTx({
+            tx,
+            row: current,
+            receipt,
+            acknowledgedAt,
+            expectedState: "pending"
+          }) ? "accepted" as const : "rejected" as const;
+        }, { behavior: "immediate" });
+      })();
     },
 
     async acknowledgeHostedClaimEmpty(input: {
@@ -7009,6 +8227,31 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         ) {
           throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
         }
+        const exactAuthorityShell = claimOperation.state === "claimed"
+          && claimOperation.runId === claim.runId
+          && claimOperation.claimDigest === claimDigest
+          && claimOperation.authorityDigest === authorityDigest
+          && claimOperation.authorityJson === canonicalJsonStringify(claim.authority)
+          && claimOperation.attemptId === claim.attempt.id
+          && claimOperation.attemptNumber === claim.attempt.number
+          && claimOperation.fencingTokenDigest === claim.attempt.fencingTokenDigest
+          && claimOperation.credentialId === claim.authority.credentialId
+          && claimOperation.leaseExpiresAt === claim.attempt.leaseExpiresAt
+          && claimOperation.executorId === claim.executorId;
+        const claimAuthorityAvailable = claimOperation.state === "pending" || exactAuthorityShell;
+        if (exactAuthorityShell) {
+          const rejection = tx.select({ operationId: hostedLifecycleOperations.operationId })
+            .from(hostedLifecycleOperations).where(and(
+              eq(hostedLifecycleOperations.destinationId, claimOperation.destinationId),
+              eq(hostedLifecycleOperations.organizationId, claim.organizationId),
+              eq(hostedLifecycleOperations.runnerId, claim.runnerId),
+              eq(hostedLifecycleOperations.credentialId, claim.authority.credentialId),
+              eq(hostedLifecycleOperations.runId, claim.runId),
+              eq(hostedLifecycleOperations.attemptId, claim.attempt.id),
+              eq(hostedLifecycleOperations.action, "reject-start")
+            )).limit(1).get();
+          if (rejection) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
         const existingImport = tx.select().from(hostedRunImports)
           .where(eq(hostedRunImports.runId, claim.runId)).limit(1).get();
         if (existingImport) {
@@ -7047,7 +8290,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               || previousHostedAttempt.attemptNumber !== previousAttempt.number
               || terminalRunStatus(currentRun.status)
               || !retryablePreviousAttempt
-              || claimOperation.state !== "pending"
+              || !claimAuthorityAvailable
               || claim.attempt.number !== previousAttempt.number + 1
             ) {
               throw new HostedImportConflictError("HOSTED_IMPORT_ATTEMPT_CONFLICT");
@@ -7094,15 +8337,20 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             if (reassigned.changes !== 1) {
               throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
             }
-            const acknowledged = tx.update(hostedClaimOperations).set({
-              state: "claimed", activeKey: null, runId: claim.runId,
-              updatedAt: importedAt, acknowledgedAt: importedAt
-            }).where(and(
-              eq(hostedClaimOperations.operationId, claim.operationId),
-              eq(hostedClaimOperations.state, "pending")
-            )).run();
-            if (acknowledged.changes !== 1) {
-              throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+            if (!exactAuthorityShell) {
+              const acknowledged = tx.update(hostedClaimOperations).set({
+                state: "claimed", activeKey: null, runId: claim.runId,
+                updatedAt: importedAt, acknowledgedAt: importedAt
+              }).where(and(
+                eq(hostedClaimOperations.operationId, claim.operationId),
+                eq(hostedClaimOperations.state, "pending")
+              )).run();
+              if (acknowledged.changes !== 1) {
+                throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+              }
+            } else {
+              tx.update(hostedClaimOperations).set({ activeKey: null, updatedAt: importedAt })
+                .where(eq(hostedClaimOperations.operationId, claim.operationId)).run();
             }
             return {
               outcome: "created" as const,
@@ -7219,7 +8467,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           };
         }
 
-        if (claimOperation.state !== "pending") {
+        if (!claimAuthorityAvailable) {
           throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
         }
 
@@ -7391,18 +8639,23 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           authorityJson: JSON.stringify(claim.authority),
           importedAt
         }).run();
-        const acknowledged = tx.update(hostedClaimOperations).set({
-          state: "claimed",
-          activeKey: null,
-          runId: claim.runId,
-          updatedAt: importedAt,
-          acknowledgedAt: importedAt
-        }).where(and(
-          eq(hostedClaimOperations.operationId, claim.operationId),
-          eq(hostedClaimOperations.state, "pending")
-        )).run();
-        if (acknowledged.changes !== 1) {
-          throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+        if (!exactAuthorityShell) {
+          const acknowledged = tx.update(hostedClaimOperations).set({
+            state: "claimed",
+            activeKey: null,
+            runId: claim.runId,
+            updatedAt: importedAt,
+            acknowledgedAt: importedAt
+          }).where(and(
+            eq(hostedClaimOperations.operationId, claim.operationId),
+            eq(hostedClaimOperations.state, "pending")
+          )).run();
+          if (acknowledged.changes !== 1) {
+            throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+          }
+        } else {
+          tx.update(hostedClaimOperations).set({ activeKey: null, updatedAt: importedAt })
+            .where(eq(hostedClaimOperations.operationId, claim.operationId)).run();
         }
         tx.insert(runEvents).values([
           runEventValues({
@@ -8612,15 +9865,77 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return "running";
     },
 
-    async completeRun(input: {
+    async completeHostedRunLocally(input: {
       runId: string;
       result: OpenTagRunResult;
       humanEscalation?: HumanEscalation;
-      runnerId?: string;
-      attemptId?: string;
-      fencingToken?: string;
+      runnerId: string;
+      attemptId: string;
+      fencingToken: string;
       idempotencyKey?: string;
+      destinationId: string;
+      organizationId: string;
+      credentialId: string;
+      request: HostedCompleteRequestV1;
     }): Promise<CompleteRunOutcome> {
+      const request = HostedCompleteRequestV1Schema.parse(input.request);
+      const requestDigest = await computeHostedLifecycleRequestDigestV1({
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        action: "complete",
+        request
+      });
+      const requestId = await computeHostedLifecycleRequestIdV1({
+        operationId: request.operationId,
+        requestDigest: request.requestDigest
+      });
+      const operationId = computeHostedLifecycleOperationIdV1(
+        request.requestDigest,
+      );
+      if (
+        request.requestDigest !== requestDigest
+        || request.requestId !== requestId
+        || request.operationId !== operationId
+        || request.attempt.attemptId !== input.attemptId
+        || await computeHostedClaimFencingTokenDigestV1(input.fencingToken)
+          !== request.attempt.fencingTokenDigest
+      ) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_INVALID");
+      return completeRunWithHostedLifecycle({
+        runId: input.runId,
+        result: input.result,
+        ...(input.humanEscalation ? { humanEscalation: input.humanEscalation } : {}),
+        runnerId: input.runnerId,
+        attemptId: input.attemptId,
+        fencingToken: input.fencingToken,
+        ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+      }, {
+          destinationId: input.destinationId,
+          organizationId: input.organizationId,
+          runnerId: input.runnerId,
+          credentialId: input.credentialId,
+          request,
+          requestJson: canonicalJsonStringify(request),
+          businessKeyDigest: canonicalSha256Json({
+            destinationId: input.destinationId,
+            organizationId: input.organizationId,
+            runnerId: input.runnerId,
+            credentialId: input.credentialId,
+            runId: input.runId,
+            attemptId: request.attempt.attemptId,
+            attemptNumber: request.attempt.attemptNumber,
+            action: "complete",
+            discriminator: "single_action_per_attempt"
+          })
+        }
+      );
+    },
+
+    completeRun: (() => {
+      const completeRunInternal = async (
+        input: CompleteRunInput,
+        hostedLifecycleOperation?: HostedCompletionLifecycleOperation,
+      ): Promise<CompleteRunOutcome> => {
       const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
       const safeIdempotencyKey = safeInput.idempotencyKey;
       const parsedResult = OpenTagRunResultSchema.parse(safeInput.result);
@@ -8661,6 +9976,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             }
           : {})
       });
+      if (
+        hostedLifecycleOperation
+        && hostedLifecycleOperation.request.resultDigest
+          !== await computeControlPayloadDigestV1(result)
+      ) {
+        throw new HostedLifecycleOperationConflictError(
+          "HOSTED_LIFECYCLE_OPERATION_INVALID",
+        );
+      }
       const status =
         result.conclusion === "success"
           ? "succeeded"
@@ -8677,6 +10001,66 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       if (!runRow) {
         if (input.runnerId) return "not_found";
         throw new Error(`Run not found: ${input.runId}`);
+      }
+      let hasExactHostedLifecycleReplay = false;
+      if (hostedLifecycleOperation) {
+        const lifecycle = hostedLifecycleOperation;
+        const request = lifecycle.request;
+        const [attempt, importedAttempt] = await Promise.all([
+          db.select().from(attempts).where(eq(attempts.id, input.attemptId!)).limit(1).get(),
+          db.select().from(hostedAttemptImports)
+            .where(eq(hostedAttemptImports.attemptId, input.attemptId!)).limit(1).get(),
+        ]);
+        if (
+          !attempt
+          || !importedAttempt
+          || attempt.number !== request.attempt.attemptNumber
+          || importedAttempt.attemptNumber !== request.attempt.attemptNumber
+          || request.attempt.epoch !== request.attempt.attemptNumber
+        ) {
+          throw new HostedLifecycleOperationConflictError(
+            "HOSTED_LIFECYCLE_OPERATION_INVALID",
+          );
+        }
+        const existing = await db.select().from(hostedLifecycleOperations).where(or(
+          and(
+            eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+            eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+            eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+            eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+            eq(hostedLifecycleOperations.operationId, request.operationId)
+          ),
+          and(
+            eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+            eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+            eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+            eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+            eq(hostedLifecycleOperations.requestId, request.requestId)
+          ),
+          and(
+            eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+            eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+            eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+            eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+            eq(hostedLifecycleOperations.businessKeyDigest, lifecycle.businessKeyDigest)
+          )
+        )).limit(1).get();
+        if (existing) {
+          hasExactHostedLifecycleReplay = existing.requestId === request.requestId
+            && existing.action === "complete"
+            && existing.runId === input.runId
+            && existing.attemptId === request.attempt.attemptId
+            && existing.attemptNumber === request.attempt.attemptNumber
+            && existing.fencingTokenDigest === request.attempt.fencingTokenDigest
+            && existing.requestDigest === request.requestDigest
+            && existing.businessKeyDigest === lifecycle.businessKeyDigest
+            && existing.requestJson === lifecycle.requestJson;
+          if (!hasExactHostedLifecycleReplay) {
+            throw new HostedLifecycleOperationConflictError(
+              "HOSTED_LIFECYCLE_OPERATION_CONFLICT",
+            );
+          }
+        }
       }
       if (humanEscalation) {
         if (result.conclusion !== "needs_human") {
@@ -8705,6 +10089,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             completedAttempt.runnerId === input.runnerId &&
             completedAttempt.fencingToken === input.fencingToken &&
             releasedTerminalAttemptMatchesRun(completedAttempt, runRow);
+          if (
+            duplicateTerminalAttempt
+            && hostedLifecycleOperation
+            && !hasExactHostedLifecycleReplay
+          ) {
+            throw new HostedLifecycleOperationConflictError(
+              "HOSTED_LIFECYCLE_OPERATION_CONFLICT",
+            );
+          }
           if (duplicateTerminalAttempt && status === runRow.status) return "duplicate";
           if (duplicateTerminalAttempt && safeIdempotencyKey) {
             const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
@@ -8726,6 +10119,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         }
       }
       if (terminalRunStatus(runRow.status)) {
+        if (hostedLifecycleOperation && !hasExactHostedLifecycleReplay) {
+          throw new HostedLifecycleOperationConflictError(
+            "HOSTED_LIFECYCLE_OPERATION_CONFLICT",
+          );
+        }
         return input.runnerId ? "duplicate" : "not_found";
       }
       const runThread = runRow ? protocolRunFieldsFromEvent(OpenTagEventSchema.parse(JSON.parse(runRow.eventJson)), runRow.createdAt).thread : undefined;
@@ -8817,6 +10215,48 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             return "stale_attempt" as const;
           }
           if (releasedTerminalAttemptMatchesRun(currentAttempt, currentRun)) {
+            if (hostedLifecycleOperation) {
+              const lifecycle = hostedLifecycleOperation;
+              const request = lifecycle.request;
+              const existing = tx.select().from(hostedLifecycleOperations).where(or(
+                and(
+                  eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+                  eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+                  eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+                  eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+                  eq(hostedLifecycleOperations.operationId, request.operationId)
+                ),
+                and(
+                  eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+                  eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+                  eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+                  eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+                  eq(hostedLifecycleOperations.requestId, request.requestId)
+                ),
+                and(
+                  eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+                  eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+                  eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+                  eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+                  eq(hostedLifecycleOperations.businessKeyDigest, lifecycle.businessKeyDigest)
+                )
+              )).limit(1).get();
+              const exact = existing
+                && existing.requestId === request.requestId
+                && existing.action === "complete"
+                && existing.runId === input.runId
+                && existing.attemptId === request.attempt.attemptId
+                && existing.attemptNumber === request.attempt.attemptNumber
+                && existing.fencingTokenDigest === request.attempt.fencingTokenDigest
+                && existing.requestDigest === request.requestDigest
+                && existing.businessKeyDigest === lifecycle.businessKeyDigest
+                && existing.requestJson === lifecycle.requestJson;
+              if (!exact) {
+                throw new HostedLifecycleOperationConflictError(
+                  "HOSTED_LIFECYCLE_OPERATION_CONFLICT",
+                );
+              }
+            }
             return status === currentRun.status ? ("duplicate" as const) : ("stale_attempt" as const);
           }
           if (currentAttempt.status !== "assigned" && currentAttempt.status !== "running") {
@@ -8945,11 +10385,96 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             createdAt: updatedAt
           })).onConflictDoNothing().run();
         }
+        if (hostedLifecycleOperation) {
+          const lifecycle = hostedLifecycleOperation;
+          const request = lifecycle.request;
+          const existing = tx.select().from(hostedLifecycleOperations).where(or(
+            and(
+              eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+              eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+              eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+              eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+              eq(hostedLifecycleOperations.operationId, request.operationId)
+            ),
+            and(
+              eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+              eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+              eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+              eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+              eq(hostedLifecycleOperations.requestId, request.requestId)
+            ),
+            and(
+              eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+              eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+              eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+              eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+              eq(hostedLifecycleOperations.businessKeyDigest, lifecycle.businessKeyDigest)
+            )
+          )).limit(1).get();
+          if (existing) {
+            const exact = existing.requestId === request.requestId
+              && existing.action === "complete"
+              && existing.runId === input.runId
+              && existing.attemptId === request.attempt.attemptId
+              && existing.attemptNumber === request.attempt.attemptNumber
+              && existing.fencingTokenDigest === request.attempt.fencingTokenDigest
+              && existing.requestDigest === request.requestDigest
+              && existing.businessKeyDigest === lifecycle.businessKeyDigest
+              && existing.requestJson === lifecycle.requestJson;
+            if (!exact) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_CONFLICT");
+          } else {
+            const terminal = tx.select({ operationId: hostedLifecycleOperations.operationId })
+              .from(hostedLifecycleOperations).where(and(
+                eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+                eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+                eq(hostedLifecycleOperations.runId, input.runId),
+                eq(hostedLifecycleOperations.attemptId, request.attempt.attemptId),
+                inArray(hostedLifecycleOperations.action, ["complete", "reject-start"])
+              )).limit(1).get();
+            if (terminal) {
+              throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_CONFLICT");
+            }
+            const sequenceRow = tx.select({
+              value: sql<number>`coalesce(max(${hostedLifecycleOperations.sequence}), 0)`
+            }).from(hostedLifecycleOperations).where(and(
+              eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+              eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+              eq(hostedLifecycleOperations.runId, input.runId),
+              eq(hostedLifecycleOperations.attemptId, request.attempt.attemptId)
+            )).get();
+            tx.insert(hostedLifecycleOperations).values({
+              destinationId: lifecycle.destinationId,
+              organizationId: lifecycle.organizationId,
+              runnerId: lifecycle.runnerId,
+              credentialId: lifecycle.credentialId,
+              operationId: request.operationId,
+              requestId: request.requestId,
+              action: "complete",
+              runId: input.runId,
+              attemptId: request.attempt.attemptId,
+              attemptNumber: request.attempt.attemptNumber,
+              fencingTokenDigest: request.attempt.fencingTokenDigest,
+              requestDigest: request.requestDigest,
+              businessKeyDigest: lifecycle.businessKeyDigest,
+              sequence: Number(sequenceRow?.value ?? 0) + 1,
+              requestJson: lifecycle.requestJson,
+              state: "pending",
+              attemptCount: 0,
+              nextAttemptAt: updatedAt,
+              createdAt: updatedAt,
+              updatedAt
+            }).run();
+          }
+        }
         return "completed" as const;
       });
       if (completionOutcome !== "completed") return completionOutcome;
       return "completed";
-    },
+      };
+      completeRunWithHostedLifecycle = (input, lifecycle) =>
+        completeRunInternal(input, lifecycle);
+      return (input: CompleteRunInput) => completeRunInternal(input);
+    })(),
 
     async requestActionPermission(input: {
       runnerId: string;

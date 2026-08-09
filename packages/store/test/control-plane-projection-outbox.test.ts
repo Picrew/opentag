@@ -3,6 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
+import {
+  RunnerReadinessReceiptEnvelopeV1Schema,
+  buildHostedLifecycleRequestV1,
+  canonicalJsonStringify,
+  computeControlPayloadDigestV1,
+  computeControlReceiptDigestV1,
+  computeHostedLifecycleReceiptIdV1,
+} from "@opentag/core";
 import { describe, expect, it } from "vitest";
 import {
   ControlPlaneProjectionOutboxValidationError,
@@ -12,7 +20,41 @@ import { canonicalSha256Json } from "../src/canonical-json.js";
 import { migrateSchema } from "../src/schema.js";
 
 const DIGEST = `sha256:${"a".repeat(64)}`;
+const OTHER_DIGEST = `sha256:${"b".repeat(64)}`;
 const NOW = new Date("2026-08-08T00:00:00.000Z");
+
+const LOCAL_PRODUCER = {
+  kind: "local_opentag" as const,
+  id: "local_opentag",
+  credentialId: "credential_ref_1",
+  registrationGeneration: 1,
+};
+
+const ATTEMPT_REF = {
+  attemptId: "attempt_1",
+  attemptNumber: 1,
+  epoch: 1,
+  fencingTokenDigest: DIGEST,
+};
+
+const HOSTED_AUTHORITY_REF = {
+  claimOperationId: "operation_claim_1",
+  authorityDigest: DIGEST,
+  attempt: ATTEMPT_REF,
+  admissionPolicySnapshot: {
+    receiptId: "receipt_policy_1",
+    snapshotId: "policy_1",
+    digest: OTHER_DIGEST,
+  },
+};
+
+const EXECUTOR_RESULT_RECEIPT_REF = {
+  receiptId: `lifecycle_${"6".repeat(64)}`,
+  operationId: `op_${"5".repeat(64)}`,
+  requestId: `req_${"4".repeat(64)}`,
+  requestDigest: `sha256:${"5".repeat(64)}`,
+  resultDigest: `sha256:${"6".repeat(64)}`,
+};
 
 function withProjectionDigests<T extends { payload: unknown }>(value: T) {
   const withPayloadDigest = { ...value, payloadDigest: canonicalSha256Json(value.payload) };
@@ -33,7 +75,7 @@ function workThreadReceipt(overrides: Record<string, unknown> = {}) {
     organizationId: "org_1",
     operationId: "operation_work_thread_1",
     requiredCapabilities: ["relay.work-thread-ref.v1"],
-    producer: { kind: "local_opentag", id: "local_opentag" },
+    producer: LOCAL_PRODUCER,
     identity: {
       namespace: "opentag.control.receipt/work-thread-ref/v1",
       parts: ["org_1", "run_1", "work_thread_1"]
@@ -41,12 +83,14 @@ function workThreadReceipt(overrides: Record<string, unknown> = {}) {
     observedAt: NOW.toISOString(),
     runId: "run_1",
     workThreadId: "work_thread_1",
+    predecessorReceiptDigests: [DIGEST, OTHER_DIGEST],
     payload: {
       workThreadId: "work_thread_1",
       sourceIdentityDigest: DIGEST,
       localCreationReceiptId: "local_creation_1",
       localCreationReceiptDigest: DIGEST,
       lineageKind: "source_event",
+      hostedAuthorityRef: HOSTED_AUTHORITY_REF,
       createdAt: NOW.toISOString()
     },
     ...overrides
@@ -65,7 +109,7 @@ function callbackProviderReceipt(
     organizationId: "org_1",
     operationId: "operation_callback_1",
     requiredCapabilities: ["relay.callback-observation.v1"],
-    producer: { kind: "local_opentag", id: "local_opentag" },
+    producer: LOCAL_PRODUCER,
     identity: {
       namespace: "opentag.control.receipt/callback-provider-observation/v1",
       parts: ["org_1", "work_thread_1", "intent_1", "callback_attempt_1", "provider_receipt_1"]
@@ -90,17 +134,12 @@ function allowedReceipts() {
     schemaVersion: 1 as const,
     protocolVersion: "1.0" as const,
     organizationId: "org_1",
-    producer: { kind: "local_opentag" as const, id: "local_opentag" },
+    producer: LOCAL_PRODUCER,
     observedAt: NOW.toISOString(),
     runId: "run_1",
     workThreadId: "work_thread_1"
   };
-  const attempt = {
-    attemptId: "attempt_1",
-    attemptNumber: 1,
-    epoch: 1,
-    fencingTokenDigest: DIGEST
-  };
+  const attempt = ATTEMPT_REF;
   return [
     withProjectionDigests({
       schemaVersion: 1,
@@ -167,6 +206,7 @@ function allowedReceipts() {
         admissionPolicySnapshot: { snapshotId: "policy_1", digest: DIGEST },
         runId: "run_1",
         attempt,
+        executorResultReceiptRef: EXECUTOR_RESULT_RECEIPT_REF,
         assessmentInputDigest: DIGEST,
         evidenceReceiptDigests: [DIGEST],
         gateResults: [{
@@ -232,6 +272,339 @@ function repository(sqlite = new Database(":memory:")) {
 }
 
 describe("control_plane_projection_outbox", () => {
+  it("gates claims on acknowledged parent and lifecycle dependencies", async () => {
+    const { repo, sqlite } = repository();
+    const lifecycleRequest = await buildHostedLifecycleRequestV1({
+      action: "running",
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      runId: "run_1",
+      attempt: {
+        ...ATTEMPT_REF,
+        fencingToken: "fencing-token-1",
+      },
+      occurredAt: NOW.toISOString(),
+      executorId: "codex",
+      executorCapabilityDigest: DIGEST,
+    });
+    const parent = refreshProjectionDigests(
+      RunnerReadinessReceiptEnvelopeV1Schema.parse(allowedReceipts()[0]!) as unknown as Record<string, unknown>
+    );
+    const childDraft = withProjectionDigests({
+      ...parent,
+      receiptId: "receipt_readiness_child",
+      operationId: "operation_readiness_child",
+      identity: {
+        namespace: "opentag.control.receipt/runner-readiness/v1" as const,
+        parts: ["org_1", "runner_1", "1", "readiness_child"] as const
+      },
+      payload: {
+        ...parent.payload,
+        readinessId: "readiness_child"
+      }
+    });
+    const child = refreshProjectionDigests(
+      RunnerReadinessReceiptEnvelopeV1Schema.parse(childDraft) as unknown as Record<string, unknown>
+    );
+    await repo.enqueueControlPlaneProjection({ destinationId: "cloud", envelope: parent, now: NOW });
+    await repo.enqueueControlPlaneProjection({
+      destinationId: "cloud",
+      envelope: child,
+      dependsOnReceiptId: parent.receiptId,
+      requiresLifecycleOperationId: lifecycleRequest.operationId,
+      now: NOW
+    });
+    expect(await repo.claimDueControlPlaneProjections({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      leaseOwner: "pump",
+      leaseSeconds: 30,
+      limit: 10,
+      now: NOW
+    })).toMatchObject({ entries: [{ receiptId: parent.receiptId }] });
+    const parentLease = await repo.getControlPlaneProjection({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      receiptId: parent.receiptId
+    });
+    await repo.acknowledgeControlPlaneProjection({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      receiptId: parent.receiptId,
+      leaseToken: parentLease!.leaseToken!,
+      now: new Date("2026-08-08T00:00:01.000Z")
+    });
+    sqlite.prepare(`INSERT INTO hosted_lifecycle_operations (
+      destination_id, organization_id, runner_id, credential_id,
+      operation_id, request_id, action, run_id, attempt_id, attempt_number,
+      fencing_token_digest, request_digest, business_key_digest, sequence,
+      request_json, state, attempt_count, next_attempt_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, 1, ?, 'pending', 0, ?, ?, ?)`)
+      .run(
+        "cloud", "org_1", "runner_1", "credential_ref_1",
+        lifecycleRequest.operationId, lifecycleRequest.requestId, "run_1",
+        "attempt_1", 1, DIGEST, lifecycleRequest.requestDigest,
+        canonicalSha256Json({ fixture: "running-lifecycle" }),
+        canonicalJsonStringify(lifecycleRequest), NOW.toISOString(),
+        NOW.toISOString(), NOW.toISOString(),
+      );
+    const [lifecycleClaim] = await repo.claimDueHostedLifecycleOperations({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      leaseOwner: "lifecycle-pump",
+      leaseSeconds: 30,
+      now: NOW,
+    });
+    const lifecyclePayload = {
+      operation: "running" as const,
+      occurredAt: lifecycleRequest.occurredAt,
+      executorId: lifecycleRequest.executorId,
+      executorCapabilityDigest: lifecycleRequest.executorCapabilityDigest,
+    };
+    const lifecycleReceiptBase = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      receiptKind: "attempt_lifecycle" as const,
+      receiptId: await computeHostedLifecycleReceiptIdV1({
+        organizationId: "org_1",
+        operationId: lifecycleRequest.operationId,
+      }),
+      organizationId: "org_1",
+      requestId: lifecycleRequest.requestId,
+      operationId: lifecycleRequest.operationId,
+      requestDigest: lifecycleRequest.requestDigest,
+      requiredCapabilities: ["relay.lifecycle.v1"] as const,
+      producer: {
+        kind: "runner" as const,
+        id: "runner_1",
+        credentialId: "credential_ref_1",
+      },
+      identity: {
+        namespace: "opentag.control.receipt/attempt-lifecycle/v1" as const,
+        parts: [
+          "org_1",
+          "run_1",
+          "attempt_1",
+          "running",
+          lifecycleRequest.operationId,
+        ] as const,
+      },
+      observedAt: NOW.toISOString(),
+      payloadDigest: await computeControlPayloadDigestV1(lifecyclePayload),
+      runId: "run_1",
+      attempt: ATTEMPT_REF,
+      payload: lifecyclePayload,
+    };
+    const lifecycleReceipt = {
+      ...lifecycleReceiptBase,
+      receiptDigest: await computeControlReceiptDigestV1(lifecycleReceiptBase),
+    };
+    await expect(repo.acknowledgeHostedLifecycleOperation({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      operationId: lifecycleRequest.operationId,
+      leaseToken: lifecycleClaim!.leaseToken!,
+      receipt: lifecycleReceipt,
+      now: new Date("2026-08-08T00:00:01.000Z"),
+    })).resolves.toBe("acknowledged");
+    expect(await repo.claimDueControlPlaneProjections({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      leaseOwner: "pump",
+      leaseSeconds: 30,
+      limit: 10,
+      now: new Date("2026-08-08T00:00:02.000Z")
+    })).toMatchObject({ entries: [{ receiptId: child.receiptId }] });
+
+    const assessment = allowedReceipts()[3]!;
+    await repo.enqueueControlPlaneProjection({
+      destinationId: "cloud",
+      envelope: assessment,
+      requiresLifecycleOperationId: lifecycleRequest.operationId,
+      now: NOW,
+    });
+    expect(await repo.claimDueControlPlaneProjections({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      leaseOwner: "pump",
+      leaseSeconds: 30,
+      limit: 10,
+      now: new Date("2026-08-08T00:00:02.500Z"),
+    })).toMatchObject({
+      entries: [],
+      rejected: [{
+        receiptId: assessment.receiptId,
+        reasonCode: "dependency_invalid",
+      }],
+    });
+
+    const missingDraft = withProjectionDigests({
+      ...child,
+      receiptId: "receipt_readiness_missing",
+      operationId: "operation_readiness_missing",
+      identity: {
+        namespace: "opentag.control.receipt/runner-readiness/v1" as const,
+        parts: ["org_1", "runner_1", "1", "readiness_missing"] as const
+      },
+      payload: { ...child.payload, readinessId: "readiness_missing" }
+    });
+    const missing = refreshProjectionDigests(
+      RunnerReadinessReceiptEnvelopeV1Schema.parse(missingDraft) as unknown as Record<string, unknown>
+    );
+    await repo.enqueueControlPlaneProjection({
+      destinationId: "cloud",
+      envelope: missing,
+      dependsOnReceiptId: "receipt_does_not_exist",
+      now: NOW
+    });
+    expect(await repo.claimDueControlPlaneProjections({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      leaseOwner: "pump",
+      leaseSeconds: 30,
+      limit: 10,
+      now: new Date("2026-08-08T00:00:03.000Z")
+    })).toMatchObject({
+      entries: [],
+      rejected: [{ receiptId: missing.receiptId, reasonCode: "dependency_missing" }]
+    });
+    expect(await repo.getControlPlaneProjection({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      receiptId: missing.receiptId
+    })).toMatchObject({ state: "attention", lastReasonCode: "dependency_missing" });
+
+    sqlite.exec("DROP TRIGGER control_plane_projection_outbox_immutable_update_guard");
+    sqlite.prepare(`UPDATE control_plane_projection_outbox
+      SET envelope_json = '{}'
+      WHERE destination_id = 'cloud' AND receipt_id = ?`).run(parent.receiptId);
+    const malformedParentChild = RunnerReadinessReceiptEnvelopeV1Schema.parse(
+      refreshProjectionDigests({
+        ...child,
+        receiptId: "receipt_readiness_malformed_parent",
+        operationId: "operation_readiness_malformed_parent",
+        identity: {
+          namespace: "opentag.control.receipt/runner-readiness/v1",
+          parts: ["org_1", "runner_1", "1", "readiness_malformed_parent"],
+        },
+        payload: { ...child.payload, readinessId: "readiness_malformed_parent" },
+      }),
+    );
+    await repo.enqueueControlPlaneProjection({
+      destinationId: "cloud",
+      envelope: malformedParentChild,
+      dependsOnReceiptId: parent.receiptId,
+      now: NOW,
+    });
+    expect(await repo.claimDueControlPlaneProjections({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      leaseOwner: "pump",
+      leaseSeconds: 30,
+      limit: 10,
+      now: new Date("2026-08-08T00:00:03.500Z"),
+    })).toMatchObject({
+      entries: [],
+      rejected: [{
+        receiptId: malformedParentChild.receiptId,
+        reasonCode: "dependency_invalid",
+      }],
+    });
+
+    sqlite.exec("DROP TRIGGER hosted_lifecycle_operations_immutable_guard");
+    sqlite.prepare(`UPDATE hosted_lifecycle_operations
+      SET receipt_json = '{}'
+      WHERE operation_id = ?`).run(lifecycleRequest.operationId);
+    const malformed = RunnerReadinessReceiptEnvelopeV1Schema.parse(
+      refreshProjectionDigests({
+        ...child,
+        receiptId: "receipt_readiness_malformed_dependency",
+        operationId: "operation_readiness_malformed_dependency",
+        identity: {
+          namespace: "opentag.control.receipt/runner-readiness/v1",
+          parts: ["org_1", "runner_1", "1", "readiness_malformed_dependency"],
+        },
+        payload: { ...child.payload, readinessId: "readiness_malformed_dependency" },
+      }),
+    );
+    await repo.enqueueControlPlaneProjection({
+      destinationId: "cloud",
+      envelope: malformed,
+      requiresLifecycleOperationId: lifecycleRequest.operationId,
+      now: NOW,
+    });
+    expect(await repo.claimDueControlPlaneProjections({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      leaseOwner: "pump",
+      leaseSeconds: 30,
+      limit: 10,
+      now: new Date("2026-08-08T00:00:04.000Z"),
+    })).toMatchObject({
+      entries: [],
+      rejected: [{
+        receiptId: malformed.receiptId,
+        reasonCode: "dependency_invalid",
+      }],
+    });
+
+    const crossScopeRequest = await buildHostedLifecycleRequestV1({
+      action: "running",
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      runId: "run_1",
+      attempt: { ...ATTEMPT_REF, fencingToken: "fencing-token-1" },
+      occurredAt: "2026-08-08T00:00:05.000Z",
+      executorId: "codex",
+      executorCapabilityDigest: OTHER_DIGEST,
+    });
+    sqlite.prepare(`INSERT INTO hosted_lifecycle_operations (
+      destination_id, organization_id, runner_id, credential_id,
+      operation_id, request_id, action, run_id, attempt_id, attempt_number,
+      fencing_token_digest, request_digest, business_key_digest, sequence,
+      request_json, state, attempt_count, next_attempt_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, 1, ?, 'pending', 0, ?, ?, ?)`)
+      .run(
+        "other-cloud", "org_1", "runner_1", "credential_ref_1",
+        crossScopeRequest.operationId, crossScopeRequest.requestId, "run_1",
+        "attempt_1", 1, DIGEST, crossScopeRequest.requestDigest,
+        canonicalSha256Json({ fixture: "cross-scope-running-lifecycle" }),
+        canonicalJsonStringify(crossScopeRequest), NOW.toISOString(),
+        NOW.toISOString(), NOW.toISOString(),
+      );
+    const crossScope = RunnerReadinessReceiptEnvelopeV1Schema.parse(
+      refreshProjectionDigests({
+        ...child,
+        receiptId: "receipt_readiness_cross_scope",
+        operationId: "operation_readiness_cross_scope",
+        identity: {
+          namespace: "opentag.control.receipt/runner-readiness/v1",
+          parts: ["org_1", "runner_1", "1", "readiness_cross_scope"],
+        },
+        payload: { ...child.payload, readinessId: "readiness_cross_scope" },
+      }),
+    );
+    await repo.enqueueControlPlaneProjection({
+      destinationId: "cloud",
+      envelope: crossScope,
+      requiresLifecycleOperationId: crossScopeRequest.operationId,
+      now: NOW,
+    });
+    expect(await repo.claimDueControlPlaneProjections({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      leaseOwner: "pump",
+      leaseSeconds: 30,
+      limit: 10,
+      now: new Date("2026-08-08T00:00:06.000Z"),
+    })).toMatchObject({
+      entries: [],
+      rejected: [{
+        receiptId: crossScope.receiptId,
+        reasonCode: "dependency_cross_destination",
+      }],
+    });
+  });
   it("accepts exactly the seven current Control V1 projection receipt schemas", async () => {
     const { sqlite, repo } = repository();
     const outcomes = [];
@@ -456,7 +829,8 @@ describe("control_plane_projection_outbox", () => {
         work_thread_id, receipt_kind, identity_namespace, identity_parts_json,
         identity_key, operation_id, payload_digest, receipt_digest, envelope_json,
         'leased', 1, next_attempt_at, 'unsafe owner', 'token',
-        '2026-08-08T00:01:00.000Z', NULL, NULL, created_at, updated_at, NULL
+        '2026-08-08T00:01:00.000Z', NULL, NULL, created_at, updated_at, NULL,
+        NULL, NULL
       FROM control_plane_projection_outbox WHERE destination_id = 'cloud'
     `).run()).toThrow(/insert_invalid/u);
     expect(() => sqlite.prepare(`
@@ -466,7 +840,7 @@ describe("control_plane_projection_outbox", () => {
         identity_key, operation_id, 'sha256:bad', receipt_digest, envelope_json,
         state, attempt_count, next_attempt_at, lease_owner, lease_token,
         lease_expires_at, last_reason_code, last_http_status, created_at, updated_at,
-        acknowledged_at
+        acknowledged_at, NULL, NULL
       FROM control_plane_projection_outbox WHERE destination_id = 'cloud'
     `).run()).toThrow();
     expect(() => sqlite.prepare(`
@@ -476,7 +850,7 @@ describe("control_plane_projection_outbox", () => {
         identity_key, operation_id, payload_digest, receipt_digest, envelope_json,
         state, attempt_count, next_attempt_at, lease_owner, lease_token,
         lease_expires_at, last_reason_code, last_http_status, created_at, updated_at,
-        acknowledged_at
+        acknowledged_at, NULL, NULL
       FROM control_plane_projection_outbox WHERE destination_id = 'cloud'
     `).run()).toThrow();
     expect(() => sqlite.prepare(`
@@ -486,7 +860,7 @@ describe("control_plane_projection_outbox", () => {
         identity_key, operation_id, payload_digest, receipt_digest, 'not-json',
         state, attempt_count, next_attempt_at, lease_owner, lease_token,
         lease_expires_at, last_reason_code, last_http_status, created_at, updated_at,
-        acknowledged_at
+        acknowledged_at, NULL, NULL
       FROM control_plane_projection_outbox WHERE destination_id = 'cloud'
     `).run()).toThrow();
     expect(() => sqlite.prepare(`
@@ -496,7 +870,7 @@ describe("control_plane_projection_outbox", () => {
         identity_key, operation_id, payload_digest, receipt_digest, envelope_json,
         state, attempt_count, next_attempt_at, lease_owner, lease_token,
         lease_expires_at, last_reason_code, last_http_status, created_at, updated_at,
-        acknowledged_at
+        acknowledged_at, NULL, NULL
       FROM control_plane_projection_outbox WHERE destination_id = 'cloud'
     `).run()).toThrow(/insert_invalid/u);
     expect(() => sqlite.prepare(`
@@ -557,7 +931,7 @@ describe("control_plane_projection_outbox", () => {
         'forged_identity_key', 'forged_operation', payload_digest, receipt_digest,
         envelope_json, state, attempt_count, next_attempt_at, lease_owner,
         lease_token, lease_expires_at, last_reason_code, last_http_status,
-        created_at, updated_at, acknowledged_at
+        created_at, updated_at, acknowledged_at, NULL, NULL
       FROM control_plane_projection_outbox WHERE receipt_id = ?
     `).run("receipt_work_thread_1");
     await expect(repo.getControlPlaneProjection({

@@ -127,6 +127,15 @@ export const hostedClaimOperations = sqliteTable(
     requestJson: text("request_json").notNull(),
     state: text("state").notNull(),
     runId: text("run_id"),
+    claimDigest: text("claim_digest"),
+    authorityDigest: text("authority_digest"),
+    authorityJson: text("authority_json"),
+    attemptId: text("attempt_id"),
+    attemptNumber: integer("attempt_number"),
+    fencingTokenDigest: text("fencing_token_digest"),
+    credentialId: text("credential_id"),
+    leaseExpiresAt: text("lease_expires_at"),
+    executorId: text("executor_id"),
     executionStartedAt: text("execution_started_at"),
     terminalReasonCode: text("terminal_reason_code"),
     createdAt: text("created_at").notNull(),
@@ -209,6 +218,82 @@ export const hostedHeartbeatOperations = sqliteTable(
     ),
     activeIdx: uniqueIndex("hosted_heartbeat_operations_active_idx").on(table.activeKey),
     attemptIdx: index("hosted_heartbeat_operations_attempt_idx").on(
+      table.runId,
+      table.attemptId,
+      table.state
+    )
+  })
+);
+
+export const hostedLifecycleOperations = sqliteTable(
+  "hosted_lifecycle_operations",
+  {
+    destinationId: text("destination_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    runnerId: text("runner_id").notNull(),
+    credentialId: text("credential_id").notNull(),
+    operationId: text("operation_id").notNull(),
+    requestId: text("request_id").notNull(),
+    action: text("action").notNull(),
+    runId: text("run_id").notNull(),
+    attemptId: text("attempt_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    fencingTokenDigest: text("fencing_token_digest").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    businessKeyDigest: text("business_key_digest").notNull(),
+    sequence: integer("sequence").notNull(),
+    requestJson: text("request_json").notNull(),
+    state: text("state").notNull(),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    nextAttemptAt: text("next_attempt_at"),
+    leaseOwner: text("lease_owner"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: text("lease_expires_at"),
+    receiptId: text("receipt_id"),
+    receiptDigest: text("receipt_digest"),
+    receiptJson: text("receipt_json"),
+    lastReasonCode: text("last_reason_code"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    acknowledgedAt: text("acknowledged_at")
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [
+      table.destinationId,
+      table.organizationId,
+      table.runnerId,
+      table.credentialId,
+      table.operationId
+    ] }),
+    requestIdx: uniqueIndex("hosted_lifecycle_operations_request_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.runnerId,
+      table.credentialId,
+      table.requestId
+    ),
+    businessIdx: uniqueIndex("hosted_lifecycle_operations_business_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.runnerId,
+      table.credentialId,
+      table.businessKeyDigest
+    ),
+    sequenceIdx: uniqueIndex("hosted_lifecycle_operations_sequence_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.runId,
+      table.attemptId,
+      table.sequence
+    ),
+    dueIdx: index("hosted_lifecycle_operations_due_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.state,
+      table.nextAttemptAt,
+      table.createdAt
+    ),
+    attemptIdx: index("hosted_lifecycle_operations_attempt_idx").on(
       table.runId,
       table.attemptId,
       table.state
@@ -806,6 +891,8 @@ export const controlPlaneProjectionOutbox = sqliteTable(
     identityPartsJson: text("identity_parts_json").notNull(),
     identityKey: text("identity_key").notNull(),
     operationId: text("operation_id").notNull(),
+    dependsOnReceiptId: text("depends_on_receipt_id"),
+    requiresLifecycleOperationId: text("requires_lifecycle_operation_id"),
     payloadDigest: text("payload_digest").notNull(),
     receiptDigest: text("receipt_digest").notNull(),
     envelopeJson: text("envelope_json").notNull(),
@@ -1532,6 +1619,46 @@ function migrateHostedExecutionStartSchema(sqlite: Database.Database): void {
   })();
 }
 
+function migrateHostedClaimAuthorityShellSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-hosted-claim-authority-shell-v1";
+  if (sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId)) return;
+  sqlite.transaction(() => {
+    const columns = sqlite.prepare("PRAGMA table_info(hosted_claim_operations)").all() as { name: string }[];
+    const names = new Set(columns.map((column) => column.name));
+    const additions = [
+      ["claim_digest", "TEXT"], ["authority_digest", "TEXT"], ["authority_json", "TEXT"],
+      ["attempt_id", "TEXT"], ["attempt_number", "INTEGER"], ["fencing_token_digest", "TEXT"],
+      ["credential_id", "TEXT"], ["lease_expires_at", "TEXT"], ["executor_id", "TEXT"]
+    ] as const;
+    for (const [name, type] of additions) {
+      if (!names.has(name)) sqlite.exec(`ALTER TABLE hosted_claim_operations ADD COLUMN ${name} ${type}`);
+    }
+    sqlite.exec(`
+      DROP TRIGGER IF EXISTS hosted_claim_authority_shell_immutable_guard;
+      CREATE TRIGGER hosted_claim_authority_shell_immutable_guard
+      BEFORE UPDATE OF claim_digest, authority_digest, authority_json, attempt_id,
+        attempt_number, fencing_token_digest, credential_id, lease_expires_at, executor_id
+      ON hosted_claim_operations
+      WHEN OLD.claim_digest IS NOT NULL AND (
+        NEW.claim_digest IS NOT OLD.claim_digest
+        OR NEW.authority_digest IS NOT OLD.authority_digest
+        OR NEW.authority_json IS NOT OLD.authority_json
+        OR NEW.attempt_id IS NOT OLD.attempt_id
+        OR NEW.attempt_number IS NOT OLD.attempt_number
+        OR NEW.fencing_token_digest IS NOT OLD.fencing_token_digest
+        OR NEW.credential_id IS NOT OLD.credential_id
+        OR NEW.lease_expires_at IS NOT OLD.lease_expires_at
+        OR NEW.executor_id IS NOT OLD.executor_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_claim_authority_shell_immutable');
+      END;
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)")
+      .run(migrationId, new Date().toISOString());
+  })();
+}
+
 function migrateHostedAttemptImportSchema(sqlite: Database.Database): void {
   const migrationId = "2026-08-10-hosted-attempt-import-v1";
   const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
@@ -1648,6 +1775,139 @@ function migrateHostedHeartbeatOperationSchema(sqlite: Database.Database): void 
       BEFORE DELETE ON hosted_heartbeat_operations
       BEGIN
         SELECT RAISE(ABORT, 'hosted_heartbeat_operations_delete_forbidden');
+      END;
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateHostedLifecycleOperationSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-hosted-lifecycle-operation-v1";
+  const recreateGuards = (): void => {
+    sqlite.exec(`
+      DROP TRIGGER IF EXISTS hosted_lifecycle_operations_immutable_guard;
+      DROP TRIGGER IF EXISTS hosted_lifecycle_operations_delete_guard;
+      CREATE TRIGGER hosted_lifecycle_operations_immutable_guard
+      BEFORE UPDATE OF destination_id, organization_id, runner_id, credential_id, operation_id,
+        request_id, action, run_id, attempt_id, attempt_number, fencing_token_digest,
+        request_digest, business_key_digest, sequence, request_json, created_at
+      ON hosted_lifecycle_operations
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_lifecycle_operations_immutable');
+      END;
+      CREATE TRIGGER hosted_lifecycle_operations_delete_guard
+      BEFORE DELETE ON hosted_lifecycle_operations
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_lifecycle_operations_delete_forbidden');
+      END;
+    `);
+  };
+  const existingTable = sqlite.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'hosted_lifecycle_operations'"
+  ).get();
+  if (existingTable) {
+    const columns = sqlite.prepare("PRAGMA table_info(hosted_lifecycle_operations)").all() as Array<{
+      name: string;
+      notnull: number;
+    }>;
+    const businessKeyColumn = columns.find((column) => column.name === "business_key_digest");
+    const sequenceColumn = columns.find((column) => column.name === "sequence");
+    if (!businessKeyColumn || businessKeyColumn.notnull !== 1 || !sequenceColumn || sequenceColumn.notnull !== 1) {
+      throw new Error(
+        "hosted_lifecycle_operations_incompatible_partial_schema: business_key_digest and sequence must be present and NOT NULL",
+      );
+    }
+  }
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) {
+    sqlite.transaction(recreateGuards)();
+    return;
+  }
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS hosted_lifecycle_operations (
+        destination_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        runner_id TEXT NOT NULL,
+        credential_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('heartbeat', 'running', 'reject-start', 'progress', 'complete')),
+        run_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+        fencing_token_digest TEXT NOT NULL,
+        request_digest TEXT NOT NULL,
+        business_key_digest TEXT NOT NULL,
+        sequence INTEGER NOT NULL CHECK (sequence > 0),
+        request_json TEXT NOT NULL CHECK (json_valid(request_json) AND json_type(request_json) = 'object'),
+        state TEXT NOT NULL CHECK (state IN ('pending', 'leased', 'acknowledged', 'attention')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        next_attempt_at TEXT,
+        lease_owner TEXT,
+        lease_token TEXT,
+        lease_expires_at TEXT,
+        receipt_id TEXT,
+        receipt_digest TEXT,
+        receipt_json TEXT CHECK (receipt_json IS NULL OR (json_valid(receipt_json) AND json_type(receipt_json) = 'object')),
+        last_reason_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        acknowledged_at TEXT,
+        PRIMARY KEY (destination_id, organization_id, runner_id, credential_id, operation_id),
+        CHECK (
+          (state = 'pending' AND next_attempt_at IS NOT NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND receipt_id IS NULL AND receipt_digest IS NULL AND receipt_json IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'leased' AND next_attempt_at IS NOT NULL AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL AND receipt_id IS NULL AND receipt_digest IS NULL AND receipt_json IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'acknowledged' AND next_attempt_at IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND receipt_id IS NOT NULL AND receipt_digest IS NOT NULL AND receipt_json IS NOT NULL AND acknowledged_at IS NOT NULL)
+          OR (state = 'attention' AND next_attempt_at IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND receipt_id IS NULL AND receipt_digest IS NULL AND receipt_json IS NULL AND last_reason_code IS NOT NULL AND acknowledged_at IS NULL)
+        )
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_lifecycle_operations_request_idx
+        ON hosted_lifecycle_operations(destination_id, organization_id, runner_id, credential_id, request_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_lifecycle_operations_business_idx
+        ON hosted_lifecycle_operations(destination_id, organization_id, runner_id, credential_id, business_key_digest);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_lifecycle_operations_sequence_idx
+        ON hosted_lifecycle_operations(destination_id, organization_id, run_id, attempt_id, sequence);
+      CREATE INDEX IF NOT EXISTS hosted_lifecycle_operations_due_idx
+        ON hosted_lifecycle_operations(destination_id, organization_id, state, next_attempt_at, created_at);
+      CREATE INDEX IF NOT EXISTS hosted_lifecycle_operations_attempt_idx
+        ON hosted_lifecycle_operations(run_id, attempt_id, state);
+    `);
+    recreateGuards();
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateControlPlaneProjectionDependenciesSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-control-plane-projection-dependencies-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    const columns = sqlite.prepare("PRAGMA table_info(control_plane_projection_outbox)").all() as Array<{ name: string }>;
+    const names = new Set(columns.map((column) => column.name));
+    if (!names.has("depends_on_receipt_id")) {
+      sqlite.exec("ALTER TABLE control_plane_projection_outbox ADD COLUMN depends_on_receipt_id TEXT");
+    }
+    if (!names.has("requires_lifecycle_operation_id")) {
+      sqlite.exec("ALTER TABLE control_plane_projection_outbox ADD COLUMN requires_lifecycle_operation_id TEXT");
+    }
+    sqlite.exec(`
+      DROP TRIGGER IF EXISTS control_plane_projection_outbox_immutable_update_guard;
+      CREATE TRIGGER control_plane_projection_outbox_immutable_update_guard
+      BEFORE UPDATE OF
+        receipt_id, destination_id, organization_id, runner_id, run_id, work_thread_id,
+        receipt_kind, identity_namespace, identity_parts_json, identity_key, operation_id,
+        depends_on_receipt_id, requires_lifecycle_operation_id,
+        payload_digest, receipt_digest, envelope_json, created_at
+      ON control_plane_projection_outbox
+      BEGIN
+        SELECT RAISE(ABORT, 'control_plane_projection_outbox_immutable');
       END;
     `);
     sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
@@ -2256,8 +2516,11 @@ export function migrateSchema(sqlite: Database.Database): void {
   migrateFactoryWorkstreamSchema(sqlite);
   migrateReassessmentObligationSchema(sqlite);
   migrateControlPlaneProjectionOutboxSchema(sqlite);
+  migrateControlPlaneProjectionDependenciesSchema(sqlite);
   migrateHostedRunImportSchema(sqlite);
   migrateHostedExecutionStartSchema(sqlite);
+  migrateHostedClaimAuthorityShellSchema(sqlite);
   migrateHostedAttemptImportSchema(sqlite);
   migrateHostedHeartbeatOperationSchema(sqlite);
+  migrateHostedLifecycleOperationSchema(sqlite);
 }
