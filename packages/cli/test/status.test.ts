@@ -552,6 +552,7 @@ describe("OpenTag CLI status", () => {
       registration: {
         schemaVersion: 1,
         protocolVersion: "1.0",
+        organizationId: "org_1",
         runnerId: configured.daemon.runnerId,
         registrationGeneration: 1,
         credentialGeneration: 1,

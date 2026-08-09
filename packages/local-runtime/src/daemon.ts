@@ -29,6 +29,7 @@ import {
   executionPathForAttempt
 } from "@opentag/runner";
 import type { AgentSessionProfileConfig, RepositoryBindingConfig } from "./config.js";
+import type { HostedControlLoop } from "./control-v1.js";
 import { maybeCreatePullRequest, type PullRequestOptions } from "./pr.js";
 
 export type ClaimedRun = {
@@ -203,7 +204,8 @@ function executorMetadata(event: OpenTagEvent): Record<string, unknown> {
   };
 }
 
-export async function runOneDaemonIteration(input: {
+export type LegacyDaemonIterationInput = {
+  mode: "legacy";
   runnerId: string;
   repositories: RepositoryBindingConfig[];
   executors: Record<string, ExecutorAdapter>;
@@ -217,7 +219,22 @@ export async function runOneDaemonIteration(input: {
   runTimeoutMs?: number;
   agentSessionProfile?: AgentSessionProfileConfig;
   client: DaemonClient;
-}): Promise<boolean> {
+};
+
+export async function runOneDaemonIteration(
+  input: LegacyDaemonIterationInput
+): Promise<boolean> {
+  const runtimeInput = input as unknown as Record<string, unknown>;
+  if (
+    (runtimeInput.mode !== undefined && runtimeInput.mode !== "legacy")
+    || "controlLoop" in runtimeInput
+    || "controlV1SidecarOnly" in runtimeInput
+    || typeof input.client?.claim !== "function"
+  ) {
+    throw new Error(
+      "runOneDaemonIteration accepts only a legacy claim-capable daemon runtime."
+    );
+  }
   const claimed = await input.client.claim();
   if (!claimed) return false;
   const lease: AttemptLease = { attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
@@ -684,41 +701,90 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-export async function serveDaemon(input: {
-  runnerId: string;
-  repositories: RepositoryBindingConfig[];
-  executors: Record<string, ExecutorAdapter>;
-  scratchRoot?: string;
-  keepScratch?: "always" | "on_failure" | "never";
-  approvalMode?: ApprovalMode;
-  trustedMaterialActionReceipt?: TrustedMaterialActionReceiptProvider;
-  security?: RunnerSecurityPolicy;
-  pullRequestOptions?: PullRequestOptions;
-  heartbeatIntervalMs?: number;
-  runTimeoutMs?: number;
-  agentSessionProfile?: AgentSessionProfileConfig;
+export type LegacyDaemonRuntimeInput = LegacyDaemonIterationInput & {
   pollIntervalMs?: number;
   signal?: AbortSignal;
-  client: DaemonClient;
-}): Promise<void> {
+  controlLoop?: never;
+};
+
+export type ControlV1SidecarRuntimeInput = {
+  mode: "control-v1-sidecar";
+  pollIntervalMs?: number;
+  signal?: AbortSignal;
+  controlLoop: HostedControlLoop;
+  client?: never;
+};
+
+export type DaemonRuntimeInput =
+  | LegacyDaemonRuntimeInput
+  | ControlV1SidecarRuntimeInput;
+
+function assertDaemonRuntimeInput(input: DaemonRuntimeInput): void {
+  const runtimeInput = input as unknown as Record<string, unknown>;
+  if ("controlV1SidecarOnly" in runtimeInput) {
+    throw new Error(
+      "controlV1SidecarOnly is not a valid authority boundary; use a discriminated daemon runtime mode."
+    );
+  }
+  if (runtimeInput.mode === "legacy") {
+    if (
+      "controlLoop" in runtimeInput
+      || typeof (runtimeInput.client as { claim?: unknown } | undefined)?.claim
+        !== "function"
+    ) {
+      throw new Error(
+        "Legacy daemon runtime requires a claim-capable client and forbids a HostedControlLoop."
+      );
+    }
+    return;
+  }
+  if (runtimeInput.mode === "control-v1-sidecar") {
+    const loop = runtimeInput.controlLoop as Partial<HostedControlLoop> | undefined;
+    if (
+      "client" in runtimeInput
+      || !loop
+      || typeof loop.beforeIteration !== "function"
+      || typeof loop.afterIteration !== "function"
+      || typeof loop.abort !== "function"
+      || typeof loop.close !== "function"
+    ) {
+      throw new Error(
+        "Control V1 sidecar runtime requires a HostedControlLoop and forbids a claim-capable client."
+      );
+    }
+    return;
+  }
+  throw new Error("Unknown daemon runtime mode.");
+}
+
+export async function serveDaemon(input: DaemonRuntimeInput): Promise<void> {
+  assertDaemonRuntimeInput(input);
   const pollIntervalMs = input.pollIntervalMs ?? 5_000;
+  if (input.mode === "control-v1-sidecar") {
+    const abortControlLoop = () => input.controlLoop.abort();
+    input.signal?.addEventListener("abort", abortControlLoop, { once: true });
+    try {
+      while (!input.signal?.aborted) {
+        try {
+          await input.controlLoop.beforeIteration();
+          await input.controlLoop.afterIteration();
+          await sleep(pollIntervalMs, input.signal);
+        } catch (error) {
+          if (input.signal?.aborted) break;
+          console.warn("OpenTag Control V1 sidecar iteration failed; retrying:", error);
+          await sleep(pollIntervalMs, input.signal);
+        }
+      }
+    } finally {
+      input.signal?.removeEventListener("abort", abortControlLoop);
+      await input.controlLoop.close();
+    }
+    return;
+  }
+
   while (!input.signal?.aborted) {
     try {
-      const didWork = await runOneDaemonIteration({
-        runnerId: input.runnerId,
-        repositories: input.repositories,
-        executors: input.executors,
-        ...(input.scratchRoot ? { scratchRoot: input.scratchRoot } : {}),
-        ...(input.keepScratch ? { keepScratch: input.keepScratch } : {}),
-        ...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
-        ...(input.trustedMaterialActionReceipt ? { trustedMaterialActionReceipt: input.trustedMaterialActionReceipt } : {}),
-        ...(input.security ? { security: input.security } : {}),
-        ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
-        ...(input.heartbeatIntervalMs !== undefined ? { heartbeatIntervalMs: input.heartbeatIntervalMs } : {}),
-        ...(input.runTimeoutMs !== undefined ? { runTimeoutMs: input.runTimeoutMs } : {}),
-        ...(input.agentSessionProfile ? { agentSessionProfile: input.agentSessionProfile } : {}),
-        client: input.client
-      });
+      const didWork = await runOneDaemonIteration(input);
       if (!didWork) {
         await sleep(pollIntervalMs, input.signal);
       }

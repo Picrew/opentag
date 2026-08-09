@@ -47,6 +47,7 @@ function tokenFingerprint(token: string): string {
 const hostedRegistration = {
   schemaVersion: 1 as const,
   protocolVersion: "1.0" as const,
+  organizationId: "org_1",
   runnerId: "runner_local",
   registrationGeneration: 1,
   credentialGeneration: 1,

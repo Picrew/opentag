@@ -70,6 +70,7 @@ export const ControlTimestampSchema = z
     return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
   }, "Timestamp must be a real RFC 3339 UTC millisecond instant.");
 export const WorkerReleaseShaSchema = z.string().regex(/^[a-f0-9]{40}$/u);
+export const WorkerReleaseIdentitySchema = z.union([z.literal("local"), WorkerReleaseShaSchema]);
 export const NpmPackageVersionSchema = z
   .string()
   .regex(
@@ -561,12 +562,64 @@ export const RelayCapabilitiesResponseV1Schema = z
     deployment: z
       .object({
         environment: UnpaddedNonEmptyStringSchema,
-        releaseSha: WorkerReleaseShaSchema,
+        releaseSha: WorkerReleaseIdentitySchema,
       })
       .strict(),
     artifact: ArtifactIdentityV1Schema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((response, ctx) => {
+    if (
+      response.deployment.releaseSha === "local"
+      && response.deployment.environment !== "local"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["deployment", "releaseSha"],
+        message: "The local release identity is valid only in the local environment.",
+      });
+    }
+  });
+
+export const RunnerControlContextResponseV1Schema = z
+  .object({
+    schemaVersion: ControlSchemaVersionSchema,
+    protocolVersion: ControlProtocolVersionSchema,
+    contextKind: z.literal("runner_control"),
+    organizationId: NonEmptyIdSchema,
+    runnerId: NonEmptyIdSchema,
+    credentialId: NonEmptyIdSchema,
+    registrationGeneration: z.number().int().positive(),
+    credentialGeneration: z.number().int().positive(),
+    capabilities: RelayCapabilitiesSchema,
+    targets: z.array(
+      z.object({
+        projectTargetId: NonEmptyIdSchema,
+        bindingDigest: ReceiptDigestSchema,
+        provider: NonEmptyIdSchema,
+        owner: NonEmptyIdSchema,
+        repo: NonEmptyIdSchema,
+        defaultExecutor: NonEmptyIdSchema,
+        defaultBranch: NonEmptyIdSchema.nullable(),
+      }).strict(),
+    ),
+    observedAt: ControlTimestampSchema,
+  })
+  .strict()
+  .superRefine((context, ctx) => {
+    for (let index = 1; index < context.targets.length; index += 1) {
+      const previous = context.targets[index - 1];
+      const current = context.targets[index];
+      if (!previous || !current) continue;
+      if (compareUnicodeCodePoints(previous.projectTargetId, current.projectTargetId) >= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["targets", index, "projectTargetId"],
+          message: "Targets must be sorted by projectTargetId and contain no duplicates.",
+        });
+      }
+    }
+  });
 
 const ControlMutationRequestV1Shape = {
   schemaVersion: ControlSchemaVersionSchema,
@@ -796,6 +849,7 @@ export const RunnerCredentialMetadataV1Schema = z
   .object({
     ...VersionedResponseShape,
     operationId: NonEmptyIdSchema,
+    organizationId: NonEmptyIdSchema,
     runnerId: NonEmptyIdSchema,
     registrationGeneration: z.number().int().positive(),
     credentialGeneration: z.number().int().positive(),
@@ -1165,6 +1219,16 @@ export function computeMaterialActionReceiptDigestV1(
   receipt: z.input<typeof MaterialActionReceiptDigestInputV1Schema>,
 ): Promise<string> {
   return sha256Utf8V1(canonicalJsonStringify(buildMaterialActionReceiptDigestInputV1(receipt)));
+}
+
+export async function computeControlPayloadDigestV1(payload: unknown): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(payload));
+}
+
+export async function computeControlReceiptDigestV1(
+  receiptWithoutDigest: unknown,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(receiptWithoutDigest));
 }
 
 export const ReadinessStateV1Schema = z.enum(["ready", "degraded", "blocked", "unknown"]);
@@ -1884,6 +1948,7 @@ export type RunnerCredentialCurrentStateResponseV1 = z.infer<
   typeof RunnerCredentialCurrentStateResponseV1Schema
 >;
 export type RunnerReadinessReceiptEnvelopeV1 = z.infer<typeof RunnerReadinessReceiptEnvelopeV1Schema>;
+export type RunnerControlContextResponseV1 = z.infer<typeof RunnerControlContextResponseV1Schema>;
 export type MaterialActionAttemptRefV1 = z.infer<typeof MaterialActionAttemptRefV1Schema>;
 export type RunnerMaterialActionReconcileAttemptV1 = z.infer<
   typeof RunnerMaterialActionReconcileAttemptV1Schema

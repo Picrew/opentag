@@ -146,6 +146,7 @@ const HostedControlRotationStagedFromPairedSchema = z
     origin: z.literal("paired"),
     canonicalRequestDigest: ReceiptDigestSchema,
     request: RunnerCredentialRotationRequestV1Schema,
+    registration: HostedControlRegistrationMetadataSchema,
     rotation: RunnerCredentialRotationMetadataV1Schema
   })
   .strict();
@@ -190,6 +191,7 @@ const HostedControlCredentialConflictSchema = z
     endpoint: z.literal("rotate"),
     canonicalRequestDigest: ReceiptDigestSchema,
     request: RunnerCredentialRotationRequestV1Schema,
+    registration: HostedControlRegistrationMetadataSchema,
     replay: ReplayedRunnerCredentialRotationResponseV1Schema,
     current: RunnerCredentialCurrentStateResponseV1Schema,
     successorAttempted: z.literal(false),
@@ -514,17 +516,35 @@ export const AcpAgentConfigSchema = z
   })
   .strict();
 
-export const RepositoryBindingConfigSchema = z.object({
-  provider: z.string().min(1).default("github"),
-  owner: z.string().min(1),
-  repo: z.string().min(1),
-  checkoutPath: z.string().min(1),
-  defaultExecutor: ExecutorSchema.default("echo"),
-  baseBranch: z.string().min(1).default("main"),
-  pushRemote: z.string().min(1).default("origin"),
-  worktreeRoot: z.string().min(1).optional(),
-  keepWorktree: KeepWorktreeSchema.default("on_failure")
-});
+export function canonicalRepositoryIdentity(input: {
+  provider: string;
+  owner: string;
+  repo: string;
+}): { provider: string; owner: string; repo: string } {
+  if (input.provider.toLowerCase() !== "github") return { ...input };
+  return {
+    provider: "github",
+    owner: input.owner.toLowerCase(),
+    repo: input.repo.toLowerCase()
+  };
+}
+
+export const RepositoryBindingConfigSchema = z
+  .object({
+    provider: z.string().min(1).default("github"),
+    owner: z.string().min(1),
+    repo: z.string().min(1),
+    checkoutPath: z.string().min(1),
+    defaultExecutor: ExecutorSchema.default("echo"),
+    baseBranch: z.string().min(1).default("main"),
+    pushRemote: z.string().min(1).default("origin"),
+    worktreeRoot: z.string().min(1).optional(),
+    keepWorktree: KeepWorktreeSchema.default("on_failure")
+  })
+  .transform((binding) => ({
+    ...binding,
+    ...canonicalRepositoryIdentity(binding)
+  }));
 
 export const SlackChannelBindingConfigSchema = z.object({
   teamId: z.string().min(1),
@@ -1071,11 +1091,13 @@ function withoutHostedTokens(
 }
 
 function registrationFromRotation(
-  rotation: z.infer<typeof RunnerCredentialRotationMetadataV1Schema>
+  rotation: z.infer<typeof RunnerCredentialRotationMetadataV1Schema>,
+  organizationId: string
 ): HostedControlRegistrationMetadata {
   return HostedControlRegistrationMetadataSchema.parse({
     schemaVersion: rotation.schemaVersion,
     protocolVersion: rotation.protocolVersion,
+    organizationId,
     runnerId: rotation.runnerId,
     registrationGeneration: rotation.registrationGeneration,
     credentialGeneration: rotation.credentialGeneration,
@@ -1156,7 +1178,10 @@ export function beginHostedCredentialRotationSuccessor(
       origin: "lost_201_successor",
       canonicalRequestDigest,
       request,
-      registration: registrationFromRotation(control.replay),
+      registration: registrationFromRotation(
+        control.replay,
+        control.registration.organizationId
+      ),
       predecessorConflict: {
         originalRequest: control.request,
         originalCanonicalRequestDigest: control.canonicalRequestDigest,
@@ -1195,6 +1220,7 @@ export function stageHostedCredentialRotation(
       origin: control.origin,
       canonicalRequestDigest: control.canonicalRequestDigest,
       request: control.request,
+      registration: control.registration,
       rotation,
       ...(control.origin === "lost_201_successor"
         ? { predecessorConflict: control.predecessorConflict }
@@ -1227,7 +1253,10 @@ export function reconcileHostedCredentialRotationSuccessorReplay(
         ? "successor_replay_without_token"
         : "successor_replay_mismatch",
       registration: replayMatches
-        ? registrationFromRotation(successorReplay)
+        ? registrationFromRotation(
+          successorReplay,
+          control.registration.organizationId
+        )
         : control.registration,
       evidence: control.predecessorConflict,
       successorRequest: control.request,
@@ -1292,7 +1321,10 @@ export function finalizeHostedCredentialRotation(config: OpenTagDaemonConfig): O
       kind: "hosted_control_v1",
       state: "paired",
       operationId: control.request.operationId,
-      registration: registrationFromRotation(control.rotation)
+      registration: registrationFromRotation(
+        control.rotation,
+        control.registration.organizationId
+      )
     }
   });
 }
@@ -1402,7 +1434,7 @@ export function recordHostedCredentialConflict(
         reason: "recovery_required",
         recoveryReason: replayMatches ? "current_state_unsafe" : "replay_mismatch",
         registration: replayMatches
-          ? registrationFromRotation(replay)
+          ? registrationFromRotation(replay, control.registration.organizationId)
           : control.registration,
         evidence
       }
@@ -1416,6 +1448,7 @@ export function recordHostedCredentialConflict(
       endpoint: control.endpoint,
       canonicalRequestDigest: control.canonicalRequestDigest,
       request: control.request,
+      registration: control.registration,
       replay,
       current,
       successorAttempted: false,

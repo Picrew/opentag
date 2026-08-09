@@ -969,6 +969,7 @@ describe("OpenTag CLI config", () => {
       registration: {
         schemaVersion: 1,
         protocolVersion: "1.0",
+        organizationId: "org_1",
         runnerId: source.daemon.runnerId,
         registrationGeneration: 1,
         credentialGeneration: 1,
@@ -1014,6 +1015,7 @@ describe("OpenTag CLI config", () => {
       registration: {
         schemaVersion: 1,
         protocolVersion: "1.0",
+        organizationId: "org_1",
         runnerId: daemon.runnerId,
         registrationGeneration: 1,
         credentialGeneration: 1,
@@ -1064,6 +1066,7 @@ describe("OpenTag CLI config", () => {
       registration: {
         schemaVersion: 1,
         protocolVersion: "1.0",
+        organizationId: "org_1",
         runnerId: source.daemon.runnerId,
         registrationGeneration: 1,
         credentialGeneration: 1,

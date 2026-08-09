@@ -1041,13 +1041,14 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
   }
   const dispatcher = dependencies.startDispatcher(dispatcherInput);
   let originalError: unknown;
+  let daemonPromise: Promise<void> | undefined;
 
   try {
     await dependencies.waitForDispatcher({ dispatcherUrl: config.daemon.dispatcherUrl });
     await dependencies.bootstrapDispatcher(config);
 
-    const daemonPromise = dependencies.serveDaemon({
-      ...createDaemonRuntimeInput(config.daemon),
+    daemonPromise = dependencies.serveDaemon({
+      ...createDaemonRuntimeInput(config.daemon, { databasePath: config.state.databasePath }),
       signal: abortController.signal
     });
     abortOnSubsystemFailure(daemonPromise, abortController);
@@ -1183,6 +1184,7 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     throw error;
   } finally {
     abortController.abort();
+    if (daemonPromise) await Promise.allSettled([daemonPromise]);
     await Promise.allSettled([...ingresses].reverse().map((ingress) => ingress.handle.close()));
     try {
       await dispatcher.close();
@@ -1209,9 +1211,10 @@ async function startRelayMode(input: StartFromConfigInput, abortController: Abor
     await dependencies.bootstrapDispatcher(config);
   }
 
+  let daemonPromise: Promise<void> | undefined;
   try {
-    const daemonPromise = dependencies.serveDaemon({
-      ...createDaemonRuntimeInput(config.daemon),
+    daemonPromise = dependencies.serveDaemon({
+      ...createDaemonRuntimeInput(config.daemon, { databasePath: config.state.databasePath }),
       signal: abortController.signal
     });
     abortOnSubsystemFailure(daemonPromise, abortController);
@@ -1254,6 +1257,7 @@ async function startRelayMode(input: StartFromConfigInput, abortController: Abor
     }
   } finally {
     abortController.abort();
+    if (daemonPromise) await Promise.allSettled([daemonPromise]);
   }
 }
 

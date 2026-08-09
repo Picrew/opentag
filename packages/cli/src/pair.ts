@@ -131,6 +131,7 @@ function registrationMetadata(response: RunnerCredentialResponseV1): HostedContr
   return {
     schemaVersion: response.schemaVersion,
     protocolVersion: response.protocolVersion,
+    organizationId: response.organizationId,
     runnerId: response.runnerId,
     registrationGeneration: response.registrationGeneration,
     credentialGeneration: response.credentialGeneration,
@@ -156,7 +157,8 @@ function assertPersistedRegistration(
   path: string,
   expected: HostedControlRegistration,
   trustedRelay: TrustedRelayAuthorizationV1,
-  expectedRunnerToken?: string
+  expectedRunnerToken?: string | null,
+  expectPairingTokenRemoved = false
 ): void {
   const daemon = rawDaemon(readRawConfig(path));
   if (JSON.stringify(daemon.controlRegistration) !== JSON.stringify(expected)) {
@@ -165,8 +167,14 @@ function assertPersistedRegistration(
   if (JSON.stringify(daemon.trustedRelay) !== JSON.stringify(trustedRelay)) {
     throw new Error("Hosted Control V1 trusted relay authorization did not survive atomic config readback.");
   }
-  if (expectedRunnerToken !== undefined && daemon.runnerToken !== expectedRunnerToken) {
+  if (
+    (expectedRunnerToken === null && daemon.runnerToken !== undefined)
+    || (typeof expectedRunnerToken === "string" && daemon.runnerToken !== expectedRunnerToken)
+  ) {
     throw new Error("Hosted Control V1 staged runner credential failed atomic config readback.");
+  }
+  if (expectPairingTokenRemoved && daemon.pairingToken !== undefined) {
+    throw new Error("Hosted Control V1 pairing credential survived atomic config readback.");
   }
 }
 
@@ -194,9 +202,8 @@ function writeHostedState(input: {
     input.configPath,
     input.controlRegistration,
     input.trustedRelay,
-    input.runnerToken === undefined || input.runnerToken === null
-      ? undefined
-      : input.runnerToken
+    input.runnerToken,
+    input.removePairingToken === true
   );
 }
 
@@ -766,6 +773,7 @@ function finalizeStagedHostedPair(input: {
     readRawConfig: input.dependencies.readRawConfig ?? readCliRawConfig,
     relayUrl: input.relayUrl,
     trustedRelay: input.plan.trustedRelay,
+    removePairingToken: true,
     runnerToken: input.plan.finalizeStagedLocally.runnerToken,
     writeHostedConfig: input.dependencies.writeHostedConfig
       ?? writeHostedControlConfigAtomic

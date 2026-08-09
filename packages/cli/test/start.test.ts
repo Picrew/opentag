@@ -1181,6 +1181,34 @@ describe("OpenTag CLI start wiring", () => {
     expect(logs.join("\n")).toContain("OpenTag will use the fixed profile 'opentag-fixed'");
   });
 
+  it("aborts and awaits the relay daemon before start resolves", async () => {
+    const built = githubConfig();
+    built.runtime = {
+      mode: "relay",
+      relayUrl: "https://relay.example",
+      relayProvider: "custom"
+    };
+    built.daemon.dispatcherUrl = "https://relay.example";
+    const calls: string[] = [];
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async waitForDispatcher() {},
+        async bootstrapDispatcher() {},
+        serveDaemon: async ({ signal }) => {
+          calls.push(`daemon.started:${signal?.aborted}`);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          calls.push("daemon.stopped");
+        },
+        logger: { log() {} }
+      }
+    });
+    expect(calls).toEqual(["daemon.started:true", "daemon.stopped"]);
+  });
+
   it("starts a paired Hosted Control V1 runner with wait then daemon and no bootstrap", async () => {
     const built = githubConfig();
     built.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
@@ -1200,6 +1228,7 @@ describe("OpenTag CLI start wiring", () => {
       registration: {
         schemaVersion: 1,
         protocolVersion: "1.0",
+        organizationId: "org_1",
         runnerId: built.daemon.runnerId,
         registrationGeneration: 1,
         credentialGeneration: 1,
@@ -1277,6 +1306,7 @@ describe("OpenTag CLI start wiring", () => {
       registration: {
         schemaVersion: 1,
         protocolVersion: "1.0",
+        organizationId: "org_1",
         runnerId: built.daemon.runnerId,
         registrationGeneration: 1,
         credentialGeneration: 1,
@@ -1486,6 +1516,51 @@ describe("OpenTag CLI start wiring", () => {
 
     expect(calls.slice(0, 2)).toEqual(["ports", "dispatcher"]);
     expect(calls).toEqual(expect.arrayContaining(["wait", "bootstrap", "daemon", "lark-ingress", "lark.close", "dispatcher.close"]));
+  });
+
+  it("awaits the local daemon before closing the dispatcher", async () => {
+    const built = config();
+    const calls: string[] = [];
+    const dispatcherHandle = {
+      url: "http://localhost:3030",
+      server: {},
+      async close() {
+        calls.push("dispatcher.close");
+      }
+    } as ReturnType<NonNullable<StartRuntimeDependencies["startDispatcher"]>>;
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async assertStartPortsAvailable() {},
+        startDispatcher: () => dispatcherHandle,
+        async waitForDispatcher() {},
+        async bootstrapDispatcher() {},
+        serveDaemon: async ({ signal }) => {
+          calls.push(`daemon.started:${signal?.aborted}`);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          calls.push("daemon.stopped");
+        },
+        startLarkIngress: () => ({
+          startPromise: new Promise<void>(() => {}),
+          async handleCardAction() {
+            return { status: "ignored_card_action_not_opentag" as const };
+          },
+          async close() {
+            calls.push("lark.close");
+          }
+        }),
+        logger: { log() {} }
+      }
+    });
+    expect(calls).toEqual([
+      "daemon.started:true",
+      "daemon.stopped",
+      "lark.close",
+      "dispatcher.close"
+    ]);
   });
 
   it("logs mounted Telegram and Discord dispatcher endpoints in local mode", async () => {

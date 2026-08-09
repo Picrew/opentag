@@ -53,6 +53,7 @@ function parseDaemonConfig(value: unknown) {
 const hostedRegistration = {
   schemaVersion: 1 as const,
   protocolVersion: "1.0" as const,
+  organizationId: "org_1",
   runnerId: "runner_hosted",
   registrationGeneration: 1,
   credentialGeneration: 1,
@@ -140,6 +141,7 @@ const successorRotationMetadata = {
 const rotatedHostedRegistration = {
   schemaVersion: rotatedHostedRotation.schemaVersion,
   protocolVersion: rotatedHostedRotation.protocolVersion,
+  organizationId: hostedRegistration.organizationId,
   runnerId: rotatedHostedRotation.runnerId,
   registrationGeneration: rotatedHostedRotation.registrationGeneration,
   credentialGeneration: rotatedHostedRotation.credentialGeneration,
@@ -344,6 +346,38 @@ describe("parseDaemonConfig ACP agents", () => {
         }
       }
     })).toThrow(/env|unrecognized/iu);
+  });
+});
+
+describe("parseDaemonConfig repository identity", () => {
+  it("canonicalizes GitHub provider, owner, and repo to lowercase only", () => {
+    const config = parseDaemonConfig({
+      repositories: [
+        {
+          provider: "GitHub",
+          owner: "AcMe",
+          repo: "Widgets",
+          checkoutPath: "/tmp/github-widgets"
+        },
+        {
+          provider: "GitLab",
+          owner: "AcMe",
+          repo: "Widgets",
+          checkoutPath: "/tmp/gitlab-widgets"
+        }
+      ]
+    });
+
+    expect(config.repositories[0]).toMatchObject({
+      provider: "github",
+      owner: "acme",
+      repo: "widgets"
+    });
+    expect(config.repositories[1]).toMatchObject({
+      provider: "GitLab",
+      owner: "AcMe",
+      repo: "Widgets"
+    });
   });
 });
 
@@ -637,7 +671,9 @@ describe("Hosted Control V1 credential state", () => {
     expect(runnerDispatcherToken(paired)).toBe("runtime_committed");
     expect(() => createDaemonClient(unpaired)).toThrow(/not paired/iu);
     expect(() => createDaemonClient(staged)).toThrow(/staged but not committed/iu);
-    expect(() => createDaemonClient(paired)).not.toThrow();
+    expect(() => createDaemonClient(paired)).toThrow(
+      /does not expose a legacy claim-capable daemon client/iu
+    );
   });
 
   it("rejects unknown hosted fields and invalid metadata", () => {
@@ -881,6 +917,7 @@ describe("Hosted Control V1 credential state", () => {
       endpoint: "rotate",
       canonicalRequestDigest: hostedCredentialMutationDigest,
       request: hostedCredentialMutationRequest,
+      registration: hostedRegistration,
       replay: replayedHostedRotation,
       current,
       successorAttempted: false,

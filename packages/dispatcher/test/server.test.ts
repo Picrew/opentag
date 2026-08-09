@@ -680,6 +680,34 @@ describe("dispatcher API", () => {
     });
   });
 
+  it("does not expose readiness ingress without a runner-scoped authenticated principal", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      runnerTokens: ["runner_a_token", "runner_b_token"],
+    });
+    const response = await app.request("/v1/runners/runner_b/readiness", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer runner_a_token",
+      },
+      body: "{}",
+    });
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: "unauthorized",
+      reason: "invalid_pairing_token",
+    });
+
+    const unconfigured = createDispatcherApp({ databasePath: ":memory:" });
+    const absent = await unconfigured.request("/v1/runners/runner_b/readiness", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(absent.status).toBe(404);
+  });
+
   it("rejects normalized events that cannot derive a durable WorkThread", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:", pairingToken: "pair_test" });
     const response = await app.request(

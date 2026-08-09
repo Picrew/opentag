@@ -15,8 +15,9 @@ import {
   runnerDispatcherToken,
   type OpenTagDaemonConfig
 } from "./config.js";
-import type { DaemonClient } from "./daemon.js";
+import type { DaemonClient, DaemonRuntimeInput } from "./daemon.js";
 import type { PullRequestOptions } from "./pr.js";
+import { createHostedControlLoop } from "./control-v1.js";
 
 export function securityFromConfig(config: OpenTagDaemonConfig): RunnerSecurityPolicy | undefined {
   const security = config.security;
@@ -113,10 +114,11 @@ export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
       dispatcherUrl: config.dispatcherUrl,
       trustedRelay: config.trustedRelay
     });
-  }
-  const hostedAuthProblem = hostedRunnerAuthProblem(config);
-  if (hostedAuthProblem) {
-    throw new Error(hostedAuthProblem);
+    const hostedAuthProblem = hostedRunnerAuthProblem(config);
+    if (hostedAuthProblem) throw new Error(hostedAuthProblem);
+    throw new Error(
+      "Hosted Control V1 does not expose a legacy claim-capable daemon client."
+    );
   }
   const token = runnerDispatcherToken(config);
   return createDispatcherClient({
@@ -138,14 +140,45 @@ export function pullRequestOptionsFromConfig(config: OpenTagDaemonConfig): PullR
   };
 }
 
-export function createDaemonRuntimeInput(config: OpenTagDaemonConfig) {
+export function createDaemonRuntimeInput(
+  config: OpenTagDaemonConfig,
+  options: { databasePath?: string } = {},
+): DaemonRuntimeInput {
   const security = securityFromConfig(config);
   const pullRequestOptions = pullRequestOptionsFromConfig(config);
+  const executors = executorsFromConfig(config);
+  if (config.controlRegistration) {
+    if (!options.databasePath) {
+      throw new Error(
+        "Hosted Control V1 requires the authoritative local dispatcher database path."
+      );
+    }
+    assertHostedRelayAuthorization({
+      dispatcherUrl: config.dispatcherUrl,
+      trustedRelay: config.trustedRelay
+    });
+    const hostedAuthProblem = hostedRunnerAuthProblem(config);
+    if (hostedAuthProblem) throw new Error(hostedAuthProblem);
+    const controlLoop = createHostedControlLoop({
+      config,
+      databasePath: options.databasePath,
+      executors,
+    });
+    if (!controlLoop) {
+      throw new Error("Hosted Control V1 sidecar could not be created.");
+    }
+    return {
+      mode: "control-v1-sidecar",
+      controlLoop,
+      ...(config.pollIntervalMs ? { pollIntervalMs: config.pollIntervalMs } : {}),
+    };
+  }
 
   return {
+    mode: "legacy",
     runnerId: config.runnerId,
     repositories: config.repositories,
-    executors: executorsFromConfig(config),
+    executors,
     scratchRoot: config.scratchRoot,
     keepScratch: config.keepScratch,
     approvalMode: config.approvalMode,

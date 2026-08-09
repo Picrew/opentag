@@ -52,6 +52,7 @@ import {
   RunnerCredentialHttpResponseV1Schema,
   RunnerReadinessReasonCodeV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
+  RunnerControlContextResponseV1Schema,
   WorkThreadRefPayloadV1Schema,
   WorkThreadRefReceiptEnvelopeV1Schema,
   RunnerPermissionCurrentQueryV1Schema,
@@ -167,6 +168,30 @@ describe("OpenTag Control V1 version and capability negotiation", () => {
         artifact: { packageName: "@opentag/core", packageVersion: "0.9.0" },
       }).artifact?.packageVersion,
     ).toBe("0.9.0");
+
+    expect(
+      RelayCapabilitiesResponseV1Schema.parse({
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        registryVersion: "opentag.control.capabilities/v1",
+        capabilities: [],
+        minimumClient: { schemaVersion: 1, protocolVersion: "1.0" },
+        deployment: {
+          environment: "local",
+          releaseSha: "local",
+        },
+      }).deployment,
+    ).toEqual({ environment: "local", releaseSha: "local" });
+    for (const environment of ["staging", "production"]) {
+      expect(RelayCapabilitiesResponseV1Schema.safeParse({
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        registryVersion: "opentag.control.capabilities/v1",
+        capabilities: [],
+        minimumClient: { schemaVersion: 1, protocolVersion: "1.0" },
+        deployment: { environment, releaseSha: "local" },
+      }).success).toBe(false);
+    }
   });
 
   it.each([
@@ -219,6 +244,45 @@ describe("OpenTag Control V1 version and capability negotiation", () => {
         idempotencyKey: "parallel-key",
       }).success,
     ).toBe(false);
+  });
+
+  it("accepts only strict runner control context with sorted unique targets", () => {
+    const context = {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      contextKind: "runner_control",
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      credentialId: "credential_1",
+      registrationGeneration: 1,
+      credentialGeneration: 2,
+      capabilities: ["relay.readiness.v1", "relay.work-thread-ref.v1"],
+      targets: [
+        {
+          projectTargetId: "target_a",
+          bindingDigest: digest,
+          provider: "github",
+          owner: "acme",
+          repo: "alpha",
+          defaultExecutor: "echo",
+          defaultBranch: "main",
+        },
+        {
+          projectTargetId: "target_b",
+          bindingDigest: otherDigest,
+          provider: "github",
+          owner: "acme",
+          repo: "beta",
+          defaultExecutor: "codex",
+          defaultBranch: null,
+        },
+      ],
+      observedAt,
+    };
+    expect(RunnerControlContextResponseV1Schema.safeParse(context).success).toBe(true);
+    expect(RunnerControlContextResponseV1Schema.safeParse({ ...context, extra: true }).success).toBe(false);
+    expect(RunnerControlContextResponseV1Schema.safeParse({ ...context, targets: [...context.targets].reverse() }).success).toBe(false);
+    expect(RunnerControlContextResponseV1Schema.safeParse({ ...context, targets: [context.targets[0], context.targets[0]] }).success).toBe(false);
   });
 });
 
@@ -1058,6 +1122,7 @@ describe("runner registration and credential re-provision", () => {
       schemaVersion: 1,
       protocolVersion: "1.0",
       operationId: "op_pair_1",
+      organizationId: "org_1",
       runnerId: "runner_1",
       registrationGeneration: 1,
       credentialGeneration: 1,
@@ -1074,6 +1139,12 @@ describe("runner registration and credential re-provision", () => {
       }).success,
     ).toBe(true);
     expect(RunnerCredentialMetadataV1Schema.parse(metadata)).toEqual(metadata);
+    expect(
+      RunnerCredentialMetadataV1Schema.safeParse({
+        ...metadata,
+        organizationId: undefined,
+      }).success,
+    ).toBe(false);
     expect(
       RunnerCredentialMetadataV1Schema.safeParse({ ...metadata, replayed: false }).success,
     ).toBe(false);

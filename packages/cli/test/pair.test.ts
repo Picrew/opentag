@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -145,6 +145,7 @@ function credentialResponse(input: {
     schemaVersion: 1,
     protocolVersion: "1.0",
     operationId: input.operationId,
+    organizationId: "org_1",
     runnerId: input.runnerId ?? "runner_local",
     registrationGeneration: input.registrationGeneration ?? 1,
     credentialGeneration: input.credentialGeneration ?? 1,
@@ -555,6 +556,11 @@ describe("OpenTag CLI pair relay", () => {
           "https://control.example/v1/relay/capabilities"
         );
       }
+      const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
+        daemon: Record<string, unknown>;
+      };
+      raw.daemon.runnerToken = "runner_token_from_previous_attempt";
+      writeFileSync(configPath, `${JSON.stringify(raw, null, 2)}\n`);
       return responseAt(
         credentialResponse({ operationId: "operation_replay_1", replayed: true }),
         200,
@@ -583,6 +589,80 @@ describe("OpenTag CLI pair relay", () => {
     });
     expect(saved.daemon.runnerToken).toBeUndefined();
     expect(saved.daemon.pairingToken).toBeUndefined();
+    expect((readCliRawConfig(configPath) as {
+      daemon: Record<string, unknown>;
+    }).daemon).not.toHaveProperty("runnerToken");
+  });
+
+  it("fails replay recovery when a writer leaves the previous runner token on disk", async () => {
+    const configPath = join(tempDir(), "config.json");
+    writeCliConfigAtomic(configPath, githubConfig());
+    const fetchImpl = vi.fn(async (url) => {
+      if (String(url).endsWith("/v1/relay/capabilities")) {
+        return responseAt(
+          controlCapabilities("relay.registration.v1"),
+          200,
+          "https://control.example/v1/relay/capabilities"
+        );
+      }
+      const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
+        daemon: Record<string, unknown>;
+      };
+      raw.daemon.runnerToken = "runner_token_must_be_removed";
+      writeFileSync(configPath, `${JSON.stringify(raw, null, 2)}\n`);
+      return responseAt(
+        credentialResponse({ operationId: "operation_replay_writer_1", replayed: true }),
+        200,
+        "https://control.example/v1/runners"
+      );
+    }) as unknown as typeof fetch;
+    const writeHostedConfig = vi.fn((
+      path: string,
+      patch: Parameters<typeof writeHostedControlConfigAtomic>[1],
+      filesystem?: Parameters<typeof writeHostedControlConfigAtomic>[2]
+    ) => {
+      if (patch.runnerToken !== null) {
+        writeHostedControlConfigAtomic(path, patch, filesystem);
+        return;
+      }
+      const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+      const daemon = raw.daemon as Record<string, unknown>;
+      raw.runtime = {
+        mode: "relay",
+        relayUrl: patch.relayUrl,
+        ...(patch.relayProvider ? { relayProvider: patch.relayProvider } : {})
+      };
+      raw.daemon = {
+        ...daemon,
+        dispatcherUrl: patch.dispatcherUrl,
+        controlRegistration: patch.controlRegistration,
+        trustedRelay: patch.trustedRelay ?? daemon.trustedRelay
+      };
+      if (patch.removePairingToken) delete (raw.daemon as Record<string, unknown>).pairingToken;
+      writeFileSync(path, `${JSON.stringify(raw, null, 2)}\n`);
+    });
+    const logger = { log: vi.fn(), warn: vi.fn() };
+
+    await expect(runPairCommand(
+      {
+        config: configPath,
+        relay: "https://control.example",
+        trustRelayOrigin: "https://control.example"
+      },
+      {
+        fetchImpl,
+        randomUUID: () => "operation_replay_writer_1",
+        now: () => new Date("2026-08-08T01:00:00.000Z"),
+        readRawConfig: (path) => JSON.parse(readFileSync(path, "utf8")),
+        writeHostedConfig,
+        logger
+      }
+    )).rejects.toThrow("Hosted Control V1 staged runner credential failed atomic config readback.");
+
+    expect(logger.log).not.toHaveBeenCalled();
+    expect((readCliRawConfig(configPath) as {
+      daemon: Record<string, unknown>;
+    }).daemon.runnerToken).toBe("runner_token_must_be_removed");
   });
 
   it("persists outcome_unknown without leaking a transport canary and reuses the operation", async () => {
@@ -710,6 +790,7 @@ describe("OpenTag CLI pair relay", () => {
         const registration = {
           schemaVersion: 1,
           protocolVersion: "1.0",
+          organizationId: "org_1",
           runnerId: "runner_local",
           registrationGeneration: 1,
           credentialGeneration: 1,
@@ -788,6 +869,7 @@ describe("OpenTag CLI pair relay", () => {
       registration: {
         schemaVersion: 1,
         protocolVersion: "1.0",
+        organizationId: "org_1",
         runnerId: source.daemon.runnerId,
         registrationGeneration: 1,
         credentialGeneration: 1,
@@ -914,6 +996,7 @@ describe("OpenTag CLI pair relay", () => {
         registration: { runnerId: "runner_local" }
       }
     });
+    expect(readCliConfig(configPath).daemon.pairingToken).toBeUndefined();
 
     const retryFetch = vi.fn();
     const retryClient = vi.fn();
@@ -938,6 +1021,7 @@ describe("OpenTag CLI pair relay", () => {
       state: "paired",
       operationId: "operation_crash_1"
     });
+    expect(readCliConfig(configPath).daemon.pairingToken).toBeUndefined();
     expect(retryFetch).not.toHaveBeenCalled();
     expect(retryClient).not.toHaveBeenCalled();
     expect(retryReadConfig).not.toHaveBeenCalled();
@@ -971,6 +1055,7 @@ describe("OpenTag CLI pair relay", () => {
       registration: {
         schemaVersion: 1,
         protocolVersion: "1.0",
+        organizationId: "org_1",
         runnerId: registrationRunnerId,
         registrationGeneration: 1,
         credentialGeneration: 1,

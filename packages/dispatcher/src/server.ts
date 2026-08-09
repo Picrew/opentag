@@ -2935,6 +2935,17 @@ export function openDispatcherDatabase(databasePath: string): InstanceType<typeo
   return new Database(databasePath);
 }
 
+export function openDispatcherGovernanceStore(databasePath: string) {
+  const sqlite = openDispatcherDatabase(databasePath);
+  migrateSchema(sqlite);
+  return {
+    repo: createOpenTagRepository(drizzle(sqlite)),
+    close() {
+      sqlite.close();
+    },
+  };
+}
+
 export function createDispatcherApp(input: {
   databasePath: string;
   sqlite?: InstanceType<typeof Database>;

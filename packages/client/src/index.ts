@@ -38,6 +38,7 @@ import {
   RunnerPermissionCurrentQueryV1Schema,
   RunnerPermissionRequestHttpResponseV1Schema,
   RunnerPermissionRequestV1Schema,
+  RunnerControlContextResponseV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
   RunnerCredentialHttpResponseV1Schema,
   RunnerCredentialReprovisionRequestV1Schema,
@@ -83,6 +84,7 @@ import {
   type RunnerDirectoryEntry,
   type RunnerRegistrationRequestV1,
   type RunnerReadinessReceiptEnvelopeV1,
+  type RunnerControlContextResponseV1,
   type HumanPermissionDecisionRequestV1,
   type RunnerMaterialActionReconcileRequestV1,
   type MaterialActionReceiptEnvelopeV1,
@@ -383,6 +385,8 @@ export type OpenTagClientOptions = {
   dispatcherUrl: string;
   pairingToken?: string;
   controlCredential?: ControlCredential;
+  controlSignal?: AbortSignal;
+  controlTimeoutMs?: number;
   channelPrincipalCredential?: string;
   fetchImpl?: typeof fetch;
 };
@@ -598,6 +602,7 @@ export type LinearOAuthInstallationStart = {
 
 export type OpenTagClient = {
   getRelayCapabilitiesControlV1(): Promise<RelayCapabilitiesResponseV1>;
+  getRunnerControlContextV1(input: { runnerId: string }): Promise<RunnerControlContextResponseV1>;
   registerRunner(input: RegisterRunnerInput): Promise<void>;
   registerRunnerControlV1(input: RunnerRegistrationRequestV1): Promise<RunnerCredentialResponseV1>;
   reprovisionRunnerControlV1(input: RunnerCredentialReprovisionRequestV1): Promise<RunnerCredentialResponseV1>;
@@ -900,7 +905,8 @@ function throwControlV1Error(
   response: Response,
   body: unknown,
   action: string,
-  expectedRequestId?: string
+  expectedRequestId?: string,
+  preserveServerRequestId = false
 ): never {
   const error = ControlErrorHttpResponseV1Schema.safeParse({
     status: response.status,
@@ -922,7 +928,8 @@ function throwControlV1Error(
     action,
     error.data.status,
     error.data.body.error,
-    expectedRequestId ?? "unavailable",
+    expectedRequestId
+      ?? (preserveServerRequestId ? error.data.body.requestId : "unavailable"),
     error.data.status === 429 ? error.data.body.retryAfterSeconds : undefined
   );
 }
@@ -1363,10 +1370,28 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
     init: RequestInit,
     action: string
   ): Promise<Response> => {
+    const requestAbort = new AbortController();
+    const onExternalAbort = () => requestAbort.abort(options.controlSignal?.reason);
+    if (options.controlSignal?.aborted) onExternalAbort();
+    else options.controlSignal?.addEventListener("abort", onExternalAbort, { once: true });
+    const timeout = setTimeout(
+      () => requestAbort.abort(new Error("control_request_timeout")),
+      options.controlTimeoutMs ?? 30_000,
+    );
     try {
-      return await baseFetch(url, { ...init, redirect: "manual" });
-    } catch {
+      return await baseFetch(url, {
+        ...init,
+        redirect: "manual",
+        signal: requestAbort.signal,
+      });
+    } catch (error) {
+      if (!(error instanceof TypeError) && !requestAbort.signal.aborted) {
+        throw error;
+      }
       throw new OpenTagClientHttpError(action, 0, "transport_failed");
+    } finally {
+      clearTimeout(timeout);
+      options.controlSignal?.removeEventListener("abort", onExternalAbort);
     }
   };
 
@@ -1380,10 +1405,38 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       );
       const body = await parseControlJson(response, action, trustedControlOrigin);
       if (response.status !== 200) {
-        throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+        const parsedError = ControlErrorHttpResponseV1Schema.safeParse({ status: response.status, body });
+        if (!parsedError.success) {
+          throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+        }
+        throwControlV1Error(response, body, action, undefined, true);
       }
       const parsed = RelayCapabilitiesResponseV1Schema.safeParse(body);
       if (!parsed.success) {
+        throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+      }
+      return parsed.data;
+    },
+
+    async getRunnerControlContextV1(input) {
+      const runnerId = RunnerControlContextResponseV1Schema.shape.runnerId.parse(input.runnerId);
+      const action = "getRunnerControlContextV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(runnerId)}/control-context`,
+        { method: "GET", headers: authHeaders(token) },
+        action,
+      );
+      const body = await parseControlJson(response, action, trustedControlOrigin);
+      if (response.status !== 200) {
+        const parsedError = ControlErrorHttpResponseV1Schema.safeParse({ status: response.status, body });
+        if (!parsedError.success) {
+          throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+        }
+        throwControlV1Error(response, body, action, undefined, true);
+      }
+      const parsed = RunnerControlContextResponseV1Schema.safeParse(body);
+      if (!parsed.success || parsed.data.runnerId !== runnerId) {
         throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
       }
       return parsed.data;

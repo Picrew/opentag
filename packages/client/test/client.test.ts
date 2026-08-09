@@ -52,6 +52,7 @@ function freshRunnerCredentialResponse(input = runnerRegistrationRequest()) {
     schemaVersion: 1 as const,
     protocolVersion: "1.0" as const,
     operationId: input.operationId,
+    organizationId: "org_1",
     runnerId: input.runnerId,
     registrationGeneration: 1,
     credentialGeneration: 1,
@@ -1942,6 +1943,173 @@ describe("@opentag/client", () => {
       runnerId: "runner_legacy",
       locality: "private"
     })).resolves.toBeUndefined();
+  });
+
+  it("fetches strict runner control context with the runtime credential", async () => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    const context = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const,
+      organizationId: "org_1",
+      runnerId: "runner_private_1",
+      credentialId: "credential_runtime_1",
+      registrationGeneration: 1,
+      credentialGeneration: 1,
+      capabilities: ["relay.readiness.v1"] as const,
+      targets: [{
+        projectTargetId: "target_1",
+        bindingDigest: `sha256:${"a".repeat(64)}`,
+        provider: "github",
+        owner: "acme",
+        repo: "app",
+        defaultExecutor: "echo",
+        defaultBranch: "main",
+      }],
+      observedAt: "2026-08-09T00:00:00.000Z",
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      controlCredential: { kind: "runtime", token: "runtime_secret" },
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), authorization: new Headers(init?.headers).get("authorization") });
+        return jsonResponse(context, 200, String(url));
+      },
+    });
+    await expect(client.getRunnerControlContextV1({ runnerId: "runner_private_1" })).resolves.toEqual(context);
+    expect(requests).toEqual([{
+      url: "http://dispatcher.test/v1/runners/runner_private_1/control-context",
+      authorization: "Bearer runtime_secret",
+    }]);
+  });
+
+  it("preserves the server requestId for relay-capabilities GET errors", async () => {
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async (url) => jsonResponse({
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        error: "protocol_upgrade_required",
+        message: "Upgrade required.",
+        requestId: "request_capabilities_426",
+        supported: { schemaVersions: [1], protocolVersions: ["1.0"] },
+        nextAction: "upgrade_client",
+      }, 426, String(url)),
+    });
+    const failure = await client.getRelayCapabilitiesControlV1()
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(OpenTagControlV1HttpError);
+    expect(failure).toMatchObject({
+      status: 426,
+      code: "protocol_upgrade_required",
+      requestId: "request_capabilities_426",
+    });
+  });
+
+  it("rejects cross-runner and unknown-field control context responses", async () => {
+    const base = {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      contextKind: "runner_control",
+      organizationId: "org_1",
+      runnerId: "runner_other",
+      credentialId: "credential_runtime_1",
+      registrationGeneration: 1,
+      credentialGeneration: 1,
+      capabilities: ["relay.readiness.v1"],
+      targets: [],
+      observedAt: "2026-08-09T00:00:00.000Z",
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      controlCredential: { kind: "runtime", token: "runtime_secret" },
+      fetchImpl: async (url) => jsonResponse({ ...base, extra: true }, 200, String(url)),
+    });
+    await expect(client.getRunnerControlContextV1({ runnerId: "runner_private_1" })).rejects.toMatchObject({
+      status: 200,
+      responseBody: "invalid_control_v1_response",
+    });
+  });
+
+  it("preserves the server requestId for runner control-context errors", async () => {
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      controlCredential: { kind: "runtime", token: "runtime_secret" },
+      fetchImpl: async (url) => jsonResponse({
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        error: "missing_or_concealed",
+        message: "Runner not found.",
+        requestId: "request_context_404",
+      }, 404, String(url)),
+    });
+    const failure = await client
+      .getRunnerControlContextV1({ runnerId: "runner_private_1" })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(OpenTagControlV1HttpError);
+    expect(failure).toMatchObject({
+      status: 404,
+      code: "missing_or_concealed",
+      requestId: "request_context_404",
+    });
+  });
+
+  it("passes the configured abort signal to strict Control V1 requests", async () => {
+    const abort = new AbortController();
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      controlCredential: { kind: "runtime", token: "runtime_secret" },
+      controlSignal: abort.signal,
+      fetchImpl: async (url, init) => {
+        expect(init?.signal).toBeInstanceOf(AbortSignal);
+        expect(init?.signal).not.toBe(abort.signal);
+        expect(init?.signal?.aborted).toBe(false);
+        return jsonResponse({
+          schemaVersion: 1,
+          protocolVersion: "1.0",
+          contextKind: "runner_control",
+          organizationId: "org_1",
+          runnerId: "runner_1",
+          credentialId: "credential_1",
+          registrationGeneration: 1,
+          credentialGeneration: 1,
+          capabilities: [],
+          targets: [],
+          observedAt: "2026-08-09T00:00:00.000Z",
+        }, 200, String(url));
+      },
+    });
+    await client.getRunnerControlContextV1({ runnerId: "runner_1" });
+  });
+
+  it("bounds strict Control V1 requests with an abortable timeout", async () => {
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      controlCredential: { kind: "runtime", token: "runtime_secret" },
+      controlTimeoutMs: 1,
+      fetchImpl: async (_url, init) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      }),
+    });
+    await expect(client.getRunnerControlContextV1({ runnerId: "runner_1" })).rejects.toMatchObject({
+      status: 0,
+      responseBody: "transport_failed",
+    });
+  });
+
+  it("does not disguise an ordinary fetch implementation error as a transport failure", async () => {
+    const failure = new Error("fetch_adapter_bug");
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      controlCredential: { kind: "runtime", token: "runtime_secret" },
+      fetchImpl: async () => { throw failure; },
+    });
+    await expect(client.getRunnerControlContextV1({ runnerId: "runner_1" }))
+      .rejects.toBe(failure);
   });
 
   it("does not authorize Control V1 registration with only the legacy pairing token", async () => {
