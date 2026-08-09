@@ -22,9 +22,26 @@ import {
   canonicalJsonStringify,
   CompletionAssessmentReceiptEnvelopeV1Schema,
   CompletionContractRefReceiptEnvelopeV1Schema,
+  computeControlPayloadDigestV1,
+  computeControlReceiptDigestV1,
   ControlErrorHttpResponseV1Schema,
   HumanPermissionDecisionHttpResponseV1Schema,
   HumanPermissionDecisionRequestV1Schema,
+  HostedClaimRequestV1Schema,
+  HostedClaimV1Schema,
+  HostedCompleteRequestV1Schema,
+  HostedHeartbeatRequestV1Schema,
+  HostedLifecycleReceiptEnvelopeV1Schema,
+  HostedProgressRequestV1Schema,
+  HostedRejectStartRequestV1Schema,
+  HostedRunningRequestV1Schema,
+  computeHostedClaimFencingTokenDigestV1,
+  computeHostedLifecycleRequestDigestV1,
+  computeHostedLifecycleRequestIdV1,
+  verifyHostedLifecycleReceiptV1,
+  verifyHostedAdmissionEnvelopeDigestV1,
+  verifyHostedClaimExpectedAuthorityV1,
+  verifyHostedClaimFencingTokenDigestV1,
   MaterialActionReconcileHttpResponseV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
   MaterialActionStableIdV1Schema,
@@ -73,6 +90,14 @@ import {
   type OpenTagManagedChannelBindingOwnership,
   type OpenTagRun,
   type OpenTagRunResult,
+  type HostedCompleteRequestV1,
+  type HostedHeartbeatRequestV1,
+  type HostedLifecycleReceiptEnvelopeV1,
+  type HostedLifecycleActionV1,
+  type HostedLifecycleRequestV1,
+  type HostedProgressRequestV1,
+  type HostedRejectStartRequestV1,
+  type HostedRunningRequestV1,
   type AcceptedProgressMetrics,
   type FactoryRecipeSnapshot,
   type FactoryRecipeSnapshotInput,
@@ -86,6 +111,8 @@ import {
   type RunnerReadinessReceiptEnvelopeV1,
   type RunnerControlContextResponseV1,
   type HumanPermissionDecisionRequestV1,
+  type HostedClaimRequestV1,
+  type HostedClaimV1,
   type RunnerMaterialActionReconcileRequestV1,
   type MaterialActionReceiptEnvelopeV1,
   type PermissionResolutionReceiptEnvelopeV1,
@@ -114,6 +141,8 @@ export type {
   FactoryRecipeSnapshot,
   FactoryRecipeSnapshotInput,
   HumanPermissionDecisionRequestV1,
+  HostedClaimRequestV1,
+  HostedClaimV1,
   MaterialActionReceiptEnvelopeV1,
   PermissionResolutionReceiptEnvelopeV1,
   RunnerMaterialActionReconcileRequestV1,
@@ -603,6 +632,45 @@ export type LinearOAuthInstallationStart = {
 export type OpenTagClient = {
   getRelayCapabilitiesControlV1(): Promise<RelayCapabilitiesResponseV1>;
   getRunnerControlContextV1(input: { runnerId: string }): Promise<RunnerControlContextResponseV1>;
+  claimHostedRunControlV1(input: {
+    runnerId: string;
+    request: HostedClaimRequestV1;
+  }): Promise<HostedClaimV1 | null>;
+  heartbeatHostedRunControlV1(input: {
+    organizationId: string;
+    credentialId: string;
+    runnerId: string;
+    runId: string;
+    request: HostedHeartbeatRequestV1;
+  }): Promise<ControlReceiptResult<HostedLifecycleReceiptEnvelopeV1>>;
+  markHostedRunRunningControlV1(input: {
+    organizationId: string;
+    credentialId: string;
+    runnerId: string;
+    runId: string;
+    request: HostedRunningRequestV1;
+  }): Promise<ControlReceiptResult<HostedLifecycleReceiptEnvelopeV1>>;
+  progressHostedRunControlV1(input: {
+    organizationId: string;
+    credentialId: string;
+    runnerId: string;
+    runId: string;
+    request: HostedProgressRequestV1;
+  }): Promise<ControlReceiptResult<HostedLifecycleReceiptEnvelopeV1>>;
+  completeHostedRunControlV1(input: {
+    organizationId: string;
+    credentialId: string;
+    runnerId: string;
+    runId: string;
+    request: HostedCompleteRequestV1;
+  }): Promise<ControlReceiptResult<HostedLifecycleReceiptEnvelopeV1>>;
+  rejectHostedAttemptStartControlV1(input: {
+    organizationId: string;
+    credentialId: string;
+    runnerId: string;
+    runId: string;
+    request: HostedRejectStartRequestV1;
+  }): Promise<ControlReceiptResult<HostedLifecycleReceiptEnvelopeV1>>;
   registerRunner(input: RegisterRunnerInput): Promise<void>;
   registerRunnerControlV1(input: RunnerRegistrationRequestV1): Promise<RunnerCredentialResponseV1>;
   reprovisionRunnerControlV1(input: RunnerCredentialReprovisionRequestV1): Promise<RunnerCredentialResponseV1>;
@@ -932,6 +1000,78 @@ function throwControlV1Error(
       ?? (preserveServerRequestId ? error.data.body.requestId : "unavailable"),
     error.data.status === 429 ? error.data.body.retryAfterSeconds : undefined
   );
+}
+
+async function parseHostedLifecycleControlV1Response(input: {
+  response: Response,
+  action: string,
+  trustedOrigin: string,
+  lifecycleAction: HostedLifecycleActionV1,
+  organizationId: string,
+  credentialId: string,
+  runnerId: string,
+  runId: string,
+  request: HostedLifecycleRequestV1,
+}): Promise<ControlReceiptResult<HostedLifecycleReceiptEnvelopeV1>> {
+  const body = await parseControlJson(
+    input.response,
+    input.action,
+    input.trustedOrigin,
+  );
+  if (input.response.status !== 200 && input.response.status !== 201) {
+    throwControlV1Error(
+      input.response,
+      body,
+      input.action,
+      input.request.requestId,
+    );
+  }
+  const parsed = HostedLifecycleReceiptEnvelopeV1Schema.safeParse(body);
+  if (
+    !parsed.success
+    || !(await verifyHostedLifecycleReceiptV1({
+      receipt: parsed.data,
+      request: input.request,
+      action: input.lifecycleAction,
+      organizationId: input.organizationId,
+      runnerId: input.runnerId,
+      runId: input.runId,
+      credentialId: input.credentialId,
+    }))
+  ) {
+    throw new OpenTagClientHttpError(
+      input.action,
+      input.response.status,
+      "invalid_control_v1_response",
+    );
+  }
+  return input.response.status === 201
+    ? { status: 201, replayed: false, outcome: "accepted", receipt: parsed.data }
+    : { status: 200, replayed: true, outcome: "accepted", receipt: parsed.data };
+}
+
+async function validateHostedLifecycleRequest(input: {
+  organizationId: string;
+  runnerId: string;
+  runId: string;
+  action: HostedLifecycleActionV1;
+  request: HostedLifecycleRequestV1;
+}): Promise<void> {
+  const expectedDigest = await computeHostedLifecycleRequestDigestV1(input);
+  const expectedRequestId = await computeHostedLifecycleRequestIdV1({
+    operationId: input.request.operationId,
+    requestDigest: expectedDigest,
+  });
+  const expectedFenceDigest = await computeHostedClaimFencingTokenDigestV1(
+    input.request.attempt.fencingToken,
+  );
+  if (
+    input.request.requestDigest !== expectedDigest
+    || input.request.requestId !== expectedRequestId
+    || input.request.attempt.fencingTokenDigest !== expectedFenceDigest
+  ) {
+    throw new Error("Hosted lifecycle request identity is invalid.");
+  }
 }
 
 async function parseControlReceiptResponse<T extends {
@@ -1440,6 +1580,253 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
       }
       return parsed.data;
+    },
+
+    async claimHostedRunControlV1(input) {
+      const runnerId = HostedClaimV1Schema.shape.runnerId.parse(input.runnerId);
+      const request = HostedClaimRequestV1Schema.parse(input.request);
+      const action = "claimHostedRunControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(runnerId)}/hosted-claims`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      assertControlResponseBoundary(response, action, trustedControlOrigin);
+      if (response.status === 204) return null;
+
+      const body = await parseControlJson(response, action, trustedControlOrigin);
+      if (response.status !== 200) {
+        const parsedError = ControlErrorHttpResponseV1Schema.safeParse({
+          status: response.status,
+          body,
+        });
+        if (!parsedError.success) {
+          throw new OpenTagClientHttpError(
+            action,
+            response.status,
+            "invalid_control_v1_response",
+          );
+        }
+        throwControlV1Error(response, body, action, request.requestId);
+      }
+
+      const parsed = HostedClaimV1Schema.safeParse(body);
+      if (!parsed.success) {
+        throw new OpenTagClientHttpError(
+          action,
+          response.status,
+          "invalid_control_v1_response",
+        );
+      }
+      const claim = parsed.data;
+      if (
+        claim.runnerId !== runnerId
+        || !verifyHostedClaimExpectedAuthorityV1(request, claim)
+      ) {
+        throw new OpenTagClientHttpError(
+          action,
+          response.status,
+          "response_identity_mismatch",
+        );
+      }
+      if (!(await verifyHostedClaimFencingTokenDigestV1(claim))) {
+        throw new OpenTagClientHttpError(
+          action,
+          response.status,
+          "invalid_control_v1_response",
+        );
+      }
+      const policy = claim.admissionPolicySnapshot;
+      const expectedPolicyPayloadDigest = await computeControlPayloadDigestV1(
+        policy.payload,
+      );
+      const { receiptDigest: _receiptDigest, ...policyReceiptDigestInput } =
+        policy;
+      const expectedPolicyReceiptDigest = await computeControlReceiptDigestV1(
+        policyReceiptDigestInput,
+      );
+      if (
+        !(await verifyHostedAdmissionEnvelopeDigestV1(claim.hostedAdmission))
+        || policy.payloadDigest !== expectedPolicyPayloadDigest
+        || policy.receiptDigest !== expectedPolicyReceiptDigest
+      ) {
+        throw new OpenTagClientHttpError(
+          action,
+          response.status,
+          "invalid_control_v1_response",
+        );
+      }
+      return claim;
+    },
+
+    async heartbeatHostedRunControlV1(input) {
+      const action = "heartbeatHostedRunControlV1";
+      const request = HostedHeartbeatRequestV1Schema.parse(input.request);
+      await validateHostedLifecycleRequest({
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        action: "heartbeat",
+        request,
+      });
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(input.runnerId)}/runs/${encodeURIComponent(input.runId)}/heartbeat`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      return parseHostedLifecycleControlV1Response({
+        response,
+        action,
+        trustedOrigin: trustedControlOrigin,
+        lifecycleAction: "heartbeat",
+        organizationId: input.organizationId,
+        credentialId: input.credentialId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        request,
+      });
+    },
+
+    async markHostedRunRunningControlV1(input) {
+      const action = "markHostedRunRunningControlV1";
+      const request = HostedRunningRequestV1Schema.parse(input.request);
+      await validateHostedLifecycleRequest({
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        action: "running",
+        request,
+      });
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(input.runnerId)}/runs/${encodeURIComponent(input.runId)}/running`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      return parseHostedLifecycleControlV1Response({
+        response,
+        action,
+        trustedOrigin: trustedControlOrigin,
+        lifecycleAction: "running",
+        organizationId: input.organizationId,
+        credentialId: input.credentialId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        request,
+      });
+    },
+
+    async progressHostedRunControlV1(input) {
+      const action = "progressHostedRunControlV1";
+      const request = HostedProgressRequestV1Schema.parse(input.request);
+      await validateHostedLifecycleRequest({
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        action: "progress",
+        request,
+      });
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(input.runnerId)}/runs/${encodeURIComponent(input.runId)}/progress`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      return parseHostedLifecycleControlV1Response({
+        response,
+        action,
+        trustedOrigin: trustedControlOrigin,
+        lifecycleAction: "progress",
+        organizationId: input.organizationId,
+        credentialId: input.credentialId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        request,
+      });
+    },
+
+    async completeHostedRunControlV1(input) {
+      const action = "completeHostedRunControlV1";
+      const request = HostedCompleteRequestV1Schema.parse(input.request);
+      await validateHostedLifecycleRequest({
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        action: "complete",
+        request,
+      });
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(input.runnerId)}/runs/${encodeURIComponent(input.runId)}/complete`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      return parseHostedLifecycleControlV1Response({
+        response,
+        action,
+        trustedOrigin: trustedControlOrigin,
+        lifecycleAction: "complete",
+        organizationId: input.organizationId,
+        credentialId: input.credentialId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        request,
+      });
+    },
+
+    async rejectHostedAttemptStartControlV1(input) {
+      const action = "rejectHostedAttemptStartControlV1";
+      const request = HostedRejectStartRequestV1Schema.parse(input.request);
+      await validateHostedLifecycleRequest({
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        action: "reject-start",
+        request,
+      });
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(input.runnerId)}/runs/${encodeURIComponent(input.runId)}/reject-start`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      return parseHostedLifecycleControlV1Response({
+        response,
+        action,
+        trustedOrigin: trustedControlOrigin,
+        lifecycleAction: "reject-start",
+        organizationId: input.organizationId,
+        credentialId: input.credentialId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        request,
+      });
     },
 
     async registerRunner(input) {

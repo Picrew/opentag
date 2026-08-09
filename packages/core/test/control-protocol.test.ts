@@ -25,12 +25,26 @@ import {
   buildMaterialActionReceiptDigestInputV1,
   buildPermissionRequestDigestInputV1,
   computeMaterialActionFencingTokenDigestV1,
+  computeControlPayloadDigestV1,
+  computeControlReceiptDigestV1,
   computeMaterialActionPayloadDigestV1,
   computeMaterialActionReceiptDigestV1,
+  computeHostedAdmissionEnvelopeDigestV1,
+  computeHostedClaimFencingTokenDigestV1,
+  computeHostedLifecycleOperationIdV1,
+  computeHostedLifecycleRequestDigestV1,
+  computeHostedLifecycleRequestIdV1,
+  computeGitHubIssueCommentSourceIdentityDigestV1,
   computePermissionFencingTokenDigestV1,
   computePermissionRequestDigestV1,
+  GitHubIssueCommentSourceIdentityDigestInputV1Schema,
   HumanPermissionDecisionHttpResponseV1Schema,
   HumanPermissionDecisionRequestV1Schema,
+  HostedAdmissionEnvelopeV1Schema,
+  HostedClaimRequestV1Schema,
+  HostedClaimV1Schema,
+  HostedHeartbeatRequestV1Schema,
+  HostedLifecycleReceiptEnvelopeV1Schema,
   MaterialActionPayloadV1Schema,
   MaterialActionReconcileHttpResponseV1Schema,
   MaterialActionReceiptDigestInputV1Schema,
@@ -61,6 +75,10 @@ import {
   RunnerMaterialActionReconcileRequestV1Schema,
   RunnerRegistrationRequestV1Schema,
   RunnerRegistrationResponseV1Schema,
+  verifyHostedAdmissionEnvelopeDigestV1,
+  verifyHostedClaimExpectedAuthorityV1,
+  verifyHostedClaimFencingTokenDigestV1,
+  verifyHostedLifecycleReceiptV1,
   type CompletionAssessmentReceiptEnvelopeV1,
   type RunnerReadinessReceiptEnvelopeV1,
 } from "../src/control-protocol.js";
@@ -283,6 +301,624 @@ describe("OpenTag Control V1 version and capability negotiation", () => {
     expect(RunnerControlContextResponseV1Schema.safeParse({ ...context, extra: true }).success).toBe(false);
     expect(RunnerControlContextResponseV1Schema.safeParse({ ...context, targets: [...context.targets].reverse() }).success).toBe(false);
     expect(RunnerControlContextResponseV1Schema.safeParse({ ...context, targets: [context.targets[0], context.targets[0]] }).success).toBe(false);
+  });
+});
+
+describe("hosted admission and claim V1 protocol", () => {
+  const hostedClaimCapabilities = [
+    "relay.claim-fence.v1",
+    "relay.hosted-admission.v1",
+    "relay.hosted-claim.v1",
+    "relay.lifecycle.v1",
+    "relay.readiness.v1",
+  ] as const;
+  const sourceIdentityInput = {
+    provider: "github",
+    repository: {
+      providerRepositoryId: "123",
+      owner: "acme",
+      repo: "widget",
+    },
+    sourceThread: {
+      kind: "issue",
+      providerThreadId: "456",
+      number: 42,
+    },
+    sourceEvent: {
+      providerEventId: "789",
+      kind: "issue_comment",
+    },
+    actor: {
+      providerUserId: "1001",
+      login: "octocat",
+    },
+    executionBearingCommentBody: "@opentag fix the failing test",
+  } as const;
+
+  async function hostedAdmission() {
+    const sourceIdentityDigest = await computeGitHubIssueCommentSourceIdentityDigestV1(
+      sourceIdentityInput,
+    );
+    const envelope = {
+      kind: "hosted_admission",
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      requiredCapabilities: ["relay.hosted-admission.v1"],
+      admissionId: "admission_1",
+      operationId: "op_github_delivery_1",
+      organizationId: "org_1",
+      bindingId: "binding_1",
+      bindingSecretVersion: "secret-v3",
+      provider: "github",
+      deliveryId: "provider-delivery-id",
+      deliveryPayloadDigest: digest,
+      sourceIdentityDigest,
+      eventName: "issue_comment",
+      action: "created",
+      repository: sourceIdentityInput.repository,
+      sourceThread: sourceIdentityInput.sourceThread,
+      sourceEvent: sourceIdentityInput.sourceEvent,
+      verifiedActor: {
+        ...sourceIdentityInput.actor,
+        authorization: {
+          decision: "allowed",
+          grantRef: "actor-grant-2",
+          grantVersion: 2,
+          grantDigest: digest,
+        },
+      },
+      projectTarget: {
+        projectTargetId: "target_1",
+        version: 4,
+        digest,
+      },
+      runnerId: "runner_1",
+      admissionPolicySnapshot: {
+        snapshotId: "policy_1",
+        digest: otherDigest,
+      },
+      receivedAt: observedAt,
+      envelopeDigest: digest,
+    } as const;
+    return {
+      ...envelope,
+      envelopeDigest: await computeHostedAdmissionEnvelopeDigestV1(envelope),
+    };
+  }
+
+  function admissionPolicySnapshot() {
+    return {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      receiptId: "policy_receipt_1",
+      organizationId: "org_1",
+      operationId: "op_github_delivery_1",
+      requiredCapabilities: hostedClaimCapabilities,
+      producer: { kind: "cloud", id: "cloud_control" },
+      identity: {
+        namespace: "opentag.control.receipt/admission-policy-snapshot/v1",
+        parts: ["org_1", "run_1", "policy_1"],
+      },
+      observedAt,
+      payloadDigest: digest,
+      receiptDigest: otherDigest,
+      receiptKind: "admission_policy_snapshot",
+      runId: "run_1",
+      payload: {
+        snapshotId: "policy_1",
+        capturedAt: observedAt,
+        tenant: { organizationId: "org_1" },
+        actor: {
+          provider: "github",
+          providerUserId: "1001",
+          login: "octocat",
+          authorizationRef: "actor-grant-2",
+        },
+        target: {
+          projectTargetId: "target_1",
+          bindingId: "binding_1",
+          providerRepositoryId: "123",
+          defaultBranch: "main",
+        },
+        runner: {
+          runnerId: "runner_1",
+          readinessReceiptDigest: digest,
+        },
+        executor: {
+          executorId: "executor_acp",
+          capabilityDigest: otherDigest,
+        },
+        requiredRelayCapabilities: hostedClaimCapabilities,
+        admissionRules: {
+          profile: "github-pr-exact-head/v1",
+          requiredCheckNames: ["test", "typecheck"],
+          mergeRequired: false,
+          humanApprovalRequiredFor: ["merge"],
+        },
+      },
+    } as const;
+  }
+
+  async function hostedClaim() {
+    return {
+      kind: "hosted_claim",
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      requiredCapabilities: hostedClaimCapabilities,
+      requestId: "request_1",
+      operationId: "op_claim_1",
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      runId: "run_1",
+      executorId: "executor_acp",
+      hostedAdmission: await hostedAdmission(),
+      admissionPolicySnapshot: admissionPolicySnapshot(),
+      attempt: {
+        id: "attempt_1",
+        number: 1,
+        epoch: 1,
+        fencingToken: "fence_secret_canary",
+        fencingTokenDigest: publicFenceDigest,
+        leaseExpiresAt: "2026-08-08T00:02:00.000Z",
+      },
+      authority: {
+        organizationId: "org_1",
+        runnerId: "runner_1",
+        runId: "run_1",
+        credentialId: "credential_1",
+        registrationGeneration: 3,
+        credentialGeneration: 2,
+        projectTargetId: "target_1",
+        bindingId: "binding_1",
+        targetBindingDigest: digest,
+        admissionPolicyReceiptId: "policy_receipt_1",
+        admissionPolicySnapshotId: "policy_1",
+        admissionPolicySnapshotDigest: otherDigest,
+        runnerReadinessReceiptId: "readiness_receipt_1",
+        runnerReadinessReceiptDigest: digest,
+        targetReadinessReceiptId: "readiness_receipt_1",
+        targetReadinessReceiptDigest: digest,
+        executorId: "executor_acp",
+        executorCapabilityDigest: otherDigest,
+        attemptId: "attempt_1",
+        attemptNumber: 1,
+        epoch: 1,
+        fencingTokenDigest: publicFenceDigest,
+      },
+    } as const;
+  }
+
+  it("computes and verifies the JCS admission digest without envelopeDigest", async () => {
+    const admission = await hostedAdmission();
+    const { envelopeDigest: _envelopeDigest, ...digestInput } = admission;
+
+    expect(admission.envelopeDigest).toBe(digestCanonical(digestInput));
+    expect(await verifyHostedAdmissionEnvelopeDigestV1(admission)).toBe(true);
+    expect(
+      await verifyHostedAdmissionEnvelopeDigestV1({
+        ...admission,
+        operationId: "op_changed",
+      }),
+    ).toBe(false);
+
+    const pullRequestAdmissionInput = {
+      ...admission,
+      sourceThread: { ...admission.sourceThread, kind: "pull_request" as const },
+    };
+    const pullRequestAdmission = {
+      ...pullRequestAdmissionInput,
+      envelopeDigest: await computeHostedAdmissionEnvelopeDigestV1(
+        pullRequestAdmissionInput,
+      ),
+    };
+    expect(HostedAdmissionEnvelopeV1Schema.safeParse(pullRequestAdmission).success).toBe(true);
+    expect(await verifyHostedAdmissionEnvelopeDigestV1(pullRequestAdmission)).toBe(true);
+    expect(
+      HostedAdmissionEnvelopeV1Schema.safeParse({
+        ...admission,
+        sourceThread: { ...admission.sourceThread, kind: "discussion" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires canonical positive decimal GitHub provider IDs", async () => {
+    const admission = await hostedAdmission();
+    const invalidProviderIds = [
+      "0",
+      "01",
+      "comment:789",
+      " 789",
+      "789 ",
+      "-1",
+      "+1",
+      "1.0",
+      "1".repeat(32),
+    ];
+
+    for (const providerId of invalidProviderIds) {
+      const mutations = [
+        {
+          ...admission,
+          repository: {
+            ...admission.repository,
+            providerRepositoryId: providerId,
+          },
+        },
+        {
+          ...admission,
+          sourceThread: {
+            ...admission.sourceThread,
+            providerThreadId: providerId,
+          },
+        },
+        {
+          ...admission,
+          sourceEvent: {
+            ...admission.sourceEvent,
+            providerEventId: providerId,
+          },
+        },
+        {
+          ...admission,
+          verifiedActor: {
+            ...admission.verifiedActor,
+            providerUserId: providerId,
+          },
+        },
+      ];
+      for (const mutation of mutations) {
+        expect(HostedAdmissionEnvelopeV1Schema.safeParse(mutation).success).toBe(
+          false,
+        );
+      }
+    }
+
+    expect(
+      HostedAdmissionEnvelopeV1Schema.safeParse({
+        ...admission,
+        repository: {
+          ...admission.repository,
+          providerRepositoryId: "1".repeat(31),
+        },
+        sourceThread: {
+          ...admission.sourceThread,
+          providerThreadId: "1",
+        },
+        sourceEvent: {
+          ...admission.sourceEvent,
+          providerEventId: "9",
+        },
+        verifiedActor: {
+          ...admission.verifiedActor,
+          providerUserId: "10",
+        },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("hashes transient GitHub issue-comment semantics without admitting the body", async () => {
+    const sourceIdentityDigest = await computeGitHubIssueCommentSourceIdentityDigestV1(
+      sourceIdentityInput,
+    );
+    expect(sourceIdentityDigest).toBe(
+      digestCanonical(
+        GitHubIssueCommentSourceIdentityDigestInputV1Schema.parse(sourceIdentityInput),
+      ),
+    );
+    expect(
+      await computeGitHubIssueCommentSourceIdentityDigestV1({
+        ...sourceIdentityInput,
+        executionBearingCommentBody: "@opentag do something else",
+      }),
+    ).not.toBe(sourceIdentityDigest);
+    expect(
+      GitHubIssueCommentSourceIdentityDigestInputV1Schema.safeParse({
+        ...sourceIdentityInput,
+        rawPayload: { issue: { body: sourceIdentityInput.executionBearingCommentBody } },
+      }).success,
+    ).toBe(false);
+
+    const admission = await hostedAdmission();
+    expect(
+      HostedAdmissionEnvelopeV1Schema.safeParse({
+        ...admission,
+        executionBearingCommentBody: sourceIdentityInput.executionBearingCommentBody,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires the exact hosted claim capability and expected-authority tuple", () => {
+    const request = {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      requiredCapabilities: hostedClaimCapabilities,
+      requestId: "request_1",
+      operationId: "op_claim_1",
+      expectedAuthority: {
+        credentialId: "credential_1",
+        registrationGeneration: 3,
+        credentialGeneration: 2,
+        runnerReadinessReceiptId: "readiness_receipt_1",
+        runnerReadinessReceiptDigest: digest,
+      },
+    } as const;
+    expect(HostedClaimRequestV1Schema.safeParse(request).success).toBe(true);
+    expect(
+      HostedClaimRequestV1Schema.safeParse({
+        ...request,
+        requiredCapabilities: hostedClaimCapabilities.slice(0, -1),
+      }).success,
+    ).toBe(false);
+    expect(
+      HostedClaimRequestV1Schema.safeParse({
+        ...request,
+        expectedAuthority: { ...request.expectedAuthority, role: "admin" },
+      }).success,
+    ).toBe(false);
+    expect(
+      HostedClaimRequestV1Schema.safeParse({ ...request, idempotencyKey: "parallel" }).success,
+    ).toBe(false);
+  });
+
+  it("links the request CAS authority tuple to the returned claim authority", async () => {
+    const claim = await hostedClaim();
+    const request = {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      requiredCapabilities: hostedClaimCapabilities,
+      requestId: "request_1",
+      operationId: claim.operationId,
+      expectedAuthority: {
+        credentialId: claim.authority.credentialId,
+        registrationGeneration: claim.authority.registrationGeneration,
+        credentialGeneration: claim.authority.credentialGeneration,
+        runnerReadinessReceiptId: claim.authority.runnerReadinessReceiptId,
+        runnerReadinessReceiptDigest: claim.authority.runnerReadinessReceiptDigest,
+      },
+    } as const;
+
+    expect(verifyHostedClaimExpectedAuthorityV1(request, claim)).toBe(true);
+    expect(
+      verifyHostedClaimExpectedAuthorityV1(
+        {
+          ...request,
+          expectedAuthority: {
+            ...request.expectedAuthority,
+            credentialGeneration: request.expectedAuthority.credentialGeneration + 1,
+          },
+        },
+        claim,
+      ),
+    ).toBe(false);
+    expect(
+      verifyHostedClaimExpectedAuthorityV1(
+        { ...request, requestId: "request_other" },
+        claim,
+      ),
+    ).toBe(false);
+    expect(
+      verifyHostedClaimExpectedAuthorityV1(
+        { ...request, operationId: "op_other" },
+        claim,
+      ),
+    ).toBe(false);
+  });
+
+  it("proves the raw hosted claim fence matches both public digests", async () => {
+    const claim = await hostedClaim();
+    expect(await computeHostedClaimFencingTokenDigestV1(claim.attempt.fencingToken)).toBe(
+      publicFenceDigest,
+    );
+    expect(await verifyHostedClaimFencingTokenDigestV1(claim)).toBe(true);
+    expect(
+      await verifyHostedClaimFencingTokenDigestV1({
+        ...claim,
+        attempt: { ...claim.attempt, fencingToken: "different_raw_fence" },
+      }),
+    ).toBe(false);
+  });
+
+  it("derives and verifies strict hosted heartbeat requests and linked receipts", async () => {
+    const requestSeed = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.lifecycle.v1"] as const,
+      requestId: `req_${"0".repeat(64)}`,
+      operationId: `op_${"0".repeat(64)}`,
+      attempt: {
+        attemptId: "attempt_1",
+        attemptNumber: 1,
+        epoch: 1,
+        fencingToken: "raw_fence",
+        fencingTokenDigest: digest,
+      },
+      requestDigest: digest,
+      occurredAt: "2026-08-10T00:00:00.000Z",
+      expectedLeaseExpiresAt: "2026-08-10T00:01:00.000Z",
+    };
+    const requestDigest = await computeHostedLifecycleRequestDigestV1({
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      runId: "run_1",
+      action: "heartbeat",
+      request: requestSeed,
+    });
+    const operationId = computeHostedLifecycleOperationIdV1(requestDigest);
+    const request = HostedHeartbeatRequestV1Schema.parse({
+      ...requestSeed,
+      requestDigest,
+      operationId,
+      requestId: await computeHostedLifecycleRequestIdV1({
+        operationId,
+        requestDigest,
+      }),
+    });
+    const payload = {
+      operation: "heartbeat" as const,
+      occurredAt: request.occurredAt,
+      leaseExpiresAt: "2026-08-10T00:02:00.000Z",
+    };
+    const receiptBase = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      receiptKind: "attempt_lifecycle" as const,
+      receiptId: `lifecycle_${"1".repeat(64)}`,
+      organizationId: "org_1",
+      requestId: request.requestId,
+      operationId: request.operationId,
+      requestDigest: request.requestDigest,
+      requiredCapabilities: ["relay.lifecycle.v1"] as const,
+      producer: {
+        kind: "runner" as const,
+        id: "runner_1",
+        credentialId: "credential_1",
+      },
+      identity: {
+        namespace: "opentag.control.receipt/attempt-lifecycle/v1" as const,
+        parts: [
+          "org_1",
+          "run_1",
+          "attempt_1",
+          "heartbeat",
+          request.operationId,
+        ] as const,
+      },
+      observedAt: "2026-08-10T00:00:01.000Z",
+      payloadDigest: await computeControlPayloadDigestV1(payload),
+      runId: "run_1",
+      attempt: {
+        attemptId: "attempt_1",
+        attemptNumber: 1,
+        epoch: 1,
+        fencingTokenDigest: digest,
+      },
+      payload,
+    };
+    const receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse({
+      ...receiptBase,
+      receiptDigest: await computeControlReceiptDigestV1(receiptBase),
+    });
+    const verification = {
+      receipt,
+      request,
+      action: "heartbeat" as const,
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      runId: "run_1",
+      credentialId: "credential_1",
+    };
+    expect(await verifyHostedLifecycleReceiptV1(verification)).toBe(true);
+    expect(
+      await verifyHostedLifecycleReceiptV1({
+        ...verification,
+        receipt: { ...receipt, requestDigest: otherDigest },
+      }),
+    ).toBe(false);
+    expect(
+      HostedHeartbeatRequestV1Schema.safeParse({
+        ...request,
+        idempotencyKey: "legacy-field",
+      }).success,
+    ).toBe(false);
+    expect(
+      await computeHostedLifecycleRequestDigestV1({
+        ...verification,
+        request: {
+          ...request,
+          attempt: { ...request.attempt, fencingToken: "different_raw_fence" },
+        },
+      }),
+    ).toBe(request.requestDigest);
+  });
+
+  it("accepts only a fully linked, sanitized hosted claim", async () => {
+    const claim = await hostedClaim();
+    expect(HostedClaimV1Schema.safeParse(claim).success).toBe(true);
+
+    for (const forbidden of [
+      { body: "raw comment" },
+      { workspacePath: "/tmp/opentag" },
+      { callbackUri: "https://example.test/callback" },
+      { metadata: { command: "fix" } },
+    ]) {
+      expect(
+        HostedClaimV1Schema.safeParse({
+          ...claim,
+          hostedAdmission: { ...claim.hostedAdmission, ...forbidden },
+        }).success,
+      ).toBe(false);
+    }
+    expect(HostedClaimV1Schema.safeParse({ ...claim, event: { body: "raw" } }).success).toBe(
+      false,
+    );
+  });
+
+  it("rejects mismatched tenant, target, policy, readiness, executor, and attempt identities", async () => {
+    const claim = await hostedClaim();
+    const mismatches = [
+      { ...claim, organizationId: "org_other" },
+      {
+        ...claim,
+        hostedAdmission: {
+          ...claim.hostedAdmission,
+          projectTarget: { ...claim.hostedAdmission.projectTarget, projectTargetId: "target_other" },
+        },
+      },
+      {
+        ...claim,
+        authority: {
+          ...claim.authority,
+          admissionPolicyReceiptId: "policy_receipt_other",
+        },
+      },
+      {
+        ...claim,
+        hostedAdmission: { ...claim.hostedAdmission, bindingId: "binding_other" },
+      },
+      {
+        ...claim,
+        hostedAdmission: {
+          ...claim.hostedAdmission,
+          verifiedActor: {
+            ...claim.hostedAdmission.verifiedActor,
+            providerUserId: "2002",
+          },
+        },
+      },
+      {
+        ...claim,
+        admissionPolicySnapshot: {
+          ...claim.admissionPolicySnapshot,
+          payload: {
+            ...claim.admissionPolicySnapshot.payload,
+            runner: {
+              ...claim.admissionPolicySnapshot.payload.runner,
+              runnerId: "runner_other",
+            },
+          },
+        },
+      },
+      {
+        ...claim,
+        hostedAdmission: {
+          ...claim.hostedAdmission,
+          admissionPolicySnapshot: {
+            ...claim.hostedAdmission.admissionPolicySnapshot,
+            digest,
+          },
+        },
+      },
+      {
+        ...claim,
+        authority: { ...claim.authority, runnerReadinessReceiptDigest: otherDigest },
+      },
+      { ...claim, executorId: "executor_other" },
+      { ...claim, authority: { ...claim.authority, attemptId: "attempt_other" } },
+      { ...claim, attempt: { ...claim.attempt, epoch: 2 } },
+    ];
+    for (const mismatch of mismatches) {
+      expect(HostedClaimV1Schema.safeParse(mismatch).success).toBe(false);
+    }
   });
 });
 
@@ -1026,6 +1662,30 @@ describe("OpenTag Control V1 status semantics", () => {
           },
         }).success,
       ).toBe(true);
+    },
+  );
+
+  it.each(["operation_digest_conflict", "stale_control_authority"] as const)(
+    "accepts hosted claim conflict reason %s",
+    (error) => {
+      const response = {
+        status: 409,
+        body: {
+          schemaVersion: 1,
+          protocolVersion: "1.0",
+          error,
+          message: "The hosted claim authority no longer matches.",
+          requestId: "req_hosted_claim_1",
+        },
+      } as const;
+
+      expect(ControlErrorHttpResponseV1Schema.safeParse(response).success).toBe(true);
+      expect(
+        ControlErrorHttpResponseV1Schema.safeParse({
+          ...response,
+          body: { ...response.body, authority: { credentialId: "credential_1" } },
+        }).success,
+      ).toBe(false);
     },
   );
 
@@ -2020,6 +2680,30 @@ describe("ReceiptEnvelope V1", () => {
     } as const;
 
     expect(AdmissionPolicySnapshotPayloadV1Schema.safeParse(policy).success).toBe(true);
+    for (const providerId of [
+      "0",
+      "01",
+      "github:123",
+      " 123",
+      "123 ",
+      "-1",
+      "+1",
+      "1.0",
+      "1".repeat(32),
+    ]) {
+      expect(
+        AdmissionPolicySnapshotPayloadV1Schema.safeParse({
+          ...policy,
+          actor: { ...policy.actor, providerUserId: providerId },
+        }).success,
+      ).toBe(false);
+      expect(
+        AdmissionPolicySnapshotPayloadV1Schema.safeParse({
+          ...policy,
+          target: { ...policy.target, providerRepositoryId: providerId },
+        }).success,
+      ).toBe(false);
+    }
     expect(
       AdmissionPolicySnapshotPayloadV1Schema.safeParse({
         ...policy,

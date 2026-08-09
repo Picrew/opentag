@@ -8,6 +8,7 @@ export type GitHubIssueCommentInput = {
   apiCommentsUrl: string;
   issueUrl: string;
   issueNumber: number;
+  threadKind?: "issue" | "pull_request";
   owner: string;
   repo: string;
   actorId: number;
@@ -157,6 +158,7 @@ function commandMetadata(command: OpenTagCommand): Record<string, unknown> {
 export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): OpenTagEvent | null {
   const mention = parseOpenTagMention(input.commentBody);
   if (!mention.matched) return null;
+  const threadKind = input.threadKind ?? "issue";
 
   const command = {
     rawText: mention.rawText,
@@ -185,7 +187,7 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
     context: [
       {
         provider: "github",
-        kind: "issue",
+        kind: threadKind,
         uri: input.issueUrl,
         visibility: input.private ? "private" : "public"
       },
@@ -200,7 +202,7 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
     workItem: githubWorkItem({
       owner: input.owner,
       repo: input.repo,
-      kind: "issue",
+      kind: threadKind,
       number: input.issueNumber,
       uri: input.issueUrl
     }),
@@ -214,7 +216,9 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
       repoProvider: "github",
       owner: input.owner,
       repo: input.repo,
-      issueNumber: input.issueNumber,
+      ...(threadKind === "pull_request"
+        ? { pullRequestNumber: input.issueNumber }
+        : { issueNumber: input.issueNumber }),
       ...(input.authorAssociation ? { authorAssociation: input.authorAssociation } : {}),
       ...commandMetadata(command),
       ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),

@@ -9,7 +9,7 @@ import type { OpenTagEvent, OpenTagRun, OpenTagRunResult } from "@opentag/core";
 import { createDispatcherClient, createOpenTagClient } from "@opentag/client";
 import { createDispatcherApp } from "@opentag/dispatcher";
 import { createAcpExecutor, type ExecutorAdapter, type ExecutorRunInput } from "@opentag/runner";
-import { runOneDaemonIteration, type DaemonClient } from "../src/daemon.js";
+import { executeClaimedRun, runOneDaemonIteration, type DaemonClient } from "../src/daemon.js";
 
 const acpFixture = fileURLToPath(new URL("../../runner/test/fixtures/acp-agent.mjs", import.meta.url));
 
@@ -125,6 +125,73 @@ function recordingExecutor(input: {
 }
 
 describe("ACP daemon workspaces", () => {
+  it("executes an externally claimed attempt without claiming and preserves its fence across the lifecycle", async () => {
+    const scratchRoot = join(mkdtempSync(join(tmpdir(), "opentag-claimed-execution-")), "scratch");
+    const authoritativeClaim = {
+      ...claimed({ event: event({ id: "evt_external_claim" }), attemptId: "attempt_external" }),
+      fencingToken: "fence_external"
+    };
+    const claim = vi.fn(async () => authoritativeClaim);
+    const lifecycle: Array<{
+      action: string;
+      runId: string;
+      lease: { attemptId: string; fencingToken: string };
+    }> = [];
+    const runs: ExecutorRunInput[] = [];
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Review Agent",
+      async canRun() { return { ready: true }; },
+      async run(run, sink) {
+        runs.push(run);
+        await sink.emit({
+          type: "executor.progress",
+          message: "working",
+          at: "2026-07-12T00:00:01.000Z"
+        });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return { conclusion: "success", summary: "done" };
+      },
+      async cancel() {}
+    };
+    const record = (action: string, runId: string, lease: { attemptId: string; fencingToken: string }) => {
+      lifecycle.push({ action, runId, lease: { ...lease } });
+    };
+    const client: DaemonClient = {
+      claim,
+      async markRunning(runId, _executorId, lease) { record("markRunning", runId, lease); },
+      async heartbeat(runId, lease) { record("heartbeat", runId, lease); },
+      async progress(runId, lease) { record("progress", runId, lease); },
+      async complete(runId, lease) { record("complete", runId, lease); },
+      async requestActionPermission() { throw new Error("unexpected permission request"); },
+      async resolveActionPermission() { throw new Error("unexpected permission resolution"); },
+      async recordMaterialActionReceipt() { throw new Error("unexpected material action receipt"); }
+    };
+
+    await executeClaimedRun({
+      runnerId: "runner_local",
+      claimed: authoritativeClaim,
+      repositories: [],
+      executors: { reviewer: executor },
+      scratchRoot,
+      heartbeatIntervalMs: 1,
+      client
+    });
+
+    expect(claim).not.toHaveBeenCalled();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.attemptId).toBe("attempt_external");
+    expect(runs[0]?.workspace?.path).toBe(scratchAttemptPath(scratchRoot, "attempt_external"));
+    expect(lifecycle.map((entry) => entry.action)).toEqual(
+      expect.arrayContaining(["markRunning", "heartbeat", "progress", "complete"])
+    );
+    expect(lifecycle.every((entry) => entry.runId === "run_acp")).toBe(true);
+    expect(lifecycle.every((entry) =>
+      entry.lease.attemptId === "attempt_external"
+      && entry.lease.fencingToken === "fence_external"
+    )).toBe(true);
+  });
+
   it("runs a governed ACP mutation end to end and reconciles a duplicate from its trusted receipt", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:", pairingToken: "pair_e2e" });
     const fetchImpl = ((input: string | URL | Request, init?: RequestInit) => app.fetch(new Request(input, init))) as typeof fetch;
@@ -847,23 +914,29 @@ describe("ACP daemon workspaces", () => {
     const runs: ExecutorRunInput[] = [];
     const cancellations: Array<{ runId: string; attemptId: string | undefined }> = [];
     const completed: OpenTagRunResult[] = [];
+    const externalClaim = claimed({ event: event({ id: "evt_stale" }), attemptId: "attempt_A" });
+    const claim = vi.fn(async () => externalClaim);
     const staleProgress = vi.fn(async () => {
       throw new Error('progress failed: 409 {"error":"stale_attempt"}');
     });
+    const client = clientFor({
+      claimed: externalClaim,
+      progress: staleProgress,
+      completed
+    });
+    client.claim = claim;
 
-    await runOneDaemonIteration({
+    await executeClaimedRun({
       runnerId: "runner_local",
+      claimed: externalClaim,
       repositories: [],
       executors: { reviewer: recordingExecutor({ runs, cancellations, emitProgress: true }) },
       scratchRoot: join(mkdtempSync(join(tmpdir(), "opentag-scratch-root-")), "scratch"),
       heartbeatIntervalMs: 0,
-      client: clientFor({
-        claimed: claimed({ event: event({ id: "evt_stale" }), attemptId: "attempt_A" }),
-        progress: staleProgress,
-        completed
-      })
+      client
     });
 
+    expect(claim).not.toHaveBeenCalled();
     expect(cancellations).toEqual([{ runId: "run_acp", attemptId: "attempt_A" }]);
     expect(completed).toEqual([]);
   });
@@ -923,5 +996,389 @@ describe("ACP daemon workspaces", () => {
     expect(serialized).not.toContain(providerToken);
     expect(serialized).not.toContain(activeFence);
     expect(serialized).toContain("[redacted]");
+  });
+
+  it("cancels a hosted executor at its immutable local lease deadline despite unknown heartbeats", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-10T00:00:00.000Z"));
+    const cancellations: Array<{ runId: string; attemptId: string | undefined }> = [];
+    const completed: OpenTagRunResult[] = [];
+    const heartbeat = vi.fn(async () => {
+      throw new Error("transport_outcome_unknown");
+    });
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Review Agent",
+      async canRun() { return { ready: true }; },
+      async run() {
+        resolveStarted();
+        return new Promise<OpenTagRunResult>(() => {});
+      },
+      async cancel(runId, attemptId) {
+        cancellations.push({ runId, attemptId });
+      },
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const execution = executeClaimedRun({
+        runnerId: "runner_local",
+        claimed: claimed({ event: event({ id: "evt_hosted_deadline" }) }),
+        repositories: [],
+        executors: { reviewer: executor },
+        scratchRoot: join(mkdtempSync(join(tmpdir(), "opentag-hosted-deadline-")), "scratch"),
+        heartbeatIntervalMs: 100,
+        hostedExecutionAuthority: {
+          leaseExpiresAt: "2026-08-10T00:00:01.000Z",
+          assertCurrent: async () => true,
+        },
+        client: {
+          ...clientFor({
+            claimed: claimed({ event: event({ id: "evt_hosted_deadline" }) }),
+            completed,
+          }),
+          heartbeat,
+        },
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(999);
+      expect(cancellations).toEqual([]);
+      expect(heartbeat).toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await execution;
+      expect(cancellations).toEqual([
+        { runId: "run_acp", attemptId: "attempt_01J_TEST" },
+      ]);
+      expect(completed).toEqual([]);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("extends the hosted deadline only after a verified heartbeat updates the accepted local lease", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-10T00:00:00.000Z"));
+    const cancellations: Array<{ runId: string; attemptId: string | undefined }> = [];
+    let acceptedLease = "2026-08-10T00:00:01.000Z";
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Review Agent",
+      async canRun() { return { ready: true }; },
+      async run() {
+        resolveStarted();
+        return new Promise<OpenTagRunResult>(() => {});
+      },
+      async cancel(runId, attemptId) {
+        cancellations.push({ runId, attemptId });
+      },
+    };
+    try {
+      const externalClaim = claimed({ event: event({ id: "evt_hosted_renewed" }) });
+      const execution = executeClaimedRun({
+        runnerId: "runner_local",
+        claimed: externalClaim,
+        repositories: [],
+        executors: { reviewer: executor },
+        scratchRoot: join(mkdtempSync(join(tmpdir(), "opentag-hosted-renewed-")), "scratch"),
+        heartbeatIntervalMs: 100,
+        hostedExecutionAuthority: {
+          leaseExpiresAt: acceptedLease,
+          assertCurrent: async () => true,
+          readAcceptedLeaseExpiresAt: async () => acceptedLease,
+        },
+        client: {
+          ...clientFor({ claimed: externalClaim, completed: [] }),
+          heartbeat: async () => {
+            acceptedLease = "2026-08-10T00:00:02.000Z";
+          },
+        },
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(cancellations).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await execution;
+      expect(cancellations).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never revives a hosted executor when a heartbeat response arrives after the old deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-10T00:00:00.000Z"));
+    const cancellations: Array<{ runId: string; attemptId: string | undefined }> = [];
+    let acceptedLease = "2026-08-10T00:00:01.000Z";
+    let resolveHeartbeat!: () => void;
+    const heartbeatResponse = new Promise<void>((resolve) => {
+      resolveHeartbeat = resolve;
+    });
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Review Agent",
+      async canRun() { return { ready: true }; },
+      async run() {
+        resolveStarted();
+        return new Promise<OpenTagRunResult>(() => {});
+      },
+      async cancel(runId, attemptId) {
+        cancellations.push({ runId, attemptId });
+      },
+    };
+    try {
+      const externalClaim = claimed({ event: event({ id: "evt_hosted_late_renewal" }) });
+      const execution = executeClaimedRun({
+        runnerId: "runner_local",
+        claimed: externalClaim,
+        repositories: [],
+        executors: { reviewer: executor },
+        scratchRoot: join(mkdtempSync(join(tmpdir(), "opentag-hosted-late-renewal-")), "scratch"),
+        heartbeatIntervalMs: 100,
+        hostedExecutionAuthority: {
+          leaseExpiresAt: acceptedLease,
+          assertCurrent: async () => true,
+          readAcceptedLeaseExpiresAt: async () => acceptedLease,
+        },
+        client: {
+          ...clientFor({ claimed: externalClaim, completed: [] }),
+          heartbeat: async () => heartbeatResponse,
+        },
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(cancellations).toHaveLength(1);
+      acceptedLease = "2026-08-10T00:00:05.000Z";
+      resolveHeartbeat();
+      await execution;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(cancellations).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("denies hosted permission and material callbacks after the local lease deadline without Cloud calls", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-10T00:00:00.000Z"));
+    const cancellations: Array<{ runId: string; attemptId: string | undefined }> = [];
+    let permissionResolver: ExecutorRunInput["permissionResolver"];
+    let materialActionReporter: ExecutorRunInput["materialActionReporter"];
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Review Agent",
+      async canRun() { return { ready: true }; },
+      async run(run) {
+        permissionResolver = run.permissionResolver;
+        materialActionReporter = run.materialActionReporter;
+        resolveStarted();
+        return new Promise<OpenTagRunResult>(() => {});
+      },
+      async cancel(runId, attemptId) {
+        cancellations.push({ runId, attemptId });
+      },
+    };
+    const requestPermission = vi.fn<DaemonClient["requestActionPermission"]>();
+    const resolvePermission = vi.fn<DaemonClient["resolveActionPermission"]>();
+    const recordMaterial = vi.fn<DaemonClient["recordMaterialActionReceipt"]>();
+    try {
+      const externalClaim = claimed({ event: event({ id: "evt_hosted_guard", permissions: [] }) });
+      const execution = executeClaimedRun({
+        runnerId: "runner_local",
+        claimed: externalClaim,
+        repositories: [],
+        executors: { reviewer: executor },
+        scratchRoot: join(mkdtempSync(join(tmpdir(), "opentag-hosted-guard-")), "scratch"),
+        heartbeatIntervalMs: 0,
+        hostedExecutionAuthority: {
+          leaseExpiresAt: "2026-08-10T00:00:01.000Z",
+          assertCurrent: async () => true,
+        },
+        client: {
+          ...clientFor({ claimed: externalClaim, completed: [] }),
+          requestActionPermission: requestPermission,
+          resolveActionPermission: resolvePermission,
+          recordMaterialActionReceipt: recordMaterial,
+        },
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(1_000);
+      await execution;
+      await expect(permissionResolver?.({
+        toolCallId: "tool_expired",
+        title: "Publish",
+        provider: "acp",
+        permissionScopes: ["report:publish"],
+      })).resolves.toMatchObject({ decision: "deny" });
+      await expect(materialActionReporter?.({
+        actionId: "action_expired",
+        toolCallId: "tool_expired",
+        provider: "acp",
+        receiptRef: "acp:expired",
+        outcome: "unknown",
+      })).rejects.toThrow("hosted_execution_authority_expired");
+      expect(requestPermission).not.toHaveBeenCalled();
+      expect(resolvePermission).not.toHaveBeenCalled();
+      expect(recordMaterial).not.toHaveBeenCalled();
+      expect(cancellations).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("latches hosted authority revocation when the execution marker becomes stale", async () => {
+    const cancellations: Array<{ runId: string; attemptId: string | undefined }> = [];
+    const requestPermission = vi.fn<DaemonClient["requestActionPermission"]>();
+    const recordMaterial = vi.fn<DaemonClient["recordMaterialActionReceipt"]>();
+    const current = vi.fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Review Agent",
+      async canRun() { return { ready: true }; },
+      async run(run) {
+        await expect(run.permissionResolver?.({
+          toolCallId: "tool_superseded",
+          title: "Publish",
+          provider: "acp",
+          permissionScopes: ["report:publish"],
+        })).resolves.toMatchObject({ decision: "deny" });
+        await expect(run.materialActionReporter?.({
+          actionId: "action_superseded",
+          toolCallId: "tool_superseded",
+          provider: "acp",
+          receiptRef: "acp:superseded",
+          outcome: "unknown",
+        })).rejects.toThrow("hosted_execution_authority_expired");
+        return { conclusion: "success", summary: "must not be committed" };
+      },
+      async cancel(runId, attemptId) {
+        cancellations.push({ runId, attemptId });
+        throw new Error("cancel_race");
+      },
+    };
+    const externalClaim = claimed({ event: event({ id: "evt_hosted_superseded", permissions: [] }) });
+    const completed: OpenTagRunResult[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await executeClaimedRun({
+        runnerId: "runner_local",
+        claimed: externalClaim,
+        repositories: [],
+        executors: { reviewer: executor },
+        scratchRoot: join(mkdtempSync(join(tmpdir(), "opentag-hosted-superseded-")), "scratch"),
+        heartbeatIntervalMs: 0,
+        hostedExecutionAuthority: {
+          leaseExpiresAt: "2099-08-10T00:00:00.000Z",
+          assertCurrent: current,
+        },
+        client: {
+          ...clientFor({ claimed: externalClaim, completed }),
+          requestActionPermission: requestPermission,
+          recordMaterialActionReceipt: recordMaterial,
+        },
+      });
+    } finally {
+      warn.mockRestore();
+    }
+    expect(requestPermission).not.toHaveBeenCalled();
+    expect(recordMaterial).not.toHaveBeenCalled();
+    expect(current).toHaveBeenCalledTimes(2);
+    expect(cancellations).toEqual([
+      { runId: "run_acp", attemptId: "attempt_01J_TEST" },
+    ]);
+    expect(completed).toEqual([]);
+  });
+
+  it("allows hosted permission and material reporting while the local lease and start marker are current", async () => {
+    const completed: OpenTagRunResult[] = [];
+    const current = vi.fn(async () => true);
+    const activeAction = {
+        id: "action_active",
+        runId: "run_acp",
+        attemptId: "attempt_01J_TEST",
+        actionFamily: "publish",
+        capability: "publish",
+        scope: { permissionScopes: ["report:publish"] },
+        target: { title: "Publish" },
+        riskTier: "high" as const,
+        status: "authorized" as const,
+        idempotencyKey: "action:active",
+        attemptFenceDigest: "digest",
+        createdAt: "2026-08-10T00:00:00.000Z",
+        updatedAt: "2026-08-10T00:00:00.000Z",
+    };
+    const requestPermission = vi.fn(async () => ({
+      state: "authorized" as const,
+      decision: "allow_run" as const,
+      action: activeAction,
+    }));
+    const recordMaterial = vi.fn(async (_runId, _lease, _actionId, receipt) => ({
+      state: "reconciled" as const,
+      decision: "deny" as const,
+      action: { ...activeAction, status: "succeeded" as const, receipt },
+      receipt,
+    }));
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Review Agent",
+      async canRun() { return { ready: true }; },
+      async run(run) {
+        await expect(run.permissionResolver?.({
+          toolCallId: "tool_active",
+          title: "Publish",
+          provider: "acp",
+          permissionScopes: ["report:publish"],
+        })).resolves.toMatchObject({ decision: "allow_run" });
+        await run.materialActionReporter?.({
+          actionId: "action_active",
+          toolCallId: "tool_active",
+          provider: "acp",
+          receiptRef: "acp:active",
+          outcome: "succeeded",
+        });
+        return { conclusion: "success", summary: "done" };
+      },
+      async cancel() {},
+    };
+    const externalClaim = claimed({ event: event({ id: "evt_hosted_active", permissions: [] }) });
+    await executeClaimedRun({
+      runnerId: "runner_local",
+      claimed: externalClaim,
+      repositories: [],
+      executors: { reviewer: executor },
+      scratchRoot: join(mkdtempSync(join(tmpdir(), "opentag-hosted-active-")), "scratch"),
+      heartbeatIntervalMs: 0,
+      hostedExecutionAuthority: {
+        leaseExpiresAt: "2099-08-10T00:00:00.000Z",
+        assertCurrent: current,
+      },
+      client: {
+        ...clientFor({ claimed: externalClaim, completed }),
+        requestActionPermission: requestPermission,
+        recordMaterialActionReceipt: recordMaterial,
+      },
+    });
+    expect(requestPermission).toHaveBeenCalledTimes(1);
+    expect(recordMaterial).toHaveBeenCalledTimes(1);
+    expect(current.mock.calls.length).toBeGreaterThanOrEqual(5);
+    expect(completed).toEqual([{ conclusion: "success", summary: "done" }]);
   });
 });

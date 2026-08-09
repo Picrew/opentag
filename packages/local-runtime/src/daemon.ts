@@ -164,7 +164,8 @@ function runNoLongerClaimed(error: unknown): boolean {
 type ExecutorRunOutcome =
   | { kind: "result"; result: OpenTagRunResult }
   | { kind: "error"; error: unknown }
-  | { kind: "timeout" };
+  | { kind: "timeout" }
+  | { kind: "hosted_lease_expired" };
 
 function pullRequestPreparationFailureResult(result: OpenTagRunResult, error: unknown): OpenTagRunResult {
   return {
@@ -221,6 +222,22 @@ export type LegacyDaemonIterationInput = {
   client: DaemonClient;
 };
 
+export type ClaimedRunExecutionClient = Omit<DaemonClient, "claim">;
+
+export type ClaimedRunExecutionInput = Omit<
+  LegacyDaemonIterationInput,
+  "mode" | "client"
+> & {
+  claimed: ClaimedRun;
+  client: ClaimedRunExecutionClient;
+  hostedExecutionAuthority?: {
+    leaseExpiresAt: string;
+    assertCurrent(): Promise<boolean>;
+    readAcceptedLeaseExpiresAt?(): Promise<string | null>;
+    now?: () => Date;
+  };
+};
+
 export async function runOneDaemonIteration(
   input: LegacyDaemonIterationInput
 ): Promise<boolean> {
@@ -237,6 +254,24 @@ export async function runOneDaemonIteration(
   }
   const claimed = await input.client.claim();
   if (!claimed) return false;
+  const { mode: _mode, ...executionInput } = input;
+  return executeClaimedRun({
+    ...executionInput,
+    claimed,
+  });
+}
+
+/**
+ * Executes one already-claimed Attempt without owning claim authority.
+ *
+ * The caller supplies the authoritative Run, Attempt ID, and fencing token.
+ * This helper only consumes those values through the claim-less lifecycle
+ * client and never allocates or recovers an Attempt itself.
+ */
+export async function executeClaimedRun(
+  input: ClaimedRunExecutionInput
+): Promise<boolean> {
+  const { claimed } = input;
   const lease: AttemptLease = { attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
   const runId = claimed.run.id;
 
@@ -440,22 +475,79 @@ export async function runOneDaemonIteration(
   let heartbeatHandle: ReturnType<typeof setInterval> | undefined;
   let heartbeatInFlight: Promise<void> | undefined;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let hostedLeaseDeadlineHandle: ReturnType<typeof setTimeout> | undefined;
   let cancellationDetected = false;
   let cancelPromise: Promise<void> | undefined;
-  function requestExecutorCancel(error: unknown): void {
-    if (!runNoLongerClaimed(error)) {
-      console.warn(`OpenTag heartbeat failed for ${runId}:`, error);
-      return;
-    }
+  const hostedAuthority = input.hostedExecutionAuthority;
+  const hostedClock = hostedAuthority?.now ?? (() => new Date());
+  let hostedLeaseDeadline = hostedAuthority
+    ? Date.parse(hostedAuthority.leaseExpiresAt)
+    : undefined;
+  let hostedLeaseRevoked = false;
+  let armHostedLeaseDeadline: (() => void) | undefined;
+  if (hostedAuthority && !Number.isFinite(hostedLeaseDeadline)) {
+    throw new Error("hosted_execution_lease_deadline_invalid");
+  }
+  function beginExecutorCancellation(): void {
     cancellationDetected = true;
     cancelPromise ??= activeExecutor.cancel(runId, attemptId).catch((cancelError: unknown) => {
       console.warn(`OpenTag executor cancellation failed for ${runId}:`, cancelError);
     });
   }
+  function revokeHostedExecutionAuthority(): void {
+    hostedLeaseRevoked = true;
+    beginExecutorCancellation();
+  }
+  function requestExecutorCancel(error: unknown): void {
+    if (!runNoLongerClaimed(error)) {
+      console.warn(`OpenTag heartbeat failed for ${runId}:`, error);
+      return;
+    }
+    revokeHostedExecutionAuthority();
+  }
+  async function hostedExecutionIsCurrent(): Promise<boolean> {
+    if (!hostedAuthority || hostedLeaseDeadline === undefined) return true;
+    if (hostedLeaseRevoked || hostedClock().getTime() >= hostedLeaseDeadline) {
+      revokeHostedExecutionAuthority();
+      return false;
+    }
+    try {
+      if (!(await hostedAuthority.assertCurrent())) {
+        revokeHostedExecutionAuthority();
+        return false;
+      }
+    } catch {
+      revokeHostedExecutionAuthority();
+      return false;
+    }
+    if (hostedLeaseRevoked || hostedClock().getTime() >= hostedLeaseDeadline) {
+      revokeHostedExecutionAuthority();
+      return false;
+    }
+    return true;
+  }
+  if (!(await hostedExecutionIsCurrent())) {
+    if (cancelPromise) await cancelPromise;
+    return true;
+  }
   if (heartbeatIntervalMs > 0) {
     heartbeatHandle = setInterval(() => {
       if (heartbeatInFlight) return;
       heartbeatInFlight = input.client.heartbeat(runId, lease)
+        .then(async () => {
+          const acceptedLeaseExpiresAt = await hostedAuthority
+            ?.readAcceptedLeaseExpiresAt?.();
+          if (!acceptedLeaseExpiresAt || hostedLeaseRevoked) return;
+          const acceptedDeadline = Date.parse(acceptedLeaseExpiresAt);
+          if (
+            Number.isFinite(acceptedDeadline)
+            && hostedLeaseDeadline !== undefined
+            && acceptedDeadline > hostedLeaseDeadline
+          ) {
+            hostedLeaseDeadline = acceptedDeadline;
+            armHostedLeaseDeadline?.();
+          }
+        })
         .catch(requestExecutorCancel)
         .finally(() => {
           heartbeatInFlight = undefined;
@@ -475,6 +567,13 @@ export async function runOneDaemonIteration(
         ...(claimed.run.contextPacket ? { contextPacket: claimed.run.contextPacket } : {}),
         permissions: claimed.event.permissions,
         permissionResolver: async (request) => {
+          const deniedActionId = `hosted_denied_${createHash("sha256")
+            .update(`${runId}:${attemptId}:${request.toolCallId}`)
+            .digest("hex")
+            .slice(0, 24)}`;
+          if (!(await hostedExecutionIsCurrent())) {
+            return { actionId: deniedActionId, decision: "deny" as const };
+          }
           let resolution = await input.client.requestActionPermission(runId, lease, {
             toolCallId: request.toolCallId,
             title: request.title,
@@ -492,12 +591,18 @@ export async function runOneDaemonIteration(
           });
           while (resolution.state === "waiting") {
             await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+            if (!(await hostedExecutionIsCurrent())) {
+              return { actionId: resolution.action.id, decision: "deny" as const };
+            }
             try {
               resolution = await input.client.resolveActionPermission(runId, lease, resolution.action.id);
             } catch (error) {
               if (runNoLongerClaimed(error)) return { actionId: resolution.action.id, decision: "deny" as const };
               throw error;
             }
+          }
+          if (!(await hostedExecutionIsCurrent())) {
+            return { actionId: resolution.action.id, decision: "deny" as const };
           }
           if (resolution.state === "authorized") {
             return {
@@ -517,6 +622,9 @@ export async function runOneDaemonIteration(
           return { actionId: resolution.action.id, decision: "deny" as const };
         },
         materialActionReporter: async (report) => {
+          if (!(await hostedExecutionIsCurrent())) {
+            throw new Error("hosted_execution_authority_expired");
+          }
           let trustedReceiptPromise = trustedReceiptsByActionId.get(report.actionId);
           if (!trustedReceiptPromise && input.trustedMaterialActionReceipt) {
             const createdReceiptPromise = input.trustedMaterialActionReceipt({ runId, attemptId: lease.attemptId, report });
@@ -524,6 +632,9 @@ export async function runOneDaemonIteration(
             trustedReceiptPromise = createdReceiptPromise;
           }
           const trustedReceipt = await trustedReceiptPromise;
+          if (!(await hostedExecutionIsCurrent())) {
+            throw new Error("hosted_execution_authority_expired");
+          }
           await input.client.recordMaterialActionReceipt(runId, lease, report.actionId, trustedReceipt ?? {
             id: `receipt_${createHash("sha256").update(`${report.actionId}:${report.receiptRef}`).digest("hex").slice(0, 24)}`,
             actionId: report.actionId,
@@ -575,14 +686,54 @@ export async function runOneDaemonIteration(
           timeoutHandle = setTimeout(() => resolve({ kind: "timeout" }), runTimeoutMs);
         })
       : undefined;
+  const hostedLeaseDeadlinePromise =
+    hostedAuthority && hostedLeaseDeadline !== undefined
+      ? new Promise<ExecutorRunOutcome>((resolveDeadline) => {
+          const armDeadline = () => {
+            if (hostedLeaseRevoked) return;
+            if (hostedLeaseDeadlineHandle) {
+              clearTimeout(hostedLeaseDeadlineHandle);
+              hostedLeaseDeadlineHandle = undefined;
+            }
+            const currentDeadline = hostedLeaseDeadline;
+            if (currentDeadline === undefined) return;
+            const remainingMs = currentDeadline - hostedClock().getTime();
+            if (remainingMs <= 0) {
+              hostedLeaseRevoked = true;
+              beginExecutorCancellation();
+              resolveDeadline({ kind: "hosted_lease_expired" });
+              return;
+            }
+            hostedLeaseDeadlineHandle = setTimeout(
+              armDeadline,
+              Math.min(remainingMs, 2_147_483_647),
+            );
+          };
+          armHostedLeaseDeadline = armDeadline;
+          armDeadline();
+        })
+      : undefined;
 
   let executorOutcome: ExecutorRunOutcome;
   try {
-    executorOutcome = await (timeoutPromise ? Promise.race([executorRunPromise, timeoutPromise]) : executorRunPromise);
+    const competingOutcomes = [
+      executorRunPromise,
+      ...(timeoutPromise ? [timeoutPromise] : []),
+      ...(hostedLeaseDeadlinePromise ? [hostedLeaseDeadlinePromise] : []),
+    ];
+    executorOutcome = await (competingOutcomes.length === 1
+      ? executorRunPromise
+      : Promise.race(competingOutcomes));
   } finally {
     if (heartbeatHandle) clearInterval(heartbeatHandle);
     if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (hostedLeaseDeadlineHandle) clearTimeout(hostedLeaseDeadlineHandle);
     if (heartbeatInFlight) await heartbeatInFlight;
+  }
+
+  if (executorOutcome.kind === "hosted_lease_expired") {
+    if (cancelPromise) await cancelPromise;
+    return true;
   }
 
   if (executorOutcome.kind === "timeout") {
@@ -598,6 +749,9 @@ export async function runOneDaemonIteration(
       );
     });
     await cancelPromise;
+    if (!(await hostedExecutionIsCurrent())) {
+      return true;
+    }
     try {
       await input.client.complete(
         runId,
@@ -621,6 +775,10 @@ export async function runOneDaemonIteration(
       if (cancelPromise) await cancelPromise;
       return true;
     }
+    if (!(await hostedExecutionIsCurrent())) {
+      if (cancelPromise) await cancelPromise;
+      return true;
+    }
     try {
       await input.client.complete(
         runId,
@@ -641,6 +799,10 @@ export async function runOneDaemonIteration(
   if (cancellationDetected) {
     return true;
   }
+  if (!(await hostedExecutionIsCurrent())) {
+    if (cancelPromise) await cancelPromise;
+    return true;
+  }
 
   const executorResult = sanitizeCredentialLikeValue(executorOutcome.result, {
     secrets: [lease.fencingToken]
@@ -654,13 +816,24 @@ export async function runOneDaemonIteration(
           event: claimed.event,
           binding,
           result: executorResult,
-          options: input.pullRequestOptions ?? {}
+          options: input.pullRequestOptions ?? {},
+          ...(hostedAuthority
+            ? { assertExecutionCurrent: hostedExecutionIsCurrent }
+            : {})
         })
       : executorResult;
   } catch (error) {
+    if (!(await hostedExecutionIsCurrent())) {
+      if (cancelPromise) await cancelPromise;
+      return true;
+    }
     result = sanitizeCredentialLikeValue(pullRequestPreparationFailureResult(executorResult, error), {
       secrets: [lease.fencingToken]
     });
+  }
+  if (!(await hostedExecutionIsCurrent())) {
+    if (cancelPromise) await cancelPromise;
+    return true;
   }
   try {
     await input.client.complete(runId, lease, result);

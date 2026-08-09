@@ -163,6 +163,8 @@ export function createDaemonRuntimeInput(
       config,
       databasePath: options.databasePath,
       executors,
+      ...(security ? { security } : {}),
+      ...(pullRequestOptions ? { pullRequestOptions } : {}),
     });
     if (!controlLoop) {
       throw new Error("Hosted Control V1 sidecar could not be created.");

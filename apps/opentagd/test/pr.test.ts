@@ -108,6 +108,50 @@ describe("maybeCreatePullRequest", () => {
     });
   });
 
+  it("rechecks execution authority before each pull-request materialization step", async () => {
+    const commands: string[] = [];
+    const requests: string[] = [];
+    const authorityChecks = [true, true, false];
+
+    await expect(maybeCreatePullRequest({
+      run,
+      executorCapability: { sourceControl: "daemon_managed" },
+      event,
+      binding: {
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        checkoutPath: "/tmp/demo",
+        baseBranch: "main",
+        pushRemote: "origin"
+      },
+      result,
+      assertExecutionCurrent: async () => authorityChecks.shift() ?? false,
+      options: {
+        githubToken: "ghs_test",
+        allowAutoCreatePullRequest: true,
+        commandRunner: {
+          async run(command, args) {
+            commands.push(`${command} ${args.join(" ")}`);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+        },
+        fetchImpl: (async (url) => {
+          requests.push(String(url));
+          return Response.json({ html_url: "https://github.com/acme/demo/pull/1" });
+        }) as typeof fetch
+      }
+    })).rejects.toThrow("execution_authority_expired");
+
+    expect(authorityChecks).toEqual([]);
+    expect(commands).toEqual([
+      "git add -- src/demo.ts",
+      "git commit -m OpenTag run run_1",
+      "git push -u origin opentag/run_1"
+    ]);
+    expect(requests).toEqual([]);
+  });
+
   it("leaves the result unchanged without a GitHub token", async () => {
     await expect(
       maybeCreatePullRequest({

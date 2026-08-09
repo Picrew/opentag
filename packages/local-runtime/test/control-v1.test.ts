@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { RunnerReadinessReceiptEnvelopeV1Schema } from "@opentag/core";
 import { serveDaemon, type DaemonClient } from "../src/daemon.js";
-import { assertRunnerControlContextRegistrationV1, buildRunnerReadinessReceipt, isRunnerControlContextFreshV1, pumpControlPlaneProjections, type ControlPlaneProjectionOutboxEntry, type ControlProjectionClient, type ControlProjectionRepository } from "../src/control-v1.js";
+import { assertHostedClaimCurrentAuthorityV1, assertRunnerControlContextRegistrationV1, buildHostedClaimRequestV1, buildHostedCompletionMetadataForControlV1, buildHostedProgressMetadataForControlV1, buildRunnerReadinessReceipt, createHostedControlLoop, isRunnerControlContextFreshV1, pumpControlPlaneProjections, type ControlPlaneProjectionOutboxEntry, type ControlProjectionClient, type ControlProjectionRepository } from "../src/control-v1.js";
 
 const now = new Date("2026-08-09T00:00:00.000Z");
 
@@ -73,6 +73,339 @@ function harness(entry: ControlPlaneProjectionOutboxEntry) {
 }
 
 describe("Control V1 projection pump", () => {
+  it("keeps raw executor progress and completion evidence out of Cloud lifecycle metadata", async () => {
+    const secret = "ghp_secret /Users/alice/private/repo/src/token.ts";
+    const progress = await buildHostedProgressMetadataForControlV1({
+      at: now.toISOString(),
+      message: secret,
+      type: "tool_output",
+    } as never);
+    expect(progress.progressId).toMatch(/^progress_[0-9a-f]{64}$/u);
+    expect(progress.progressDigest).toMatch(/^sha256:[0-9a-f]{64}$/u);
+    const completion = await buildHostedCompletionMetadataForControlV1({
+      conclusion: "failure",
+      summary: secret,
+      changedFiles: ["/Users/alice/private/repo/src/token.ts"],
+      artifacts: [{ title: secret, uri: "local://artifact", summary: secret }],
+      verification: [{ command: secret, outcome: "failed", excerpt: secret }],
+    });
+    expect(completion).toMatchObject({
+      conclusion: "failure",
+      reasonCode: "executor_failure",
+    });
+    expect(completion.resultDigest).toMatch(/^sha256:[0-9a-f]{64}$/u);
+    expect(completion.artifactDigests).toHaveLength(1);
+    expect(completion.evidenceDigests).toHaveLength(1);
+    const serialized = JSON.stringify({ progress, completion });
+    expect(serialized).not.toContain("ghp_secret");
+    expect(serialized).not.toContain("/Users/alice");
+    expect(serialized).not.toContain("local://artifact");
+  });
+
+  it("accepts fresh readiness before a strict hosted claim and treats 204 as no work", async () => {
+    const events: string[] = [];
+    const context = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const,
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      credentialId: "credential_1",
+      registrationGeneration: 1,
+      credentialGeneration: 1,
+      capabilities: [
+        "relay.claim-fence.v1",
+        "relay.hosted-admission.v1",
+        "relay.hosted-claim.v1",
+        "relay.lifecycle.v1",
+        "relay.readiness.v1",
+      ] as const,
+      targets: [],
+      observedAt: now.toISOString(),
+    };
+    const client = {
+      getRunnerControlContextV1: vi.fn(async () => {
+        events.push("context");
+        return context;
+      }),
+      reportRunnerReadinessControlV1: vi.fn(async (receipt) => {
+        events.push("readiness");
+        return { status: 201 as const, replayed: false as const, outcome: "accepted" as const, receipt };
+      }),
+      claimHostedRunControlV1: vi.fn()
+        .mockImplementationOnce(async () => {
+          events.push("claim");
+          throw new Error("transport_outcome_unknown");
+        })
+        .mockImplementationOnce(async () => {
+        events.push("claim");
+        return null;
+        }),
+    } as never;
+    let pending: { operationId: string; requestId: string; request: unknown } | null = null;
+    const repo = {
+      getHostedAssignedRunForRecovery: vi.fn(async () => null),
+      getHostedClaimOperationForRetry: vi.fn(async () => pending),
+      beginHostedClaimOperation: vi.fn(async ({ request }) => {
+        events.push("journal");
+        pending = {
+          operationId: request.operationId,
+          requestId: request.requestId,
+          request,
+        };
+        return { outcome: "created" as const, operation: pending };
+      }),
+      acknowledgeHostedClaimEmpty: vi.fn(async () => {
+        events.push("empty");
+      }),
+    } as never;
+    const loop = createHostedControlLoop({
+      config: {
+        runnerId: "runner_1",
+        dispatcherUrl: "https://control.example",
+        runnerToken: "runtime_secret",
+        githubToken: "github_secret",
+        repositories: [],
+        agents: {},
+        controlRegistration: {
+          kind: "hosted_control_v1",
+          state: "paired",
+          operationId: "pair_1",
+          registration: {
+            schemaVersion: 1,
+            protocolVersion: "1.0",
+            organizationId: "org_1",
+            runnerId: "runner_1",
+            credentialId: "credential_1",
+            registrationGeneration: 1,
+            credentialGeneration: 1,
+            credentialPurpose: "runtime",
+            createdAt: now.toISOString(),
+          },
+        },
+      } as never,
+      databasePath: ":memory:",
+      executors: {},
+      now: () => now,
+      controlClient: client,
+      governanceStore: { repo, close: vi.fn() },
+      executeClaimedRunImpl: vi.fn() as never,
+    });
+    await expect(loop?.beforeIteration()).rejects.toThrow("transport_outcome_unknown");
+    const firstRequest = (client.claimHostedRunControlV1 as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].request;
+    await expect(loop?.beforeIteration()).resolves.toBe(false);
+    const secondRequest = (client.claimHostedRunControlV1 as ReturnType<typeof vi.fn>).mock.calls[1]?.[0].request;
+    expect(events).toEqual([
+      "context",
+      "readiness",
+      "journal",
+      "claim",
+      "context",
+      "claim",
+      "empty",
+    ]);
+    expect(firstRequest).toEqual(secondRequest);
+    expect(client.reportRunnerReadinessControlV1).toHaveBeenCalledTimes(1);
+    expect(repo.beginHostedClaimOperation).toHaveBeenCalledTimes(1);
+    expect(repo.acknowledgeHostedClaimEmpty).toHaveBeenCalledTimes(1);
+    await loop?.close();
+  });
+
+  it("replays an uncertain hosted heartbeat and renews again only from the accepted local lease", async () => {
+    const repository = {
+      provider: "github",
+      owner: "acme",
+      repo: "widget",
+      checkoutPath: process.cwd(),
+      defaultExecutor: "reviewer",
+      baseBranch: "main",
+      pushRemote: "origin",
+      keepWorktree: "on_failure" as const,
+    };
+    const executor = {
+      id: "reviewer",
+      displayName: "Review Agent",
+      capability: { id: "reviewer", protocol: "acp" },
+      canRun: vi.fn(async () => ({ ready: true })),
+    } as never;
+    const context = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const,
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      credentialId: "credential_1",
+      registrationGeneration: 3,
+      credentialGeneration: 2,
+      capabilities: [
+        "relay.claim-fence.v1",
+        "relay.hosted-admission.v1",
+        "relay.hosted-claim.v1",
+        "relay.lifecycle.v1",
+        "relay.readiness.v1",
+      ] as const,
+      targets: [{
+        projectTargetId: "target_1",
+        bindingDigest: `sha256:${"a".repeat(64)}`,
+        provider: "github",
+        owner: "acme",
+        repo: "widget",
+        defaultExecutor: "reviewer",
+        defaultBranch: "main",
+      }],
+      observedAt: now.toISOString(),
+    };
+    const readiness = await buildRunnerReadinessReceipt({
+      context,
+      executors: { reviewer: executor },
+      repositories: [repository],
+      now: () => now,
+    });
+    const executorCapabilityDigest = readiness.payload.executors[0]
+      ?.capabilityDigest;
+    expect(executorCapabilityDigest).toMatch(/^sha256:[0-9a-f]{64}$/u);
+
+    const lease = {
+      attemptId: "attempt_1",
+      fencingToken: `fence_${"f".repeat(64)}`,
+    };
+    let acceptedLeaseExpiresAt = "2026-08-09T00:01:00.000Z";
+    let pending: { operationId: string; requestId: string; request: unknown }
+      | null = null;
+    const beginHostedHeartbeatOperation = vi.fn(async ({ request }) => {
+      pending = {
+        operationId: request.operationId,
+        requestId: request.requestId,
+        request,
+      };
+      return { outcome: "created" as const, operation: pending };
+    });
+    const applyHostedHeartbeatReceipt = vi.fn(async () => {
+      acceptedLeaseExpiresAt = acceptedLeaseExpiresAt
+        === "2026-08-09T00:01:00.000Z"
+        ? "2026-08-09T00:02:00.000Z"
+        : "2026-08-09T00:03:00.000Z";
+      pending = null;
+      return "accepted" as const;
+    });
+    const repo = {
+      getHostedAssignedRunForRecovery: vi.fn(async () => ({
+        claimed: {
+          run: { id: "run_1" },
+          attemptId: lease.attemptId,
+          fencingToken: lease.fencingToken,
+        },
+        leaseExpiresAt: acceptedLeaseExpiresAt,
+        hostedAuthority: {
+          organizationId: "org_1",
+          runnerId: "runner_1",
+          runId: "run_1",
+          credentialId: "credential_1",
+          registrationGeneration: 3,
+          credentialGeneration: 2,
+          projectTargetId: "target_1",
+          bindingId: "binding_1",
+          targetBindingDigest: `sha256:${"a".repeat(64)}`,
+          admissionPolicyReceiptId: "policy_receipt_1",
+          admissionPolicySnapshotId: "policy_1",
+          admissionPolicySnapshotDigest: `sha256:${"b".repeat(64)}`,
+          runnerReadinessReceiptId: "readiness_1",
+          runnerReadinessReceiptDigest: `sha256:${"c".repeat(64)}`,
+          targetReadinessReceiptId: "readiness_1",
+          targetReadinessReceiptDigest: `sha256:${"d".repeat(64)}`,
+          executorId: "reviewer",
+          executorCapabilityDigest,
+          attemptId: lease.attemptId,
+          attemptNumber: 1,
+          epoch: 1,
+          fencingTokenDigest: `sha256:${"e".repeat(64)}`,
+          claimOperationId: "claim_operation_1",
+          projectTargetVersion: 1,
+          admissionPolicySnapshotVersion: 1,
+          policyReceiptDigest: `sha256:${"f".repeat(64)}`,
+        },
+      })),
+      acquireHostedExecutionStart: vi.fn(async () => true),
+      isHostedExecutionCurrent: vi.fn(async () => true),
+      getHostedExecutionLease: vi.fn(async () => ({
+        leaseExpiresAt: acceptedLeaseExpiresAt,
+      })),
+      getHostedHeartbeatOperationForRetry: vi.fn(async () => pending),
+      beginHostedHeartbeatOperation,
+      applyHostedHeartbeatReceipt,
+    } as never;
+    const heartbeatHostedRunControlV1 = vi.fn()
+      .mockRejectedValueOnce(new Error("transport_outcome_unknown"))
+      .mockImplementation(async ({ request }) => ({
+        status: 201 as const,
+        replayed: false as const,
+        outcome: "accepted" as const,
+        receipt: { requestId: request.requestId },
+      }));
+    const executeClaimedRunImpl = vi.fn(async (execution) => {
+      await expect(execution.client.heartbeat("run_1", lease)).rejects.toThrow(
+        "transport_outcome_unknown",
+      );
+      await execution.client.heartbeat("run_1", lease);
+      await execution.client.heartbeat("run_1", lease);
+      await expect(
+        execution.hostedExecutionAuthority?.readAcceptedLeaseExpiresAt?.(),
+      ).resolves.toBe("2026-08-09T00:03:00.000Z");
+      return true;
+    });
+    const loop = createHostedControlLoop({
+      config: {
+        runnerId: "runner_1",
+        dispatcherUrl: "https://control.example",
+        runnerToken: "runtime_secret",
+        repositories: [repository],
+        agents: {},
+        controlRegistration: {
+          kind: "hosted_control_v1",
+          state: "paired",
+          operationId: "pair_1",
+          registration: {
+            schemaVersion: 1,
+            protocolVersion: "1.0",
+            organizationId: "org_1",
+            runnerId: "runner_1",
+            credentialId: "credential_1",
+            registrationGeneration: 3,
+            credentialGeneration: 2,
+            credentialPurpose: "runtime",
+            createdAt: now.toISOString(),
+          },
+        },
+      } as never,
+      databasePath: ":memory:",
+      executors: { reviewer: executor },
+      now: () => now,
+      controlClient: {
+        getRunnerControlContextV1: vi.fn(async () => context),
+        heartbeatHostedRunControlV1,
+      } as never,
+      governanceStore: { repo, close: vi.fn() },
+      executeClaimedRunImpl: executeClaimedRunImpl as never,
+    });
+
+    await expect(loop?.beforeIteration()).resolves.toBe(true);
+    const requests = heartbeatHostedRunControlV1.mock.calls.map(
+      ([call]) => call.request,
+    );
+    expect(requests).toHaveLength(3);
+    expect(requests[0]).toEqual(requests[1]);
+    expect(requests[2]).not.toEqual(requests[1]);
+    expect(requests[0]?.expectedLeaseExpiresAt).toBe(
+      "2026-08-09T00:01:00.000Z",
+    );
+    expect(requests[2]?.expectedLeaseExpiresAt).toBe(
+      "2026-08-09T00:02:00.000Z",
+    );
+    expect(beginHostedHeartbeatOperation).toHaveBeenCalledTimes(2);
+    expect(applyHostedHeartbeatReceipt).toHaveBeenCalledTimes(2);
+    await loop?.close();
+  });
+
   it("fails closed when Cloud context belongs to a different organization", () => {
     const context = {
       schemaVersion: 1 as const,

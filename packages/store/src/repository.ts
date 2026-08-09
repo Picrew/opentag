@@ -18,6 +18,10 @@ import {
   CompletionContractSchema,
   CompletionWaiverSchema,
   canonicalJsonStringify,
+  computeControlPayloadDigestV1,
+  computeControlReceiptDigestV1,
+  computeHostedLifecycleRequestDigestV1,
+  computeHostedLifecycleRequestIdV1,
   CompletionAssessmentReceiptEnvelopeV1Schema,
   CompletionContractRefReceiptEnvelopeV1Schema,
   CallbackAttemptObservationReceiptEnvelopeV1Schema,
@@ -60,11 +64,17 @@ import {
   RunnerRegistrationInputSchema,
   SuggestedChangesSnapshotSchema,
   HumanEscalationSchema,
+  HostedClaimRequestV1Schema,
+  HostedClaimV1Schema,
+  HostedHeartbeatRequestV1Schema,
+  HostedLifecycleReceiptEnvelopeV1Schema,
   VerificationEvidenceSchema,
   WorkThreadRefReceiptEnvelopeV1Schema,
   WorkThreadSchema,
   WorkstreamAdmissionBatchInputSchema,
   WorkstreamInputSchema,
+  verifyHostedAdmissionEnvelopeDigestV1,
+  verifyHostedClaimFencingTokenDigestV1,
   type ApprovalDecision,
   type AgentAccessProfileSnapshot,
   type ActorIdentity,
@@ -86,6 +96,10 @@ import {
   type FrozenRoutingPolicy,
   type FactoryRecipeSnapshotInput,
   type HumanEscalation,
+  type HostedClaimRequestV1,
+  type HostedClaimV1,
+  type HostedHeartbeatRequestV1,
+  type HostedLifecycleReceiptEnvelopeV1,
   type MutationIntentActionability,
   type OpenTagEvent,
   type OpenTagManagedChannelBindingOwnership,
@@ -139,6 +153,10 @@ import {
   factoryWorkstreamMembers,
   factoryWorkstreams,
   governanceEvents,
+  hostedAttemptImports,
+  hostedClaimOperations,
+  hostedHeartbeatOperations,
+  hostedRunImports,
   humanEscalations,
   linearOAuthInstallStates,
   linearRelayInstallations,
@@ -318,6 +336,121 @@ export type ClaimedOpenTagRun = OpenTagRunWithEvent & {
   fencingToken: string;
   executorId: string;
   routingDecision: RoutingDecision;
+};
+
+export const HOSTED_IMPORT_ERROR_CODES = [
+  "HOSTED_IMPORT_CLAIM_INVALID",
+  "HOSTED_IMPORT_EVENT_MISMATCH",
+  "HOSTED_IMPORT_RUN_CONFLICT",
+  "HOSTED_IMPORT_ADMISSION_CONFLICT",
+  "HOSTED_IMPORT_OPERATION_CONFLICT",
+  "HOSTED_IMPORT_ATTEMPT_CONFLICT",
+  "HOSTED_IMPORT_FENCE_CONFLICT",
+  "HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT",
+  "HOSTED_IMPORT_AUTHORITY_CONFLICT",
+  "HOSTED_IMPORT_WORK_THREAD_CONFLICT",
+  "HOSTED_CLAIM_OPERATION_INVALID",
+  "HOSTED_CLAIM_OPERATION_CONFLICT",
+  "HOSTED_CLAIM_OPERATION_NOT_PENDING",
+  "HOSTED_HEARTBEAT_OPERATION_INVALID",
+  "HOSTED_HEARTBEAT_OPERATION_CONFLICT"
+] as const;
+
+export type HostedImportErrorCode = (typeof HOSTED_IMPORT_ERROR_CODES)[number];
+
+export class HostedImportConflictError extends Error {
+  override readonly name = "HostedImportConflictError";
+
+  constructor(readonly code: HostedImportErrorCode) {
+    super(code);
+  }
+}
+
+export type HostedImportAuthority = HostedClaimV1["authority"] & {
+  admissionId: string;
+  admissionOperationId: string;
+  claimOperationId: string;
+  admissionEnvelopeDigest: string;
+  sourceIdentityDigest: string;
+  deliveryPayloadDigest: string;
+  policyReceiptId: string;
+  policyPayloadDigest: string;
+  policyReceiptDigest: string;
+  eventDigest: string;
+  contextPacketDigest: string;
+  workThreadId?: string;
+  workThreadDigest?: string;
+  claimDigest: string;
+  authorityDigest: string;
+  importedAt: string;
+};
+
+export type HostedAssignedRun = OpenTagRunWithEvent & {
+  attemptId: string;
+  attemptNumber: number;
+  fencingToken: string;
+  executorId: string;
+};
+
+export type ImportHostedAssignedRunResult = {
+  outcome: "created" | "replayed";
+  executionState: "ready_to_start" | "already_started" | "superseded" | "terminal";
+  executionMayStart: false;
+  claimed: HostedAssignedRun | null;
+  hostedAuthority: HostedImportAuthority;
+};
+
+export type HostedSourceRefetchReceipt = {
+  provider: "github";
+  providerRepositoryId: string;
+  owner: string;
+  repo: string;
+  sourceThread: HostedClaimV1["hostedAdmission"]["sourceThread"];
+  sourceEvent: HostedClaimV1["hostedAdmission"]["sourceEvent"];
+  actor: { providerUserId: string; login: string };
+  sourceIdentityDigest: string;
+  eventDigest: string;
+  refetchedAt: string;
+};
+
+export type HostedClaimOperation = {
+  operationId: string;
+  requestId: string;
+  organizationId: string;
+  runnerId: string;
+  destinationId: string;
+  requestDigest: string;
+  request: HostedClaimRequestV1;
+  state: "pending" | "claimed" | "empty";
+  runId?: string;
+  createdAt: string;
+  updatedAt: string;
+  acknowledgedAt?: string;
+  executionStartedAt?: string;
+  terminalReasonCode?: "stale_control_authority" | "operation_digest_conflict";
+};
+
+export type HostedHeartbeatOperation = {
+  destinationId: string;
+  organizationId: string;
+  runnerId: string;
+  credentialId: string;
+  operationId: string;
+  requestId: string;
+  runId: string;
+  attemptId: string;
+  attemptNumber: number;
+  fencingTokenDigest: string;
+  expectedLeaseExpiresAt: string;
+  requestDigest: string;
+  request: HostedHeartbeatRequestV1;
+  state: "pending" | "acknowledged";
+  createdAt: string;
+  updatedAt: string;
+  receiptDigest?: string;
+  receipt?: HostedLifecycleReceiptEnvelopeV1;
+  acceptedLeaseExpiresAt?: string;
+  acknowledgedAt?: string;
 };
 
 export type OpenTagAuditEvent = {
@@ -1214,6 +1347,60 @@ function attemptFromRow(row: typeof attempts.$inferSelect): Attempt {
     ...(row.resultJson ? { result: OpenTagRunResultSchema.parse(JSON.parse(row.resultJson)) } : {}),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
+  };
+}
+
+function hostedClaimOperationFromRow(
+  row: typeof hostedClaimOperations.$inferSelect
+): HostedClaimOperation {
+  return {
+    operationId: row.operationId,
+    requestId: row.requestId,
+    organizationId: row.organizationId,
+    runnerId: row.runnerId,
+    destinationId: row.destinationId,
+    requestDigest: row.requestDigest,
+    request: HostedClaimRequestV1Schema.parse(JSON.parse(row.requestJson)),
+    state: row.state as HostedClaimOperation["state"],
+    ...(row.runId ? { runId: row.runId } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    ...(row.acknowledgedAt ? { acknowledgedAt: row.acknowledgedAt } : {}),
+    ...(row.executionStartedAt ? { executionStartedAt: row.executionStartedAt } : {}),
+    ...(row.terminalReasonCode
+      ? { terminalReasonCode: row.terminalReasonCode as "stale_control_authority" | "operation_digest_conflict" }
+      : {})
+  };
+}
+
+function hostedHeartbeatOperationFromRow(
+  row: typeof hostedHeartbeatOperations.$inferSelect
+): HostedHeartbeatOperation {
+  return {
+    destinationId: row.destinationId,
+    organizationId: row.organizationId,
+    runnerId: row.runnerId,
+    credentialId: row.credentialId,
+    operationId: row.operationId,
+    requestId: row.requestId,
+    runId: row.runId,
+    attemptId: row.attemptId,
+    attemptNumber: row.attemptNumber,
+    fencingTokenDigest: row.fencingTokenDigest,
+    expectedLeaseExpiresAt: row.expectedLeaseExpiresAt,
+    requestDigest: row.requestDigest,
+    request: HostedHeartbeatRequestV1Schema.parse(JSON.parse(row.requestJson)),
+    state: row.state as HostedHeartbeatOperation["state"],
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    ...(row.receiptDigest ? { receiptDigest: row.receiptDigest } : {}),
+    ...(row.receiptJson
+      ? { receipt: HostedLifecycleReceiptEnvelopeV1Schema.parse(JSON.parse(row.receiptJson)) }
+      : {}),
+    ...(row.acceptedLeaseExpiresAt
+      ? { acceptedLeaseExpiresAt: row.acceptedLeaseExpiresAt }
+      : {}),
+    ...(row.acknowledgedAt ? { acknowledgedAt: row.acknowledgedAt } : {})
   };
 }
 
@@ -6020,6 +6207,1284 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       });
     },
 
+    async beginHostedClaimOperation(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      request: HostedClaimRequestV1;
+    }): Promise<{ outcome: "created" | "replayed"; operation: HostedClaimOperation }> {
+      let request: HostedClaimRequestV1;
+      try {
+        request = HostedClaimRequestV1Schema.parse(input.request);
+      } catch {
+        throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_INVALID");
+      }
+      if (!input.destinationId || !input.organizationId || !input.runnerId) {
+        throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_INVALID");
+      }
+      const requestDigest = canonicalSha256Json(request);
+      const activeKey = canonicalSha256Json({
+        destinationId: input.destinationId,
+        organizationId: input.organizationId,
+        runnerId: input.runnerId
+      });
+      const createdAt = nowIso();
+      return db.transaction((tx) => {
+        const pending = tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.activeKey, activeKey)).limit(1).get();
+        if (pending) {
+          return { outcome: "replayed" as const, operation: hostedClaimOperationFromRow(pending) };
+        }
+        const sameOperation = tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.operationId, request.operationId)).limit(1).get();
+        if (sameOperation) {
+          if (
+            sameOperation.requestDigest !== requestDigest
+            || sameOperation.requestId !== request.requestId
+            || sameOperation.destinationId !== input.destinationId
+            || sameOperation.organizationId !== input.organizationId
+            || sameOperation.runnerId !== input.runnerId
+          ) {
+            throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+          }
+          return { outcome: "replayed" as const, operation: hostedClaimOperationFromRow(sameOperation) };
+        }
+        const sameRequest = tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.requestId, request.requestId)).limit(1).get();
+        if (sameRequest) throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+        tx.insert(hostedClaimOperations).values({
+          operationId: request.operationId,
+          requestId: request.requestId,
+          organizationId: input.organizationId,
+          runnerId: input.runnerId,
+          destinationId: input.destinationId,
+          activeKey,
+          requestDigest,
+          requestJson: JSON.stringify(request),
+          state: "pending",
+          createdAt,
+          updatedAt: createdAt
+        }).run();
+        const row = tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.operationId, request.operationId)).limit(1).get()!;
+        return { outcome: "created" as const, operation: hostedClaimOperationFromRow(row) };
+      });
+    },
+
+    async getHostedClaimOperationForRetry(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+    }): Promise<HostedClaimOperation | null> {
+      const activeKey = canonicalSha256Json(input);
+      const row = await db.select().from(hostedClaimOperations)
+        .where(eq(hostedClaimOperations.activeKey, activeKey)).limit(1).get();
+      return row ? hostedClaimOperationFromRow(row) : null;
+    },
+
+    async getHostedAssignedRunForRecovery(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+    }): Promise<{
+      claimed: HostedAssignedRun;
+      hostedAuthority: HostedImportAuthority;
+      leaseExpiresAt: string;
+    } | null> {
+      const recoveredAt = Date.now();
+      const operations = await db.select().from(hostedClaimOperations).where(and(
+        eq(hostedClaimOperations.destinationId, input.destinationId),
+        eq(hostedClaimOperations.organizationId, input.organizationId),
+        eq(hostedClaimOperations.runnerId, input.runnerId),
+        eq(hostedClaimOperations.state, "claimed")
+      )).orderBy(desc(hostedClaimOperations.acknowledgedAt), desc(hostedClaimOperations.operationId));
+      for (const operation of operations) {
+        if (!operation.runId || operation.executionStartedAt) continue;
+        const runRow = await db.select().from(runs).where(and(
+          eq(runs.id, operation.runId),
+          eq(runs.status, "assigned"),
+          eq(runs.assignedRunnerId, input.runnerId)
+        )).limit(1).get();
+        if (!runRow?.currentAttemptId) continue;
+        const attemptRow = await db.select().from(attempts).where(and(
+          eq(attempts.id, runRow.currentAttemptId),
+          eq(attempts.runId, runRow.id),
+          eq(attempts.status, "assigned")
+        )).limit(1).get();
+        const importRow = await db.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, runRow.id)).limit(1).get();
+        const attemptImportRow = attemptRow
+          ? await db.select().from(hostedAttemptImports)
+              .where(eq(hostedAttemptImports.attemptId, attemptRow.id)).limit(1).get()
+          : undefined;
+        if (
+          !attemptRow || !importRow || !attemptImportRow || !attemptRow.selectedExecutorId
+          || operation.operationId !== attemptImportRow.claimOperationId
+        ) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
+        const leaseExpiresAt = Date.parse(attemptRow.leaseExpiresAt);
+        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= recoveredAt) continue;
+        const hostedAuthority: HostedImportAuthority = {
+          ...(JSON.parse(attemptImportRow.authorityJson) as HostedClaimV1["authority"]),
+          admissionId: importRow.admissionId,
+          admissionOperationId: importRow.admissionOperationId,
+          claimOperationId: attemptImportRow.claimOperationId,
+          admissionEnvelopeDigest: importRow.admissionEnvelopeDigest,
+          sourceIdentityDigest: importRow.sourceIdentityDigest,
+          deliveryPayloadDigest: importRow.deliveryPayloadDigest,
+          policyReceiptId: importRow.policyReceiptId,
+          policyPayloadDigest: importRow.policyPayloadDigest,
+          policyReceiptDigest: importRow.policyReceiptDigest,
+          eventDigest: importRow.eventDigest,
+          contextPacketDigest: importRow.contextPacketDigest,
+          ...(importRow.workThreadId ? { workThreadId: importRow.workThreadId } : {}),
+          ...(importRow.workThreadDigest ? { workThreadDigest: importRow.workThreadDigest } : {}),
+          claimDigest: attemptImportRow.claimDigest,
+          authorityDigest: attemptImportRow.authorityDigest,
+          importedAt: attemptImportRow.importedAt
+        };
+        return {
+          claimed: {
+            run: runFromRow(runRow),
+            event: OpenTagEventSchema.parse(JSON.parse(runRow.eventJson)),
+            attemptId: attemptRow.id,
+            attemptNumber: attemptRow.number,
+            fencingToken: attemptRow.fencingToken,
+            executorId: attemptRow.selectedExecutorId
+          },
+          hostedAuthority,
+          leaseExpiresAt: attemptRow.leaseExpiresAt
+        };
+      }
+      return null;
+    },
+
+    async acquireHostedExecutionStart(input: {
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+    }): Promise<boolean> {
+      return db.transaction((tx) => {
+        const startedAt = nowIso();
+        const imported = tx.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, input.runId)).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports)
+          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const operation = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.operationId, importedAttempt?.claimOperationId ?? ""),
+          eq(hostedClaimOperations.state, "claimed"),
+          eq(hostedClaimOperations.runId, input.runId)
+        )).limit(1).get();
+        if (
+          !imported || !importedAttempt || !run || !attempt || !operation
+          || importedAttempt.runId !== input.runId
+          || run.status !== "assigned"
+          || run.currentAttemptId !== input.attemptId
+          || attempt.runId !== input.runId
+          || attempt.status !== "assigned"
+          || attempt.fencingToken !== input.fencingToken
+        ) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
+        const leaseExpiresAt = Date.parse(attempt.leaseExpiresAt);
+        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= Date.parse(startedAt)) return false;
+        if (operation.executionStartedAt) return false;
+        const acquired = tx.update(hostedClaimOperations).set({
+          executionStartedAt: startedAt,
+          updatedAt: startedAt
+        }).where(and(
+          eq(hostedClaimOperations.operationId, operation.operationId),
+          isNull(hostedClaimOperations.executionStartedAt)
+        )).run();
+        return acquired.changes === 1;
+      });
+    },
+
+    async isHostedExecutionCurrent(input: {
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+    }): Promise<boolean> {
+      return db.transaction((tx) => {
+        const checkedAt = Date.now();
+        const importedRun = tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, input.runId)).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports)
+          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const operation = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.operationId, importedAttempt?.claimOperationId ?? ""),
+          eq(hostedClaimOperations.state, "claimed"),
+          eq(hostedClaimOperations.runId, input.runId),
+          isNotNull(hostedClaimOperations.executionStartedAt)
+        )).limit(1).get();
+        if (
+          !importedRun || !importedAttempt || !run || !attempt || !operation
+          || importedAttempt.runId !== input.runId
+          || run.currentAttemptId !== input.attemptId
+          || !["assigned", "running", "needs_approval"].includes(run.status)
+          || attempt.runId !== input.runId
+          || !["assigned", "running"].includes(attempt.status)
+          || attempt.fencingToken !== input.fencingToken
+        ) {
+          return false;
+        }
+        const leaseExpiresAt = Date.parse(attempt.leaseExpiresAt);
+        return Number.isFinite(leaseExpiresAt) && leaseExpiresAt > checkedAt;
+      });
+    },
+
+    async getHostedExecutionLease(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      credentialId: string;
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+    }): Promise<{ leaseExpiresAt: string } | null> {
+      return db.transaction((tx) => {
+        const checkedAt = Date.now();
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports)
+          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const operation = importedAttempt
+          ? tx.select().from(hostedClaimOperations).where(and(
+              eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
+              eq(hostedClaimOperations.destinationId, input.destinationId),
+              eq(hostedClaimOperations.organizationId, input.organizationId),
+              eq(hostedClaimOperations.runnerId, input.runnerId),
+              eq(hostedClaimOperations.state, "claimed"),
+              eq(hostedClaimOperations.runId, input.runId),
+              isNotNull(hostedClaimOperations.executionStartedAt),
+              isNull(hostedClaimOperations.terminalReasonCode)
+            )).limit(1).get()
+          : undefined;
+        if (
+          !run || !attempt || !importedAttempt || !operation
+          || run.currentAttemptId !== input.attemptId
+          || run.assignedRunnerId !== input.runnerId
+          || !["assigned", "running", "needs_approval"].includes(run.status)
+          || run.leaseExpiresAt !== attempt.leaseExpiresAt
+          || attempt.runId !== input.runId
+          || attempt.runnerId !== input.runnerId
+          || !["assigned", "running"].includes(attempt.status)
+          || attempt.fencingToken !== input.fencingToken
+          || importedAttempt.runId !== input.runId
+          || importedAttempt.attemptNumber !== attempt.number
+          || (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId !== input.credentialId
+        ) {
+          return null;
+        }
+        const leaseExpiresAt = Date.parse(attempt.leaseExpiresAt);
+        return Number.isFinite(leaseExpiresAt) && leaseExpiresAt > checkedAt
+          ? { leaseExpiresAt: attempt.leaseExpiresAt }
+          : null;
+      });
+    },
+
+    async beginHostedHeartbeatOperation(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      credentialId: string;
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+      request: HostedHeartbeatRequestV1;
+    }): Promise<{ outcome: "created" | "replayed"; operation: HostedHeartbeatOperation }> {
+      let request: HostedHeartbeatRequestV1;
+      try {
+        request = HostedHeartbeatRequestV1Schema.parse(input.request);
+      } catch {
+        throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_INVALID");
+      }
+      const computedRequestDigest = await computeHostedLifecycleRequestDigestV1({
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        action: "heartbeat",
+        request
+      });
+      const computedRequestId = await computeHostedLifecycleRequestIdV1({
+        operationId: request.operationId,
+        requestDigest: request.requestDigest
+      });
+      if (
+        request.requestDigest !== computedRequestDigest
+        || request.requestId !== computedRequestId
+      ) {
+        throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_INVALID");
+      }
+      const activeKey = canonicalSha256Json({
+        destinationId: input.destinationId,
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        credentialId: input.credentialId,
+        runId: input.runId,
+        attemptId: input.attemptId,
+        fencingTokenDigest: request.attempt.fencingTokenDigest
+      });
+      const requestJson = JSON.stringify(request);
+      const createdAt = nowIso();
+      return db.transaction((tx) => {
+        const pending = tx.select().from(hostedHeartbeatOperations)
+          .where(eq(hostedHeartbeatOperations.activeKey, activeKey)).limit(1).get();
+        if (pending) {
+          const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+          const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+          const importedAttempt = tx.select().from(hostedAttemptImports)
+            .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+          const operation = importedAttempt
+            ? tx.select().from(hostedClaimOperations).where(and(
+                eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
+                eq(hostedClaimOperations.destinationId, input.destinationId),
+                eq(hostedClaimOperations.organizationId, input.organizationId),
+                eq(hostedClaimOperations.runnerId, input.runnerId),
+                eq(hostedClaimOperations.state, "claimed"),
+                eq(hostedClaimOperations.runId, input.runId),
+                isNotNull(hostedClaimOperations.executionStartedAt),
+                isNull(hostedClaimOperations.terminalReasonCode)
+              )).limit(1).get()
+            : undefined;
+          if (
+            !run || !attempt || !importedAttempt || !operation
+            || run.currentAttemptId !== input.attemptId
+            || run.assignedRunnerId !== input.runnerId
+            || !["assigned", "running", "needs_approval"].includes(run.status)
+            || run.leaseExpiresAt !== pending.expectedLeaseExpiresAt
+            || attempt.runId !== input.runId
+            || attempt.runnerId !== input.runnerId
+            || !["assigned", "running"].includes(attempt.status)
+            || attempt.fencingToken !== input.fencingToken
+            || attempt.leaseExpiresAt !== pending.expectedLeaseExpiresAt
+            || Date.parse(attempt.leaseExpiresAt) <= Date.parse(createdAt)
+            || (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId !== input.credentialId
+          ) {
+            throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
+          }
+          return { outcome: "replayed" as const, operation: hostedHeartbeatOperationFromRow(pending) };
+        }
+        const sameOperation = tx.select().from(hostedHeartbeatOperations)
+          .where(and(
+            eq(hostedHeartbeatOperations.destinationId, input.destinationId),
+            eq(hostedHeartbeatOperations.organizationId, input.organizationId),
+            eq(hostedHeartbeatOperations.runnerId, input.runnerId),
+            eq(hostedHeartbeatOperations.credentialId, input.credentialId),
+            eq(hostedHeartbeatOperations.operationId, request.operationId)
+          )).limit(1).get();
+        const sameRequest = tx.select().from(hostedHeartbeatOperations)
+          .where(and(
+            eq(hostedHeartbeatOperations.destinationId, input.destinationId),
+            eq(hostedHeartbeatOperations.organizationId, input.organizationId),
+            eq(hostedHeartbeatOperations.runnerId, input.runnerId),
+            eq(hostedHeartbeatOperations.credentialId, input.credentialId),
+            eq(hostedHeartbeatOperations.requestId, request.requestId)
+          )).limit(1).get();
+        if (sameOperation || sameRequest) {
+          const existing = sameOperation ?? sameRequest!;
+          if (
+            existing.operationId !== request.operationId
+            || existing.requestId !== request.requestId
+            || existing.runId !== input.runId
+            || existing.attemptId !== input.attemptId
+            || existing.requestJson !== requestJson
+          ) {
+            throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
+          }
+          return { outcome: "replayed" as const, operation: hostedHeartbeatOperationFromRow(existing) };
+        }
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports)
+          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const operation = importedAttempt
+          ? tx.select().from(hostedClaimOperations).where(and(
+              eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
+              eq(hostedClaimOperations.destinationId, input.destinationId),
+              eq(hostedClaimOperations.organizationId, input.organizationId),
+              eq(hostedClaimOperations.runnerId, input.runnerId),
+              eq(hostedClaimOperations.state, "claimed"),
+              eq(hostedClaimOperations.runId, input.runId),
+              isNotNull(hostedClaimOperations.executionStartedAt),
+              isNull(hostedClaimOperations.terminalReasonCode)
+            )).limit(1).get()
+          : undefined;
+        if (
+          !run || !attempt || !importedAttempt || !operation
+          || run.currentAttemptId !== input.attemptId
+          || run.assignedRunnerId !== input.runnerId
+          || !["assigned", "running", "needs_approval"].includes(run.status)
+          || run.leaseExpiresAt !== attempt.leaseExpiresAt
+          || attempt.runId !== input.runId
+          || attempt.runnerId !== input.runnerId
+          || !["assigned", "running"].includes(attempt.status)
+          || attempt.fencingToken !== input.fencingToken
+          || importedAttempt.runId !== input.runId
+          || importedAttempt.attemptNumber !== attempt.number
+          || (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId !== input.credentialId
+          || importedAttempt.fencingTokenDigest !== request.attempt.fencingTokenDigest
+          || request.attempt.attemptId !== attempt.id
+          || request.attempt.attemptNumber !== attempt.number
+          || request.attempt.epoch !== attempt.number
+          || request.attempt.fencingToken !== input.fencingToken
+          || request.expectedLeaseExpiresAt !== attempt.leaseExpiresAt
+          || Date.parse(attempt.leaseExpiresAt) <= Date.parse(createdAt)
+        ) {
+          throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
+        }
+        tx.insert(hostedHeartbeatOperations).values({
+          destinationId: input.destinationId,
+          organizationId: input.organizationId,
+          runnerId: input.runnerId,
+          credentialId: input.credentialId,
+          operationId: request.operationId,
+          requestId: request.requestId,
+          runId: input.runId,
+          attemptId: input.attemptId,
+          attemptNumber: attempt.number,
+          fencingTokenDigest: request.attempt.fencingTokenDigest,
+          expectedLeaseExpiresAt: request.expectedLeaseExpiresAt,
+          requestDigest: request.requestDigest,
+          requestJson,
+          activeKey,
+          state: "pending",
+          createdAt,
+          updatedAt: createdAt
+        }).run();
+        const row = tx.select().from(hostedHeartbeatOperations)
+          .where(and(
+            eq(hostedHeartbeatOperations.destinationId, input.destinationId),
+            eq(hostedHeartbeatOperations.organizationId, input.organizationId),
+            eq(hostedHeartbeatOperations.runnerId, input.runnerId),
+            eq(hostedHeartbeatOperations.credentialId, input.credentialId),
+            eq(hostedHeartbeatOperations.operationId, request.operationId)
+          )).limit(1).get()!;
+        return { outcome: "created" as const, operation: hostedHeartbeatOperationFromRow(row) };
+      });
+    },
+
+    async getHostedHeartbeatOperationForRetry(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      credentialId: string;
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+    }): Promise<HostedHeartbeatOperation | null> {
+      return db.transaction((tx) => {
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(and(
+          eq(attempts.id, input.attemptId),
+          eq(attempts.runId, input.runId),
+          eq(attempts.fencingToken, input.fencingToken)
+        )).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports)
+          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const claimOperation = importedAttempt
+          ? tx.select().from(hostedClaimOperations).where(and(
+              eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
+              eq(hostedClaimOperations.destinationId, input.destinationId),
+              eq(hostedClaimOperations.organizationId, input.organizationId),
+              eq(hostedClaimOperations.runnerId, input.runnerId),
+              eq(hostedClaimOperations.state, "claimed"),
+              eq(hostedClaimOperations.runId, input.runId),
+              isNotNull(hostedClaimOperations.executionStartedAt),
+              isNull(hostedClaimOperations.terminalReasonCode)
+            )).limit(1).get()
+          : undefined;
+        if (
+          !run || !attempt || !importedAttempt || !claimOperation
+          || run.currentAttemptId !== input.attemptId
+          || run.assignedRunnerId !== input.runnerId
+          || !["assigned", "running", "needs_approval"].includes(run.status)
+          || run.leaseExpiresAt !== attempt.leaseExpiresAt
+          || attempt.runnerId !== input.runnerId
+          || !["assigned", "running"].includes(attempt.status)
+          || Date.parse(attempt.leaseExpiresAt) <= Date.now()
+          || (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId !== input.credentialId
+        ) return null;
+        const activeKey = canonicalSha256Json({
+          destinationId: input.destinationId,
+          organizationId: input.organizationId,
+          runnerId: input.runnerId,
+          credentialId: input.credentialId,
+          runId: input.runId,
+          attemptId: input.attemptId,
+          fencingTokenDigest: tx.select({ fencingTokenDigest: hostedAttemptImports.fencingTokenDigest })
+            .from(hostedAttemptImports).where(eq(hostedAttemptImports.attemptId, input.attemptId))
+            .limit(1).get()?.fencingTokenDigest ?? ""
+        });
+        const row = tx.select().from(hostedHeartbeatOperations)
+          .where(eq(hostedHeartbeatOperations.activeKey, activeKey)).limit(1).get();
+        return row && row.expectedLeaseExpiresAt === attempt.leaseExpiresAt
+          ? hostedHeartbeatOperationFromRow(row)
+          : null;
+      });
+    },
+
+    async applyHostedHeartbeatReceipt(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      credentialId: string;
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+      operationId: string;
+      requestId: string;
+      receipt: HostedLifecycleReceiptEnvelopeV1;
+    }): Promise<"accepted" | "replayed" | "rejected"> {
+      let receipt: HostedLifecycleReceiptEnvelopeV1;
+      try {
+        receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(input.receipt);
+      } catch {
+        return "rejected";
+      }
+      const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
+      if (
+        receipt.payloadDigest !== await computeControlPayloadDigestV1(receipt.payload)
+        || receipt.receiptDigest !== await computeControlReceiptDigestV1(receiptDigestInput)
+      ) {
+        return "rejected";
+      }
+      const receiptJson = JSON.stringify(receipt);
+      return db.transaction((tx) => {
+        const journal = tx.select().from(hostedHeartbeatOperations).where(and(
+          eq(hostedHeartbeatOperations.destinationId, input.destinationId),
+          eq(hostedHeartbeatOperations.organizationId, input.organizationId),
+          eq(hostedHeartbeatOperations.runnerId, input.runnerId),
+          eq(hostedHeartbeatOperations.credentialId, input.credentialId),
+          eq(hostedHeartbeatOperations.operationId, input.operationId),
+          eq(hostedHeartbeatOperations.requestId, input.requestId)
+        )).limit(1).get();
+        if (!journal) return "rejected" as const;
+        if (journal.state === "acknowledged") {
+          return journal.receiptDigest === receipt.receiptDigest
+            ? "replayed" as const
+            : "rejected" as const;
+        }
+        const newLeaseExpiresAt = receipt.payload.operation === "heartbeat"
+          ? receipt.payload.leaseExpiresAt
+          : null;
+        const acknowledgedAt = nowIso();
+        const now = Date.parse(acknowledgedAt);
+        const oldExpiry = Date.parse(journal.expectedLeaseExpiresAt);
+        const newExpiry = newLeaseExpiresAt ? Date.parse(newLeaseExpiresAt) : Number.NaN;
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports)
+          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const claimOperation = importedAttempt
+          ? tx.select().from(hostedClaimOperations).where(and(
+              eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
+              eq(hostedClaimOperations.destinationId, input.destinationId),
+              eq(hostedClaimOperations.organizationId, input.organizationId),
+              eq(hostedClaimOperations.runnerId, input.runnerId),
+              eq(hostedClaimOperations.state, "claimed"),
+              eq(hostedClaimOperations.runId, input.runId),
+              isNotNull(hostedClaimOperations.executionStartedAt),
+              isNull(hostedClaimOperations.terminalReasonCode)
+            )).limit(1).get()
+          : undefined;
+        if (
+          !run || !attempt || !importedAttempt || !claimOperation || !newLeaseExpiresAt
+          || journal.runId !== input.runId || journal.attemptId !== input.attemptId
+          || run.currentAttemptId !== input.attemptId
+          || run.assignedRunnerId !== input.runnerId
+          || !["assigned", "running", "needs_approval"].includes(run.status)
+          || run.leaseExpiresAt !== journal.expectedLeaseExpiresAt
+          || attempt.runId !== input.runId
+          || attempt.runnerId !== input.runnerId
+          || !["assigned", "running"].includes(attempt.status)
+          || attempt.fencingToken !== input.fencingToken
+          || attempt.leaseExpiresAt !== journal.expectedLeaseExpiresAt
+          || importedAttempt.runId !== input.runId
+          || importedAttempt.attemptNumber !== journal.attemptNumber
+          || (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId !== input.credentialId
+          || importedAttempt.fencingTokenDigest !== journal.fencingTokenDigest
+          || receipt.runId !== input.runId
+          || receipt.organizationId !== input.organizationId
+          || receipt.producer.id !== input.runnerId
+          || receipt.producer.credentialId !== input.credentialId
+          || receipt.requestId !== journal.requestId
+          || receipt.operationId !== journal.operationId
+          || receipt.requestDigest !== journal.requestDigest
+          || receipt.attempt.attemptId !== input.attemptId
+          || receipt.attempt.attemptNumber !== journal.attemptNumber
+          || receipt.attempt.epoch !== journal.attemptNumber
+          || receipt.attempt.fencingTokenDigest !== journal.fencingTokenDigest
+          || !Number.isFinite(oldExpiry) || oldExpiry <= now
+          || !Number.isFinite(newExpiry) || newExpiry <= oldExpiry || newExpiry <= now
+        ) {
+          return "rejected" as const;
+        }
+        const attemptUpdated = tx.update(attempts).set({
+          heartbeatAt: acknowledgedAt,
+          leaseExpiresAt: newLeaseExpiresAt,
+          updatedAt: acknowledgedAt
+        }).where(and(
+          eq(attempts.id, input.attemptId),
+          eq(attempts.leaseExpiresAt, journal.expectedLeaseExpiresAt)
+        )).run();
+        const runUpdated = tx.update(runs).set({
+          heartbeatAt: acknowledgedAt,
+          leaseExpiresAt: newLeaseExpiresAt,
+          updatedAt: acknowledgedAt
+        }).where(and(
+          eq(runs.id, input.runId),
+          eq(runs.currentAttemptId, input.attemptId),
+          eq(runs.leaseExpiresAt, journal.expectedLeaseExpiresAt)
+        )).run();
+        const journalUpdated = tx.update(hostedHeartbeatOperations).set({
+          activeKey: null,
+          state: "acknowledged",
+          receiptDigest: receipt.receiptDigest,
+          receiptJson,
+          acceptedLeaseExpiresAt: newLeaseExpiresAt,
+          updatedAt: acknowledgedAt,
+          acknowledgedAt
+        }).where(and(
+          eq(hostedHeartbeatOperations.destinationId, input.destinationId),
+          eq(hostedHeartbeatOperations.organizationId, input.organizationId),
+          eq(hostedHeartbeatOperations.runnerId, input.runnerId),
+          eq(hostedHeartbeatOperations.credentialId, input.credentialId),
+          eq(hostedHeartbeatOperations.operationId, journal.operationId),
+          eq(hostedHeartbeatOperations.state, "pending")
+        )).run();
+        return attemptUpdated.changes === 1 && runUpdated.changes === 1 && journalUpdated.changes === 1
+          ? "accepted" as const
+          : "rejected" as const;
+      });
+    },
+
+    async acknowledgeHostedClaimEmpty(input: {
+      operationId: string;
+      requestId: string;
+    }): Promise<HostedClaimOperation> {
+      const acknowledgedAt = nowIso();
+      return db.transaction((tx) => {
+        const current = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.operationId, input.operationId),
+          eq(hostedClaimOperations.requestId, input.requestId)
+        )).limit(1).get();
+        if (!current) throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+        if (current.state === "empty") return hostedClaimOperationFromRow(current);
+        if (current.state !== "pending") {
+          throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+        }
+        tx.update(hostedClaimOperations).set({
+          state: "empty",
+          activeKey: null,
+          updatedAt: acknowledgedAt,
+          acknowledgedAt
+        }).where(and(
+          eq(hostedClaimOperations.operationId, input.operationId),
+          eq(hostedClaimOperations.state, "pending")
+        )).run();
+        return hostedClaimOperationFromRow(tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.operationId, input.operationId)).limit(1).get()!);
+      });
+    },
+
+    async abandonHostedClaimOperation(input: {
+      operationId: string;
+      requestId: string;
+      reasonCode: "stale_control_authority" | "operation_digest_conflict";
+    }): Promise<HostedClaimOperation> {
+      const acknowledgedAt = nowIso();
+      return db.transaction((tx) => {
+        const current = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.operationId, input.operationId),
+          eq(hostedClaimOperations.requestId, input.requestId)
+        )).limit(1).get();
+        if (!current) throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+        if (current.state === "empty" && current.terminalReasonCode === input.reasonCode) {
+          return hostedClaimOperationFromRow(current);
+        }
+        if (current.state !== "pending") {
+          throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+        }
+        tx.update(hostedClaimOperations).set({
+          state: "empty",
+          activeKey: null,
+          terminalReasonCode: input.reasonCode,
+          updatedAt: acknowledgedAt,
+          acknowledgedAt
+        }).where(and(
+          eq(hostedClaimOperations.operationId, input.operationId),
+          eq(hostedClaimOperations.state, "pending")
+        )).run();
+        return hostedClaimOperationFromRow(tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.operationId, input.operationId)).limit(1).get()!);
+      });
+    },
+
+    async importHostedAssignedRun(input: {
+      event: OpenTagEvent;
+      claim: HostedClaimV1;
+      sourceReceipt: HostedSourceRefetchReceipt;
+    }): Promise<ImportHostedAssignedRunResult> {
+      let event: OpenTagEvent;
+      let claim: HostedClaimV1;
+      try {
+        event = OpenTagEventSchema.parse(input.event);
+        claim = HostedClaimV1Schema.parse(input.claim);
+      } catch {
+        throw new HostedImportConflictError("HOSTED_IMPORT_CLAIM_INVALID");
+      }
+      if (
+        !(await verifyHostedAdmissionEnvelopeDigestV1(claim.hostedAdmission))
+        || !(await verifyHostedClaimFencingTokenDigestV1(claim))
+      ) {
+        throw new HostedImportConflictError("HOSTED_IMPORT_CLAIM_INVALID");
+      }
+
+      const admission = claim.hostedAdmission;
+      const sourceReceipt = input.sourceReceipt;
+      const projectTarget = projectTargetRefFromEvent(event);
+      const deliveryId = sourceDeliveryIdFromEvent(event);
+      const localThreadNumber = typeof event.metadata.issueNumber === "number"
+        ? event.metadata.issueNumber
+        : typeof event.metadata.pullRequestNumber === "number"
+          ? event.metadata.pullRequestNumber
+          : null;
+      if (
+        event.source !== "github"
+        || event.sourceEventId !== admission.sourceEvent.providerEventId
+        || event.actor.provider !== "github"
+        || event.actor.providerUserId !== admission.verifiedActor.providerUserId
+        || event.actor.handle !== admission.verifiedActor.login
+        || deliveryId !== admission.deliveryId
+        || projectTarget?.provider !== admission.provider
+        || projectTarget.owner !== admission.repository.owner
+        || projectTarget.repo !== admission.repository.repo
+        || event.workItem?.provider !== "github"
+        || event.workItem.kind !== admission.sourceThread.kind
+        || localThreadNumber !== admission.sourceThread.number
+      ) {
+        throw new HostedImportConflictError("HOSTED_IMPORT_EVENT_MISMATCH");
+      }
+      if (
+        sourceReceipt.provider !== "github"
+        || sourceReceipt.providerRepositoryId !== admission.repository.providerRepositoryId
+        || sourceReceipt.owner !== admission.repository.owner
+        || sourceReceipt.repo !== admission.repository.repo
+        || canonicalSha256Json(sourceReceipt.sourceThread) !== canonicalSha256Json(admission.sourceThread)
+        || canonicalSha256Json(sourceReceipt.sourceEvent) !== canonicalSha256Json(admission.sourceEvent)
+        || sourceReceipt.actor.providerUserId !== admission.verifiedActor.providerUserId
+        || sourceReceipt.actor.login !== admission.verifiedActor.login
+        || sourceReceipt.sourceIdentityDigest !== admission.sourceIdentityDigest
+        || sourceReceipt.eventDigest !== canonicalSha256Json(event)
+        || !Number.isFinite(Date.parse(sourceReceipt.refetchedAt))
+      ) {
+        throw new HostedImportConflictError("HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT");
+      }
+
+      const importedAt = nowIso();
+      const protocolFields = protocolRunFieldsFromEvent(event, event.receivedAt);
+      const eventDigest = canonicalSha256Json(event);
+      const contextPacketDigest = canonicalSha256Json(protocolFields.contextPacket);
+      const incomingWorkThreadDigest = protocolFields.thread
+        ? canonicalSha256Json(protocolFields.thread)
+        : null;
+      const claimDigest = canonicalSha256Json(claim);
+      const authorityDigest = canonicalSha256Json(claim.authority);
+
+      const result = db.transaction((tx) => {
+        const claimOperation = tx.select().from(hostedClaimOperations).where(
+          eq(hostedClaimOperations.operationId, claim.operationId)
+        ).limit(1).get();
+        if (
+          !claimOperation
+          || claimOperation.requestId !== claim.requestId
+          || claimOperation.organizationId !== claim.organizationId
+          || claimOperation.runnerId !== claim.runnerId
+        ) {
+          throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+        }
+        const existingImport = tx.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, claim.runId)).limit(1).get();
+        if (existingImport) {
+          const importedAttempt = tx.select().from(hostedAttemptImports)
+            .where(eq(hostedAttemptImports.attemptId, claim.attempt.id)).limit(1).get();
+          if (!importedAttempt) {
+            const exactLineage = existingImport.admissionId === admission.admissionId
+              && existingImport.admissionOperationId === admission.operationId
+              && existingImport.sourceIdentityDigest === admission.sourceIdentityDigest
+              && existingImport.deliveryPayloadDigest === admission.deliveryPayloadDigest
+              && existingImport.admissionEnvelopeDigest === admission.envelopeDigest
+              && existingImport.eventDigest === eventDigest
+              && existingImport.contextPacketDigest === contextPacketDigest
+              && existingImport.workThreadDigest === incomingWorkThreadDigest;
+            if (!exactLineage) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_RUN_CONFLICT");
+            }
+            const currentRun = tx.select().from(runs).where(eq(runs.id, claim.runId)).limit(1).get();
+            const previousAttempt = currentRun?.currentAttemptId
+              ? tx.select().from(attempts).where(eq(attempts.id, currentRun.currentAttemptId)).limit(1).get()
+              : undefined;
+            const previousHostedAttempt = previousAttempt
+              ? tx.select().from(hostedAttemptImports)
+                  .where(eq(hostedAttemptImports.attemptId, previousAttempt.id)).limit(1).get()
+              : undefined;
+            const retryablePreviousAttempt = Boolean(
+              previousAttempt
+              && (
+                ["interrupted", "cancelled", "timed_out", "failed"].includes(previousAttempt.status)
+                || Date.parse(previousAttempt.leaseExpiresAt) <= Date.parse(importedAt)
+              )
+            );
+            if (
+              !currentRun || !previousAttempt || !previousHostedAttempt
+              || previousHostedAttempt.runId !== claim.runId
+              || previousHostedAttempt.attemptNumber !== previousAttempt.number
+              || terminalRunStatus(currentRun.status)
+              || !retryablePreviousAttempt
+              || claimOperation.state !== "pending"
+              || claim.attempt.number !== previousAttempt.number + 1
+            ) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_ATTEMPT_CONFLICT");
+            }
+            if (tx.select({ attemptId: hostedAttemptImports.attemptId }).from(hostedAttemptImports)
+              .where(eq(hostedAttemptImports.claimOperationId, claim.operationId)).limit(1).get()) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_OPERATION_CONFLICT");
+            }
+            if (tx.select({ attemptId: hostedAttemptImports.attemptId }).from(hostedAttemptImports)
+              .where(eq(hostedAttemptImports.fencingTokenDigest, claim.attempt.fencingTokenDigest)).limit(1).get()) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_FENCE_CONFLICT");
+            }
+            if (tx.select({ attemptId: hostedAttemptImports.attemptId }).from(hostedAttemptImports)
+              .where(eq(hostedAttemptImports.authorityDigest, authorityDigest)).limit(1).get()) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+            }
+            if (tx.select({ id: attempts.id }).from(attempts).where(or(
+              eq(attempts.id, claim.attempt.id),
+              and(eq(attempts.runId, claim.runId), eq(attempts.number, claim.attempt.number))
+            )).limit(1).get()) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_ATTEMPT_CONFLICT");
+            }
+            if (tx.select({ id: attempts.id }).from(attempts)
+              .where(eq(attempts.fencingToken, claim.attempt.fencingToken)).limit(1).get()) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_FENCE_CONFLICT");
+            }
+            tx.insert(attempts).values({
+              id: claim.attempt.id, runId: claim.runId, number: claim.attempt.number,
+              runnerId: claim.runnerId, runnerLocality: "hosted", selectedExecutorId: claim.executorId,
+              fencingToken: claim.attempt.fencingToken, status: "assigned", startedAt: importedAt,
+              heartbeatAt: importedAt, leaseExpiresAt: claim.attempt.leaseExpiresAt,
+              createdAt: importedAt, updatedAt: importedAt
+            }).run();
+            tx.insert(hostedAttemptImports).values({
+              attemptId: claim.attempt.id, runId: claim.runId, attemptNumber: claim.attempt.number,
+              claimOperationId: claim.operationId, fencingTokenDigest: claim.attempt.fencingTokenDigest,
+              claimDigest, authorityDigest, authorityJson: JSON.stringify(claim.authority), importedAt
+            }).run();
+            const reassigned = tx.update(runs).set({
+              status: "assigned", assignedRunnerId: claim.runnerId, executor: claim.executorId,
+              leasedAt: importedAt, leaseExpiresAt: claim.attempt.leaseExpiresAt, heartbeatAt: importedAt,
+              currentAttemptId: claim.attempt.id, updatedAt: importedAt
+            }).where(and(eq(runs.id, claim.runId), eq(runs.currentAttemptId, previousAttempt.id))).run();
+            if (reassigned.changes !== 1) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+            }
+            const acknowledged = tx.update(hostedClaimOperations).set({
+              state: "claimed", activeKey: null, runId: claim.runId,
+              updatedAt: importedAt, acknowledgedAt: importedAt
+            }).where(and(
+              eq(hostedClaimOperations.operationId, claim.operationId),
+              eq(hostedClaimOperations.state, "pending")
+            )).run();
+            if (acknowledged.changes !== 1) {
+              throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+            }
+            return {
+              outcome: "created" as const,
+              importRow: existingImport,
+              attemptImportRow: tx.select().from(hostedAttemptImports)
+                .where(eq(hostedAttemptImports.attemptId, claim.attempt.id)).limit(1).get()!,
+              runRow: tx.select().from(runs).where(eq(runs.id, claim.runId)).limit(1).get()!,
+              executionStartedAt: null,
+              superseded: false
+            };
+          }
+          const exact = existingImport.admissionId === admission.admissionId
+            && existingImport.admissionOperationId === admission.operationId
+            && importedAttempt.claimOperationId === claim.operationId
+            && importedAttempt.attemptId === claim.attempt.id
+            && importedAttempt.fencingTokenDigest === claim.attempt.fencingTokenDigest
+            && existingImport.sourceIdentityDigest === admission.sourceIdentityDigest
+            && existingImport.deliveryPayloadDigest === admission.deliveryPayloadDigest
+            && existingImport.admissionEnvelopeDigest === admission.envelopeDigest
+            && existingImport.policyReceiptId === claim.admissionPolicySnapshot.receiptId
+            && existingImport.policyPayloadDigest === claim.admissionPolicySnapshot.payloadDigest
+            && existingImport.policyReceiptDigest === claim.admissionPolicySnapshot.receiptDigest
+            && existingImport.eventDigest === eventDigest
+            && existingImport.contextPacketDigest === contextPacketDigest
+            && existingImport.workThreadDigest === incomingWorkThreadDigest
+            && importedAttempt.claimDigest === claimDigest
+            && importedAttempt.authorityDigest === authorityDigest
+            && importedAttempt.authorityJson === JSON.stringify(claim.authority);
+          if (!exact) throw new HostedImportConflictError("HOSTED_IMPORT_RUN_CONFLICT");
+          if (claimOperation.state !== "claimed" || claimOperation.runId !== claim.runId) {
+            throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+          }
+          const runRow = tx.select().from(runs).where(eq(runs.id, claim.runId)).limit(1).get();
+          const attemptRow = tx.select().from(attempts).where(eq(attempts.id, claim.attempt.id)).limit(1).get();
+          if (runRow && attemptRow && runRow.currentAttemptId !== claim.attempt.id) {
+            const currentHostedAttempt = runRow.currentAttemptId
+              ? tx.select().from(hostedAttemptImports)
+                  .where(eq(hostedAttemptImports.attemptId, runRow.currentAttemptId)).limit(1).get()
+              : undefined;
+            if (
+              !currentHostedAttempt
+              || runRow.eventId !== event.id
+              || runRow.workThreadId !== existingImport.workThreadId
+              || attemptRow.runId !== claim.runId
+              || attemptRow.number !== claim.attempt.number
+              || attemptRow.runnerId !== claim.runnerId
+              || attemptRow.selectedExecutorId !== claim.executorId
+              || attemptRow.fencingToken !== claim.attempt.fencingToken
+              || attemptRow.leaseExpiresAt !== claim.attempt.leaseExpiresAt
+            ) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+            }
+            return {
+              outcome: "replayed" as const,
+              importRow: existingImport,
+              attemptImportRow: importedAttempt,
+              runRow,
+              executionStartedAt: claimOperation.executionStartedAt,
+              superseded: true
+            };
+          }
+          if (
+            runRow && attemptRow
+            && (runRow.status !== "assigned" || attemptRow.status !== "assigned")
+          ) {
+            if (
+              !claimOperation.executionStartedAt
+              || runRow.eventId !== event.id
+              || runRow.workThreadId !== existingImport.workThreadId
+              || attemptRow.runId !== claim.runId
+              || attemptRow.number !== claim.attempt.number
+              || attemptRow.runnerId !== claim.runnerId
+              || attemptRow.selectedExecutorId !== claim.executorId
+              || attemptRow.fencingToken !== claim.attempt.fencingToken
+              || attemptRow.leaseExpiresAt !== claim.attempt.leaseExpiresAt
+            ) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+            }
+            return {
+              outcome: "replayed" as const,
+              importRow: existingImport,
+              attemptImportRow: importedAttempt,
+              runRow,
+              executionStartedAt: claimOperation.executionStartedAt,
+              superseded: false
+            };
+          }
+          if (
+            !runRow || !attemptRow
+            || runRow.status !== "assigned"
+            || runRow.eventId !== event.id
+            || runRow.assignedRunnerId !== claim.runnerId
+            || runRow.executor !== claim.executorId
+            || runRow.currentAttemptId !== claim.attempt.id
+            || runRow.leaseExpiresAt !== claim.attempt.leaseExpiresAt
+            || runRow.workThreadId !== existingImport.workThreadId
+            || attemptRow.runId !== claim.runId
+            || attemptRow.number !== claim.attempt.number
+            || attemptRow.runnerId !== claim.runnerId
+            || attemptRow.selectedExecutorId !== claim.executorId
+            || attemptRow.fencingToken !== claim.attempt.fencingToken
+            || attemptRow.leaseExpiresAt !== claim.attempt.leaseExpiresAt
+            || attemptRow.status !== "assigned"
+          ) {
+            throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+          }
+          return {
+            outcome: "replayed" as const,
+            importRow: existingImport,
+            attemptImportRow: importedAttempt,
+            runRow,
+            executionStartedAt: claimOperation.executionStartedAt,
+            superseded: false
+          };
+        }
+
+        if (claimOperation.state !== "pending") {
+          throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+        }
+
+        if (tx.select({ id: runs.id }).from(runs).where(or(eq(runs.id, claim.runId), eq(runs.eventId, event.id))).limit(1).get()) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_RUN_CONFLICT");
+        }
+        if (tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+          .where(eq(hostedRunImports.admissionId, admission.admissionId)).limit(1).get()) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_ADMISSION_CONFLICT");
+        }
+        if (tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports).where(or(
+          eq(hostedRunImports.claimOperationId, claim.operationId),
+          eq(hostedRunImports.claimOperationId, admission.operationId),
+          eq(hostedRunImports.admissionOperationId, claim.operationId),
+          eq(hostedRunImports.admissionOperationId, admission.operationId)
+        )).limit(1).get()) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_OPERATION_CONFLICT");
+        }
+        const collidingAttempt = tx.select().from(attempts).where(or(
+          eq(attempts.id, claim.attempt.id),
+          and(eq(attempts.runId, claim.runId), eq(attempts.number, claim.attempt.number))
+        )).limit(1).get();
+        if (collidingAttempt) throw new HostedImportConflictError("HOSTED_IMPORT_ATTEMPT_CONFLICT");
+        if (tx.select({ id: attempts.id }).from(attempts)
+          .where(eq(attempts.fencingToken, claim.attempt.fencingToken)).limit(1).get()
+          || tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+            .where(eq(hostedRunImports.fencingTokenDigest, claim.attempt.fencingTokenDigest)).limit(1).get()
+          || tx.select({ attemptId: hostedAttemptImports.attemptId }).from(hostedAttemptImports)
+            .where(eq(hostedAttemptImports.fencingTokenDigest, claim.attempt.fencingTokenDigest)).limit(1).get()) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_FENCE_CONFLICT");
+        }
+        const sourceCollision = tx.select().from(hostedRunImports).where(
+          eq(hostedRunImports.sourceIdentityDigest, admission.sourceIdentityDigest)
+        ).limit(1).get();
+        if (sourceCollision) throw new HostedImportConflictError("HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT");
+        const deliveryCollision = tx.select().from(sourceDeliveries).where(and(
+          eq(sourceDeliveries.source, event.source),
+          eq(sourceDeliveries.deliveryId, admission.deliveryId)
+        )).limit(1).get();
+        if (deliveryCollision) throw new HostedImportConflictError("HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT");
+        if (tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+          .where(eq(hostedRunImports.authorityDigest, authorityDigest)).limit(1).get()
+          || tx.select({ attemptId: hostedAttemptImports.attemptId }).from(hostedAttemptImports)
+            .where(eq(hostedAttemptImports.authorityDigest, authorityDigest)).limit(1).get()) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
+
+        let durableThread: DurableWorkThread | undefined;
+        if (protocolFields.thread) {
+          const canonicalKey = workThreadCanonicalKey(protocolFields.thread);
+          const existingThread = tx.select().from(workThreads).where(and(
+            eq(workThreads.scopeId, "local"),
+            eq(workThreads.canonicalKey, canonicalKey)
+          )).limit(1).get();
+          if (existingThread) {
+            let current: DurableWorkThread;
+            try {
+              current = workThreadFromRow(existingThread);
+            } catch {
+              throw new HostedImportConflictError("HOSTED_IMPORT_WORK_THREAD_CONFLICT");
+            }
+            durableThread = mergeWorkThreadAnchors(current, protocolFields.thread);
+            if (workThreadCanonicalKey(durableThread) !== canonicalKey) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_WORK_THREAD_CONFLICT");
+            }
+            const mergedJson = JSON.stringify(durableThread);
+            if (mergedJson !== existingThread.threadJson) {
+              tx.update(workThreads).set({ threadJson: mergedJson, updatedAt: importedAt })
+                .where(eq(workThreads.id, existingThread.id)).run();
+            }
+          } else {
+            const id = protocolFields.thread.id ?? `thread_${randomUUID()}`;
+            if (tx.select({ id: workThreads.id }).from(workThreads).where(eq(workThreads.id, id)).limit(1).get()) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_WORK_THREAD_CONFLICT");
+            }
+            durableThread = WorkThreadSchema.parse({ ...protocolFields.thread, id }) as DurableWorkThread;
+            tx.insert(workThreads).values({
+              id,
+              scopeId: "local",
+              canonicalKey,
+              provider: durableThread.workItemReference.provider,
+              ownerContainerId: durableThread.workItemReference.ownerContainer?.id ?? "",
+              workItemKind: durableThread.workItemReference.kind,
+              externalId: durableThread.workItemReference.externalId,
+              threadJson: JSON.stringify(durableThread),
+              currentAssessmentId: null,
+              createdAt: importedAt,
+              updatedAt: importedAt
+            }).run();
+          }
+        }
+
+        tx.insert(runs).values({
+          id: claim.runId,
+          eventId: event.id,
+          status: "assigned",
+          eventJson: JSON.stringify(event),
+          contextPacketJson: JSON.stringify(protocolFields.contextPacket),
+          assignedRunnerId: claim.runnerId,
+          executor: claim.executorId,
+          repoProvider: projectTarget.provider,
+          repoOwner: projectTarget.owner,
+          repoName: projectTarget.repo,
+          workThreadId: durableThread?.id ?? null,
+          conversationKey: conversationKeyFromEvent(event),
+          leasedAt: importedAt,
+          leaseExpiresAt: claim.attempt.leaseExpiresAt,
+          heartbeatAt: importedAt,
+          currentAttemptId: claim.attempt.id,
+          routingPolicyJson: JSON.stringify({ runnerIds: [claim.runnerId], executorIds: [claim.executorId] }),
+          routingRunnerIdsJson: JSON.stringify([claim.runnerId]),
+          routingExecutorIdsJson: JSON.stringify([claim.executorId]),
+          routingRejectionsJson: "[]",
+          createdAt: importedAt,
+          updatedAt: importedAt
+        }).run();
+        tx.insert(attempts).values({
+          id: claim.attempt.id,
+          runId: claim.runId,
+          number: claim.attempt.number,
+          runnerId: claim.runnerId,
+          runnerLocality: "hosted",
+          selectedExecutorId: claim.executorId,
+          fencingToken: claim.attempt.fencingToken,
+          status: "assigned",
+          startedAt: importedAt,
+          heartbeatAt: importedAt,
+          leaseExpiresAt: claim.attempt.leaseExpiresAt,
+          createdAt: importedAt,
+          updatedAt: importedAt
+        }).run();
+        tx.insert(sourceDeliveries).values({
+          source: event.source,
+          deliveryId: admission.deliveryId,
+          runId: claim.runId,
+          eventId: event.id,
+          createdAt: importedAt
+        }).run();
+        tx.insert(hostedRunImports).values({
+          runId: claim.runId,
+          admissionId: admission.admissionId,
+          admissionOperationId: admission.operationId,
+          claimOperationId: claim.operationId,
+          attemptId: claim.attempt.id,
+          fencingTokenDigest: claim.attempt.fencingTokenDigest,
+          sourceIdentityDigest: admission.sourceIdentityDigest,
+          deliveryPayloadDigest: admission.deliveryPayloadDigest,
+          admissionEnvelopeDigest: admission.envelopeDigest,
+          policyReceiptId: claim.admissionPolicySnapshot.receiptId,
+          policyPayloadDigest: claim.admissionPolicySnapshot.payloadDigest,
+          policyReceiptDigest: claim.admissionPolicySnapshot.receiptDigest,
+          eventDigest,
+          contextPacketDigest,
+          workThreadId: durableThread?.id ?? null,
+          workThreadDigest: incomingWorkThreadDigest,
+          claimDigest,
+          authorityDigest,
+          authorityJson: JSON.stringify(claim.authority),
+          importedAt
+        }).run();
+        tx.insert(hostedAttemptImports).values({
+          attemptId: claim.attempt.id,
+          runId: claim.runId,
+          attemptNumber: claim.attempt.number,
+          claimOperationId: claim.operationId,
+          fencingTokenDigest: claim.attempt.fencingTokenDigest,
+          claimDigest,
+          authorityDigest,
+          authorityJson: JSON.stringify(claim.authority),
+          importedAt
+        }).run();
+        const acknowledged = tx.update(hostedClaimOperations).set({
+          state: "claimed",
+          activeKey: null,
+          runId: claim.runId,
+          updatedAt: importedAt,
+          acknowledgedAt: importedAt
+        }).where(and(
+          eq(hostedClaimOperations.operationId, claim.operationId),
+          eq(hostedClaimOperations.state, "pending")
+        )).run();
+        if (acknowledged.changes !== 1) {
+          throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+        }
+        tx.insert(runEvents).values([
+          runEventValues({
+            runId: claim.runId,
+            type: "run.hosted_imported",
+            payload: {
+              admissionId: admission.admissionId,
+              admissionEnvelopeDigest: admission.envelopeDigest,
+              claimOperationId: claim.operationId,
+              authorityDigest,
+              attemptId: claim.attempt.id,
+              attemptNumber: claim.attempt.number
+            },
+            visibility: "audit",
+            importance: "high",
+            createdAt: importedAt
+          }),
+          runEventValues({
+            runId: claim.runId,
+            type: "context_packet.generated",
+            payload: { contextPacket: protocolFields.contextPacket, ...(durableThread ? { thread: durableThread } : {}) },
+            visibility: "audit",
+            importance: "normal",
+            message: protocolFields.contextPacket.summary,
+            createdAt: importedAt
+          })
+        ]).run();
+        const runRow = tx.select().from(runs).where(eq(runs.id, claim.runId)).limit(1).get();
+        if (!runRow) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        return {
+          outcome: "created" as const,
+          importRow: tx.select().from(hostedRunImports).where(eq(hostedRunImports.runId, claim.runId)).limit(1).get()!,
+          attemptImportRow: tx.select().from(hostedAttemptImports)
+            .where(eq(hostedAttemptImports.attemptId, claim.attempt.id)).limit(1).get()!,
+          runRow,
+          executionStartedAt: null,
+          superseded: false
+        };
+      });
+
+      const storedEvent = OpenTagEventSchema.parse(JSON.parse(result.runRow.eventJson));
+      const hostedAuthority: HostedImportAuthority = {
+        ...(JSON.parse(result.attemptImportRow.authorityJson) as HostedClaimV1["authority"]),
+        admissionId: result.importRow.admissionId,
+        admissionOperationId: result.importRow.admissionOperationId,
+        claimOperationId: result.attemptImportRow.claimOperationId,
+        admissionEnvelopeDigest: result.importRow.admissionEnvelopeDigest,
+        sourceIdentityDigest: result.importRow.sourceIdentityDigest,
+        deliveryPayloadDigest: result.importRow.deliveryPayloadDigest,
+        policyReceiptId: result.importRow.policyReceiptId,
+        policyPayloadDigest: result.importRow.policyPayloadDigest,
+        policyReceiptDigest: result.importRow.policyReceiptDigest,
+        eventDigest: result.importRow.eventDigest,
+        contextPacketDigest: result.importRow.contextPacketDigest,
+        ...(result.importRow.workThreadId ? { workThreadId: result.importRow.workThreadId } : {}),
+        ...(result.importRow.workThreadDigest ? { workThreadDigest: result.importRow.workThreadDigest } : {}),
+        claimDigest: result.attemptImportRow.claimDigest,
+        authorityDigest: result.attemptImportRow.authorityDigest,
+        importedAt: result.attemptImportRow.importedAt
+      };
+      return {
+        outcome: result.outcome,
+        executionState: terminalRunStatus(result.runRow.status)
+          ? "terminal"
+          : result.superseded
+            ? "superseded"
+            : result.executionStartedAt
+            ? "already_started"
+            : "ready_to_start",
+        executionMayStart: false,
+        claimed: result.superseded || result.executionStartedAt || terminalRunStatus(result.runRow.status) ? null : {
+          run: runFromRow(result.runRow),
+          event: storedEvent,
+          attemptId: claim.attempt.id,
+          attemptNumber: claim.attempt.number,
+          fencingToken: claim.attempt.fencingToken,
+          executorId: claim.executorId
+        },
+        hostedAuthority
+      };
+    },
+
     async createRun(input: {
       id: string;
       event: OpenTagEvent;
@@ -6337,7 +7802,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .where(and(
           inArray(runs.status, ["assigned", "running", "needs_approval"]),
           isNotNull(runs.leaseExpiresAt),
-          lte(runs.leaseExpiresAt, now.toISOString())
+          lte(runs.leaseExpiresAt, now.toISOString()),
+          notExists(db.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+            .where(eq(hostedRunImports.runId, runs.id)))
         ))
         .orderBy(asc(runs.leaseExpiresAt), asc(runs.createdAt), asc(runs.id))
         .limit(EXPIRED_LEASE_RECOVERY_LIMIT);
@@ -6346,7 +7813,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const updatedAt = nowIso();
         const interrupted = db.transaction((tx) => {
           const current = tx.select().from(runs).where(eq(runs.id, activeRow.id)).limit(1).get();
-          if (!current || !isIsoExpired(current.leaseExpiresAt, now) || !["assigned", "running", "needs_approval"].includes(current.status)) {
+          const hosted = tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+            .where(eq(hostedRunImports.runId, activeRow.id)).limit(1).get();
+          if (hosted || !current || !isIsoExpired(current.leaseExpiresAt, now) || !["assigned", "running", "needs_approval"].includes(current.status)) {
             return false;
           }
           if (current.currentAttemptId) {
@@ -6414,20 +7883,27 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           claimCursorRunId: runners.claimCursorRunId
         }).from(runners).where(eq(runners.runnerId, input.runnerId)).limit(1).get();
         const hasCursor = Boolean(caller?.claimCursorCreatedAt && caller.claimCursorRunId);
+        const isNotHostedRun = notExists(
+          tx.select({ runId: hostedRunImports.runId })
+            .from(hostedRunImports)
+            .where(eq(hostedRunImports.runId, runs.id))
+        );
         const queuedAfterCursor = hasCursor
           ? tx.select().from(runs).where(and(
               eq(runs.status, "queued"),
+              isNotHostedRun,
               or(
                 gt(runs.createdAt, caller!.claimCursorCreatedAt!),
                 and(eq(runs.createdAt, caller!.claimCursorCreatedAt!), gt(runs.id, caller!.claimCursorRunId!))
               )
             )).orderBy(asc(runs.createdAt), asc(runs.id)).limit(CLAIM_SCAN_LIMIT).all()
-          : tx.select().from(runs).where(eq(runs.status, "queued"))
+          : tx.select().from(runs).where(and(eq(runs.status, "queued"), isNotHostedRun))
               .orderBy(asc(runs.createdAt), asc(runs.id)).limit(CLAIM_SCAN_LIMIT).all();
         const remainingWindow = CLAIM_SCAN_LIMIT - queuedAfterCursor.length;
         const queuedBeforeCursor = hasCursor && remainingWindow > 0
           ? tx.select().from(runs).where(and(
               eq(runs.status, "queued"),
+              isNotHostedRun,
               or(
                 lt(runs.createdAt, caller!.claimCursorCreatedAt!),
                 and(eq(runs.createdAt, caller!.claimCursorCreatedAt!), lte(runs.id, caller!.claimCursorRunId!))

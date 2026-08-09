@@ -18,6 +18,7 @@ export const RelayCapabilitySchema = z.enum([
   "relay.readiness.v1",
   "relay.repository-binding.v1",
   "relay.hosted-admission.v1",
+  "relay.hosted-claim.v1",
   "relay.claim-fence.v1",
   "relay.lifecycle.v1",
   "relay.permission.v1",
@@ -695,6 +696,8 @@ export const ControlConflictResponseV1Schema = z
       "stale_readiness",
       "target_binding_stale",
       "idempotency_conflict",
+      "operation_digest_conflict",
+      "stale_control_authority",
       "invalid_state_transition",
     ]),
     message: z.string().min(1),
@@ -1474,6 +1477,141 @@ export const PermissionResolutionCurrentHttpResponseV1Schema = z.union([
   z.object({ status: z.literal(202), body: PermissionResolutionWaitingReceiptEnvelopeV1Schema }).strict(),
 ]);
 
+const GitHubProviderIdV1Schema = z
+  .string()
+  .regex(/^[1-9][0-9]{0,30}$/);
+
+const HostedAdmissionEnvelopeDigestInputV1Shape = {
+  kind: z.literal("hosted_admission"),
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.hosted-admission.v1")]),
+  admissionId: NonEmptyIdSchema,
+  operationId: NonEmptyIdSchema,
+  organizationId: NonEmptyIdSchema,
+  bindingId: NonEmptyIdSchema,
+  bindingSecretVersion: NonEmptyIdSchema,
+  provider: z.literal("github"),
+  deliveryId: NonEmptyIdSchema,
+  deliveryPayloadDigest: ReceiptDigestSchema,
+  sourceIdentityDigest: ReceiptDigestSchema,
+  eventName: z.literal("issue_comment"),
+  action: z.literal("created"),
+  repository: z
+    .object({
+      providerRepositoryId: GitHubProviderIdV1Schema,
+      owner: NonEmptyIdSchema,
+      repo: NonEmptyIdSchema,
+    })
+    .strict(),
+  sourceThread: z
+    .object({
+      kind: z.enum(["issue", "pull_request"]),
+      providerThreadId: GitHubProviderIdV1Schema,
+      number: z.number().int().positive(),
+    })
+    .strict(),
+  sourceEvent: z
+    .object({
+      providerEventId: GitHubProviderIdV1Schema,
+      kind: z.literal("issue_comment"),
+    })
+    .strict(),
+  verifiedActor: z
+    .object({
+      providerUserId: GitHubProviderIdV1Schema,
+      login: NonEmptyIdSchema,
+      authorization: z
+        .object({
+          decision: z.literal("allowed"),
+          grantRef: NonEmptyIdSchema,
+          grantVersion: z.number().int().positive(),
+          grantDigest: ReceiptDigestSchema,
+        })
+        .strict(),
+    })
+    .strict(),
+  projectTarget: z
+    .object({
+      projectTargetId: NonEmptyIdSchema,
+      version: z.number().int().positive(),
+      digest: ReceiptDigestSchema,
+    })
+    .strict(),
+  runnerId: NonEmptyIdSchema,
+  admissionPolicySnapshot: z
+    .object({
+      snapshotId: NonEmptyIdSchema,
+      digest: ReceiptDigestSchema,
+    })
+    .strict(),
+  receivedAt: ControlTimestampSchema,
+};
+
+export const HostedAdmissionEnvelopeDigestInputV1Schema = z
+  .object(HostedAdmissionEnvelopeDigestInputV1Shape)
+  .strict();
+
+export const HostedAdmissionEnvelopeV1Schema = z
+  .object({
+    ...HostedAdmissionEnvelopeDigestInputV1Shape,
+    envelopeDigest: ReceiptDigestSchema,
+  })
+  .strict();
+
+export const GitHubIssueCommentSourceIdentityDigestInputV1Schema = z
+  .object({
+    provider: z.literal("github"),
+    repository: HostedAdmissionEnvelopeDigestInputV1Shape.repository,
+    sourceThread: HostedAdmissionEnvelopeDigestInputV1Shape.sourceThread,
+    sourceEvent: HostedAdmissionEnvelopeDigestInputV1Shape.sourceEvent,
+    actor: z
+      .object({
+        providerUserId: GitHubProviderIdV1Schema,
+        login: NonEmptyIdSchema,
+      })
+      .strict(),
+    executionBearingCommentBody: z.string().min(1),
+  })
+  .strict();
+
+export function buildHostedAdmissionEnvelopeDigestInputV1(
+  envelope: z.input<typeof HostedAdmissionEnvelopeV1Schema>,
+): z.output<typeof HostedAdmissionEnvelopeDigestInputV1Schema> {
+  const { envelopeDigest: _envelopeDigest, ...digestInput } =
+    HostedAdmissionEnvelopeV1Schema.parse(envelope);
+  return HostedAdmissionEnvelopeDigestInputV1Schema.parse(digestInput);
+}
+
+export function computeHostedAdmissionEnvelopeDigestV1(
+  envelope: z.input<typeof HostedAdmissionEnvelopeV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(
+    canonicalJsonStringify(buildHostedAdmissionEnvelopeDigestInputV1(envelope)),
+  );
+}
+
+export async function verifyHostedAdmissionEnvelopeDigestV1(
+  envelope: z.input<typeof HostedAdmissionEnvelopeV1Schema>,
+): Promise<boolean> {
+  const parsed = HostedAdmissionEnvelopeV1Schema.parse(envelope);
+  return (await computeHostedAdmissionEnvelopeDigestV1(parsed)) === parsed.envelopeDigest;
+}
+
+export function buildGitHubIssueCommentSourceIdentityDigestInputV1(
+  input: z.input<typeof GitHubIssueCommentSourceIdentityDigestInputV1Schema>,
+): z.output<typeof GitHubIssueCommentSourceIdentityDigestInputV1Schema> {
+  return GitHubIssueCommentSourceIdentityDigestInputV1Schema.parse(input);
+}
+
+export function computeGitHubIssueCommentSourceIdentityDigestV1(
+  input: z.input<typeof GitHubIssueCommentSourceIdentityDigestInputV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(
+    canonicalJsonStringify(buildGitHubIssueCommentSourceIdentityDigestInputV1(input)),
+  );
+}
+
 export const AdmissionPolicySnapshotPayloadV1Schema = z
   .object({
     snapshotId: NonEmptyIdSchema,
@@ -1482,7 +1620,7 @@ export const AdmissionPolicySnapshotPayloadV1Schema = z
     actor: z
       .object({
         provider: NonEmptyIdSchema,
-        providerUserId: NonEmptyIdSchema,
+        providerUserId: GitHubProviderIdV1Schema,
         login: NonEmptyIdSchema,
         authorizationRef: NonEmptyIdSchema,
       })
@@ -1491,7 +1629,7 @@ export const AdmissionPolicySnapshotPayloadV1Schema = z
       .object({
         projectTargetId: NonEmptyIdSchema,
         bindingId: NonEmptyIdSchema,
-        providerRepositoryId: NonEmptyIdSchema,
+        providerRepositoryId: GitHubProviderIdV1Schema,
         defaultBranch: NonEmptyIdSchema,
       })
       .strict(),
@@ -1535,6 +1673,692 @@ export const AdmissionPolicySnapshotReceiptEnvelopeV1Schema = z
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["payload", "tenant"], message: "Policy snapshot must be tenant scoped." });
     }
   });
+
+const HostedClaimRequiredCapabilitiesV1Schema = z.tuple([
+  z.literal("relay.claim-fence.v1"),
+  z.literal("relay.hosted-admission.v1"),
+  z.literal("relay.hosted-claim.v1"),
+  z.literal("relay.lifecycle.v1"),
+  z.literal("relay.readiness.v1"),
+]);
+
+export const HostedClaimExpectedAuthorityV1Schema = z
+  .object({
+    credentialId: NonEmptyIdSchema,
+    registrationGeneration: z.number().int().positive(),
+    credentialGeneration: z.number().int().positive(),
+    runnerReadinessReceiptId: NonEmptyIdSchema,
+    runnerReadinessReceiptDigest: ReceiptDigestSchema,
+  })
+  .strict();
+
+export const HostedClaimRequestV1Schema = z
+  .object({
+    ...ControlMutationRequestV1Shape,
+    requiredCapabilities: HostedClaimRequiredCapabilitiesV1Schema,
+    expectedAuthority: HostedClaimExpectedAuthorityV1Schema,
+  })
+  .strict();
+
+const HostedClaimAttemptV1Schema = z
+  .object({
+    id: NonEmptyIdSchema,
+    number: z.number().int().positive(),
+    epoch: z.number().int().positive(),
+    fencingToken: z.string().min(1).max(4096),
+    fencingTokenDigest: ReceiptDigestSchema,
+    leaseExpiresAt: ControlTimestampSchema,
+  })
+  .strict()
+  .superRefine((attempt, ctx) => {
+    if (attempt.epoch !== attempt.number) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["epoch"],
+        message: "Attempt epoch must equal the Run-scoped attempt number.",
+      });
+    }
+  });
+
+const HostedClaimAuthorityV1Schema = z
+  .object({
+    organizationId: NonEmptyIdSchema,
+    runnerId: NonEmptyIdSchema,
+    runId: NonEmptyIdSchema,
+    credentialId: NonEmptyIdSchema,
+    registrationGeneration: z.number().int().positive(),
+    credentialGeneration: z.number().int().positive(),
+    projectTargetId: NonEmptyIdSchema,
+    bindingId: NonEmptyIdSchema,
+    targetBindingDigest: ReceiptDigestSchema,
+    admissionPolicyReceiptId: NonEmptyIdSchema,
+    admissionPolicySnapshotId: NonEmptyIdSchema,
+    admissionPolicySnapshotDigest: ReceiptDigestSchema,
+    runnerReadinessReceiptId: NonEmptyIdSchema,
+    runnerReadinessReceiptDigest: ReceiptDigestSchema,
+    targetReadinessReceiptId: NonEmptyIdSchema,
+    targetReadinessReceiptDigest: ReceiptDigestSchema,
+    executorId: NonEmptyIdSchema,
+    executorCapabilityDigest: ReceiptDigestSchema,
+    attemptId: NonEmptyIdSchema,
+    attemptNumber: z.number().int().positive(),
+    epoch: z.number().int().positive(),
+    fencingTokenDigest: ReceiptDigestSchema,
+  })
+  .strict()
+  .superRefine((authority, ctx) => {
+    if (authority.epoch !== authority.attemptNumber) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["epoch"],
+        message: "Authority epoch must equal the Run-scoped attempt number.",
+      });
+    }
+    if (
+      authority.runnerReadinessReceiptId !== authority.targetReadinessReceiptId ||
+      authority.runnerReadinessReceiptDigest !== authority.targetReadinessReceiptDigest
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["targetReadinessReceiptId"],
+        message: "Runner and target readiness must use the same receipt tuple.",
+      });
+    }
+  });
+
+export const HostedClaimV1Schema = z
+  .object({
+    kind: z.literal("hosted_claim"),
+    ...VersionedResponseShape,
+    requiredCapabilities: HostedClaimRequiredCapabilitiesV1Schema,
+    requestId: NonEmptyIdSchema,
+    operationId: NonEmptyIdSchema,
+    organizationId: NonEmptyIdSchema,
+    runnerId: NonEmptyIdSchema,
+    runId: NonEmptyIdSchema,
+    executorId: NonEmptyIdSchema,
+    hostedAdmission: HostedAdmissionEnvelopeV1Schema,
+    admissionPolicySnapshot: AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
+    attempt: HostedClaimAttemptV1Schema,
+    authority: HostedClaimAuthorityV1Schema,
+  })
+  .strict()
+  .superRefine((claim, ctx) => {
+    const admission = claim.hostedAdmission;
+    const policy = claim.admissionPolicySnapshot;
+    const authority = claim.authority;
+    const mismatches: Array<[string[], boolean, string]> = [
+      [["hostedAdmission", "organizationId"], admission.organizationId !== claim.organizationId, "Admission organization must match the claim."],
+      [["hostedAdmission", "runnerId"], admission.runnerId !== claim.runnerId, "Admission Runner must match the claim."],
+      [["admissionPolicySnapshot", "organizationId"], policy.organizationId !== claim.organizationId, "Policy organization must match the claim."],
+      [["admissionPolicySnapshot", "runId"], policy.runId !== claim.runId, "Policy Run must match the claim."],
+      [["admissionPolicySnapshot", "operationId"], policy.operationId !== admission.operationId, "Policy operation must match the admission."],
+      [["admissionPolicySnapshot", "payload", "tenant", "organizationId"], policy.payload.tenant.organizationId !== claim.organizationId, "Policy tenant must match the claim."],
+      [["admissionPolicySnapshot", "payload", "runner", "runnerId"], policy.payload.runner.runnerId !== claim.runnerId, "Policy Runner must match the claim."],
+      [["hostedAdmission", "bindingId"], admission.bindingId !== policy.payload.target.bindingId, "Admission binding must match the policy."],
+      [["hostedAdmission", "projectTarget", "projectTargetId"], admission.projectTarget.projectTargetId !== policy.payload.target.projectTargetId, "Admission target must match the policy."],
+      [["hostedAdmission", "repository", "providerRepositoryId"], admission.repository.providerRepositoryId !== policy.payload.target.providerRepositoryId, "Admission repository must match the policy."],
+      [["hostedAdmission", "verifiedActor", "providerUserId"], admission.verifiedActor.providerUserId !== policy.payload.actor.providerUserId, "Admission actor ID must match the policy."],
+      [["hostedAdmission", "verifiedActor", "login"], admission.verifiedActor.login !== policy.payload.actor.login, "Admission actor login must match the policy."],
+      [["admissionPolicySnapshot", "payload", "actor", "provider"], policy.payload.actor.provider !== admission.provider, "Policy actor provider must match the admission."],
+      [["hostedAdmission", "verifiedActor", "authorization", "grantRef"], admission.verifiedActor.authorization.grantRef !== policy.payload.actor.authorizationRef, "Admission actor grant must match the policy."],
+      [["hostedAdmission", "admissionPolicySnapshot", "snapshotId"], admission.admissionPolicySnapshot.snapshotId !== policy.payload.snapshotId, "Admission policy ID must match the receipt."],
+      [["hostedAdmission", "admissionPolicySnapshot", "digest"], admission.admissionPolicySnapshot.digest !== policy.receiptDigest, "Admission policy digest must match the receipt."],
+      [["authority", "organizationId"], authority.organizationId !== claim.organizationId, "Authority organization must match the claim."],
+      [["authority", "runnerId"], authority.runnerId !== claim.runnerId, "Authority Runner must match the claim."],
+      [["authority", "runId"], authority.runId !== claim.runId, "Authority Run must match the claim."],
+      [["authority", "projectTargetId"], authority.projectTargetId !== admission.projectTarget.projectTargetId, "Authority target must match the admission."],
+      [["authority", "bindingId"], authority.bindingId !== admission.bindingId, "Authority binding must match the admission."],
+      [["authority", "targetBindingDigest"], authority.targetBindingDigest !== admission.projectTarget.digest, "Authority target digest must match the admission."],
+      [["authority", "admissionPolicyReceiptId"], authority.admissionPolicyReceiptId !== policy.receiptId, "Authority policy receipt ID must match the receipt."],
+      [["authority", "admissionPolicySnapshotId"], authority.admissionPolicySnapshotId !== policy.payload.snapshotId, "Authority policy ID must match the receipt."],
+      [["authority", "admissionPolicySnapshotDigest"], authority.admissionPolicySnapshotDigest !== policy.receiptDigest, "Authority policy digest must match the receipt."],
+      [["authority", "runnerReadinessReceiptDigest"], authority.runnerReadinessReceiptDigest !== policy.payload.runner.readinessReceiptDigest, "Authority readiness digest must match the policy."],
+      [["authority", "executorId"], authority.executorId !== claim.executorId || authority.executorId !== policy.payload.executor.executorId, "Authority executor must match the claim and policy."],
+      [["authority", "executorCapabilityDigest"], authority.executorCapabilityDigest !== policy.payload.executor.capabilityDigest, "Authority executor digest must match the policy."],
+      [["authority", "attemptId"], authority.attemptId !== claim.attempt.id, "Authority Attempt ID must match the claim."],
+      [["authority", "attemptNumber"], authority.attemptNumber !== claim.attempt.number, "Authority Attempt number must match the claim."],
+      [["authority", "epoch"], authority.epoch !== claim.attempt.epoch, "Authority Attempt epoch must match the claim."],
+      [["authority", "fencingTokenDigest"], authority.fencingTokenDigest !== claim.attempt.fencingTokenDigest, "Authority fence digest must match the claim."],
+    ];
+    for (const [path, mismatch, message] of mismatches) {
+      if (mismatch) ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
+    }
+
+    if (
+      claim.requiredCapabilities.length !== policy.payload.requiredRelayCapabilities.length ||
+      claim.requiredCapabilities.some(
+        (capability, index) => capability !== policy.payload.requiredRelayCapabilities[index],
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["requiredCapabilities"],
+        message: "Claim capabilities must match the immutable policy snapshot.",
+      });
+    }
+  });
+
+export function verifyHostedClaimExpectedAuthorityV1(
+  request: z.input<typeof HostedClaimRequestV1Schema>,
+  claim: z.input<typeof HostedClaimV1Schema>,
+): boolean {
+  const parsedRequest = HostedClaimRequestV1Schema.parse(request);
+  const parsedClaim = HostedClaimV1Schema.parse(claim);
+  const expected = parsedRequest.expectedAuthority;
+  const authority = parsedClaim.authority;
+  return parsedRequest.requestId === parsedClaim.requestId &&
+    parsedRequest.operationId === parsedClaim.operationId &&
+    expected.credentialId === authority.credentialId &&
+    expected.registrationGeneration === authority.registrationGeneration &&
+    expected.credentialGeneration === authority.credentialGeneration &&
+    expected.runnerReadinessReceiptId === authority.runnerReadinessReceiptId &&
+    expected.runnerReadinessReceiptDigest === authority.runnerReadinessReceiptDigest;
+}
+
+export function computeHostedClaimFencingTokenDigestV1(
+  rawFencingToken: string,
+): Promise<string> {
+  return sha256Utf8V1(rawFencingToken);
+}
+
+export async function verifyHostedClaimFencingTokenDigestV1(
+  claim: z.input<typeof HostedClaimV1Schema>,
+): Promise<boolean> {
+  const parsed = HostedClaimV1Schema.parse(claim);
+  const computedDigest = await computeHostedClaimFencingTokenDigestV1(
+    parsed.attempt.fencingToken,
+  );
+  return computedDigest === parsed.attempt.fencingTokenDigest &&
+    computedDigest === parsed.authority.fencingTokenDigest;
+}
+
+export const HostedLifecycleMachineRequestIdV1Schema = z
+  .string()
+  .regex(/^req_[0-9a-f]{64}$/u);
+export const HostedLifecycleMachineOperationIdV1Schema = z
+  .string()
+  .regex(/^op_[0-9a-f]{64}$/u);
+export const HostedLifecycleStableIdV1Schema = z
+  .string()
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u)
+  .refine((value) => isCredentialSafeText(value));
+export const HostedLifecycleRequiredCapabilitiesV1Schema = z.tuple([
+  z.literal("relay.lifecycle.v1"),
+]);
+export const HostedLifecycleAttemptV1Schema = z
+  .object({
+    attemptId: HostedLifecycleStableIdV1Schema,
+    attemptNumber: z.number().int().positive(),
+    epoch: z.number().int().positive(),
+    fencingToken: z.string().min(1).max(4096),
+    fencingTokenDigest: ReceiptDigestSchema,
+  })
+  .strict()
+  .refine((attempt) => attempt.epoch === attempt.attemptNumber, {
+    path: ["epoch"],
+    message: "Attempt epoch must equal attempt number.",
+  });
+const HostedLifecycleRequestBaseV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: HostedLifecycleRequiredCapabilitiesV1Schema,
+  requestId: HostedLifecycleMachineRequestIdV1Schema,
+  operationId: HostedLifecycleMachineOperationIdV1Schema,
+  attempt: HostedLifecycleAttemptV1Schema,
+  requestDigest: ReceiptDigestSchema,
+  occurredAt: ControlTimestampSchema,
+});
+export const HostedHeartbeatRequestV1Schema = HostedLifecycleRequestBaseV1Schema
+  .extend({ expectedLeaseExpiresAt: ControlTimestampSchema })
+  .strict();
+export const HostedRunningRequestV1Schema = HostedLifecycleRequestBaseV1Schema
+  .extend({
+    executorId: HostedLifecycleStableIdV1Schema,
+    executorCapabilityDigest: ReceiptDigestSchema,
+    runTimeoutMs: z.number().int().positive().max(86_400_000).optional(),
+  })
+  .strict();
+export const HostedRejectStartReasonCodeV1Schema = z.enum([
+  "executor_incompatible",
+  "executor_unavailable",
+  "target_unavailable",
+  "unknown_safe_failure",
+]);
+export const HostedRejectStartRequestV1Schema = HostedLifecycleRequestBaseV1Schema
+  .extend({
+    executorId: HostedLifecycleStableIdV1Schema,
+    reasonCode: HostedRejectStartReasonCodeV1Schema,
+  })
+  .strict();
+export const HostedProgressRequestV1Schema = HostedLifecycleRequestBaseV1Schema
+  .extend({
+    progressId: z.string().regex(/^progress_[0-9a-f]{64}$/u),
+    progressDigest: ReceiptDigestSchema,
+  })
+  .strict();
+const HostedLifecycleSortedDigestsV1Schema = sortedUniqueArray(
+  ReceiptDigestSchema,
+).max(64);
+export const HostedCompleteRequestV1Schema = HostedLifecycleRequestBaseV1Schema
+  .extend({
+    conclusion: z.enum([
+      "success",
+      "failure",
+      "cancelled",
+      "interrupted",
+      "timed_out",
+      "needs_human",
+    ]),
+    reasonCode: z.string().regex(/^[a-z][a-z0-9._-]{0,63}$/u),
+    resultDigest: ReceiptDigestSchema,
+    artifactDigests: HostedLifecycleSortedDigestsV1Schema,
+    evidenceDigests: HostedLifecycleSortedDigestsV1Schema,
+  })
+  .strict();
+export const HostedLifecycleRequestV1Schema = z.union([
+  HostedHeartbeatRequestV1Schema,
+  HostedRunningRequestV1Schema,
+  HostedRejectStartRequestV1Schema,
+  HostedProgressRequestV1Schema,
+  HostedCompleteRequestV1Schema,
+]);
+export const HostedLifecycleReceiptPayloadV1Schema = z.discriminatedUnion(
+  "operation",
+  [
+    z.object({
+      operation: z.literal("heartbeat"),
+      occurredAt: ControlTimestampSchema,
+      leaseExpiresAt: ControlTimestampSchema,
+    }).strict(),
+    z.object({
+      operation: z.literal("running"),
+      occurredAt: ControlTimestampSchema,
+      executorId: HostedLifecycleStableIdV1Schema,
+      executorCapabilityDigest: ReceiptDigestSchema,
+      runTimeoutMs: z.number().int().positive().max(86_400_000).optional(),
+    }).strict(),
+    z.object({
+      operation: z.literal("reject_start"),
+      occurredAt: ControlTimestampSchema,
+      executorId: HostedLifecycleStableIdV1Schema,
+      reasonCode: HostedRejectStartReasonCodeV1Schema,
+    }).strict(),
+    z.object({
+      operation: z.literal("progress"),
+      occurredAt: ControlTimestampSchema,
+      progressId: z.string().regex(/^progress_[0-9a-f]{64}$/u),
+      progressDigest: ReceiptDigestSchema,
+    }).strict(),
+    z.object({
+      operation: z.literal("executor_result"),
+      occurredAt: ControlTimestampSchema,
+      conclusion: HostedCompleteRequestV1Schema.shape.conclusion,
+      reasonCode: HostedCompleteRequestV1Schema.shape.reasonCode,
+      resultDigest: ReceiptDigestSchema,
+      artifactDigests: HostedLifecycleSortedDigestsV1Schema,
+      evidenceDigests: HostedLifecycleSortedDigestsV1Schema,
+    }).strict(),
+  ],
+);
+export const HostedLifecycleReceiptEnvelopeV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  receiptKind: z.literal("attempt_lifecycle"),
+  receiptId: z.string().regex(/^lifecycle_[0-9a-f]{64}$/u),
+  organizationId: HostedLifecycleStableIdV1Schema,
+  requestId: HostedLifecycleMachineRequestIdV1Schema,
+  operationId: HostedLifecycleMachineOperationIdV1Schema,
+  requestDigest: ReceiptDigestSchema,
+  requiredCapabilities: HostedLifecycleRequiredCapabilitiesV1Schema,
+  producer: z.object({
+    kind: z.literal("runner"),
+    id: HostedLifecycleStableIdV1Schema,
+    credentialId: HostedLifecycleStableIdV1Schema,
+  }).strict(),
+  identity: z.object({
+    namespace: z.literal("opentag.control.receipt/attempt-lifecycle/v1"),
+    parts: z.tuple([
+      HostedLifecycleStableIdV1Schema,
+      HostedLifecycleStableIdV1Schema,
+      HostedLifecycleStableIdV1Schema,
+      z.enum(["heartbeat", "running", "reject_start", "progress", "executor_result"]),
+      HostedLifecycleMachineOperationIdV1Schema,
+    ]),
+  }).strict(),
+  observedAt: ControlTimestampSchema,
+  payloadDigest: ReceiptDigestSchema,
+  receiptDigest: ReceiptDigestSchema,
+  runId: HostedLifecycleStableIdV1Schema,
+  attempt: z.object({
+    attemptId: HostedLifecycleStableIdV1Schema,
+    attemptNumber: z.number().int().positive(),
+    epoch: z.number().int().positive(),
+    fencingTokenDigest: ReceiptDigestSchema,
+  }).strict(),
+  payload: HostedLifecycleReceiptPayloadV1Schema,
+}).strict();
+
+export type HostedHeartbeatRequestV1 = z.infer<typeof HostedHeartbeatRequestV1Schema>;
+export type HostedRunningRequestV1 = z.infer<typeof HostedRunningRequestV1Schema>;
+export type HostedRejectStartRequestV1 = z.infer<typeof HostedRejectStartRequestV1Schema>;
+export type HostedProgressRequestV1 = z.infer<typeof HostedProgressRequestV1Schema>;
+export type HostedCompleteRequestV1 = z.infer<typeof HostedCompleteRequestV1Schema>;
+export type HostedLifecycleRequestV1 = z.infer<typeof HostedLifecycleRequestV1Schema>;
+export type HostedLifecycleReceiptEnvelopeV1 = z.infer<typeof HostedLifecycleReceiptEnvelopeV1Schema>;
+
+export type HostedLifecycleActionV1 =
+  | "heartbeat"
+  | "running"
+  | "reject-start"
+  | "progress"
+  | "complete";
+
+export async function computeHostedLifecycleRequestDigestV1(input: {
+  organizationId: string;
+  runnerId: string;
+  runId: string;
+  action: HostedLifecycleActionV1;
+  request: HostedLifecycleRequestV1;
+}): Promise<string> {
+  const { request } = input;
+  const common = {
+    operation: input.action,
+    organizationId: input.organizationId,
+    runnerId: input.runnerId,
+    runId: input.runId,
+    schemaVersion: request.schemaVersion,
+    protocolVersion: request.protocolVersion,
+    requiredCapabilities: request.requiredCapabilities,
+    attempt: {
+      attemptId: request.attempt.attemptId,
+      attemptNumber: request.attempt.attemptNumber,
+      epoch: request.attempt.epoch,
+      fencingTokenDigest: request.attempt.fencingTokenDigest,
+    },
+    occurredAt: request.occurredAt,
+  };
+  const actionFields = input.action === "heartbeat"
+    ? {
+        expectedLeaseExpiresAt:
+          HostedHeartbeatRequestV1Schema.parse(request).expectedLeaseExpiresAt,
+      }
+    : input.action === "running"
+      ? (() => {
+          const running = HostedRunningRequestV1Schema.parse(request);
+          return {
+            executorId: running.executorId,
+            executorCapabilityDigest: running.executorCapabilityDigest,
+            ...(running.runTimeoutMs ? { runTimeoutMs: running.runTimeoutMs } : {}),
+          };
+        })()
+      : input.action === "reject-start"
+        ? (() => {
+            const rejected = HostedRejectStartRequestV1Schema.parse(request);
+            return {
+              executorId: rejected.executorId,
+              reasonCode: rejected.reasonCode,
+            };
+          })()
+        : input.action === "progress"
+          ? (() => {
+              const progress = HostedProgressRequestV1Schema.parse(request);
+              return {
+                progressId: progress.progressId,
+                progressDigest: progress.progressDigest,
+              };
+            })()
+          : (() => {
+              const complete = HostedCompleteRequestV1Schema.parse(request);
+              return {
+                conclusion: complete.conclusion,
+                reasonCode: complete.reasonCode,
+                resultDigest: complete.resultDigest,
+                artifactDigests: complete.artifactDigests,
+                evidenceDigests: complete.evidenceDigests,
+              };
+            })();
+  return sha256Utf8V1(canonicalJsonStringify({ ...common, ...actionFields }));
+}
+
+export function computeHostedLifecycleOperationIdV1(
+  requestDigest: string,
+): string {
+  const parsed = ReceiptDigestSchema.parse(requestDigest);
+  return HostedLifecycleMachineOperationIdV1Schema.parse(
+    `op_${parsed.slice("sha256:".length)}`,
+  );
+}
+
+export async function computeHostedLifecycleRequestIdV1(input: {
+  operationId: string;
+  requestDigest: string;
+}): Promise<string> {
+  const digest = await sha256Utf8V1(canonicalJsonStringify({
+    purpose: "opentag-hosted-lifecycle-request-id-v1",
+    operationId: HostedLifecycleMachineOperationIdV1Schema.parse(
+      input.operationId,
+    ),
+    requestDigest: ReceiptDigestSchema.parse(input.requestDigest),
+  }));
+  return HostedLifecycleMachineRequestIdV1Schema.parse(
+    `req_${digest.slice("sha256:".length)}`,
+  );
+}
+
+export async function buildHostedLifecycleRequestV1(input: {
+  organizationId: string;
+  runnerId: string;
+  runId: string;
+  attempt: z.input<typeof HostedLifecycleAttemptV1Schema>;
+  occurredAt: string;
+} & (
+  | { action: "heartbeat"; expectedLeaseExpiresAt: string }
+  | {
+      action: "running";
+      executorId: string;
+      executorCapabilityDigest: string;
+      runTimeoutMs?: number;
+    }
+  | {
+      action: "reject-start";
+      executorId: string;
+      reasonCode: z.input<typeof HostedRejectStartReasonCodeV1Schema>;
+    }
+  | {
+      action: "progress";
+      progressId: string;
+      progressDigest: string;
+    }
+  | {
+      action: "complete";
+      conclusion: z.input<typeof HostedCompleteRequestV1Schema>["conclusion"];
+      reasonCode: string;
+      resultDigest: string;
+      artifactDigests: string[];
+      evidenceDigests: string[];
+    }
+)): Promise<HostedLifecycleRequestV1> {
+  const common = {
+    schemaVersion: 1 as const,
+    protocolVersion: "1.0" as const,
+    requiredCapabilities: ["relay.lifecycle.v1"] as const,
+    requestId: `req_${"0".repeat(64)}`,
+    operationId: `op_${"0".repeat(64)}`,
+    attempt: HostedLifecycleAttemptV1Schema.parse(input.attempt),
+    requestDigest: `sha256:${"0".repeat(64)}`,
+    occurredAt: ControlTimestampSchema.parse(input.occurredAt),
+  };
+  const actionFields = input.action === "heartbeat"
+    ? { expectedLeaseExpiresAt: input.expectedLeaseExpiresAt }
+    : input.action === "running"
+      ? {
+          executorId: input.executorId,
+          executorCapabilityDigest: input.executorCapabilityDigest,
+          ...(input.runTimeoutMs ? { runTimeoutMs: input.runTimeoutMs } : {}),
+        }
+      : input.action === "reject-start"
+        ? { executorId: input.executorId, reasonCode: input.reasonCode }
+        : input.action === "progress"
+          ? {
+              progressId: input.progressId,
+              progressDigest: input.progressDigest,
+            }
+          : {
+              conclusion: input.conclusion,
+              reasonCode: input.reasonCode,
+              resultDigest: input.resultDigest,
+              artifactDigests: input.artifactDigests,
+              evidenceDigests: input.evidenceDigests,
+            };
+  const requestSeed = HostedLifecycleRequestV1Schema.parse({
+    ...common,
+    ...actionFields,
+  });
+  const requestDigest = await computeHostedLifecycleRequestDigestV1({
+    organizationId: input.organizationId,
+    runnerId: input.runnerId,
+    runId: input.runId,
+    action: input.action,
+    request: requestSeed,
+  });
+  const operationId = computeHostedLifecycleOperationIdV1(requestDigest);
+  return HostedLifecycleRequestV1Schema.parse({
+    ...requestSeed,
+    requestDigest,
+    operationId,
+    requestId: await computeHostedLifecycleRequestIdV1({
+      operationId,
+      requestDigest,
+    }),
+  });
+}
+
+function hostedLifecycleReceiptOperationV1(
+  action: HostedLifecycleActionV1,
+): HostedLifecycleReceiptEnvelopeV1["payload"]["operation"] {
+  if (action === "reject-start") return "reject_start";
+  if (action === "complete") return "executor_result";
+  return action;
+}
+
+export async function verifyHostedLifecycleReceiptV1(input: {
+  receipt: HostedLifecycleReceiptEnvelopeV1;
+  request: HostedLifecycleRequestV1;
+  action: HostedLifecycleActionV1;
+  organizationId: string;
+  runnerId: string;
+  runId: string;
+  credentialId: string;
+}): Promise<boolean> {
+  const receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(input.receipt);
+  const request = HostedLifecycleRequestV1Schema.parse(input.request);
+  const operation = hostedLifecycleReceiptOperationV1(input.action);
+  const expectedRequestDigest = await computeHostedLifecycleRequestDigestV1({
+    organizationId: input.organizationId,
+    runnerId: input.runnerId,
+    runId: input.runId,
+    action: input.action,
+    request,
+  });
+  const expectedRequestId = await computeHostedLifecycleRequestIdV1({
+    operationId: request.operationId,
+    requestDigest: request.requestDigest,
+  });
+  const expectedPayload = input.action === "heartbeat"
+    ? receipt.payload.operation === "heartbeat"
+      ? {
+          operation,
+          occurredAt: request.occurredAt,
+          leaseExpiresAt: receipt.payload.leaseExpiresAt,
+        }
+      : null
+    : input.action === "running"
+      ? (() => {
+          const value = HostedRunningRequestV1Schema.parse(request);
+          return {
+            operation,
+            occurredAt: value.occurredAt,
+            executorId: value.executorId,
+            executorCapabilityDigest: value.executorCapabilityDigest,
+            ...(value.runTimeoutMs ? { runTimeoutMs: value.runTimeoutMs } : {}),
+          };
+        })()
+      : input.action === "reject-start"
+        ? (() => {
+            const value = HostedRejectStartRequestV1Schema.parse(request);
+            return {
+              operation,
+              occurredAt: value.occurredAt,
+              executorId: value.executorId,
+              reasonCode: value.reasonCode,
+            };
+          })()
+        : input.action === "progress"
+          ? (() => {
+              const value = HostedProgressRequestV1Schema.parse(request);
+              return {
+                operation,
+                occurredAt: value.occurredAt,
+                progressId: value.progressId,
+                progressDigest: value.progressDigest,
+              };
+            })()
+          : (() => {
+              const value = HostedCompleteRequestV1Schema.parse(request);
+              return {
+                operation,
+                occurredAt: value.occurredAt,
+                conclusion: value.conclusion,
+                reasonCode: value.reasonCode,
+                resultDigest: value.resultDigest,
+                artifactDigests: value.artifactDigests,
+                evidenceDigests: value.evidenceDigests,
+              };
+            })();
+  if (!expectedPayload) return false;
+  const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
+  return request.requestDigest === expectedRequestDigest
+    && request.requestId === expectedRequestId
+    && receipt.organizationId === input.organizationId
+    && receipt.runId === input.runId
+    && receipt.requestId === request.requestId
+    && receipt.operationId === request.operationId
+    && receipt.requestDigest === request.requestDigest
+    && receipt.producer.id === input.runnerId
+    && receipt.producer.credentialId === input.credentialId
+    && receipt.attempt.attemptId === request.attempt.attemptId
+    && receipt.attempt.attemptNumber === request.attempt.attemptNumber
+    && receipt.attempt.epoch === request.attempt.epoch
+    && receipt.attempt.fencingTokenDigest
+      === request.attempt.fencingTokenDigest
+    && receipt.identity.namespace
+      === "opentag.control.receipt/attempt-lifecycle/v1"
+    && canonicalJsonStringify(receipt.identity.parts)
+      === canonicalJsonStringify([
+        input.organizationId,
+        input.runId,
+        request.attempt.attemptId,
+        operation,
+        request.operationId,
+      ])
+    && receipt.payload.operation === operation
+    && canonicalJsonStringify(receipt.payload)
+      === canonicalJsonStringify(expectedPayload)
+    && receipt.payloadDigest
+      === await computeControlPayloadDigestV1(receipt.payload)
+    && receipt.receiptDigest
+      === await computeControlReceiptDigestV1(receiptDigestInput)
+    && (
+      receipt.payload.operation !== "heartbeat"
+      || (
+        Date.parse(receipt.payload.leaseExpiresAt)
+        > Date.parse(HostedHeartbeatRequestV1Schema.parse(request)
+          .expectedLeaseExpiresAt)
+      )
+    );
+}
 
 export const WorkThreadRefPayloadV1Schema = z
   .object({
@@ -1982,6 +2806,18 @@ export type HumanPermissionDecisionHttpResponseV1 = z.infer<
 export type PermissionResolutionCurrentHttpResponseV1 = z.infer<
   typeof PermissionResolutionCurrentHttpResponseV1Schema
 >;
+export type HostedAdmissionEnvelopeDigestInputV1 = z.infer<
+  typeof HostedAdmissionEnvelopeDigestInputV1Schema
+>;
+export type HostedAdmissionEnvelopeV1 = z.infer<typeof HostedAdmissionEnvelopeV1Schema>;
+export type GitHubIssueCommentSourceIdentityDigestInputV1 = z.infer<
+  typeof GitHubIssueCommentSourceIdentityDigestInputV1Schema
+>;
+export type HostedClaimRequestV1 = z.infer<typeof HostedClaimRequestV1Schema>;
+export type HostedClaimExpectedAuthorityV1 = z.infer<
+  typeof HostedClaimExpectedAuthorityV1Schema
+>;
+export type HostedClaimV1 = z.infer<typeof HostedClaimV1Schema>;
 export type AdmissionPolicySnapshotReceiptEnvelopeV1 = z.infer<typeof AdmissionPolicySnapshotReceiptEnvelopeV1Schema>;
 export type WorkThreadRefReceiptEnvelopeV1 = z.infer<typeof WorkThreadRefReceiptEnvelopeV1Schema>;
 export type CompletionContractRefReceiptEnvelopeV1 = z.infer<typeof CompletionContractRefReceiptEnvelopeV1Schema>;

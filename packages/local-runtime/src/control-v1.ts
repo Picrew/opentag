@@ -1,10 +1,16 @@
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createOpenTagClient, type OpenTagClient } from "@opentag/client";
 import type {
+  ActionPermissionRequest,
+  ActionPermissionResolution,
   CompletionAssessmentReceiptEnvelopeV1,
   CompletionContractRefReceiptEnvelopeV1,
+  HostedClaimRequestV1,
+  HostedClaimV1,
+  MaterialActionReceipt,
   RunnerReadinessReceiptEnvelopeV1,
   RunnerControlContextResponseV1,
   WorkThreadRefReceiptEnvelopeV1,
@@ -12,15 +18,35 @@ import type {
 import {
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
+  buildHostedLifecycleRequestV1,
+  HostedCompleteRequestV1Schema,
+  HostedHeartbeatRequestV1Schema,
+  HostedProgressRequestV1Schema,
+  HostedRejectStartRequestV1Schema,
+  HostedRunningRequestV1Schema,
+  computeMaterialActionPayloadDigestV1,
+  computeMaterialActionReceiptDigestV1,
+  computePermissionRequestDigestV1,
+  verifyHostedAdmissionEnvelopeDigestV1,
   RunnerReadinessReceiptEnvelopeV1Schema,
 } from "@opentag/core";
 import { openDispatcherGovernanceStore } from "@opentag/dispatcher";
-import type { ExecutorAdapter } from "@opentag/runner";
+import {
+  refetchGitHubIssueCommentForHostedAdmission,
+  type GitHubIssueCommentRefetchReceipt,
+} from "@opentag/github";
+import type { ExecutorAdapter, RunnerSecurityPolicy } from "@opentag/runner";
 import {
   canonicalRepositoryIdentity,
   type OpenTagDaemonConfig,
   type RepositoryBindingConfig,
 } from "./config.js";
+import {
+  executeClaimedRun,
+  type ClaimedRun,
+  type ClaimedRunExecutionClient,
+} from "./daemon.js";
+import type { PullRequestOptions } from "./pr.js";
 
 const require = createRequire(import.meta.url);
 const LOCAL_RUNTIME_VERSION = (require("../package.json") as { version: string }).version;
@@ -29,6 +55,13 @@ const READINESS_PROBE_CACHE_RATIO = 0.5;
 const CONTROL_TRANSFER_TIMEOUT_MS = 30_000;
 const CONTROL_LEASE_SAFETY_MS = 5_000;
 const DEFAULT_CONTROL_LEASE_SECONDS = 90;
+const HOSTED_CLAIM_CAPABILITIES = [
+  "relay.claim-fence.v1",
+  "relay.hosted-admission.v1",
+  "relay.hosted-claim.v1",
+  "relay.lifecycle.v1",
+  "relay.readiness.v1",
+] as const;
 
 type CallbackObservationReceiptEnvelopeV1 = Parameters<
   OpenTagClient["projectCallbackObservationControlV1"]
@@ -231,6 +264,101 @@ export function assertRunnerControlContextRegistrationV1(input: {
   }
 }
 
+export function buildHostedClaimRequestV1(input: {
+  context: RunnerControlContextResponseV1;
+  readiness: RunnerReadinessReceiptEnvelopeV1;
+  requestId: string;
+  operationId: string;
+}): HostedClaimRequestV1 {
+  if (
+    input.readiness.organizationId !== input.context.organizationId
+    || input.readiness.payload.runnerId !== input.context.runnerId
+    || input.readiness.producer.credentialId !== input.context.credentialId
+    || input.readiness.producer.registrationGeneration
+      !== input.context.registrationGeneration
+  ) {
+    throw new Error("hosted_claim_readiness_context_mismatch");
+  }
+  return {
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    requiredCapabilities: [...HOSTED_CLAIM_CAPABILITIES],
+    requestId: input.requestId,
+    operationId: input.operationId,
+    expectedAuthority: {
+      credentialId: input.context.credentialId,
+      registrationGeneration: input.context.registrationGeneration,
+      credentialGeneration: input.context.credentialGeneration,
+      runnerReadinessReceiptId: input.readiness.receiptId,
+      runnerReadinessReceiptDigest: input.readiness.receiptDigest,
+    },
+  };
+}
+
+export async function assertHostedClaimCurrentAuthorityV1(input: {
+  claim: HostedClaimV1;
+  context: RunnerControlContextResponseV1;
+  readiness: RunnerReadinessReceiptEnvelopeV1;
+  request: HostedClaimRequestV1;
+  now: Date;
+}): Promise<void> {
+  const { claim, context, readiness, request } = input;
+  if (!(await verifyHostedAdmissionEnvelopeDigestV1(claim.hostedAdmission))) {
+    throw new Error("hosted_claim_admission_envelope_digest_mismatch");
+  }
+  if (
+    claim.organizationId !== context.organizationId
+    || claim.runnerId !== context.runnerId
+    || claim.authority.credentialId !== context.credentialId
+    || claim.authority.registrationGeneration !== context.registrationGeneration
+    || claim.authority.credentialGeneration !== context.credentialGeneration
+  ) {
+    throw new Error("hosted_claim_current_context_mismatch");
+  }
+  if (
+    claim.authority.runnerReadinessReceiptId
+      !== request.expectedAuthority.runnerReadinessReceiptId
+    || claim.authority.runnerReadinessReceiptDigest
+      !== request.expectedAuthority.runnerReadinessReceiptDigest
+  ) {
+    throw new Error("hosted_claim_readiness_mismatch");
+  }
+  const target = context.targets.find(
+    (candidate) => candidate.projectTargetId === claim.authority.projectTargetId,
+  );
+  if (
+    !target
+    || target.bindingDigest !== claim.authority.targetBindingDigest
+    || target.provider !== claim.hostedAdmission.provider
+    || target.owner !== claim.hostedAdmission.repository.owner
+    || target.repo !== claim.hostedAdmission.repository.repo
+    || target.defaultExecutor !== claim.executorId
+  ) {
+    throw new Error("hosted_claim_target_mismatch");
+  }
+  const readyTarget = readiness.payload.targets.find(
+    (candidate) => candidate.projectTargetId === target.projectTargetId,
+  );
+  const readyExecutor = readiness.payload.executors.find(
+    (candidate) => candidate.executorId === claim.executorId,
+  );
+  if (
+    readyTarget?.state !== "ready"
+    || readyTarget.bindingDigest !== target.bindingDigest
+    || readyExecutor?.state !== "ready"
+    || readyExecutor.capabilityDigest !== claim.authority.executorCapabilityDigest
+  ) {
+    throw new Error("hosted_claim_readiness_not_ready");
+  }
+  const leaseExpiresAt = Date.parse(claim.attempt.leaseExpiresAt);
+  if (
+    !Number.isFinite(leaseExpiresAt)
+    || leaseExpiresAt <= input.now.getTime()
+  ) {
+    throw new Error("hosted_claim_lease_expired");
+  }
+}
+
 export async function buildRunnerReadinessReceipt(input: {
   context: RunnerControlContextResponseV1;
   executors: Record<string, ExecutorAdapter>;
@@ -424,17 +552,566 @@ export type HostedControlLoop = {
   close(): Promise<void>;
 };
 
+type HostedExecutionRepository = Omit<
+  ReturnType<typeof openDispatcherGovernanceStore>["repo"],
+  "getHostedAssignedRunForRecovery" | "isHostedExecutionCurrent"
+> & {
+  getHostedClaimOperationForRetry(input: {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+  }): Promise<{ operationId: string; requestId: string; request: HostedClaimRequestV1 } | null>;
+  beginHostedClaimOperation(input: {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+    request: HostedClaimRequestV1;
+  }): Promise<{
+    outcome: "created" | "replayed";
+    operation: { operationId: string; requestId: string; request: HostedClaimRequestV1 };
+  }>;
+  acknowledgeHostedClaimEmpty(input: {
+    operationId: string;
+    requestId: string;
+  }): Promise<unknown>;
+  importHostedAssignedRun(input: {
+    event: import("@opentag/core").OpenTagEvent;
+    claim: HostedClaimV1;
+    sourceReceipt: GitHubIssueCommentRefetchReceipt;
+  }): Promise<{
+    outcome: "created" | "replayed";
+    executionState: "ready_to_start" | "already_started" | "terminal" | "superseded";
+    claimed: ClaimedRun | null;
+  }>;
+  acquireHostedExecutionStart(input: {
+    runId: string;
+    attemptId: string;
+    fencingToken: string;
+  }): Promise<boolean>;
+  abandonHostedClaimOperation(input: {
+    operationId: string;
+    requestId: string;
+    reasonCode: "stale_control_authority" | "operation_digest_conflict";
+  }): Promise<unknown>;
+  getHostedAssignedRunForRecovery(input: {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+  }): Promise<{
+    claimed: ClaimedRun;
+    leaseExpiresAt: string;
+    hostedAuthority: HostedClaimV1["authority"] & {
+      policyReceiptDigest: string;
+    };
+  } | null>;
+  isHostedExecutionCurrent(input: {
+    runId: string;
+    attemptId: string;
+    fencingToken: string;
+  }): Promise<boolean>;
+  markRunning(input: {
+    runnerId: string;
+    attemptId: string;
+    fencingToken: string;
+    executor: string;
+    executorCapability?: unknown;
+    runTimeoutMs?: number;
+    idempotencyKey?: string;
+  }): Promise<string>;
+  heartbeat(input: {
+    runId: string;
+    runnerId: string;
+    attemptId: string;
+    fencingToken: string;
+  }): Promise<string>;
+  rejectAttemptStart(input: {
+    runId: string;
+    runnerId: string;
+    attemptId: string;
+    fencingToken: string;
+    executorId: string;
+    reason: string;
+  }): Promise<string>;
+  completeRun(input: {
+    runId: string;
+    runnerId: string;
+    attemptId: string;
+    fencingToken: string;
+    result: import("@opentag/core").OpenTagRunResult;
+    idempotencyKey?: string;
+  }): Promise<string>;
+  appendRunEvent(input: {
+    runId: string;
+    type: string;
+    payload: unknown;
+    createdAt?: string;
+    visibility?: "audit" | "human" | "debug";
+    importance?: "blocking" | "low" | "high" | "normal";
+    message?: string;
+  }): Promise<unknown>;
+};
+
+function permissionResolutionFromReceipt(input: {
+  receipt: Awaited<ReturnType<OpenTagClient["getActionPermissionCurrentControlV1"]>>["receipt"];
+  request: ActionPermissionRequest;
+}): ActionPermissionResolution {
+  const { receipt, request } = input;
+  const state = receipt.payload.state;
+  return {
+    state,
+    action: {
+      id: receipt.payload.actionId,
+      runId: receipt.runId,
+      attemptId: receipt.attempt.attemptId,
+      actionFamily: receipt.payload.actionFamily,
+      capability: request.operation,
+      scope: { permissionScopes: receipt.payload.permissionScopes },
+      target: { fingerprint: receipt.payload.targetFingerprint },
+      riskTier: receipt.payload.riskTier,
+      status: state === "waiting"
+        ? "waiting_approval"
+        : state === "authorized"
+          ? "authorized"
+          : "cancelled",
+      idempotencyKey: receipt.payload.permissionRequestId,
+      attemptFenceDigest: receipt.attempt.fencingTokenDigest,
+      createdAt: receipt.payload.requestedAt,
+      updatedAt: receipt.observedAt,
+    },
+    ...(state === "authorized" ? { decision: "allow_once" as const } : {}),
+    ...(receipt.payload.reasonCode ? { reason: receipt.payload.reasonCode } : {}),
+  };
+}
+
+export async function buildHostedProgressMetadataForControlV1(input: {
+  at: string;
+}): Promise<{ progressId: string; progressDigest: string }> {
+  const progressDigest = await computeControlPayloadDigestV1({
+    type: "status",
+    occurredAt: input.at,
+  });
+  return {
+    progressId: `progress_${progressDigest.slice("sha256:".length)}`,
+    progressDigest,
+  };
+}
+
+export async function buildHostedCompletionMetadataForControlV1(
+  result: import("@opentag/core").OpenTagRunResult,
+): Promise<{
+  conclusion: import("@opentag/core").OpenTagRunResult["conclusion"];
+  reasonCode: string;
+  resultDigest: string;
+  artifactDigests: string[];
+  evidenceDigests: string[];
+}> {
+  return {
+    conclusion: result.conclusion,
+    reasonCode: `executor_${result.conclusion}`,
+    resultDigest: await computeControlPayloadDigestV1(result),
+    artifactDigests: [...new Set(await Promise.all(
+      (result.artifacts ?? []).map((artifact) =>
+        computeControlPayloadDigestV1(artifact)
+      ),
+    ))].sort(),
+    evidenceDigests: [...new Set(await Promise.all(
+      (result.verification ?? []).map((evidence) =>
+        computeControlPayloadDigestV1(evidence)
+      ),
+    ))].sort(),
+  };
+}
+
+async function createHostedExecutionClient(input: {
+  client: OpenTagClient;
+  repo: HostedExecutionRepository;
+  authority: {
+    organizationId: string;
+    runnerId: string;
+    attemptId: string;
+    attemptNumber: number;
+    epoch: number;
+    fencingToken: string;
+    fencingTokenDigest: string;
+    credentialId: string;
+    executorCapabilityDigest: string;
+    leaseExpiresAt: string;
+    policySnapshotRef: string;
+    policySnapshotDigest: string;
+  };
+}): Promise<ClaimedRunExecutionClient> {
+  const { client, repo, authority } = input;
+  const executionOccurredAt = new Date().toISOString();
+  const permissionRequests = new Map<string, {
+    request: ActionPermissionRequest;
+    permissionRequestId: string;
+    permissionRequestDigest: string;
+  }>();
+  const attempt = {
+    attemptId: authority.attemptId,
+    attemptNumber: authority.attemptNumber,
+    epoch: authority.epoch,
+    fencingToken: authority.fencingToken,
+    fencingTokenDigest: authority.fencingTokenDigest,
+  };
+  return {
+    async markRunning(runId, executor, lease, options) {
+      const request = HostedRunningRequestV1Schema.parse(
+        await buildHostedLifecycleRequestV1({
+        action: "running",
+        organizationId: authority.organizationId,
+        runnerId: authority.runnerId,
+        runId,
+        attempt,
+        occurredAt: executionOccurredAt,
+        executorId: executor,
+        executorCapabilityDigest: authority.executorCapabilityDigest,
+        ...(options?.runTimeoutMs ? { runTimeoutMs: options.runTimeoutMs } : {}),
+        }),
+      );
+      await client.markHostedRunRunningControlV1({
+        organizationId: authority.organizationId,
+        credentialId: authority.credentialId,
+        runnerId: authority.runnerId,
+        runId,
+        request,
+      });
+      const outcome = await repo.markRunning({
+        runnerId: authority.runnerId,
+        runId,
+        executor,
+        ...lease,
+        ...(options?.executorCapability ? { executorCapability: options.executorCapability } : {}),
+        ...(options?.runTimeoutMs ? { runTimeoutMs: options.runTimeoutMs } : {}),
+        ...(options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
+      });
+      if (outcome !== "running" && outcome !== "duplicate") {
+        throw new Error("hosted_local_mark_running_split_outcome");
+      }
+    },
+    async rejectAttemptStart(runId, executorId, reason, lease) {
+      const request = HostedRejectStartRequestV1Schema.parse(
+        await buildHostedLifecycleRequestV1({
+        action: "reject-start",
+        organizationId: authority.organizationId,
+        runnerId: authority.runnerId,
+        runId,
+        attempt,
+        occurredAt: executionOccurredAt,
+        executorId,
+        reasonCode: "unknown_safe_failure",
+        }),
+      );
+      await client.rejectHostedAttemptStartControlV1({
+        organizationId: authority.organizationId,
+        credentialId: authority.credentialId,
+        runnerId: authority.runnerId,
+        runId,
+        request,
+      });
+      const outcome = await repo.rejectAttemptStart({
+        runnerId: authority.runnerId,
+        runId,
+        executorId,
+        reason,
+        ...lease,
+      });
+      if (outcome !== "requeued" && outcome !== "duplicate") {
+        throw new Error("hosted_local_reject_start_split_outcome");
+      }
+    },
+    async heartbeat(runId, _lease) {
+      const journalAuthority = {
+        destinationId: "cloud",
+        organizationId: authority.organizationId,
+        runnerId: authority.runnerId,
+        credentialId: authority.credentialId,
+        runId,
+        attemptId: authority.attemptId,
+        fencingToken: authority.fencingToken,
+      };
+      let operation = await repo.getHostedHeartbeatOperationForRetry(
+        journalAuthority,
+      );
+      if (!operation) {
+        const currentLease = await repo.getHostedExecutionLease(
+          journalAuthority,
+        );
+        if (!currentLease) {
+          throw new Error("hosted_execution_authority_expired");
+        }
+        const request = HostedHeartbeatRequestV1Schema.parse(
+          await buildHostedLifecycleRequestV1({
+            action: "heartbeat",
+            organizationId: authority.organizationId,
+            runnerId: authority.runnerId,
+            runId,
+            attempt,
+            occurredAt: new Date().toISOString(),
+            expectedLeaseExpiresAt: currentLease.leaseExpiresAt,
+          }),
+        );
+        operation = (await repo.beginHostedHeartbeatOperation({
+          ...journalAuthority,
+          request,
+        })).operation;
+      }
+      const accepted = await client.heartbeatHostedRunControlV1({
+        organizationId: authority.organizationId,
+        credentialId: authority.credentialId,
+        runnerId: authority.runnerId,
+        runId,
+        request: operation.request,
+      });
+      const outcome = await repo.applyHostedHeartbeatReceipt({
+        ...journalAuthority,
+        operationId: operation.operationId,
+        requestId: operation.requestId,
+        receipt: accepted.receipt,
+      });
+      if (outcome !== "accepted" && outcome !== "replayed") {
+        throw new Error("hosted_heartbeat_receipt_rejected");
+      }
+    },
+    async progress(runId, lease, progress) {
+      const progressMetadata = await buildHostedProgressMetadataForControlV1(
+        progress,
+      );
+      const request = HostedProgressRequestV1Schema.parse(
+        await buildHostedLifecycleRequestV1({
+        action: "progress",
+        organizationId: authority.organizationId,
+        runnerId: authority.runnerId,
+        runId,
+        attempt,
+        occurredAt: progress.at,
+        ...progressMetadata,
+        }),
+      );
+      await client.progressHostedRunControlV1({
+        organizationId: authority.organizationId,
+        credentialId: authority.credentialId,
+        runnerId: authority.runnerId,
+        runId,
+        request,
+      });
+      await repo.appendRunEvent({
+        runId,
+        type: "run.progress",
+        payload: progress,
+        createdAt: progress.at,
+        visibility: "human",
+        importance: "normal",
+        message: progress.message,
+      });
+    },
+    async complete(runId, lease, result) {
+      const completionMetadata =
+        await buildHostedCompletionMetadataForControlV1(result);
+      const request = HostedCompleteRequestV1Schema.parse(
+        await buildHostedLifecycleRequestV1({
+        action: "complete",
+        organizationId: authority.organizationId,
+        runnerId: authority.runnerId,
+        runId,
+        attempt,
+        occurredAt: executionOccurredAt,
+        ...completionMetadata,
+        }),
+      );
+      await client.completeHostedRunControlV1({
+        organizationId: authority.organizationId,
+        credentialId: authority.credentialId,
+        runnerId: authority.runnerId,
+        runId,
+        request,
+      });
+      const outcome = await repo.completeRun({
+        runnerId: authority.runnerId,
+        runId,
+        ...lease,
+        result,
+      });
+      if (outcome !== "completed" && outcome !== "duplicate") {
+        throw new Error("hosted_local_complete_split_outcome");
+      }
+    },
+    async requestActionPermission(runId, lease, request) {
+      const actionId = `action_${(await computeControlPayloadDigestV1({
+        runId,
+        attemptId: lease.attemptId,
+        toolCallId: request.toolCallId,
+      })).slice("sha256:".length, "sha256:".length + 24)}`;
+      const permissionRequestId = `permission_${(await computeControlPayloadDigestV1({
+        actionId,
+        request,
+      })).slice("sha256:".length, "sha256:".length + 24)}`;
+      const requestedAt = new Date().toISOString();
+      const actionFamily = request.operation.toLowerCase().replace(/[^a-z0-9._-]/gu, "_").slice(0, 64) || "tool";
+      const targetFingerprint = request.targetFingerprint
+        ?? await computeControlPayloadDigestV1({
+          connectionId: request.connectionId,
+          operation: request.operation,
+          resource: request.resource ?? null,
+          targetConstraints: request.targetConstraints ?? null,
+        });
+      const digestInput = {
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        requiredCapabilities: ["relay.permission.v1"] as ["relay.permission.v1"],
+        organizationId: authority.organizationId,
+        runnerId: authority.runnerId,
+        runId,
+        attempt: {
+          attemptId: attempt.attemptId,
+          attemptNumber: attempt.attemptNumber,
+          epoch: attempt.epoch,
+          fencingTokenDigest: attempt.fencingTokenDigest,
+        },
+        permissionRequestId,
+        actionId,
+        actionFamily,
+        riskTier: "high" as const,
+        targetFingerprint,
+        permissionScopes: [...request.permissionScopes].sort(),
+        policySnapshotRef: authority.policySnapshotRef,
+        policySnapshotDigest: authority.policySnapshotDigest,
+        requestedAt,
+      };
+      const permissionRequestDigest = await computePermissionRequestDigestV1(digestInput);
+      const result = await client.requestActionPermissionControlV1({
+        ...digestInput,
+        requestId: permissionRequestId,
+        operationId: permissionRequestId,
+        attempt,
+        permissionRequestDigest,
+      });
+      permissionRequests.set(actionId, { request, permissionRequestId, permissionRequestDigest });
+      return permissionResolutionFromReceipt({ receipt: result.receipt, request });
+    },
+    async resolveActionPermission(runId, _lease, actionId) {
+      const pending = permissionRequests.get(actionId);
+      if (!pending) throw new Error("hosted_permission_request_unknown");
+      const result = await client.getActionPermissionCurrentControlV1({
+        organizationId: authority.organizationId,
+        runnerId: authority.runnerId,
+        runId,
+        actionId,
+        attempt: {
+          attemptId: attempt.attemptId,
+          attemptNumber: attempt.attemptNumber,
+          epoch: attempt.epoch,
+          fencingTokenDigest: attempt.fencingTokenDigest,
+        },
+        permissionRequestId: pending.permissionRequestId,
+        permissionRequestDigest: pending.permissionRequestDigest,
+      });
+      return permissionResolutionFromReceipt({ receipt: result.receipt, request: pending.request });
+    },
+    async recordMaterialActionReceipt(runId, _lease, actionId, receipt: MaterialActionReceipt) {
+      const pending = permissionRequests.get(actionId);
+      if (!pending) throw new Error("hosted_material_action_permission_unknown");
+      const observedAt = receipt.observedAt;
+      const operationId = `material_${receipt.id}`;
+      const payload = {
+        actionId,
+        actionFamily: pending.request.operation.toLowerCase().replace(/[^a-z0-9._-]/gu, "_").slice(0, 64) || "tool",
+        provider: receipt.provider,
+        connectionRef: receipt.connectionId ?? pending.request.connectionId,
+        targetFingerprint: receipt.targetFingerprint ?? pending.request.targetFingerprint
+          ?? await computeControlPayloadDigestV1({ resource: pending.request.resource ?? null }),
+        operationId,
+        requestDigest: pending.permissionRequestDigest,
+        actionPayloadDigest: await computeControlPayloadDigestV1(receipt.metadata ?? {}),
+        outcome: receipt.outcome === "unknown" ? "outcome_unknown" as const : receipt.outcome,
+        ...(receipt.externalId ? { externalId: receipt.externalId } : {}),
+        ...(receipt.externalUri ? { externalUri: receipt.externalUri } : {}),
+        observedAt,
+        reasonCode: receipt.outcome === "succeeded"
+          ? "provider_accepted" as const
+          : receipt.outcome === "failed"
+            ? "provider_error" as const
+            : "provider_receipt_missing" as const,
+        ...(receipt.outcome === "unknown"
+          ? { nextAction: "reconcile_provider_receipt", owner: "local_operator" }
+          : {}),
+      };
+      const receiptId = receipt.id;
+      const envelopeBase = {
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        receiptKind: "material_action" as const,
+        receiptId,
+        organizationId: authority.organizationId,
+        operationId,
+        requiredCapabilities: ["relay.material-receipt.v1"] as ["relay.material-receipt.v1"],
+        producer: { kind: "local_opentag" as const, id: authority.runnerId },
+        identity: {
+          namespace: "opentag.control.receipt/material-action/v1" as const,
+          parts: [authority.organizationId, runId, attempt.attemptId, actionId, receiptId],
+        },
+        observedAt,
+        runId,
+        attempt: {
+          attemptId: attempt.attemptId,
+          attemptNumber: attempt.attemptNumber,
+          epoch: attempt.epoch,
+          fencingTokenDigest: attempt.fencingTokenDigest,
+        },
+        payload,
+        payloadDigest: await computeMaterialActionPayloadDigestV1(payload),
+      };
+      const envelope = {
+        ...envelopeBase,
+        receiptDigest: await computeMaterialActionReceiptDigestV1(envelopeBase),
+      };
+      await client.recordMaterialActionReceiptControlV1({
+        runnerId: authority.runnerId,
+        fencingToken: attempt.fencingToken,
+        receipt: envelope,
+      });
+      const resolved = await client.getActionPermissionCurrentControlV1({
+        organizationId: authority.organizationId,
+        runnerId: authority.runnerId,
+        runId,
+        actionId,
+        attempt: {
+          attemptId: attempt.attemptId,
+          attemptNumber: attempt.attemptNumber,
+          epoch: attempt.epoch,
+          fencingTokenDigest: attempt.fencingTokenDigest,
+        },
+        permissionRequestId: pending.permissionRequestId,
+        permissionRequestDigest: pending.permissionRequestDigest,
+      });
+      return permissionResolutionFromReceipt({ receipt: resolved.receipt, request: pending.request });
+    },
+  };
+}
+
 export function createHostedControlLoop(input: {
   config: OpenTagDaemonConfig;
   databasePath: string;
   executors: Record<string, ExecutorAdapter>;
+  pullRequestOptions?: PullRequestOptions;
+  security?: RunnerSecurityPolicy;
   now?: () => Date;
+  fetchImpl?: typeof fetch;
+  controlClient?: OpenTagClient;
+  governanceStore?: {
+    repo: HostedExecutionRepository;
+    close(): void;
+  };
+  executeClaimedRunImpl?: typeof executeClaimedRun;
+  refetchGitHubIssueCommentImpl?: typeof refetchGitHubIssueCommentForHostedAdmission;
 }): HostedControlLoop | undefined {
   const registration = input.config.controlRegistration;
   if (!registration || registration.state !== "paired" || !input.config.runnerToken) return undefined;
-  const store = openDispatcherGovernanceStore(input.databasePath);
+  const store = input.governanceStore
+    ?? openDispatcherGovernanceStore(input.databasePath);
+  const repo = store.repo as HostedExecutionRepository;
   const abortController = new AbortController();
-  const client = createOpenTagClient({
+  const client = input.controlClient ?? createOpenTagClient({
     dispatcherUrl: input.config.dispatcherUrl,
     controlCredential: { kind: "runtime", token: input.config.runnerToken },
     controlSignal: abortController.signal,
@@ -447,14 +1124,10 @@ export function createHostedControlLoop(input: {
   }>();
   let inFlight: Promise<unknown> | undefined;
   let closed = false;
-  const contextFresh = () => {
-    if (!context) return false;
-    return isRunnerControlContextFreshV1(context.observedAt, clock());
-  };
   const pump = async () => {
     if (!context) return;
     await pumpControlPlaneProjections({
-      repo: store.repo,
+      repo,
       client,
       destinationId: "cloud",
       organizationId: context.organizationId,
@@ -470,41 +1143,294 @@ export function createHostedControlLoop(input: {
   return {
     beforeIteration() {
       return track((async () => {
-        try {
-          const nextContext = await client.getRunnerControlContextV1({
-            runnerId: input.config.runnerId,
-          });
-          assertRunnerControlContextRegistrationV1({
-            context: nextContext,
-            registration,
-          });
-          // Read the clock after the network response so time spent waiting for
-          // the server cannot make a stale context appear fresh.
-          if (!isRunnerControlContextFreshV1(nextContext.observedAt, clock())) {
-            throw new Error("runner_control_context_stale");
-          }
-          context = nextContext;
-          const receipt = await buildRunnerReadinessReceipt({
-            context,
-            executors: input.executors,
-            repositories: input.config.repositories,
-            now: clock,
-            readinessProbeCache,
-          });
-          const queued = await store.repo.enqueueControlPlaneProjection({
-            destinationId: "cloud",
-            envelope: receipt,
-          });
-          if (queued.outcome === "conflict") {
-            throw new Error("runner_readiness_projection_conflict");
-          }
-        } catch (error) {
-          // Only transient transport/server failures may use a recently verified
-          // context. Invalid, forbidden, or conflicting control data fails closed.
-          if (!retryableControlContextError(error)) throw error;
+        const nextContext = await client.getRunnerControlContextV1({
+          runnerId: input.config.runnerId,
+        });
+        assertRunnerControlContextRegistrationV1({
+          context: nextContext,
+          registration,
+        });
+        // Read the clock after the response so network delay cannot make stale
+        // authority appear current.
+        if (!isRunnerControlContextFreshV1(nextContext.observedAt, clock())) {
+          throw new Error("runner_control_context_stale");
         }
-        await pump();
-        return contextFresh();
+        context = nextContext;
+        const localReadiness = await buildRunnerReadinessReceipt({
+          context,
+          executors: input.executors,
+          repositories: input.config.repositories,
+          now: clock,
+          readinessProbeCache,
+        });
+        const recovery = await repo.getHostedAssignedRunForRecovery({
+          destinationId: "cloud",
+          organizationId: context.organizationId,
+          runnerId: context.runnerId,
+        });
+        if (recovery) {
+          const authority = recovery.hostedAuthority;
+          const target = context.targets.find(
+            (candidate) => candidate.projectTargetId === authority.projectTargetId,
+          );
+          const readyTarget = localReadiness.payload.targets.find(
+            (candidate) => candidate.projectTargetId === authority.projectTargetId,
+          );
+          const readyExecutor = localReadiness.payload.executors.find(
+            (candidate) => candidate.executorId === authority.executorId,
+          );
+          if (
+            authority.organizationId !== context.organizationId
+            || authority.runnerId !== context.runnerId
+            || authority.credentialId !== context.credentialId
+            || authority.registrationGeneration !== context.registrationGeneration
+            || authority.credentialGeneration !== context.credentialGeneration
+            || !target
+            || target.bindingDigest !== authority.targetBindingDigest
+            || target.defaultExecutor !== authority.executorId
+            || readyTarget?.state !== "ready"
+            || readyExecutor?.state !== "ready"
+            || readyExecutor.capabilityDigest !== authority.executorCapabilityDigest
+          ) {
+            throw new Error("hosted_recovery_current_authority_mismatch");
+          }
+          const acquired = await repo.acquireHostedExecutionStart({
+            runId: recovery.claimed.run.id,
+            attemptId: recovery.claimed.attemptId,
+            fencingToken: recovery.claimed.fencingToken,
+          });
+          if (!acquired) return false;
+          const executionClient = await createHostedExecutionClient({
+            client,
+            repo,
+            authority: {
+              organizationId: authority.organizationId,
+              runnerId: authority.runnerId,
+              credentialId: authority.credentialId,
+              attemptId: authority.attemptId,
+              attemptNumber: authority.attemptNumber,
+              epoch: authority.epoch,
+              fencingToken: recovery.claimed.fencingToken,
+              fencingTokenDigest: authority.fencingTokenDigest,
+              executorCapabilityDigest: authority.executorCapabilityDigest,
+              leaseExpiresAt: recovery.leaseExpiresAt,
+              policySnapshotRef: authority.admissionPolicySnapshotId,
+              policySnapshotDigest: authority.policyReceiptDigest,
+            },
+          });
+          await (input.executeClaimedRunImpl ?? executeClaimedRun)({
+            runnerId: context.runnerId,
+            repositories: input.config.repositories,
+            executors: input.executors,
+            scratchRoot: input.config.scratchRoot,
+            keepScratch: input.config.keepScratch,
+            approvalMode: input.config.approvalMode,
+            ...(input.security ? { security: input.security } : {}),
+            ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
+            ...(input.config.heartbeatIntervalMs ? { heartbeatIntervalMs: input.config.heartbeatIntervalMs } : {}),
+            ...(input.config.runTimeoutMs ? { runTimeoutMs: input.config.runTimeoutMs } : {}),
+            ...(input.config.agentSessionProfile ? { agentSessionProfile: input.config.agentSessionProfile } : {}),
+            client: executionClient,
+            claimed: recovery.claimed,
+            hostedExecutionAuthority: {
+              leaseExpiresAt: recovery.leaseExpiresAt,
+              now: clock,
+              assertCurrent: () => repo.isHostedExecutionCurrent({
+                runId: recovery.claimed.run.id,
+                attemptId: recovery.claimed.attemptId,
+                fencingToken: recovery.claimed.fencingToken,
+              }),
+              readAcceptedLeaseExpiresAt: async () =>
+                (await repo.getHostedExecutionLease({
+                  destinationId: "cloud",
+                  organizationId: authority.organizationId,
+                  runnerId: authority.runnerId,
+                  credentialId: authority.credentialId,
+                  runId: recovery.claimed.run.id,
+                  attemptId: recovery.claimed.attemptId,
+                  fencingToken: recovery.claimed.fencingToken,
+                }))?.leaseExpiresAt ?? null,
+            },
+          });
+          return true;
+        }
+        const existing = await repo.getHostedClaimOperationForRetry({
+          destinationId: "cloud",
+          organizationId: context.organizationId,
+          runnerId: context.runnerId,
+        });
+        let operation = existing;
+        if (!operation) {
+          // A new claim is forbidden until Cloud has synchronously accepted
+          // this exact readiness receipt. Projection retries are not acceptance.
+          const acceptedReadiness = await client.reportRunnerReadinessControlV1(
+            localReadiness,
+          );
+          operation = (await repo.beginHostedClaimOperation({
+            destinationId: "cloud",
+            organizationId: context.organizationId,
+            runnerId: context.runnerId,
+            request: buildHostedClaimRequestV1({
+              context,
+              readiness: acceptedReadiness.receipt,
+              requestId: `request_${randomUUID()}`,
+              operationId: `operation_${randomUUID()}`,
+            }),
+          })).operation;
+        }
+        let claim: HostedClaimV1 | null;
+        try {
+          claim = await client.claimHostedRunControlV1({
+            runnerId: context.runnerId,
+            request: operation.request,
+          });
+        } catch (error) {
+          const controlError = error as { status?: unknown; code?: unknown };
+          if (
+            controlError.status === 409
+            && (controlError.code === "stale_control_authority"
+              || controlError.code === "operation_digest_conflict")
+          ) {
+            await repo.abandonHostedClaimOperation({
+              operationId: operation.operationId,
+              requestId: operation.requestId,
+              reasonCode: controlError.code,
+            });
+          }
+          throw error;
+        }
+        if (!claim) {
+          await repo.acknowledgeHostedClaimEmpty({
+            operationId: operation.operationId,
+            requestId: operation.requestId,
+          });
+          return false;
+        }
+        await assertHostedClaimCurrentAuthorityV1({
+          claim,
+          context,
+          readiness: localReadiness,
+          request: operation.request,
+          now: clock(),
+        });
+        let imported: Awaited<ReturnType<HostedExecutionRepository["importHostedAssignedRun"]>>;
+        try {
+          if (!input.config.githubToken) {
+            throw new Error("hosted_github_token_unavailable");
+          }
+          const refetched = await (input.refetchGitHubIssueCommentImpl
+            ?? refetchGitHubIssueCommentForHostedAdmission)({
+            admission: claim.hostedAdmission,
+            token: input.config.githubToken,
+            ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+            now: clock,
+          });
+          if (Date.parse(claim.attempt.leaseExpiresAt) <= clock().getTime()) {
+            throw new Error("hosted_claim_lease_expired");
+          }
+          imported = await repo.importHostedAssignedRun({
+            event: refetched.event,
+            claim,
+            sourceReceipt: refetched.receipt,
+          });
+        } catch (error) {
+          // A rejection is itself fenced lifecycle mutation. Never emit it
+          // after expiry or when the current Cloud authority was not verified.
+          if (Date.parse(claim.attempt.leaseExpiresAt) > clock().getTime()) {
+            const request = HostedRejectStartRequestV1Schema.parse(
+              await buildHostedLifecycleRequestV1({
+              organizationId: claim.organizationId,
+              runnerId: claim.runnerId,
+              runId: claim.runId,
+              action: "reject-start",
+              attempt: {
+                attemptId: claim.attempt.id,
+                attemptNumber: claim.attempt.number,
+                epoch: claim.attempt.epoch,
+                fencingToken: claim.attempt.fencingToken,
+                fencingTokenDigest: claim.attempt.fencingTokenDigest,
+              },
+              occurredAt: clock().toISOString(),
+              executorId: claim.executorId,
+              reasonCode: "unknown_safe_failure",
+              }),
+            );
+            await client.rejectHostedAttemptStartControlV1({
+              organizationId: claim.organizationId,
+              credentialId: claim.authority.credentialId,
+              runnerId: claim.runnerId,
+              runId: claim.runId,
+              request,
+            });
+          }
+          throw error;
+        }
+        if (Date.parse(claim.attempt.leaseExpiresAt) <= clock().getTime()) {
+          throw new Error("hosted_claim_lease_expired_after_import");
+        }
+        if (imported.executionState !== "ready_to_start") return false;
+        if (!imported.claimed) {
+          throw new Error("hosted_import_ready_without_claimed_run");
+        }
+        const acquired = await repo.acquireHostedExecutionStart({
+          runId: claim.runId,
+          attemptId: claim.attempt.id,
+          fencingToken: claim.attempt.fencingToken,
+        });
+        if (!acquired) return false;
+        const executionClient = await createHostedExecutionClient({
+          client,
+          repo,
+          authority: {
+            organizationId: claim.organizationId,
+            runnerId: claim.runnerId,
+            credentialId: claim.authority.credentialId,
+            attemptId: claim.attempt.id,
+            attemptNumber: claim.attempt.number,
+            epoch: claim.attempt.epoch,
+            fencingToken: claim.attempt.fencingToken,
+            fencingTokenDigest: claim.attempt.fencingTokenDigest,
+            executorCapabilityDigest: claim.authority.executorCapabilityDigest,
+            leaseExpiresAt: claim.attempt.leaseExpiresAt,
+            policySnapshotRef: claim.admissionPolicySnapshot.payload.snapshotId,
+            policySnapshotDigest: claim.admissionPolicySnapshot.receiptDigest,
+          },
+        });
+        await (input.executeClaimedRunImpl ?? executeClaimedRun)({
+          runnerId: claim.runnerId,
+          repositories: input.config.repositories,
+          executors: input.executors,
+          scratchRoot: input.config.scratchRoot,
+          keepScratch: input.config.keepScratch,
+          approvalMode: input.config.approvalMode,
+          ...(input.security ? { security: input.security } : {}),
+          ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
+          ...(input.config.heartbeatIntervalMs ? { heartbeatIntervalMs: input.config.heartbeatIntervalMs } : {}),
+          ...(input.config.runTimeoutMs ? { runTimeoutMs: input.config.runTimeoutMs } : {}),
+          ...(input.config.agentSessionProfile ? { agentSessionProfile: input.config.agentSessionProfile } : {}),
+          client: executionClient,
+          claimed: imported.claimed,
+          hostedExecutionAuthority: {
+            leaseExpiresAt: claim.attempt.leaseExpiresAt,
+            now: clock,
+            assertCurrent: () => repo.isHostedExecutionCurrent({
+              runId: claim.runId,
+              attemptId: claim.attempt.id,
+              fencingToken: claim.attempt.fencingToken,
+            }),
+            readAcceptedLeaseExpiresAt: async () =>
+              (await repo.getHostedExecutionLease({
+                destinationId: "cloud",
+                organizationId: claim.organizationId,
+                runnerId: claim.runnerId,
+                credentialId: claim.authority.credentialId,
+                runId: claim.runId,
+                attemptId: claim.attempt.id,
+                fencingToken: claim.attempt.fencingToken,
+              }))?.leaseExpiresAt ?? null,
+          },
+        });
+        return true;
       })());
     },
     afterIteration() {

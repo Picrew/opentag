@@ -123,6 +123,40 @@ describe("normalizeGitHubIssueComment", () => {
     expect(event?.metadata).toMatchObject({ owner: "acme", repo: "demo", issueNumber: 1, installationId: 99 });
   });
 
+  it("normalizes an issue comment on a pull request as a pull request work item", () => {
+    const event = normalizeGitHubIssueComment({
+      id: "124",
+      commentBody: "@opentag fix this PR",
+      commentUrl: "https://github.com/acme/demo/pull/7#issuecomment-124",
+      apiCommentsUrl: "https://api.github.com/repos/acme/demo/issues/7/comments",
+      issueUrl: "https://github.com/acme/demo/pull/7",
+      issueNumber: 7,
+      threadKind: "pull_request",
+      owner: "acme",
+      repo: "demo",
+      actorId: 42,
+      actorLogin: "octocat",
+      private: true,
+      receivedAt: "2026-08-08T00:00:00.000Z",
+    });
+
+    expect(event?.context[0]).toMatchObject({
+      provider: "github",
+      kind: "pull_request",
+    });
+    expect(event?.workItem).toMatchObject({
+      provider: "github",
+      kind: "pull_request",
+      externalId: "acme/demo#7",
+    });
+    expect(event?.metadata).toMatchObject({
+      owner: "acme",
+      repo: "demo",
+      pullRequestNumber: 7,
+    });
+    expect(event?.metadata).not.toHaveProperty("issueNumber");
+  });
+
   it("normalizes an @opentag pull request review comment", () => {
     const event = normalizeGitHubPullRequestReviewComment({
       id: "456",

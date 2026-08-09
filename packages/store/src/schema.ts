@@ -79,6 +79,143 @@ export const attempts = sqliteTable(
   })
 );
 
+export const hostedRunImports = sqliteTable(
+  "hosted_run_imports",
+  {
+    runId: text("run_id").primaryKey(),
+    admissionId: text("admission_id").notNull(),
+    admissionOperationId: text("admission_operation_id").notNull(),
+    claimOperationId: text("claim_operation_id").notNull(),
+    attemptId: text("attempt_id").notNull(),
+    fencingTokenDigest: text("fencing_token_digest").notNull(),
+    sourceIdentityDigest: text("source_identity_digest").notNull(),
+    deliveryPayloadDigest: text("delivery_payload_digest").notNull(),
+    admissionEnvelopeDigest: text("admission_envelope_digest").notNull(),
+    policyReceiptId: text("policy_receipt_id").notNull(),
+    policyPayloadDigest: text("policy_payload_digest").notNull(),
+    policyReceiptDigest: text("policy_receipt_digest").notNull(),
+    eventDigest: text("event_digest").notNull(),
+    contextPacketDigest: text("context_packet_digest").notNull(),
+    workThreadId: text("work_thread_id"),
+    workThreadDigest: text("work_thread_digest"),
+    claimDigest: text("claim_digest").notNull(),
+    authorityDigest: text("authority_digest").notNull(),
+    authorityJson: text("authority_json").notNull(),
+    importedAt: text("imported_at").notNull()
+  },
+  (table) => ({
+    admissionIdx: uniqueIndex("hosted_run_imports_admission_idx").on(table.admissionId),
+    claimOperationIdx: uniqueIndex("hosted_run_imports_claim_operation_idx").on(table.claimOperationId),
+    attemptIdx: uniqueIndex("hosted_run_imports_attempt_idx").on(table.attemptId),
+    fenceIdx: uniqueIndex("hosted_run_imports_fence_idx").on(table.fencingTokenDigest),
+    sourceIdx: uniqueIndex("hosted_run_imports_source_idx").on(table.sourceIdentityDigest),
+    authorityIdx: uniqueIndex("hosted_run_imports_authority_idx").on(table.authorityDigest),
+    workThreadIdx: index("hosted_run_imports_work_thread_idx").on(table.workThreadId)
+  })
+);
+
+export const hostedClaimOperations = sqliteTable(
+  "hosted_claim_operations",
+  {
+    operationId: text("operation_id").primaryKey(),
+    requestId: text("request_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    runnerId: text("runner_id").notNull(),
+    destinationId: text("destination_id").notNull(),
+    activeKey: text("active_key"),
+    requestDigest: text("request_digest").notNull(),
+    requestJson: text("request_json").notNull(),
+    state: text("state").notNull(),
+    runId: text("run_id"),
+    executionStartedAt: text("execution_started_at"),
+    terminalReasonCode: text("terminal_reason_code"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    acknowledgedAt: text("acknowledged_at")
+  },
+  (table) => ({
+    requestIdx: uniqueIndex("hosted_claim_operations_request_idx").on(table.requestId),
+    activeIdx: uniqueIndex("hosted_claim_operations_active_idx").on(table.activeKey),
+    runnerStateIdx: index("hosted_claim_operations_runner_state_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.runnerId,
+      table.state
+    )
+  })
+);
+
+export const hostedAttemptImports = sqliteTable(
+  "hosted_attempt_imports",
+  {
+    attemptId: text("attempt_id").primaryKey(),
+    runId: text("run_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    claimOperationId: text("claim_operation_id").notNull(),
+    fencingTokenDigest: text("fencing_token_digest").notNull(),
+    claimDigest: text("claim_digest").notNull(),
+    authorityDigest: text("authority_digest").notNull(),
+    authorityJson: text("authority_json").notNull(),
+    importedAt: text("imported_at").notNull()
+  },
+  (table) => ({
+    runNumberIdx: uniqueIndex("hosted_attempt_imports_run_number_idx").on(table.runId, table.attemptNumber),
+    operationIdx: uniqueIndex("hosted_attempt_imports_operation_idx").on(table.claimOperationId),
+    fenceIdx: uniqueIndex("hosted_attempt_imports_fence_idx").on(table.fencingTokenDigest),
+    authorityIdx: uniqueIndex("hosted_attempt_imports_authority_idx").on(table.authorityDigest),
+    runIdx: index("hosted_attempt_imports_run_idx").on(table.runId)
+  })
+);
+
+export const hostedHeartbeatOperations = sqliteTable(
+  "hosted_heartbeat_operations",
+  {
+    destinationId: text("destination_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    runnerId: text("runner_id").notNull(),
+    credentialId: text("credential_id").notNull(),
+    operationId: text("operation_id").notNull(),
+    requestId: text("request_id").notNull(),
+    runId: text("run_id").notNull(),
+    attemptId: text("attempt_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    fencingTokenDigest: text("fencing_token_digest").notNull(),
+    expectedLeaseExpiresAt: text("expected_lease_expires_at").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    requestJson: text("request_json").notNull(),
+    activeKey: text("active_key"),
+    state: text("state").notNull(),
+    receiptDigest: text("receipt_digest"),
+    receiptJson: text("receipt_json"),
+    acceptedLeaseExpiresAt: text("accepted_lease_expires_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    acknowledgedAt: text("acknowledged_at")
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [
+      table.destinationId,
+      table.organizationId,
+      table.runnerId,
+      table.credentialId,
+      table.operationId
+    ] }),
+    requestIdx: uniqueIndex("hosted_heartbeat_operations_request_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.runnerId,
+      table.credentialId,
+      table.requestId
+    ),
+    activeIdx: uniqueIndex("hosted_heartbeat_operations_active_idx").on(table.activeKey),
+    attemptIdx: index("hosted_heartbeat_operations_attempt_idx").on(
+      table.runId,
+      table.attemptId,
+      table.state
+    )
+  })
+);
+
 export const followUpRequests = sqliteTable(
   "follow_up_requests",
   {
@@ -1294,6 +1431,232 @@ function migrateControlPlaneProjectionOutboxSchema(sqlite: Database.Database): v
   })();
 }
 
+function migrateHostedRunImportSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-hosted-run-import-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS hosted_run_imports (
+        run_id TEXT PRIMARY KEY,
+        admission_id TEXT NOT NULL,
+        admission_operation_id TEXT NOT NULL,
+        claim_operation_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        fencing_token_digest TEXT NOT NULL,
+        source_identity_digest TEXT NOT NULL,
+        delivery_payload_digest TEXT NOT NULL,
+        admission_envelope_digest TEXT NOT NULL,
+        policy_receipt_id TEXT NOT NULL,
+        policy_payload_digest TEXT NOT NULL,
+        policy_receipt_digest TEXT NOT NULL,
+        event_digest TEXT NOT NULL,
+        context_packet_digest TEXT NOT NULL,
+        work_thread_id TEXT,
+        work_thread_digest TEXT,
+        claim_digest TEXT NOT NULL,
+        authority_digest TEXT NOT NULL,
+        authority_json TEXT NOT NULL,
+        imported_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_run_imports_admission_idx
+        ON hosted_run_imports(admission_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_run_imports_claim_operation_idx
+        ON hosted_run_imports(claim_operation_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_run_imports_attempt_idx
+        ON hosted_run_imports(attempt_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_run_imports_fence_idx
+        ON hosted_run_imports(fencing_token_digest);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_run_imports_source_idx
+        ON hosted_run_imports(source_identity_digest);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_run_imports_authority_idx
+        ON hosted_run_imports(authority_digest);
+      CREATE INDEX IF NOT EXISTS hosted_run_imports_work_thread_idx
+        ON hosted_run_imports(work_thread_id);
+      CREATE TRIGGER IF NOT EXISTS hosted_run_imports_immutable_update_guard
+      BEFORE UPDATE ON hosted_run_imports
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_run_imports_immutable');
+      END;
+      CREATE TRIGGER IF NOT EXISTS hosted_run_imports_delete_guard
+      BEFORE DELETE ON hosted_run_imports
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_run_imports_delete_forbidden');
+      END;
+      CREATE TABLE IF NOT EXISTS hosted_claim_operations (
+        operation_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        runner_id TEXT NOT NULL,
+        destination_id TEXT NOT NULL,
+        active_key TEXT,
+        request_digest TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'empty')),
+        run_id TEXT,
+        terminal_reason_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        acknowledged_at TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_claim_operations_request_idx
+        ON hosted_claim_operations(request_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_claim_operations_active_idx
+        ON hosted_claim_operations(active_key);
+      CREATE INDEX IF NOT EXISTS hosted_claim_operations_runner_state_idx
+        ON hosted_claim_operations(destination_id, organization_id, runner_id, state);
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateHostedExecutionStartSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-hosted-execution-start-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    const columns = sqlite.prepare("PRAGMA table_info(hosted_claim_operations)").all() as { name: string }[];
+    if (!columns.some((column) => column.name === "execution_started_at")) {
+      sqlite.exec("ALTER TABLE hosted_claim_operations ADD COLUMN execution_started_at TEXT");
+    }
+    if (!columns.some((column) => column.name === "terminal_reason_code")) {
+      sqlite.exec("ALTER TABLE hosted_claim_operations ADD COLUMN terminal_reason_code TEXT");
+    }
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateHostedAttemptImportSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-hosted-attempt-import-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS hosted_attempt_imports (
+        attempt_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL,
+        claim_operation_id TEXT NOT NULL,
+        fencing_token_digest TEXT NOT NULL,
+        claim_digest TEXT NOT NULL,
+        authority_digest TEXT NOT NULL,
+        authority_json TEXT NOT NULL,
+        imported_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_attempt_imports_run_number_idx
+        ON hosted_attempt_imports(run_id, attempt_number);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_attempt_imports_operation_idx
+        ON hosted_attempt_imports(claim_operation_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_attempt_imports_fence_idx
+        ON hosted_attempt_imports(fencing_token_digest);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_attempt_imports_authority_idx
+        ON hosted_attempt_imports(authority_digest);
+      CREATE INDEX IF NOT EXISTS hosted_attempt_imports_run_idx
+        ON hosted_attempt_imports(run_id);
+      CREATE TRIGGER IF NOT EXISTS hosted_attempt_imports_immutable_update_guard
+      BEFORE UPDATE ON hosted_attempt_imports
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_attempt_imports_immutable');
+      END;
+      CREATE TRIGGER IF NOT EXISTS hosted_attempt_imports_delete_guard
+      BEFORE DELETE ON hosted_attempt_imports
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_attempt_imports_delete_forbidden');
+      END;
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateHostedHeartbeatOperationSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-hosted-heartbeat-operation-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS hosted_heartbeat_operations (
+        destination_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        runner_id TEXT NOT NULL,
+        credential_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL,
+        fencing_token_digest TEXT NOT NULL,
+        expected_lease_expires_at TEXT NOT NULL,
+        request_digest TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        active_key TEXT,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged')),
+        receipt_digest TEXT,
+        receipt_json TEXT,
+        accepted_lease_expires_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        acknowledged_at TEXT,
+        PRIMARY KEY (destination_id, organization_id, runner_id, credential_id, operation_id),
+        CHECK (
+          (state = 'pending' AND active_key IS NOT NULL AND receipt_digest IS NULL
+            AND receipt_json IS NULL AND accepted_lease_expires_at IS NULL
+            AND acknowledged_at IS NULL)
+          OR
+          (state = 'acknowledged' AND active_key IS NULL AND receipt_digest IS NOT NULL
+            AND receipt_json IS NOT NULL AND accepted_lease_expires_at IS NOT NULL
+            AND acknowledged_at IS NOT NULL)
+        )
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_heartbeat_operations_request_idx
+        ON hosted_heartbeat_operations(destination_id, organization_id, runner_id, credential_id, request_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_heartbeat_operations_active_idx
+        ON hosted_heartbeat_operations(active_key);
+      CREATE INDEX IF NOT EXISTS hosted_heartbeat_operations_attempt_idx
+        ON hosted_heartbeat_operations(run_id, attempt_id, state);
+      CREATE TRIGGER IF NOT EXISTS hosted_heartbeat_operations_update_guard
+      BEFORE UPDATE ON hosted_heartbeat_operations
+      WHEN (
+        OLD.state <> 'pending' OR NEW.state <> 'acknowledged'
+        OR NEW.destination_id <> OLD.destination_id
+        OR NEW.organization_id <> OLD.organization_id
+        OR NEW.runner_id <> OLD.runner_id
+        OR NEW.credential_id <> OLD.credential_id
+        OR NEW.operation_id <> OLD.operation_id
+        OR NEW.request_id <> OLD.request_id
+        OR NEW.run_id <> OLD.run_id
+        OR NEW.attempt_id <> OLD.attempt_id
+        OR NEW.attempt_number <> OLD.attempt_number
+        OR NEW.fencing_token_digest <> OLD.fencing_token_digest
+        OR NEW.expected_lease_expires_at <> OLD.expected_lease_expires_at
+        OR NEW.request_digest <> OLD.request_digest
+        OR NEW.request_json <> OLD.request_json
+        OR NEW.created_at <> OLD.created_at
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_heartbeat_operations_transition_invalid');
+      END;
+      CREATE TRIGGER IF NOT EXISTS hosted_heartbeat_operations_delete_guard
+      BEFORE DELETE ON hosted_heartbeat_operations
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_heartbeat_operations_delete_forbidden');
+      END;
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
 export function migrateSchema(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS runs (
@@ -1893,4 +2256,8 @@ export function migrateSchema(sqlite: Database.Database): void {
   migrateFactoryWorkstreamSchema(sqlite);
   migrateReassessmentObligationSchema(sqlite);
   migrateControlPlaneProjectionOutboxSchema(sqlite);
+  migrateHostedRunImportSchema(sqlite);
+  migrateHostedExecutionStartSchema(sqlite);
+  migrateHostedAttemptImportSchema(sqlite);
+  migrateHostedHeartbeatOperationSchema(sqlite);
 }
