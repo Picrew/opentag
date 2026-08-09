@@ -39,6 +39,14 @@ const PAYLOAD_DIGEST = canonicalSha256Json({
 });
 const EVIDENCE_DIGEST = `sha256:${"5".repeat(64)}`;
 const RUN_RESULT = { conclusion: "success" as const, summary: "completed locally" };
+type TerminalResult =
+  | typeof RUN_RESULT
+  | { conclusion: "failure"; summary: string }
+  | {
+      conclusion: "needs_human";
+      summary: string;
+      humanResolutionUnavailableReason: string;
+    };
 const RESULT_DIGEST = canonicalSha256Json(RUN_RESULT);
 const RUN_ID = "run-callback-1";
 const WORK_THREAD_ID = "work_thread_1";
@@ -456,6 +464,140 @@ async function setup() {
   return { sqlite, repo };
 }
 
+function terminalLifecycleFixtures(result: TerminalResult) {
+  const resultDigest = canonicalSha256Json(result);
+  const reasonCode = result.conclusion === "success"
+    ? "executor_success"
+    : result.conclusion === "failure" ? "executor_failure" : "executor_needs_human";
+  const common = {
+    ...COMPLETION_COMMON,
+    conclusion: result.conclusion,
+    reasonCode,
+    resultDigest
+  };
+  const requestDigest = canonicalSha256Json(common);
+  const operationId = `op_${requestDigest.slice("sha256:".length)}`;
+  const requestId = `req_${canonicalSha256Json({
+    purpose: "opentag-hosted-lifecycle-request-id-v1",
+    operationId,
+    requestDigest
+  }).slice("sha256:".length)}`;
+  const request = HostedCompleteRequestV1Schema.parse({
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    requiredCapabilities: ["relay.lifecycle.v1"],
+    requestId,
+    operationId,
+    attempt: { ...COMPLETION_COMMON.attempt, fencingToken: "raw-fence" },
+    requestDigest,
+    occurredAt: NOW.toISOString(),
+    conclusion: result.conclusion,
+    reasonCode,
+    resultDigest,
+    artifactDigests: [],
+    evidenceDigests: []
+  });
+  const receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(withDigests({
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    receiptKind: "attempt_lifecycle",
+    receiptId: `lifecycle_${canonicalSha256Json({
+      organizationId: "org_1",
+      operationId
+    }).slice("sha256:".length)}`,
+    organizationId: "org_1",
+    requestId,
+    operationId,
+    requestDigest,
+    requiredCapabilities: ["relay.lifecycle.v1"],
+    producer: { kind: "runner", id: "runner_1", credentialId: PRODUCER.credentialId },
+    identity: {
+      namespace: "opentag.control.receipt/attempt-lifecycle/v1",
+      parts: ["org_1", RUN_ID, RUN_ATTEMPT_ID, "executor_result", operationId]
+    },
+    observedAt: NOW.toISOString(),
+    runId: RUN_ID,
+    attempt: COMPLETION_COMMON.attempt,
+    payload: {
+      operation: "executor_result",
+      occurredAt: NOW.toISOString(),
+      conclusion: result.conclusion,
+      reasonCode,
+      resultDigest,
+      artifactDigests: [],
+      evidenceDigests: []
+    }
+  }));
+  const {
+    receiptDigest: _receiptDigest,
+    payloadDigest: _payloadDigest,
+    ...assessmentBase
+  } = ASSESSMENT_RECEIPT;
+  const assessmentReceipt = CompletionAssessmentReceiptEnvelopeV1Schema.parse(withDigests({
+    ...assessmentBase,
+    predecessorReceiptDigests: [receipt.receiptDigest],
+    payload: {
+      ...ASSESSMENT_RECEIPT.payload,
+      executorResultReceiptRef: {
+        receiptId: receipt.receiptId,
+        operationId,
+        requestId,
+        requestDigest,
+        resultDigest
+      }
+    }
+  }));
+  return { result, request, receipt, assessmentReceipt, operationId };
+}
+
+async function setupTerminalResult(result: TerminalResult) {
+  const sqlite = new Database(":memory:");
+  migrateSchema(sqlite);
+  seedAuthority(sqlite);
+  const repo = createOpenTagRepository(drizzle(sqlite));
+  const fixtures = terminalLifecycleFixtures(result);
+  await repo.completeHostedRunLocally({
+    runId: RUN_ID,
+    result,
+    runnerId: "runner_1",
+    attemptId: RUN_ATTEMPT_ID,
+    fencingToken: "raw-fence",
+    destinationId: "cloud_1",
+    organizationId: "org_1",
+    credentialId: PRODUCER.credentialId,
+    request: fixtures.request
+  });
+  const claimedAt = new Date(NOW.getTime() + 1_000);
+  const [operation] = await repo.claimDueHostedLifecycleOperations({
+    destinationId: "cloud_1",
+    organizationId: "org_1",
+    leaseOwner: "lifecycle_pump",
+    leaseSeconds: 30,
+    now: claimedAt
+  });
+  await repo.acknowledgeHostedLifecycleOperation({
+    destinationId: "cloud_1",
+    organizationId: "org_1",
+    operationId: fixtures.operationId,
+    leaseToken: operation!.leaseToken!,
+    receipt: fixtures.receipt,
+    now: new Date(claimedAt.getTime() + 1_000)
+  });
+  sqlite.exec("DROP TRIGGER control_plane_projection_outbox_immutable_update_guard");
+  sqlite.prepare(`UPDATE control_plane_projection_outbox
+    SET operation_id = ?, requires_lifecycle_operation_id = ?,
+      payload_digest = ?, receipt_digest = ?, envelope_json = ?
+    WHERE receipt_id = ?`).run(
+      fixtures.assessmentReceipt.operationId,
+      fixtures.operationId,
+      fixtures.assessmentReceipt.payloadDigest,
+      fixtures.assessmentReceipt.receiptDigest,
+      canonicalJsonStringify(fixtures.assessmentReceipt),
+      ASSESSMENT_RECEIPT_ID
+    );
+  return { sqlite, repo, ...fixtures };
+}
+
 function intentReceipt(localIntentId = "intent_1", overrides: Record<string, unknown> = {}) {
   const organizationId = typeof overrides.organizationId === "string"
     ? overrides.organizationId
@@ -685,6 +827,366 @@ async function enqueueAndClaim(
 }
 
 describe("governed callback ledger", () => {
+  it("derives the complete governed enqueue context without mutating durable state", async () => {
+    const { sqlite, repo } = await setup();
+    const before = sqlite.prepare("SELECT total_changes() AS changes").get();
+    await expect(repo.getGovernedCallbackEnqueueContext({
+      runId: RUN_ID,
+      assessmentId: ASSESSMENT_REF
+    })).resolves.toEqual({
+      outcome: "ready",
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      producer: PRODUCER,
+      sourceThreadIdentityDigest: SOURCE_DIGEST,
+      assessmentReceipt: ASSESSMENT_RECEIPT,
+      completionOperationId: COMPLETION_OPERATION_ID,
+      authority: AUTHORITY
+    });
+    expect(sqlite.prepare("SELECT total_changes() AS changes").get()).toEqual(before);
+  });
+
+  it("accepts every supported terminal completion only with matching released attempt evidence", async () => {
+    const results: TerminalResult[] = [
+      RUN_RESULT,
+      { conclusion: "failure", summary: "executor failed locally" },
+      {
+        conclusion: "needs_human",
+        summary: "operator input is required",
+        humanResolutionUnavailableReason: "No operator response is available."
+      }
+    ];
+    for (const result of results) {
+      const isolated = await setupTerminalResult(result);
+      await expect(isolated.repo.getGovernedCallbackEnqueueContext({
+        runId: RUN_ID,
+        assessmentId: ASSESSMENT_REF
+      }), result.conclusion).resolves.toMatchObject({
+        outcome: "ready",
+        completionOperationId: isolated.operationId,
+        assessmentReceipt: isolated.assessmentReceipt,
+        authority: AUTHORITY
+      });
+      isolated.sqlite.close();
+    }
+  });
+
+  it("fails closed when terminal run or attempt evidence is resurrected or corrupted", async () => {
+    const conflicts: Array<{
+      name: string;
+      mutate: (database: Database.Database) => void;
+    }> = [
+      {
+        name: "run resurrection",
+        mutate(database) {
+          database.prepare(`UPDATE runs SET status = 'running', assigned_runner_id = 'runner_1',
+            current_attempt_id = ? WHERE id = ?`).run(RUN_ATTEMPT_ID, RUN_ID);
+        }
+      },
+      {
+        name: "run result digest",
+        mutate(database) {
+          database.prepare("UPDATE runs SET result_json = ? WHERE id = ?")
+            .run(JSON.stringify({ conclusion: "success", summary: "tampered" }), RUN_ID);
+        }
+      },
+      {
+        name: "attempt status",
+        mutate(database) {
+          database.prepare("UPDATE attempts SET status = 'running' WHERE id = ?")
+            .run(RUN_ATTEMPT_ID);
+        }
+      },
+      {
+        name: "attempt result",
+        mutate(database) {
+          database.prepare("UPDATE attempts SET result_json = ? WHERE id = ?")
+            .run(JSON.stringify({ conclusion: "success", summary: "tampered" }), RUN_ATTEMPT_ID);
+        }
+      },
+      {
+        name: "actual attempt runner",
+        mutate(database) {
+          database.prepare("UPDATE attempts SET runner_id = 'runner_other' WHERE id = ?")
+            .run(RUN_ATTEMPT_ID);
+        }
+      },
+      {
+        name: "raw fencing token",
+        mutate(database) {
+          database.prepare("UPDATE attempts SET fencing_token = 'tampered-fence' WHERE id = ?")
+            .run(RUN_ATTEMPT_ID);
+        }
+      }
+    ];
+    for (const conflict of conflicts) {
+      const isolated = await setup();
+      conflict.mutate(isolated.sqlite);
+      await expect(isolated.repo.getGovernedCallbackEnqueueContext({
+        runId: RUN_ID,
+        assessmentId: ASSESSMENT_REF
+      }), conflict.name).resolves.toEqual({ outcome: "authority_conflict" });
+      isolated.sqlite.close();
+    }
+  });
+
+  it("propagates SQLite infrastructure failures instead of reporting authority conflict", async () => {
+    const { sqlite, repo } = await setup();
+    sqlite.exec("DROP TABLE attempts");
+    await expect(repo.getGovernedCallbackEnqueueContext({
+      runId: RUN_ID,
+      assessmentId: ASSESSMENT_REF
+    })).rejects.toThrow(/no such table: attempts/u);
+  });
+
+  it("distinguishes absent enqueue roots from conflicting persisted authority", async () => {
+    const { repo } = await setup();
+    await expect(repo.getGovernedCallbackEnqueueContext({
+      runId: "run_missing",
+      assessmentId: ASSESSMENT_REF
+    })).resolves.toEqual({ outcome: "not_found" });
+    await expect(repo.getGovernedCallbackEnqueueContext({
+      runId: RUN_ID,
+      assessmentId: "assessment_missing"
+    })).resolves.toEqual({ outcome: "authority_conflict" });
+
+    const conflicts: Array<{
+      name: string;
+      mutate: (database: Database.Database) => void;
+    }> = [
+      {
+        name: "historical assessment",
+        mutate(database) {
+          database.prepare(
+            "UPDATE work_threads SET current_assessment_id = 'assessment_other' WHERE id = ?"
+          ).run(WORK_THREAD_ID);
+        }
+      },
+      {
+        name: "run work thread mismatch",
+        mutate(database) {
+          database.prepare("UPDATE runs SET work_thread_id = 'work_thread_other' WHERE id = ?")
+            .run(RUN_ID);
+        }
+      },
+      {
+        name: "run attempt mismatch",
+        mutate(database) {
+          database.prepare("UPDATE runs SET current_attempt_id = 'attempt_other' WHERE id = ?")
+            .run(RUN_ID);
+        }
+      },
+      {
+        name: "run runner mismatch",
+        mutate(database) {
+          database.prepare("UPDATE runs SET assigned_runner_id = 'runner_other' WHERE id = ?")
+            .run(RUN_ID);
+        }
+      },
+      {
+        name: "assessment run mismatch",
+        mutate(database) {
+          const row = database.prepare(
+            "SELECT assessment_json AS assessmentJson FROM completion_assessments WHERE id = ?"
+          ).get(ASSESSMENT_REF) as { assessmentJson: string };
+          database.prepare("UPDATE completion_assessments SET assessment_json = ? WHERE id = ?")
+            .run(JSON.stringify({
+              ...JSON.parse(row.assessmentJson),
+              triggeredByRunId: "run_other"
+            }), ASSESSMENT_REF);
+        }
+      },
+      {
+        name: "claim authority mismatch",
+        mutate(database) {
+          database.exec("DROP TRIGGER hosted_claim_authority_shell_immutable_guard");
+          database.prepare(
+            "UPDATE hosted_claim_operations SET authority_digest = ?"
+          ).run(`sha256:${"0".repeat(64)}`);
+        }
+      },
+      {
+        name: "claim tenant mismatch",
+        mutate(database) {
+          database.prepare(
+            "UPDATE hosted_claim_operations SET organization_id = 'org_other'"
+          ).run();
+        }
+      },
+      {
+        name: "claim no longer executable",
+        mutate(database) {
+          database.prepare(
+            "UPDATE hosted_claim_operations SET execution_started_at = NULL"
+          ).run();
+        }
+      },
+      {
+        name: "completion mismatch",
+        mutate(database) {
+          database.exec("DROP TRIGGER hosted_lifecycle_operations_immutable_guard");
+          database.prepare(
+            "UPDATE hosted_lifecycle_operations SET run_id = 'run_other' WHERE action = 'complete'"
+          ).run();
+        }
+      },
+      {
+        name: "projection tenant mismatch",
+        mutate(database) {
+          database.exec("DROP TRIGGER control_plane_projection_outbox_immutable_update_guard");
+          database.prepare(
+            "UPDATE control_plane_projection_outbox SET organization_id = 'org_other' WHERE receipt_id = ?"
+          ).run(ASSESSMENT_RECEIPT_ID);
+        }
+      },
+      {
+        name: "projection lifecycle mismatch",
+        mutate(database) {
+          database.exec("DROP TRIGGER control_plane_projection_outbox_immutable_update_guard");
+          database.prepare(`UPDATE control_plane_projection_outbox
+            SET requires_lifecycle_operation_id = 'operation_other' WHERE receipt_id = ?`)
+            .run(ASSESSMENT_RECEIPT_ID);
+        }
+      },
+      {
+        name: "projection run mismatch",
+        mutate(database) {
+          database.exec("DROP TRIGGER control_plane_projection_outbox_immutable_update_guard");
+          database.prepare(
+            "UPDATE control_plane_projection_outbox SET run_id = 'run_other' WHERE receipt_id = ?"
+          ).run(ASSESSMENT_RECEIPT_ID);
+        }
+      },
+      {
+        name: "assessment admission policy mismatch",
+        mutate(database) {
+          const { receiptDigest: _receiptDigest, payloadDigest: _payloadDigest, ...base }
+            = ASSESSMENT_RECEIPT;
+          const envelope = CompletionAssessmentReceiptEnvelopeV1Schema.parse(withDigests({
+            ...base,
+            payload: {
+              ...ASSESSMENT_RECEIPT.payload,
+              admissionPolicySnapshot: {
+                ...ASSESSMENT_RECEIPT.payload.admissionPolicySnapshot,
+                digest: `sha256:${"0".repeat(64)}`
+              }
+            }
+          }));
+          replaceAssessmentProjection(database, envelope);
+        }
+      }
+    ];
+    for (const conflict of conflicts) {
+      const isolated = await setup();
+      conflict.mutate(isolated.sqlite);
+      await expect(isolated.repo.getGovernedCallbackEnqueueContext({
+        runId: RUN_ID,
+        assessmentId: ASSESSMENT_REF
+      }), conflict.name).resolves.toEqual({ outcome: "authority_conflict" });
+    }
+  });
+
+  it("discovers active and recoverable scopes from real callback state transitions", async () => {
+    const { sqlite, repo } = await setup();
+    const scope = [{ destinationId: "cloud_1", organizationId: "org_1" }];
+
+    const accepted = await enqueueAndClaim(repo, "intent_scope_accepted");
+    const acceptedAt = new Date(NOW.getTime() + 1_000);
+    await repo.beginGovernedCallbackSending({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      localIntentId: accepted.claimed.intent.localIntentId,
+      localAttemptId: accepted.claimed.attempt.localAttemptId,
+      leaseToken: accepted.claimed.attempt.leaseToken!,
+      now: acceptedAt
+    });
+    const acceptedAttempt = attemptReceipt({
+      localIntentId: accepted.claimed.intent.localIntentId,
+      localAttemptId: accepted.claimed.attempt.localAttemptId,
+      attemptNumber: accepted.claimed.attempt.attemptNumber,
+      requestDigest: accepted.claimed.attempt.requestDigest,
+      intentReceiptDigest: accepted.claimed.intentReceiptDigest,
+      attemptedAt: acceptedAt.toISOString(),
+      outcome: "accepted"
+    });
+    await repo.finalizeGovernedCallbackAttempt({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      localIntentId: accepted.claimed.intent.localIntentId,
+      localAttemptId: accepted.claimed.attempt.localAttemptId,
+      leaseToken: accepted.claimed.attempt.leaseToken!,
+      attemptReceipt: acceptedAttempt,
+      providerReceipt: providerReceipt({
+        localIntentId: accepted.claimed.intent.localIntentId,
+        localAttemptId: accepted.claimed.attempt.localAttemptId,
+        outcome: "accepted",
+        observedAt: acceptedAttempt.observedAt,
+        attemptReceiptDigest: acceptedAttempt.receiptDigest
+      }),
+      now: new Date(NOW.getTime() + 2_000)
+    });
+    await expect(repo.listGovernedCallbackScopes()).resolves.toEqual([]);
+
+    const expiredLeased = await enqueueAndClaim(repo, "intent_scope_expired_leased");
+    const expiredSending = await enqueueAndClaim(repo, "intent_scope_expired_sending");
+    await repo.beginGovernedCallbackSending({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      localIntentId: expiredSending.claimed.intent.localIntentId,
+      localAttemptId: expiredSending.claimed.attempt.localAttemptId,
+      leaseToken: expiredSending.claimed.attempt.leaseToken!,
+      now: new Date(NOW.getTime() + 1_000)
+    });
+    await repo.enqueueGovernedCallbackIntent({
+      destinationId: "cloud_1",
+      runnerId: "runner_1",
+      idempotencyKey: "idempotency_intent_scope_nonexpired",
+      delivery: governedDelivery(),
+      completionOperationId: COMPLETION_OPERATION_ID,
+      authority: AUTHORITY,
+      receipt: intentReceipt("intent_scope_nonexpired"),
+      now: NOW
+    });
+    const [nonexpired] = await repo.claimGovernedCallbackIntents({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      leaseOwner: "worker_long_lease",
+      leaseSeconds: 300,
+      limit: 1,
+      now: NOW
+    });
+    expect(nonexpired?.intent.localIntentId).toBe("intent_scope_nonexpired");
+    await expect(repo.listGovernedCallbackScopes()).resolves.toEqual(scope);
+
+    await expect(repo.recoverExpiredGovernedCallbacks({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      now: new Date(NOW.getTime() + 31_000)
+    })).resolves.toEqual({ requeued: 1, outcomeUnknown: 1 });
+    expect(sqlite.prepare(`SELECT state FROM governed_callback_intents
+      WHERE local_intent_id = ?`).get(expiredSending.claimed.intent.localIntentId))
+      .toEqual({ state: "attention" });
+    expect(sqlite.prepare(`SELECT state FROM governed_callback_attempts
+      WHERE local_attempt_id = ?`).get(expiredSending.claimed.attempt.localAttemptId))
+      .toEqual({ state: "outcome_unknown" });
+    expect(sqlite.prepare(`SELECT state FROM governed_callback_intents
+      WHERE local_intent_id = ?`).get(nonexpired!.intent.localIntentId))
+      .toEqual({ state: "leased" });
+
+    const [reclaimed] = await repo.claimGovernedCallbackIntents({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      leaseOwner: "worker_restarted",
+      leaseSeconds: 30,
+      limit: 1,
+      now: new Date(NOW.getTime() + 32_000)
+    });
+    expect(reclaimed?.intent.localIntentId).toBe(expiredLeased.claimed.intent.localIntentId);
+    expect(reclaimed?.attempt.localAttemptId).toBe(expiredLeased.claimed.attempt.localAttemptId);
+    await expect(repo.listGovernedCallbackScopes()).resolves.toEqual(scope);
+  });
+
   it("rolls governed delivery custody back when intent creation aborts", async () => {
     const { sqlite, repo } = await setup();
     sqlite.exec(`CREATE TRIGGER reject_governed_intent

@@ -682,6 +682,41 @@ export type ClaimedGovernedCallback = {
   };
 };
 
+export type GovernedCallbackEnqueueContext = {
+  outcome: "ready";
+  destinationId: string;
+  organizationId: string;
+  runnerId: string;
+  producer: {
+    kind: "local_opentag";
+    id: string;
+    credentialId: string;
+    registrationGeneration: number;
+  };
+  sourceThreadIdentityDigest: string;
+  assessmentReceipt: CompletionAssessmentReceiptEnvelopeV1;
+  completionOperationId: string;
+  authority: {
+    attemptId: string;
+    attemptNumber: number;
+    epoch: number;
+    fencingTokenDigest: string;
+    admissionId: string;
+    admissionOperationId: string;
+    claimOperationId: string;
+  };
+};
+
+export type GetGovernedCallbackEnqueueContextResult =
+  | GovernedCallbackEnqueueContext
+  | { outcome: "not_found" }
+  | { outcome: "authority_conflict" };
+
+export type GovernedCallbackScope = {
+  destinationId: string;
+  organizationId: string;
+};
+
 export type GovernedCallbackReconciliationEvidence =
   typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
 
@@ -1961,6 +1996,66 @@ type AttemptLease = {
 };
 
 class StaleActionTransitionError extends Error {}
+
+class GovernedCallbackEnqueueValidationError extends Error {}
+
+function governedCallbackEnqueueConflict(): never {
+  throw new GovernedCallbackEnqueueValidationError();
+}
+
+function parseGovernedCallbackEnqueueJson(json: string): unknown {
+  try {
+    return JSON.parse(json);
+  } catch (error) {
+    if (error instanceof SyntaxError) governedCallbackEnqueueConflict();
+    throw error;
+  }
+}
+
+function parseGovernedCallbackEnqueueSchema<T>(
+  schema: {
+    safeParse(value: unknown):
+      | { success: true; data: T }
+      | { success: false };
+  },
+  json: string
+): T {
+  const parsed = schema.safeParse(parseGovernedCallbackEnqueueJson(json));
+  if (!parsed.success) governedCallbackEnqueueConflict();
+  return parsed.data;
+}
+
+function governedCallbackEnqueueAuthorityFromJson(
+  authorityJson: string
+): HostedClaimV1["authority"] {
+  try {
+    return hostedClaimAuthoritySnapshotFromJson(authorityJson);
+  } catch (error) {
+    if (
+      error instanceof SyntaxError
+      || (error instanceof Error
+        && error.message === "hosted claim authority snapshot invalid")
+    ) governedCallbackEnqueueConflict();
+    throw error;
+  }
+}
+
+function governedCallbackEnqueueProjectionFromRow(
+  row: typeof controlPlaneProjectionOutbox.$inferSelect
+): ControlPlaneProjectionOutboxEntry {
+  try {
+    return projectionOutboxEntryFromRow(row);
+  } catch (error) {
+    if (
+      error instanceof Error
+      && (
+        error.message === "control_plane_projection_outbox_state_invalid"
+        || error.message === "control_plane_projection_outbox_row_invalid"
+      )
+    ) governedCallbackEnqueueConflict();
+    throw error;
+  }
+}
 
 function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
   const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
@@ -12261,6 +12356,269 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ];
         })
         .sort((left, right) => right.count - left.count || left.id.localeCompare(right.id));
+    },
+
+    async getGovernedCallbackEnqueueContext(input: {
+      runId: string;
+      assessmentId: string;
+    }): Promise<GetGovernedCallbackEnqueueContextResult> {
+      return db.transaction((tx) => {
+        const importedRun = tx.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, input.runId)).all();
+        const assessmentRows = tx.select().from(completionAssessments)
+          .where(eq(completionAssessments.id, input.assessmentId)).all();
+        if (importedRun.length === 0) {
+          return { outcome: "not_found" } as const;
+        }
+        if (importedRun.length !== 1 || assessmentRows.length !== 1) {
+          return { outcome: "authority_conflict" } as const;
+        }
+
+        const imported = importedRun[0]!;
+        const assessmentRow = assessmentRows[0]!;
+        try {
+          if (!imported.workThreadId) governedCallbackEnqueueConflict();
+          const runRows = tx.select().from(runs).where(and(
+            eq(runs.id, input.runId),
+            eq(runs.workThreadId, imported.workThreadId)
+          )).all();
+          const threadRows = tx.select().from(workThreads).where(and(
+            eq(workThreads.id, imported.workThreadId),
+            eq(workThreads.currentAssessmentId, input.assessmentId)
+          )).all();
+          const attemptRows = tx.select().from(hostedAttemptImports).where(and(
+            eq(hostedAttemptImports.attemptId, imported.attemptId),
+            eq(hostedAttemptImports.runId, imported.runId),
+            eq(hostedAttemptImports.claimOperationId, imported.claimOperationId),
+            eq(hostedAttemptImports.fencingTokenDigest, imported.fencingTokenDigest)
+          )).all();
+          if (runRows.length !== 1 || threadRows.length !== 1 || attemptRows.length !== 1) {
+            governedCallbackEnqueueConflict();
+          }
+          const run = runRows[0]!;
+          const importedAttempt = attemptRows[0]!;
+          const authority = governedCallbackEnqueueAuthorityFromJson(imported.authorityJson);
+          const actualAttemptRows = tx.select().from(attempts).where(and(
+            eq(attempts.id, authority.attemptId),
+            eq(attempts.runId, authority.runId)
+          )).all();
+          if (actualAttemptRows.length !== 1) governedCallbackEnqueueConflict();
+          const actualAttempt = actualAttemptRows[0]!;
+          const actualFencingTokenDigest = `sha256:${createHash("sha256")
+            .update(actualAttempt.fencingToken)
+            .digest("hex")}`;
+          const claimRows = tx.select().from(hostedClaimOperations).where(and(
+            eq(hostedClaimOperations.operationId, imported.claimOperationId),
+            eq(hostedClaimOperations.organizationId, authority.organizationId),
+            eq(hostedClaimOperations.runnerId, authority.runnerId),
+            eq(hostedClaimOperations.runId, imported.runId),
+            eq(hostedClaimOperations.credentialId, authority.credentialId),
+            eq(hostedClaimOperations.attemptId, imported.attemptId),
+            eq(hostedClaimOperations.attemptNumber, importedAttempt.attemptNumber),
+            eq(hostedClaimOperations.fencingTokenDigest, imported.fencingTokenDigest),
+            eq(hostedClaimOperations.state, "claimed"),
+            isNotNull(hostedClaimOperations.executionStartedAt),
+            isNull(hostedClaimOperations.terminalReasonCode)
+          )).all();
+          if (claimRows.length !== 1) governedCallbackEnqueueConflict();
+          const claim = claimRows[0]!;
+          const completionRows = tx.select().from(hostedLifecycleOperations).where(and(
+            eq(hostedLifecycleOperations.destinationId, claim.destinationId),
+            eq(hostedLifecycleOperations.organizationId, authority.organizationId),
+            eq(hostedLifecycleOperations.runnerId, authority.runnerId),
+            eq(hostedLifecycleOperations.credentialId, authority.credentialId),
+            eq(hostedLifecycleOperations.action, "complete"),
+            eq(hostedLifecycleOperations.runId, imported.runId),
+            eq(hostedLifecycleOperations.attemptId, imported.attemptId),
+            eq(hostedLifecycleOperations.attemptNumber, importedAttempt.attemptNumber),
+            eq(hostedLifecycleOperations.fencingTokenDigest, imported.fencingTokenDigest),
+            eq(hostedLifecycleOperations.state, "acknowledged")
+          )).all();
+          if (completionRows.length !== 1) {
+            governedCallbackEnqueueConflict();
+          }
+          const completion = completionRows[0]!;
+          if (!validAcknowledgedLifecycleDependency(completion)) {
+            governedCallbackEnqueueConflict();
+          }
+
+          const projectionIdentity = {
+            namespace: "opentag.control.receipt/completion-assessment/v1",
+            parts: [authority.organizationId, imported.workThreadId, input.assessmentId]
+          };
+          const projectionRows = tx.select().from(controlPlaneProjectionOutbox).where(and(
+            eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+            eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+            eq(controlPlaneProjectionOutbox.runId, imported.runId),
+            eq(controlPlaneProjectionOutbox.workThreadId, imported.workThreadId),
+            eq(controlPlaneProjectionOutbox.receiptKind, "completion_assessment"),
+            eq(controlPlaneProjectionOutbox.identityKey,
+              canonicalSha256Json(projectionIdentity))
+          )).all();
+          if (projectionRows.length !== 1) {
+            governedCallbackEnqueueConflict();
+          }
+          const projection = governedCallbackEnqueueProjectionFromRow(projectionRows[0]!);
+          if (projection.envelope.receiptKind !== "completion_assessment") {
+            governedCallbackEnqueueConflict();
+          }
+          const envelope = projection.envelope;
+          const assessment = parseGovernedCallbackEnqueueSchema(
+            CompletionAssessmentSchema,
+            assessmentRow.assessmentJson
+          );
+          const completionRequest = parseGovernedCallbackEnqueueSchema(
+            HostedCompleteRequestV1Schema,
+            completion.requestJson
+          );
+          const completionReceipt = parseGovernedCallbackEnqueueSchema(
+            HostedLifecycleReceiptEnvelopeV1Schema,
+            completion.receiptJson!
+          );
+          if (!run.resultJson || !actualAttempt.resultJson) {
+            governedCallbackEnqueueConflict();
+          }
+          const runResult = parseGovernedCallbackEnqueueSchema(
+            OpenTagRunResultSchema,
+            run.resultJson
+          );
+          const attemptResult = parseGovernedCallbackEnqueueSchema(
+            OpenTagRunResultSchema,
+            actualAttempt.resultJson
+          );
+          const expectedRunStatus = runResult.conclusion === "success"
+            ? "succeeded"
+            : runResult.conclusion === "failure"
+              ? "failed"
+              : runResult.conclusion === "needs_human"
+                ? "needs_approval"
+                : runResult.conclusion;
+          const expectedAttemptStatus = runResult.conclusion === "success"
+            ? "succeeded"
+            : runResult.conclusion === "failure"
+              ? "failed"
+              : runResult.conclusion === "needs_human"
+                ? "needs_human"
+                : runResult.conclusion;
+          const executorResultRef = envelope.payload.executorResultReceiptRef;
+          if (
+            assessmentRow.workThreadId !== imported.workThreadId
+            || actualAttempt.runId !== authority.runId
+            || actualAttempt.runnerId !== authority.runnerId
+            || actualAttempt.number !== authority.attemptNumber
+            || actualFencingTokenDigest !== authority.fencingTokenDigest
+            || !releasedTerminalAttemptMatchesRun(actualAttempt, run)
+            || run.status !== expectedRunStatus
+            || actualAttempt.status !== expectedAttemptStatus
+            || completionRequest.conclusion !== runResult.conclusion
+            || canonicalJsonStringify(runResult) !== canonicalJsonStringify(attemptResult)
+            || canonicalSha256Json(runResult) !== completionRequest.resultDigest
+            || canonicalSha256Json(attemptResult) !== completionRequest.resultDigest
+            || assessment.id !== input.assessmentId
+            || assessment.workThreadId !== imported.workThreadId
+            || assessment.triggeredByRunId !== imported.runId
+            || imported.authorityJson !== importedAttempt.authorityJson
+            || imported.authorityJson !== claim.authorityJson
+            || imported.authorityDigest !== importedAttempt.authorityDigest
+            || imported.authorityDigest !== claim.authorityDigest
+            || imported.claimDigest !== importedAttempt.claimDigest
+            || imported.claimDigest !== claim.claimDigest
+            || canonicalSha256Json(authority) !== imported.authorityDigest
+            || authority.organizationId !== claim.organizationId
+            || authority.runnerId !== claim.runnerId
+            || authority.runId !== imported.runId
+            || authority.credentialId !== claim.credentialId
+            || authority.attemptId !== imported.attemptId
+            || authority.attemptNumber !== importedAttempt.attemptNumber
+            || authority.epoch !== importedAttempt.attemptNumber
+            || authority.fencingTokenDigest !== imported.fencingTokenDigest
+            || projection.destinationId !== claim.destinationId
+            || projection.organizationId !== authority.organizationId
+            || projection.runId !== imported.runId
+            || projection.workThreadId !== imported.workThreadId
+            || projection.requiresLifecycleOperationId !== completion.operationId
+            || envelope.payload.assessmentId !== input.assessmentId
+            || envelope.organizationId !== authority.organizationId
+            || envelope.runId !== imported.runId
+            || envelope.workThreadId !== imported.workThreadId
+            || envelope.producer.kind !== "local_opentag"
+            || envelope.producer.credentialId !== authority.credentialId
+            || envelope.producer.registrationGeneration
+              !== authority.registrationGeneration
+            || envelope.attempt.attemptId !== authority.attemptId
+            || envelope.attempt.attemptNumber !== authority.attemptNumber
+            || envelope.attempt.epoch !== authority.epoch
+            || envelope.attempt.fencingTokenDigest !== authority.fencingTokenDigest
+            || envelope.payload.workThreadId !== imported.workThreadId
+            || envelope.payload.runId !== imported.runId
+            || envelope.payload.attempt.attemptId !== authority.attemptId
+            || envelope.payload.attempt.attemptNumber !== authority.attemptNumber
+            || envelope.payload.attempt.epoch !== authority.epoch
+            || envelope.payload.attempt.fencingTokenDigest !== authority.fencingTokenDigest
+            || envelope.payload.admissionPolicySnapshot.snapshotId
+              !== authority.admissionPolicySnapshotId
+            || envelope.payload.admissionPolicySnapshot.digest
+              !== authority.admissionPolicySnapshotDigest
+            || envelope.payload.contract.contractId !== assessment.contractId
+            || envelope.payload.contract.version !== assessment.contractVersion
+            || envelope.payload.contract.cycle !== assessment.cycle
+            || envelope.payload.assessmentInputDigest !== assessment.inputDigest
+            || envelope.payload.conclusion !== assessment.state
+            || envelope.payload.assessedAt !== assessment.assessedAt
+            || envelope.payload.assessedBy !== (assessment.assessedBy === "opentag"
+              ? "local_opentag"
+              : "human")
+            || (envelope.payload.supersedesAssessmentId ?? null)
+              !== (assessment.supersedesAssessmentId ?? null)
+            || executorResultRef.receiptId !== completionReceipt.receiptId
+            || executorResultRef.operationId !== completion.operationId
+            || executorResultRef.requestId !== completion.requestId
+            || executorResultRef.requestDigest !== completion.requestDigest
+            || executorResultRef.resultDigest !== completionRequest.resultDigest
+            || !envelope.predecessorReceiptDigests?.includes(completionReceipt.receiptDigest)
+          ) governedCallbackEnqueueConflict();
+
+          return {
+            outcome: "ready",
+            destinationId: claim.destinationId,
+            organizationId: authority.organizationId,
+            runnerId: authority.runnerId,
+            producer: envelope.producer,
+            sourceThreadIdentityDigest: imported.sourceIdentityDigest,
+            assessmentReceipt: envelope,
+            completionOperationId: completion.operationId,
+            authority: {
+              attemptId: authority.attemptId,
+              attemptNumber: authority.attemptNumber,
+              epoch: authority.epoch,
+              fencingTokenDigest: authority.fencingTokenDigest,
+              admissionId: imported.admissionId,
+              admissionOperationId: imported.admissionOperationId,
+              claimOperationId: imported.claimOperationId
+            }
+          } as const;
+        } catch (error) {
+          if (error instanceof GovernedCallbackEnqueueValidationError) {
+            return { outcome: "authority_conflict" } as const;
+          }
+          throw error;
+        }
+      });
+    },
+
+    async listGovernedCallbackScopes(): Promise<GovernedCallbackScope[]> {
+      const rows = await db.select({
+        destinationId: governedCallbackIntents.destinationId,
+        organizationId: governedCallbackIntents.organizationId
+      }).from(governedCallbackIntents).where(
+        inArray(governedCallbackIntents.state, ["pending", "leased", "sending"])
+      );
+      return [...new Map(rows.map((row) => [
+        `${row.destinationId}\u0000${row.organizationId}`,
+        row
+      ])).values()].sort((left, right) =>
+        left.destinationId.localeCompare(right.destinationId)
+        || left.organizationId.localeCompare(right.organizationId));
     },
 
     async enqueueGovernedCallbackIntent(input: {
