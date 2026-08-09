@@ -1941,22 +1941,43 @@ export const HostedProgressRequestV1Schema = HostedLifecycleRequestBaseV1Schema
 const HostedLifecycleSortedDigestsV1Schema = sortedUniqueArray(
   ReceiptDigestSchema,
 ).max(64);
+const HostedExecutorResultConclusionV1Schema = z.enum([
+  "success",
+  "failure",
+  "cancelled",
+  "interrupted",
+  "timed_out",
+  "needs_human",
+]);
+export const HostedExecutorResultReasonCodeV1Schema = z.enum([
+  "executor_success",
+  "executor_failure",
+  "executor_cancelled",
+  "executor_interrupted",
+  "executor_timed_out",
+  "executor_needs_human",
+]);
+const hostedExecutorResultReasonCodeV1 = (
+  conclusion: z.infer<typeof HostedExecutorResultConclusionV1Schema>,
+): z.infer<typeof HostedExecutorResultReasonCodeV1Schema> =>
+  `executor_${conclusion}`;
 export const HostedCompleteRequestV1Schema = HostedLifecycleRequestBaseV1Schema
   .extend({
-    conclusion: z.enum([
-      "success",
-      "failure",
-      "cancelled",
-      "interrupted",
-      "timed_out",
-      "needs_human",
-    ]),
-    reasonCode: z.string().regex(/^[a-z][a-z0-9._-]{0,63}$/u),
+    conclusion: HostedExecutorResultConclusionV1Schema,
+    reasonCode: HostedExecutorResultReasonCodeV1Schema,
     resultDigest: ReceiptDigestSchema,
     artifactDigests: HostedLifecycleSortedDigestsV1Schema,
     evidenceDigests: HostedLifecycleSortedDigestsV1Schema,
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      value.reasonCode === hostedExecutorResultReasonCodeV1(value.conclusion),
+    {
+      path: ["reasonCode"],
+      message: "Executor result reason code must match the conclusion.",
+    },
+  );
 export const HostedLifecycleRequestV1Schema = z.union([
   HostedHeartbeatRequestV1Schema,
   HostedRunningRequestV1Schema,
@@ -1994,13 +2015,21 @@ export const HostedLifecycleReceiptPayloadV1Schema = z.discriminatedUnion(
     z.object({
       operation: z.literal("executor_result"),
       occurredAt: ControlTimestampSchema,
-      conclusion: HostedCompleteRequestV1Schema.shape.conclusion,
-      reasonCode: HostedCompleteRequestV1Schema.shape.reasonCode,
+      conclusion: HostedExecutorResultConclusionV1Schema,
+      reasonCode: HostedExecutorResultReasonCodeV1Schema,
       resultDigest: ReceiptDigestSchema,
       artifactDigests: HostedLifecycleSortedDigestsV1Schema,
       evidenceDigests: HostedLifecycleSortedDigestsV1Schema,
     }).strict(),
   ],
+).refine(
+  (value) =>
+    value.operation !== "executor_result"
+    || value.reasonCode === hostedExecutorResultReasonCodeV1(value.conclusion),
+  {
+    path: ["reasonCode"],
+    message: "Executor result reason code must match the conclusion.",
+  },
 );
 export const HostedLifecycleReceiptEnvelopeV1Schema = z.object({
   schemaVersion: ControlSchemaVersionSchema,
@@ -2045,6 +2074,9 @@ export type HostedRunningRequestV1 = z.infer<typeof HostedRunningRequestV1Schema
 export type HostedRejectStartRequestV1 = z.infer<typeof HostedRejectStartRequestV1Schema>;
 export type HostedProgressRequestV1 = z.infer<typeof HostedProgressRequestV1Schema>;
 export type HostedCompleteRequestV1 = z.infer<typeof HostedCompleteRequestV1Schema>;
+export type HostedExecutorResultReasonCodeV1 = z.infer<
+  typeof HostedExecutorResultReasonCodeV1Schema
+>;
 export type HostedLifecycleRequestV1 = z.infer<typeof HostedLifecycleRequestV1Schema>;
 export type HostedLifecycleReceiptEnvelopeV1 = z.infer<typeof HostedLifecycleReceiptEnvelopeV1Schema>;
 
@@ -2174,7 +2206,7 @@ export async function buildHostedLifecycleRequestV1(input: {
   | {
       action: "complete";
       conclusion: z.input<typeof HostedCompleteRequestV1Schema>["conclusion"];
-      reasonCode: string;
+      reasonCode: z.input<typeof HostedExecutorResultReasonCodeV1Schema>;
       resultDigest: string;
       artifactDigests: string[];
       evidenceDigests: string[];

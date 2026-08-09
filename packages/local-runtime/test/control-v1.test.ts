@@ -100,6 +100,23 @@ describe("Control V1 projection pump", () => {
     expect(serialized).not.toContain("ghp_secret");
     expect(serialized).not.toContain("/Users/alice");
     expect(serialized).not.toContain("local://artifact");
+    for (const conclusion of [
+      "success",
+      "failure",
+      "cancelled",
+      "interrupted",
+      "timed_out",
+      "needs_human",
+    ] as const) {
+      const metadata = await buildHostedCompletionMetadataForControlV1({
+        conclusion,
+        summary: secret,
+      });
+      expect(metadata.reasonCode).toBe(`executor_${conclusion}`);
+      expect(metadata.reasonCode).not.toMatch(
+        /ghp_|sk_|raw-token|private-message|unknown_safe_failure/u,
+      );
+    }
   });
 
   it("accepts fresh readiness before a strict hosted claim and treats 204 as no work", async () => {

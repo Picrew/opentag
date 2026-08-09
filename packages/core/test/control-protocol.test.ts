@@ -43,7 +43,10 @@ import {
   HostedAdmissionEnvelopeV1Schema,
   HostedClaimRequestV1Schema,
   HostedClaimV1Schema,
+  HostedCompleteRequestV1Schema,
+  HostedExecutorResultReasonCodeV1Schema,
   HostedHeartbeatRequestV1Schema,
+  HostedLifecycleReceiptPayloadV1Schema,
   HostedLifecycleReceiptEnvelopeV1Schema,
   MaterialActionPayloadV1Schema,
   MaterialActionReconcileHttpResponseV1Schema,
@@ -829,6 +832,99 @@ describe("hosted admission and claim V1 protocol", () => {
         },
       }),
     ).toBe(request.requestDigest);
+  });
+
+  it("freezes hosted executor result reasons and binds them to conclusions", async () => {
+    const common = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.lifecycle.v1"] as const,
+      requestId: `req_${"0".repeat(64)}`,
+      operationId: `op_${"0".repeat(64)}`,
+      attempt: {
+        attemptId: "attempt_1",
+        attemptNumber: 1,
+        epoch: 1,
+        fencingToken: "raw_fence",
+        fencingTokenDigest: digest,
+      },
+      requestDigest: digest,
+      occurredAt: "2026-08-10T00:00:00.000Z",
+      resultDigest: digest,
+      artifactDigests: [] as string[],
+      evidenceDigests: [] as string[],
+    };
+    const pairs = [
+      ["success", "executor_success"],
+      ["failure", "executor_failure"],
+      ["cancelled", "executor_cancelled"],
+      ["interrupted", "executor_interrupted"],
+      ["timed_out", "executor_timed_out"],
+      ["needs_human", "executor_needs_human"],
+    ] as const;
+    for (const [conclusion, reasonCode] of pairs) {
+      expect(HostedExecutorResultReasonCodeV1Schema.safeParse(reasonCode).success)
+        .toBe(true);
+      expect(HostedCompleteRequestV1Schema.safeParse({
+        ...common,
+        conclusion,
+        reasonCode,
+      }).success).toBe(true);
+      expect(HostedLifecycleReceiptPayloadV1Schema.safeParse({
+        operation: "executor_result",
+        occurredAt: common.occurredAt,
+        conclusion,
+        reasonCode,
+        resultDigest: digest,
+        artifactDigests: [],
+        evidenceDigests: [],
+      }).success).toBe(true);
+    }
+
+    for (const forbidden of [
+      "ghp_0123456789abcdef",
+      "sk_live_0123456789abcdef",
+      "raw-token",
+      "private-message",
+      "unknown_safe_failure",
+    ]) {
+      expect(HostedExecutorResultReasonCodeV1Schema.safeParse(forbidden).success)
+        .toBe(false);
+      expect(HostedCompleteRequestV1Schema.safeParse({
+        ...common,
+        conclusion: "failure",
+        reasonCode: forbidden,
+      }).success).toBe(false);
+      expect(HostedLifecycleReceiptPayloadV1Schema.safeParse({
+        operation: "executor_result",
+        occurredAt: common.occurredAt,
+        conclusion: "failure",
+        reasonCode: forbidden,
+        resultDigest: digest,
+        artifactDigests: [],
+        evidenceDigests: [],
+      }).success).toBe(false);
+    }
+
+    for (const [conclusion, reasonCode] of pairs) {
+      const mismatched = reasonCode === "executor_success"
+        ? "executor_failure"
+        : "executor_success";
+      expect(HostedCompleteRequestV1Schema.safeParse({
+        ...common,
+        conclusion,
+        reasonCode: mismatched,
+      }).success).toBe(false);
+      expect(HostedLifecycleReceiptPayloadV1Schema.safeParse({
+        operation: "executor_result",
+        occurredAt: common.occurredAt,
+        conclusion,
+        reasonCode: mismatched,
+        resultDigest: digest,
+        artifactDigests: [],
+        evidenceDigests: [],
+      }).success).toBe(false);
+    }
   });
 
   it("accepts only a fully linked, sanitized hosted claim", async () => {

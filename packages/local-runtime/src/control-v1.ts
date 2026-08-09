@@ -10,6 +10,7 @@ import type {
   CompletionContractRefReceiptEnvelopeV1,
   HostedClaimRequestV1,
   HostedClaimV1,
+  HostedExecutorResultReasonCodeV1,
   MaterialActionReceipt,
   RunnerReadinessReceiptEnvelopeV1,
   RunnerControlContextResponseV1,
@@ -700,14 +701,25 @@ export async function buildHostedCompletionMetadataForControlV1(
   result: import("@opentag/core").OpenTagRunResult,
 ): Promise<{
   conclusion: import("@opentag/core").OpenTagRunResult["conclusion"];
-  reasonCode: string;
+  reasonCode: HostedExecutorResultReasonCodeV1;
   resultDigest: string;
   artifactDigests: string[];
   evidenceDigests: string[];
 }> {
+  const reasonCodes = {
+    success: "executor_success",
+    failure: "executor_failure",
+    cancelled: "executor_cancelled",
+    interrupted: "executor_interrupted",
+    timed_out: "executor_timed_out",
+    needs_human: "executor_needs_human",
+  } as const satisfies Record<
+    import("@opentag/core").OpenTagRunResult["conclusion"],
+    HostedExecutorResultReasonCodeV1
+  >;
   return {
     conclusion: result.conclusion,
-    reasonCode: `executor_${result.conclusion}`,
+    reasonCode: reasonCodes[result.conclusion],
     resultDigest: await computeControlPayloadDigestV1(result),
     artifactDigests: [...new Set(await Promise.all(
       (result.artifacts ?? []).map((artifact) =>

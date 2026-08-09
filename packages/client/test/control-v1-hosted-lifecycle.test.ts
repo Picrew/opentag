@@ -1,4 +1,6 @@
 import {
+  HostedCompleteRequestV1Schema,
+  HostedLifecycleReceiptEnvelopeV1Schema,
   HostedHeartbeatRequestV1Schema,
   buildHostedLifecycleRequestV1,
   computeControlPayloadDigestV1,
@@ -296,6 +298,42 @@ describe('hosted lifecycle Control V1 transports', () => {
     );
 
     await expect(runtimeClient(fetchImpl).heartbeatHostedRunControlV1(input(request)))
+      .rejects.toThrow(/invalid_control_v1_response/u);
+  });
+
+  it('rejects secret-like, free-form, and conclusion-mismatched complete reasons', async () => {
+    const request = await requestFor('complete');
+    for (const reasonCode of [
+      'ghp_0123456789abcdef',
+      'sk_live_0123456789abcdef',
+      'raw-token',
+      'private-message',
+      'unknown_safe_failure',
+      'executor_success',
+    ]) {
+      expect(HostedCompleteRequestV1Schema.safeParse({
+        ...request,
+        conclusion: 'failure',
+        reasonCode,
+      }).success).toBe(false);
+    }
+
+    const validReceipt = await receiptFor('complete', request);
+    const invalidReceipt = {
+      ...validReceipt,
+      payload: {
+        ...validReceipt.payload,
+        operation: 'executor_result' as const,
+        conclusion: 'failure' as const,
+        reasonCode: 'executor_success',
+      },
+    };
+    expect(HostedLifecycleReceiptEnvelopeV1Schema.safeParse(invalidReceipt).success)
+      .toBe(false);
+    const fetchImpl = vi.fn<typeof fetch>(async (url) =>
+      response(invalidReceipt, 201, String(url)),
+    );
+    await expect(runtimeClient(fetchImpl).completeHostedRunControlV1(input(request)))
       .rejects.toThrow(/invalid_control_v1_response/u);
   });
 
