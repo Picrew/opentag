@@ -669,6 +669,8 @@ export const callbackDeliveries = sqliteTable(
     threadKey: text("thread_key"),
     idempotencyKey: text("idempotency_key"),
     metadataJson: text("metadata_json"),
+    dispatchMode: text("dispatch_mode").notNull().default("legacy"),
+    governedState: text("governed_state"),
     status: text("status").notNull(),
     attempts: integer("attempts").notNull().default(0),
     lastError: text("last_error"),
@@ -679,7 +681,156 @@ export const callbackDeliveries = sqliteTable(
   (table) => ({
     callbackRunIdx: index("callback_deliveries_run_idx").on(table.runId),
     callbackStatusIdx: index("callback_deliveries_status_idx").on(table.status),
+    callbackDispatchStatusIdx: index("callback_deliveries_dispatch_status_idx").on(
+      table.dispatchMode,
+      table.status
+    ),
     callbackIdempotencyIdx: uniqueIndex("callback_deliveries_idempotency_key_idx").on(table.idempotencyKey)
+  })
+);
+
+export const governedCallbackIntents = sqliteTable(
+  "governed_callback_intents",
+  {
+    localIntentId: text("local_intent_id").primaryKey(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    destinationId: text("destination_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    runnerId: text("runner_id").notNull(),
+    producerId: text("producer_id").notNull(),
+    credentialId: text("credential_id").notNull(),
+    registrationGeneration: integer("registration_generation").notNull(),
+    runId: text("run_id").notNull(),
+    workThreadId: text("work_thread_id").notNull(),
+    runAttemptId: text("run_attempt_id").notNull(),
+    runAttemptNumber: integer("run_attempt_number").notNull(),
+    fencingTokenDigest: text("fencing_token_digest").notNull(),
+    admissionId: text("admission_id").notNull(),
+    admissionOperationId: text("admission_operation_id").notNull(),
+    claimOperationId: text("claim_operation_id").notNull(),
+    completionOperationId: text("completion_operation_id").notNull(),
+    assessmentReceiptId: text("assessment_receipt_id").notNull(),
+    assessmentReceiptDigest: text("assessment_receipt_digest").notNull(),
+    localDeliveryId: integer("local_delivery_id").notNull(),
+    provider: text("provider").notNull(),
+    operationId: text("operation_id").notNull(),
+    payloadDigest: text("payload_digest").notNull(),
+    intentReceiptId: text("intent_receipt_id").notNull(),
+    intentReceiptDigest: text("intent_receipt_digest").notNull(),
+    intentReceiptJson: text("intent_receipt_json").notNull(),
+    state: text("state").notNull(),
+    currentAttemptId: text("current_attempt_id"),
+    currentAttemptNumber: integer("current_attempt_number").notNull().default(0),
+    nextAttemptAt: text("next_attempt_at"),
+    leaseOwner: text("lease_owner"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: text("lease_expires_at"),
+    lastReasonCode: text("last_reason_code"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    terminalAt: text("terminal_at")
+  },
+  (table) => ({
+    idempotencyIdx: uniqueIndex("governed_callback_intents_idempotency_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.idempotencyKey
+    ),
+    operationIdx: uniqueIndex("governed_callback_intents_operation_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.operationId
+    ),
+    deliveryIdx: uniqueIndex("governed_callback_intents_delivery_idx").on(table.localDeliveryId),
+    dueIdx: index("governed_callback_intents_due_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.state,
+      table.nextAttemptAt,
+      table.leaseExpiresAt
+    ),
+    stateCheck: check(
+      "governed_callback_intents_state_check",
+      sql`${table.state} IN ('pending', 'leased', 'sending', 'accepted', 'rejected', 'outcome_unknown', 'attention')`
+    ),
+    providerCheck: check("governed_callback_intents_provider_check", sql`${table.provider} = 'github'`),
+    attemptNumberCheck: check(
+      "governed_callback_intents_attempt_number_check",
+      sql`typeof(${table.currentAttemptNumber}) = 'integer' AND ${table.currentAttemptNumber} >= 0`
+    )
+  })
+);
+
+export const governedCallbackAttempts = sqliteTable(
+  "governed_callback_attempts",
+  {
+    localAttemptId: text("local_attempt_id").primaryKey(),
+    localIntentId: text("local_intent_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    previousAttemptId: text("previous_attempt_id"),
+    retryAuthorizationId: text("retry_authorization_id"),
+    requestDigest: text("request_digest").notNull(),
+    state: text("state").notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: text("lease_expires_at"),
+    attemptedAt: text("attempted_at"),
+    observedAt: text("observed_at"),
+    reasonCode: text("reason_code"),
+    nextAction: text("next_action"),
+    owner: text("owner"),
+    attemptReceiptId: text("attempt_receipt_id"),
+    attemptReceiptDigest: text("attempt_receipt_digest"),
+    attemptReceiptJson: text("attempt_receipt_json"),
+    providerReceiptId: text("provider_receipt_id"),
+    resourceIdentity: text("resource_identity"),
+    providerReceiptDigest: text("provider_receipt_digest"),
+    providerReceiptJson: text("provider_receipt_json"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => ({
+    numberIdx: uniqueIndex("governed_callback_attempts_number_idx").on(
+      table.localIntentId,
+      table.attemptNumber
+    ),
+    stateIdx: index("governed_callback_attempts_state_idx").on(table.localIntentId, table.state),
+    stateCheck: check(
+      "governed_callback_attempts_state_check",
+      sql`${table.state} IN ('pending', 'leased', 'sending', 'accepted', 'rejected', 'outcome_unknown', 'attention')`
+    ),
+    attemptNumberCheck: check(
+      "governed_callback_attempts_attempt_number_check",
+      sql`typeof(${table.attemptNumber}) = 'integer' AND ${table.attemptNumber} > 0`
+    )
+  })
+);
+
+export const governedCallbackReconciliations = sqliteTable(
+  "governed_callback_reconciliations",
+  {
+    reconciliationId: text("reconciliation_id").primaryKey(),
+    localIntentId: text("local_intent_id").notNull(),
+    localAttemptId: text("local_attempt_id").notNull(),
+    resolution: text("resolution").notNull(),
+    evidenceDigest: text("evidence_digest").notNull(),
+    evidenceJson: text("evidence_json").notNull(),
+    owner: text("owner").notNull(),
+    retryAttemptId: text("retry_attempt_id"),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({
+    intentIdx: index("governed_callback_reconciliations_intent_idx").on(
+      table.localIntentId,
+      table.createdAt
+    ),
+    attemptIdx: uniqueIndex("governed_callback_reconciliations_attempt_idx").on(
+      table.localAttemptId
+    ),
+    resolutionCheck: check(
+      "governed_callback_reconciliations_resolution_check",
+      sql`${table.resolution} IN ('accepted', 'rejected')`
+    )
   })
 );
 
@@ -2168,6 +2319,98 @@ export function migrateSchema(sqlite: Database.Database): void {
       ON callback_deliveries(run_id);
     CREATE INDEX IF NOT EXISTS callback_deliveries_status_idx
       ON callback_deliveries(status);
+    CREATE TABLE IF NOT EXISTS governed_callback_intents (
+      local_intent_id TEXT PRIMARY KEY,
+      idempotency_key TEXT NOT NULL,
+      destination_id TEXT NOT NULL,
+      organization_id TEXT NOT NULL,
+      runner_id TEXT NOT NULL,
+      producer_id TEXT NOT NULL,
+      credential_id TEXT NOT NULL,
+      registration_generation INTEGER NOT NULL,
+      run_id TEXT NOT NULL,
+      work_thread_id TEXT NOT NULL,
+      run_attempt_id TEXT NOT NULL,
+      run_attempt_number INTEGER NOT NULL,
+      fencing_token_digest TEXT NOT NULL,
+      admission_id TEXT NOT NULL,
+      admission_operation_id TEXT NOT NULL,
+      claim_operation_id TEXT NOT NULL,
+      completion_operation_id TEXT,
+      assessment_receipt_id TEXT,
+      assessment_receipt_digest TEXT,
+      local_delivery_id INTEGER,
+      provider TEXT NOT NULL CHECK (provider = 'github'),
+      operation_id TEXT NOT NULL,
+      payload_digest TEXT NOT NULL,
+      intent_receipt_id TEXT NOT NULL,
+      intent_receipt_digest TEXT NOT NULL,
+      intent_receipt_json TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('pending', 'leased', 'sending', 'accepted', 'rejected', 'outcome_unknown', 'attention')),
+      current_attempt_id TEXT,
+      current_attempt_number INTEGER NOT NULL DEFAULT 0 CHECK (current_attempt_number >= 0),
+      next_attempt_at TEXT,
+      lease_owner TEXT,
+      lease_token TEXT,
+      lease_expires_at TEXT,
+      last_reason_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      terminal_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_intents_idempotency_idx
+      ON governed_callback_intents(destination_id, organization_id, idempotency_key);
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_intents_operation_idx
+      ON governed_callback_intents(destination_id, organization_id, operation_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_intents_delivery_idx
+      ON governed_callback_intents(local_delivery_id);
+    CREATE INDEX IF NOT EXISTS governed_callback_intents_due_idx
+      ON governed_callback_intents(destination_id, organization_id, state, next_attempt_at, lease_expires_at);
+    CREATE TABLE IF NOT EXISTS governed_callback_attempts (
+      local_attempt_id TEXT PRIMARY KEY,
+      local_intent_id TEXT NOT NULL,
+      attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+      previous_attempt_id TEXT,
+      retry_authorization_id TEXT,
+      request_digest TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('pending', 'leased', 'sending', 'accepted', 'rejected', 'outcome_unknown', 'attention')),
+      lease_owner TEXT,
+      lease_token TEXT,
+      lease_expires_at TEXT,
+      attempted_at TEXT,
+      observed_at TEXT,
+      reason_code TEXT,
+      next_action TEXT,
+      owner TEXT,
+      attempt_receipt_id TEXT,
+      attempt_receipt_digest TEXT,
+      attempt_receipt_json TEXT,
+      provider_receipt_id TEXT,
+      resource_identity TEXT,
+      provider_receipt_digest TEXT,
+      provider_receipt_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_attempts_number_idx
+      ON governed_callback_attempts(local_intent_id, attempt_number);
+    CREATE INDEX IF NOT EXISTS governed_callback_attempts_state_idx
+      ON governed_callback_attempts(local_intent_id, state);
+    CREATE TABLE IF NOT EXISTS governed_callback_reconciliations (
+      reconciliation_id TEXT PRIMARY KEY,
+      local_intent_id TEXT NOT NULL,
+      local_attempt_id TEXT NOT NULL,
+      resolution TEXT NOT NULL CHECK (resolution IN ('accepted', 'rejected')),
+      evidence_digest TEXT NOT NULL,
+      evidence_json TEXT NOT NULL,
+      owner TEXT NOT NULL,
+      retry_attempt_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS governed_callback_reconciliations_intent_idx
+      ON governed_callback_reconciliations(local_intent_id, created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_reconciliations_attempt_idx
+      ON governed_callback_reconciliations(local_attempt_id);
     CREATE TABLE IF NOT EXISTS follow_up_requests (
       id TEXT PRIMARY KEY,
       source_event_id TEXT NOT NULL,
@@ -2189,6 +2432,142 @@ export function migrateSchema(sqlite: Database.Database): void {
       ON follow_up_requests(source_event_id);
     CREATE INDEX IF NOT EXISTS follow_up_requests_conversation_idx
       ON follow_up_requests(conversation_key, status);
+  `);
+  const governedIntentColumns = sqlite.prepare(
+    "PRAGMA table_info(governed_callback_intents)"
+  ).all() as { name: string }[];
+  const governedIntentColumnNames = new Set(governedIntentColumns.map((column) => column.name));
+  if (!governedIntentColumnNames.has("completion_operation_id")) {
+    sqlite.exec("ALTER TABLE governed_callback_intents ADD COLUMN completion_operation_id TEXT");
+  }
+  if (!governedIntentColumnNames.has("assessment_receipt_id")) {
+    sqlite.exec("ALTER TABLE governed_callback_intents ADD COLUMN assessment_receipt_id TEXT");
+  }
+  if (!governedIntentColumnNames.has("assessment_receipt_digest")) {
+    sqlite.exec("ALTER TABLE governed_callback_intents ADD COLUMN assessment_receipt_digest TEXT");
+  }
+  if (!governedIntentColumnNames.has("local_delivery_id")) {
+    sqlite.exec("ALTER TABLE governed_callback_intents ADD COLUMN local_delivery_id INTEGER");
+  }
+  const governedReconciliationColumns = sqlite.prepare(
+    "PRAGMA table_info(governed_callback_reconciliations)"
+  ).all() as { name: string }[];
+  if (!governedReconciliationColumns.some((column) => column.name === "evidence_json")) {
+    sqlite.exec("ALTER TABLE governed_callback_reconciliations ADD COLUMN evidence_json TEXT");
+  }
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_intents_delivery_idx
+      ON governed_callback_intents(local_delivery_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_reconciliations_attempt_idx
+      ON governed_callback_reconciliations(local_attempt_id);
+    DROP TRIGGER IF EXISTS governed_callback_reconciliations_immutable_guard;
+    CREATE TRIGGER governed_callback_reconciliations_immutable_guard
+    BEFORE UPDATE OF reconciliation_id, local_intent_id, local_attempt_id,
+      resolution, evidence_digest, evidence_json, owner, retry_attempt_id, created_at
+    ON governed_callback_reconciliations
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_reconciliation_immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_reconciliations_delete_guard
+    BEFORE DELETE ON governed_callback_reconciliations
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_reconciliation_delete_forbidden');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_reconciliations_resolution_guard
+    BEFORE INSERT ON governed_callback_reconciliations
+    WHEN NEW.resolution NOT IN ('accepted', 'rejected') OR NEW.retry_attempt_id IS NOT NULL
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid governed callback reconciliation resolution');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_attempts_terminal_guard
+    BEFORE UPDATE ON governed_callback_attempts
+    WHEN OLD.state IN ('accepted', 'rejected', 'outcome_unknown', 'attention')
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_attempt_terminal_immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_attempts_delete_guard
+    BEFORE DELETE ON governed_callback_attempts
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_attempt_delete_forbidden');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_attempts_authority_immutable_guard
+    BEFORE UPDATE OF local_intent_id, attempt_number, previous_attempt_id,
+      retry_authorization_id, request_digest, created_at
+    ON governed_callback_attempts
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_attempt_authority_immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_attempts_state_transition_guard
+    BEFORE UPDATE OF state ON governed_callback_attempts
+    WHEN NEW.state <> OLD.state AND NOT (
+      (OLD.state = 'pending' AND NEW.state IN ('leased', 'attention'))
+      OR (OLD.state = 'leased' AND NEW.state IN ('pending', 'sending', 'attention'))
+      OR (OLD.state = 'sending' AND NEW.state IN ('accepted', 'rejected', 'outcome_unknown'))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid governed callback attempt state transition');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_attempts_terminal_receipt_guard
+    BEFORE UPDATE OF state ON governed_callback_attempts
+    WHEN OLD.state = 'sending' AND (
+      (NEW.state IN ('accepted', 'rejected') AND (
+        NEW.attempt_receipt_id IS NULL OR NEW.attempt_receipt_digest IS NULL
+        OR NEW.attempt_receipt_json IS NULL OR NEW.provider_receipt_id IS NULL
+        OR NEW.resource_identity IS NULL OR NEW.provider_receipt_digest IS NULL
+        OR NEW.provider_receipt_json IS NULL
+      ))
+      OR (NEW.state = 'outcome_unknown' AND (
+        NEW.attempt_receipt_id IS NULL OR NEW.attempt_receipt_digest IS NULL
+        OR NEW.attempt_receipt_json IS NULL
+        OR NOT (
+          (NEW.provider_receipt_id IS NULL AND NEW.resource_identity IS NULL
+            AND NEW.provider_receipt_digest IS NULL AND NEW.provider_receipt_json IS NULL)
+          OR (NEW.provider_receipt_id IS NOT NULL AND NEW.resource_identity IS NOT NULL
+            AND NEW.provider_receipt_digest IS NOT NULL AND NEW.provider_receipt_json IS NOT NULL)
+        )
+      ))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'incomplete governed callback terminal receipt tuple');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_attempts_receipt_write_guard
+    BEFORE UPDATE OF attempt_receipt_id, attempt_receipt_digest, attempt_receipt_json,
+      provider_receipt_id, resource_identity, provider_receipt_digest, provider_receipt_json
+    ON governed_callback_attempts
+    WHEN NEW.state = OLD.state OR OLD.state <> 'sending'
+    BEGIN
+      SELECT RAISE(ABORT, 'governed callback receipts require sending terminal transition');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_intents_authority_immutable_guard
+    BEFORE UPDATE OF destination_id, organization_id, runner_id, producer_id,
+      credential_id, registration_generation, run_id, work_thread_id,
+      run_attempt_id, run_attempt_number, fencing_token_digest, admission_id,
+      admission_operation_id, claim_operation_id, completion_operation_id,
+      assessment_receipt_id, assessment_receipt_digest, local_delivery_id,
+      provider, operation_id, payload_digest, intent_receipt_id,
+      intent_receipt_digest, intent_receipt_json
+    ON governed_callback_intents
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_intent_authority_immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_intents_delete_guard
+    BEFORE DELETE ON governed_callback_intents
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_intent_delete_forbidden');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_intents_state_transition_guard
+    BEFORE UPDATE OF state ON governed_callback_intents
+    WHEN NEW.state <> OLD.state AND NOT (
+      (OLD.state = 'pending' AND NEW.state IN ('leased', 'attention'))
+      OR (OLD.state = 'leased' AND NEW.state IN ('pending', 'sending', 'attention'))
+      OR (OLD.state = 'sending' AND NEW.state IN
+        ('accepted', 'rejected', 'outcome_unknown', 'attention'))
+      OR (OLD.state = 'outcome_unknown' AND NEW.state IN ('pending', 'accepted', 'rejected'))
+      OR (OLD.state = 'attention' AND NEW.state IN ('pending', 'accepted', 'rejected'))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid governed callback intent state transition');
+    END;
   `);
   const columns = sqlite.prepare("PRAGMA table_info(repo_bindings)").all() as { name: string }[];
   const columnNames = new Set(columns.map((column) => column.name));
@@ -2484,7 +2863,76 @@ export function migrateSchema(sqlite: Database.Database): void {
   if (!callbackColumnNames.has("idempotency_key")) {
     sqlite.exec("ALTER TABLE callback_deliveries ADD COLUMN idempotency_key TEXT");
   }
+  if (!callbackColumnNames.has("dispatch_mode")) {
+    sqlite.exec("ALTER TABLE callback_deliveries ADD COLUMN dispatch_mode TEXT NOT NULL DEFAULT 'legacy'");
+  }
+  if (!callbackColumnNames.has("governed_state")) {
+    sqlite.exec("ALTER TABLE callback_deliveries ADD COLUMN governed_state TEXT");
+  }
   sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS callback_deliveries_idempotency_key_idx ON callback_deliveries(idempotency_key)");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS callback_deliveries_dispatch_status_idx ON callback_deliveries(dispatch_mode, status)");
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS callback_deliveries_dispatch_mode_immutable
+    BEFORE UPDATE OF dispatch_mode ON callback_deliveries
+    WHEN NEW.dispatch_mode <> OLD.dispatch_mode
+    BEGIN SELECT RAISE(ABORT, 'callback delivery dispatch mode is immutable'); END;
+  `);
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS callback_deliveries_custody_insert_guard
+    BEFORE INSERT ON callback_deliveries
+    WHEN NEW.dispatch_mode NOT IN ('legacy', 'governed')
+      OR (NEW.dispatch_mode = 'legacy' AND NEW.governed_state IS NOT NULL)
+      OR (NEW.dispatch_mode = 'governed' AND NEW.governed_state NOT IN
+        ('pending', 'leased', 'sending', 'accepted', 'rejected', 'outcome_unknown', 'attention'))
+    BEGIN SELECT RAISE(ABORT, 'invalid callback delivery custody'); END;
+  `);
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS callback_deliveries_custody_update_guard
+    BEFORE UPDATE OF governed_state ON callback_deliveries
+    WHEN (NEW.dispatch_mode = 'legacy' AND NEW.governed_state IS NOT NULL)
+      OR (NEW.dispatch_mode = 'governed' AND NEW.governed_state NOT IN
+        ('pending', 'leased', 'sending', 'accepted', 'rejected', 'outcome_unknown', 'attention'))
+    BEGIN SELECT RAISE(ABORT, 'invalid callback delivery custody'); END;
+  `);
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS callback_deliveries_governed_immutable_guard
+    BEFORE UPDATE ON callback_deliveries
+    WHEN OLD.dispatch_mode = 'governed' AND (
+      NEW.run_id IS NOT OLD.run_id OR NEW.kind IS NOT OLD.kind
+      OR NEW.provider IS NOT OLD.provider OR NEW.uri IS NOT OLD.uri
+      OR NEW.body IS NOT OLD.body OR NEW.thread_key IS NOT OLD.thread_key
+      OR NEW.idempotency_key IS NOT OLD.idempotency_key
+      OR NEW.metadata_json IS NOT OLD.metadata_json
+      OR NEW.dispatch_mode IS NOT OLD.dispatch_mode
+      OR NEW.status IS NOT OLD.status OR NEW.attempts IS NOT OLD.attempts
+      OR NEW.last_error IS NOT OLD.last_error
+      OR NEW.next_attempt_at IS NOT OLD.next_attempt_at
+      OR NEW.created_at IS NOT OLD.created_at
+    )
+    BEGIN SELECT RAISE(ABORT, 'governed callback delivery custody is immutable'); END;
+  `);
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS callback_deliveries_governed_delete_guard
+    BEFORE DELETE ON callback_deliveries
+    WHEN OLD.dispatch_mode = 'governed'
+    BEGIN SELECT RAISE(ABORT, 'governed callback delivery delete forbidden'); END;
+  `);
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS callback_deliveries_governed_state_transition_guard
+    BEFORE UPDATE OF governed_state ON callback_deliveries
+    WHEN OLD.dispatch_mode = 'governed'
+      AND NEW.governed_state <> OLD.governed_state AND NOT (
+        (OLD.governed_state = 'pending' AND NEW.governed_state IN ('leased', 'attention'))
+        OR (OLD.governed_state = 'leased' AND NEW.governed_state IN ('pending', 'sending', 'attention'))
+        OR (OLD.governed_state = 'sending' AND NEW.governed_state IN
+          ('accepted', 'rejected', 'outcome_unknown', 'attention'))
+        OR (OLD.governed_state = 'outcome_unknown' AND NEW.governed_state IN
+          ('pending', 'accepted', 'rejected'))
+        OR (OLD.governed_state = 'attention' AND NEW.governed_state IN
+          ('pending', 'accepted', 'rejected'))
+      )
+    BEGIN SELECT RAISE(ABORT, 'invalid governed callback delivery state transition'); END;
+  `);
   const legacySlackTable = sqlite
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'slack_channel_bindings'")
     .get() as { name: string } | undefined;

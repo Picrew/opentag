@@ -180,6 +180,9 @@ import {
   repoPolicyRules,
   reassessmentObligations,
   callbackDeliveries,
+  governedCallbackAttempts,
+  governedCallbackIntents,
+  governedCallbackReconciliations,
   followUpRequests,
   runEvents,
   sourceDeliveries,
@@ -401,6 +404,17 @@ export class HostedLifecycleOperationConflictError extends Error {
   }
 }
 
+export class GovernedCallbackConflictError extends Error {
+  constructor(readonly code:
+    | "GOVERNED_CALLBACK_INVALID"
+    | "GOVERNED_CALLBACK_CONFLICT"
+    | "GOVERNED_CALLBACK_AUTHORITY_CONFLICT"
+    | "GOVERNED_CALLBACK_STALE_LEASE"
+    | "GOVERNED_CALLBACK_RECONCILIATION_REQUIRED") {
+    super(code);
+  }
+}
+
 export type HostedImportAuthority = HostedClaimV1["authority"] & {
   admissionId: string;
   admissionOperationId: string;
@@ -577,6 +591,8 @@ export type CallbackDelivery = {
   externalMessageId?: string;
   blocks?: unknown[];
   rich?: unknown;
+  dispatchMode: "legacy" | "governed";
+  governedState?: GovernedCallbackState;
   status: CallbackDeliveryStatus;
   attempts: number;
   lastError?: string;
@@ -588,6 +604,86 @@ export type CallbackDelivery = {
 export type EnqueuedCallbackDelivery = CallbackDelivery & {
   enqueueOutcome: "queued" | "duplicate";
 };
+
+export type GovernedCallbackState =
+  | "pending"
+  | "leased"
+  | "sending"
+  | "accepted"
+  | "rejected"
+  | "outcome_unknown"
+  | "attention";
+
+export type GovernedCallbackIntent = {
+  localIntentId: string;
+  idempotencyKey: string;
+  destinationId: string;
+  organizationId: string;
+  runnerId: string;
+  runId: string;
+  workThreadId: string;
+  provider: "github";
+  operationId: string;
+  payloadDigest: string;
+  state: GovernedCallbackState;
+  currentAttemptId?: string;
+  currentAttemptNumber: number;
+  nextAttemptAt?: string;
+  leaseOwner?: string;
+  leaseToken?: string;
+  leaseExpiresAt?: string;
+  lastReasonCode?: string;
+  createdAt: string;
+  updatedAt: string;
+  terminalAt?: string;
+};
+
+export type GovernedCallbackAttempt = {
+  localAttemptId: string;
+  localIntentId: string;
+  attemptNumber: number;
+  previousAttemptId?: string;
+  retryAuthorizationId?: string;
+  requestDigest: string;
+  state: GovernedCallbackState;
+  leaseOwner?: string;
+  leaseToken?: string;
+  leaseExpiresAt?: string;
+  attemptedAt?: string;
+  observedAt?: string;
+  reasonCode?: string;
+  nextAction?: string;
+  owner?: string;
+  providerReceiptId?: string;
+  resourceIdentity?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ClaimedGovernedCallback = {
+  intent: GovernedCallbackIntent;
+  attempt: GovernedCallbackAttempt;
+  delivery: CallbackDelivery;
+  producer: {
+    kind: "local_opentag";
+    id: string;
+    credentialId: string;
+    registrationGeneration: number;
+  };
+  intentReceiptDigest: string;
+  authority: {
+    attemptId: string;
+    attemptNumber: number;
+    epoch: number;
+    fencingTokenDigest: string;
+    completionOperationId: string;
+    assessmentReceiptId: string;
+    assessmentReceiptDigest: string;
+  };
+};
+
+export type GovernedCallbackReconciliationEvidence =
+  typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
 
 export type RepoBinding = {
   provider: string;
@@ -1973,10 +2069,127 @@ function callbackDeliveryFromRow(row: typeof callbackDeliveries.$inferSelect): C
     ...(metadata?.externalMessageId ? { externalMessageId: metadata.externalMessageId } : {}),
     ...(metadata?.blocks ? { blocks: metadata.blocks } : {}),
     ...(metadata && "rich" in metadata ? { rich: metadata.rich } : {}),
+    dispatchMode: row.dispatchMode as "legacy" | "governed",
+    ...(row.governedState ? { governedState: row.governedState as GovernedCallbackState } : {}),
     status: row.status as CallbackDeliveryStatus,
     attempts: row.attempts,
     ...(row.lastError ? { lastError: row.lastError } : {}),
     ...(row.nextAttemptAt ? { nextAttemptAt: row.nextAttemptAt } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+function governedCallbackCanonicalPayload(row: typeof callbackDeliveries.$inferSelect) {
+  const metadata = callbackDeliveryMetadataFromJson(row.metadataJson);
+  return {
+    method: "POST",
+    mode: row.kind,
+    target: row.uri,
+    body: row.body,
+    threadKey: row.threadKey,
+    agentId: metadata?.agentId ?? null,
+    statusMessageKey: metadata?.statusMessageKey ?? null,
+    blocks: metadata?.blocks ?? null,
+    rich: metadata && "rich" in metadata ? metadata.rich : null
+  };
+}
+
+function governedCallbackPayloadDigest(
+  row: typeof callbackDeliveries.$inferSelect
+): string {
+  return canonicalSha256Json(governedCallbackCanonicalPayload(row));
+}
+
+const HOSTED_CLAIM_AUTHORITY_KEYS = [
+  "organizationId", "runnerId", "runId", "credentialId",
+  "registrationGeneration", "credentialGeneration", "projectTargetId",
+  "bindingId", "targetBindingDigest", "admissionPolicyReceiptId",
+  "admissionPolicySnapshotId", "admissionPolicySnapshotDigest",
+  "runnerReadinessReceiptId", "runnerReadinessReceiptDigest",
+  "targetReadinessReceiptId", "targetReadinessReceiptDigest", "executorId",
+  "executorCapabilityDigest", "attemptId", "attemptNumber", "epoch",
+  "fencingTokenDigest"
+] as const;
+
+function hostedClaimAuthoritySnapshotFromJson(
+  authorityJson: string
+): HostedClaimV1["authority"] {
+  const value = JSON.parse(authorityJson) as Record<string, unknown>;
+  const keys = Object.keys(value).sort();
+  const expectedKeys = [...HOSTED_CLAIM_AUTHORITY_KEYS].sort();
+  const integerKeys = [
+    "registrationGeneration", "credentialGeneration", "attemptNumber", "epoch"
+  ] as const;
+  const digestKeys = [
+    "targetBindingDigest", "admissionPolicySnapshotDigest",
+    "runnerReadinessReceiptDigest", "targetReadinessReceiptDigest",
+    "executorCapabilityDigest", "fencingTokenDigest"
+  ] as const;
+  const stringKeys = HOSTED_CLAIM_AUTHORITY_KEYS.filter(
+    (key) => !(integerKeys as readonly string[]).includes(key)
+  );
+  if (
+    canonicalJsonStringify(keys) !== canonicalJsonStringify(expectedKeys)
+    || stringKeys.some((key) => typeof value[key] !== "string" || value[key] === "")
+    || digestKeys.some((key) => !/^sha256:[0-9a-f]{64}$/u.test(value[key] as string))
+    || integerKeys.some((key) => !Number.isInteger(value[key]) || (value[key] as number) <= 0)
+    || value.epoch !== value.attemptNumber
+    || value.runnerReadinessReceiptId !== value.targetReadinessReceiptId
+    || value.runnerReadinessReceiptDigest !== value.targetReadinessReceiptDigest
+  ) throw new Error("hosted claim authority snapshot invalid");
+  return value as HostedClaimV1["authority"];
+}
+
+function governedCallbackIntentFromRow(
+  row: typeof governedCallbackIntents.$inferSelect
+): GovernedCallbackIntent {
+  return {
+    localIntentId: row.localIntentId,
+    idempotencyKey: row.idempotencyKey,
+    destinationId: row.destinationId,
+    organizationId: row.organizationId,
+    runnerId: row.runnerId,
+    runId: row.runId,
+    workThreadId: row.workThreadId,
+    provider: "github",
+    operationId: row.operationId,
+    payloadDigest: row.payloadDigest,
+    state: row.state as GovernedCallbackState,
+    currentAttemptNumber: row.currentAttemptNumber,
+    ...(row.currentAttemptId ? { currentAttemptId: row.currentAttemptId } : {}),
+    ...(row.nextAttemptAt ? { nextAttemptAt: row.nextAttemptAt } : {}),
+    ...(row.leaseOwner ? { leaseOwner: row.leaseOwner } : {}),
+    ...(row.leaseToken ? { leaseToken: row.leaseToken } : {}),
+    ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt } : {}),
+    ...(row.lastReasonCode ? { lastReasonCode: row.lastReasonCode } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    ...(row.terminalAt ? { terminalAt: row.terminalAt } : {})
+  };
+}
+
+function governedCallbackAttemptFromRow(
+  row: typeof governedCallbackAttempts.$inferSelect
+): GovernedCallbackAttempt {
+  return {
+    localAttemptId: row.localAttemptId,
+    localIntentId: row.localIntentId,
+    attemptNumber: row.attemptNumber,
+    requestDigest: row.requestDigest,
+    state: row.state as GovernedCallbackState,
+    ...(row.previousAttemptId ? { previousAttemptId: row.previousAttemptId } : {}),
+    ...(row.retryAuthorizationId ? { retryAuthorizationId: row.retryAuthorizationId } : {}),
+    ...(row.leaseOwner ? { leaseOwner: row.leaseOwner } : {}),
+    ...(row.leaseToken ? { leaseToken: row.leaseToken } : {}),
+    ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt } : {}),
+    ...(row.attemptedAt ? { attemptedAt: row.attemptedAt } : {}),
+    ...(row.observedAt ? { observedAt: row.observedAt } : {}),
+    ...(row.reasonCode ? { reasonCode: row.reasonCode } : {}),
+    ...(row.nextAction ? { nextAction: row.nextAction } : {}),
+    ...(row.owner ? { owner: row.owner } : {}),
+    ...(row.providerReceiptId ? { providerReceiptId: row.providerReceiptId } : {}),
+    ...(row.resourceIdentity ? { resourceIdentity: row.resourceIdentity } : {}),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   };
@@ -3702,6 +3915,275 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     )).limit(1).get();
     if (!created) throw new Error("control_plane_projection_outbox_insert_lost");
     return { outcome: "created", entry: projectionOutboxEntryFromRow(created) };
+  }
+
+  function assertGovernedCallbackAuthorityTx(
+    tx: ProjectionTransaction,
+    intent: typeof governedCallbackIntents.$inferSelect,
+    options: { requireCurrentAssessment?: boolean } = {}
+  ): typeof callbackDeliveries.$inferSelect {
+    if (
+      intent.completionOperationId === null
+      || intent.assessmentReceiptId === null
+      || intent.assessmentReceiptDigest === null
+      || intent.localDeliveryId === null
+    ) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+    let intentEnvelope: typeof CallbackIntentObservationReceiptEnvelopeV1Schema._output;
+    try {
+      intentEnvelope = CallbackIntentObservationReceiptEnvelopeV1Schema.parse(
+        JSON.parse(intent.intentReceiptJson)
+      );
+    } catch {
+      throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+    }
+    const assessmentRef = intentEnvelope.payload.assessmentRef;
+    const importedRun = tx.select().from(hostedRunImports).where(and(
+      eq(hostedRunImports.runId, intent.runId),
+      eq(hostedRunImports.admissionId, intent.admissionId),
+      eq(hostedRunImports.admissionOperationId, intent.admissionOperationId),
+      eq(hostedRunImports.claimOperationId, intent.claimOperationId),
+      eq(hostedRunImports.attemptId, intent.runAttemptId),
+      eq(hostedRunImports.fencingTokenDigest, intent.fencingTokenDigest),
+      eq(hostedRunImports.workThreadId, intent.workThreadId),
+      eq(hostedRunImports.sourceIdentityDigest,
+        intentEnvelope.payload.sourceThreadIdentityDigest)
+    )).limit(1).get();
+    const importedAttempt = tx.select().from(hostedAttemptImports).where(and(
+      eq(hostedAttemptImports.attemptId, intent.runAttemptId),
+      eq(hostedAttemptImports.runId, intent.runId),
+      eq(hostedAttemptImports.attemptNumber, intent.runAttemptNumber),
+      eq(hostedAttemptImports.claimOperationId, intent.claimOperationId),
+      eq(hostedAttemptImports.fencingTokenDigest, intent.fencingTokenDigest)
+    )).limit(1).get();
+    const claim = tx.select().from(hostedClaimOperations).where(and(
+      eq(hostedClaimOperations.operationId, intent.claimOperationId),
+      eq(hostedClaimOperations.destinationId, intent.destinationId),
+      eq(hostedClaimOperations.organizationId, intent.organizationId),
+      eq(hostedClaimOperations.runnerId, intent.runnerId),
+      eq(hostedClaimOperations.runId, intent.runId),
+      eq(hostedClaimOperations.credentialId, intent.credentialId),
+      eq(hostedClaimOperations.attemptId, intent.runAttemptId),
+      eq(hostedClaimOperations.attemptNumber, intent.runAttemptNumber),
+      eq(hostedClaimOperations.fencingTokenDigest, intent.fencingTokenDigest),
+      eq(hostedClaimOperations.state, "claimed"),
+      isNotNull(hostedClaimOperations.executionStartedAt),
+      isNull(hostedClaimOperations.terminalReasonCode)
+    )).limit(1).get();
+    const completion = tx.select().from(hostedLifecycleOperations).where(and(
+      eq(hostedLifecycleOperations.destinationId, intent.destinationId),
+      eq(hostedLifecycleOperations.organizationId, intent.organizationId),
+      eq(hostedLifecycleOperations.runnerId, intent.runnerId),
+      eq(hostedLifecycleOperations.credentialId, intent.credentialId),
+      eq(hostedLifecycleOperations.operationId, intent.completionOperationId),
+      eq(hostedLifecycleOperations.action, "complete"),
+      eq(hostedLifecycleOperations.runId, intent.runId),
+      eq(hostedLifecycleOperations.attemptId, intent.runAttemptId),
+      eq(hostedLifecycleOperations.attemptNumber, intent.runAttemptNumber),
+      eq(hostedLifecycleOperations.fencingTokenDigest, intent.fencingTokenDigest)
+    )).limit(1).get();
+    const delivery = tx.select().from(callbackDeliveries).where(and(
+      eq(callbackDeliveries.id, intent.localDeliveryId),
+      eq(callbackDeliveries.runId, intent.runId),
+      eq(callbackDeliveries.provider, "github"),
+      eq(callbackDeliveries.dispatchMode, "governed")
+    )).limit(1).get();
+    const thread = tx.select().from(workThreads)
+      .where(eq(workThreads.id, intent.workThreadId)).limit(1).get();
+    const assessmentRow = tx.select().from(completionAssessments).where(and(
+      eq(completionAssessments.id, assessmentRef),
+      eq(completionAssessments.workThreadId, intent.workThreadId)
+    )).limit(1).get();
+    const assessmentProjection = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, intent.destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, intent.organizationId),
+      eq(controlPlaneProjectionOutbox.receiptId, intent.assessmentReceiptId),
+      eq(controlPlaneProjectionOutbox.receiptDigest, intent.assessmentReceiptDigest),
+      eq(controlPlaneProjectionOutbox.receiptKind, "completion_assessment")
+    )).limit(1).get();
+    try {
+      if (!importedRun || !importedAttempt || !claim || !completion || !delivery
+        || !thread || !assessmentRow || !assessmentProjection
+        || importedRun.authorityDigest !== importedAttempt.authorityDigest
+        || importedRun.authorityDigest !== claim.authorityDigest
+        || importedRun.authorityJson !== importedAttempt.authorityJson
+        || importedRun.authorityJson !== claim.authorityJson
+        || importedRun.claimDigest !== importedAttempt.claimDigest
+        || importedRun.claimDigest !== claim.claimDigest
+        || !validAcknowledgedLifecycleDependency(completion)
+        || (options.requireCurrentAssessment !== false
+          && thread.currentAssessmentId !== assessmentRef)
+        || delivery.governedState !== intent.state
+        || governedCallbackPayloadDigest(delivery) !== intent.payloadDigest
+        || assessmentProjection.requiresLifecycleOperationId
+          !== intent.completionOperationId
+      ) throw new Error("invalid frozen lineage");
+      const authority = hostedClaimAuthoritySnapshotFromJson(importedAttempt.authorityJson);
+      if (
+        !authority || typeof authority !== "object"
+        || canonicalSha256Json(authority) !== importedAttempt.authorityDigest
+        || authority.organizationId !== intent.organizationId
+        || authority.runnerId !== intent.runnerId
+        || authority.runId !== intent.runId
+        || authority.credentialId !== intent.credentialId
+        || authority.registrationGeneration !== intent.registrationGeneration
+        || authority.attemptId !== intent.runAttemptId
+        || authority.attemptNumber !== intent.runAttemptNumber
+        || authority.epoch !== intent.runAttemptNumber
+        || authority.fencingTokenDigest !== intent.fencingTokenDigest
+      ) throw new Error("invalid frozen authority");
+      const assessment = CompletionAssessmentSchema.parse(JSON.parse(assessmentRow.assessmentJson));
+      const envelope = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+        JSON.parse(assessmentProjection.envelopeJson)
+      );
+      const completionRequest = HostedCompleteRequestV1Schema.parse(
+        JSON.parse(completion.requestJson)
+      );
+      const executorResultRef = envelope.payload.executorResultReceiptRef;
+      assertProjectionCustodySafe(envelope);
+      assertProjectionDigests(envelope);
+      if (
+        assessment.id !== assessmentRef
+        || assessment.workThreadId !== intent.workThreadId
+        || assessment.triggeredByRunId !== intent.runId
+        || envelope.receiptId !== intent.assessmentReceiptId
+        || envelope.receiptDigest !== intent.assessmentReceiptDigest
+        || envelope.organizationId !== intent.organizationId
+        || envelope.runId !== intent.runId
+        || envelope.workThreadId !== intent.workThreadId
+        || envelope.attempt.attemptId !== intent.runAttemptId
+        || envelope.attempt.attemptNumber !== intent.runAttemptNumber
+        || envelope.attempt.epoch !== intent.runAttemptNumber
+        || envelope.attempt.fencingTokenDigest !== intent.fencingTokenDigest
+        || envelope.producer.id !== intent.producerId
+        || envelope.producer.credentialId !== intent.credentialId
+        || envelope.producer.registrationGeneration !== intent.registrationGeneration
+        || envelope.payload.assessmentId !== assessmentRef
+        || !intentEnvelope.predecessorReceiptDigests?.includes(
+          intent.assessmentReceiptDigest
+        )
+        || envelope.payload.workThreadId !== intent.workThreadId
+        || envelope.payload.runId !== intent.runId
+        || envelope.payload.attempt.attemptId !== intent.runAttemptId
+        || envelope.payload.attempt.attemptNumber !== intent.runAttemptNumber
+        || envelope.payload.attempt.epoch !== intent.runAttemptNumber
+        || envelope.payload.attempt.fencingTokenDigest !== intent.fencingTokenDigest
+        || executorResultRef.receiptId !== completion.receiptId
+        || executorResultRef.operationId !== completion.operationId
+        || executorResultRef.requestId !== completion.requestId
+        || executorResultRef.requestDigest !== completion.requestDigest
+        || executorResultRef.resultDigest !== completionRequest.resultDigest
+        || !envelope.predecessorReceiptDigests?.includes(completion.receiptDigest!)
+        || envelope.payload.admissionPolicySnapshot.snapshotId
+          !== authority.admissionPolicySnapshotId
+        || envelope.payload.admissionPolicySnapshot.digest
+          !== authority.admissionPolicySnapshotDigest
+        || envelope.payload.contract.contractId !== assessment.contractId
+        || envelope.payload.contract.version !== assessment.contractVersion
+        || envelope.payload.contract.cycle !== assessment.cycle
+        || envelope.payload.assessmentInputDigest !== assessment.inputDigest
+        || envelope.payload.conclusion !== assessment.state
+        || envelope.payload.assessedAt !== assessment.assessedAt
+        || envelope.payload.assessedBy !== (assessment.assessedBy === "opentag"
+          ? "local_opentag"
+          : "human")
+        || (envelope.payload.supersedesAssessmentId ?? null)
+          !== (assessment.supersedesAssessmentId ?? null)
+      ) throw new Error("invalid completion assessment");
+    } catch {
+      throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+    }
+    return delivery;
+  }
+
+  function updateGovernedDeliveryStateTx(
+    tx: ProjectionTransaction,
+    input: { deliveryId: number; from: GovernedCallbackState | GovernedCallbackState[]; to: GovernedCallbackState; updatedAt: string }
+  ): void {
+    const from = Array.isArray(input.from) ? input.from : [input.from];
+    const updated = tx.update(callbackDeliveries).set({
+      governedState: input.to,
+      updatedAt: input.updatedAt
+    }).where(and(
+      eq(callbackDeliveries.id, input.deliveryId),
+      eq(callbackDeliveries.dispatchMode, "governed"),
+      inArray(callbackDeliveries.governedState, from)
+    )).run();
+    if (updated.changes !== 1) throw new Error("governed_callback_delivery_state_update_lost");
+  }
+
+  function validateCallbackProjectionEnvelope<T extends ControlPlaneProjectionEnvelope>(
+    schema: { parse(value: unknown): T },
+    value: unknown
+  ): T {
+    let envelope: T;
+    try {
+      envelope = schema.parse(value);
+      assertProjectionCustodySafe(envelope);
+      assertProjectionDigests(envelope);
+    } catch {
+      throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
+    }
+    return envelope;
+  }
+
+  function assertProjectionCreatedOrReplayed(result: EnqueueControlPlaneProjectionResult): void {
+    if (result.outcome === "conflict") {
+      throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_CONFLICT");
+    }
+  }
+
+  function buildExpiredSendingAttemptObservation(
+    intent: typeof governedCallbackIntents.$inferSelect,
+    attempt: typeof governedCallbackAttempts.$inferSelect,
+    observedAt: string
+  ): typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output {
+    if (!attempt.attemptedAt) throw new Error("governed_callback_attempted_at_missing");
+    const payload = {
+      localIntentId: intent.localIntentId,
+      localAttemptId: attempt.localAttemptId,
+      attemptNumber: attempt.attemptNumber,
+      requestDigest: attempt.requestDigest,
+      outcome: "outcome_unknown" as const,
+      reasonCode: "provider_receipt_missing" as const,
+      nextAction: "reconcile-provider" as const,
+      owner: intent.producerId,
+      attemptedAt: attempt.attemptedAt,
+      observedAt
+    };
+    const base = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      receiptKind: "callback_attempt_observation" as const,
+      receiptId: `receipt_${attempt.localAttemptId}`,
+      organizationId: intent.organizationId,
+      operationId: `operation_${attempt.localAttemptId}`,
+      requiredCapabilities: ["relay.callback-observation.v1"] as const,
+      producer: {
+        kind: "local_opentag" as const,
+        id: intent.producerId,
+        credentialId: intent.credentialId,
+        registrationGeneration: intent.registrationGeneration
+      },
+      identity: {
+        namespace: "opentag.control.receipt/callback-attempt-observation/v1" as const,
+        parts: [
+          intent.organizationId,
+          intent.workThreadId,
+          intent.localIntentId,
+          attempt.localAttemptId
+        ]
+      },
+      observedAt,
+      runId: intent.runId,
+      workThreadId: intent.workThreadId,
+      predecessorReceiptDigests: [intent.intentReceiptDigest],
+      payload,
+      payloadDigest: canonicalSha256Json(payload)
+    };
+    return validateCallbackProjectionEnvelope(
+      CallbackAttemptObservationReceiptEnvelopeV1Schema,
+      { ...base, receiptDigest: canonicalSha256Json(base) }
+    );
   }
 
   function validProjectionLimit(value: number | undefined): number {
@@ -11781,6 +12263,954 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .sort((left, right) => right.count - left.count || left.id.localeCompare(right.id));
     },
 
+    async enqueueGovernedCallbackIntent(input: {
+      destinationId: string;
+      runnerId: string;
+      idempotencyKey: string;
+      delivery: {
+        provider: "github";
+        mode: CallbackDeliveryKind;
+        target: string;
+        body: string;
+        threadKey?: string;
+        agentId?: string;
+        statusMessageKey?: string;
+        blocks?: unknown[];
+        rich?: unknown;
+      };
+      completionOperationId: string;
+      authority: {
+        attemptId: string;
+        attemptNumber: number;
+        epoch: number;
+        fencingTokenDigest: string;
+        admissionId: string;
+        admissionOperationId: string;
+        claimOperationId: string;
+      };
+      receipt: typeof CallbackIntentObservationReceiptEnvelopeV1Schema._output;
+      now?: Date;
+    }): Promise<{ outcome: "created" | "replayed"; intent: GovernedCallbackIntent }> {
+      const receipt = validateCallbackProjectionEnvelope(
+        CallbackIntentObservationReceiptEnvelopeV1Schema,
+        input.receipt
+      );
+      if (
+        !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(input.idempotencyKey)
+        || input.authority.epoch !== input.authority.attemptNumber
+        || input.delivery.provider !== "github"
+        || receipt.payload.provider !== "github"
+      ) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
+      const safeDelivery = sanitizeCredentialLikeValue({
+        target: input.delivery.target,
+        body: input.delivery.body,
+        ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
+        ...(input.delivery.agentId ? { agentId: input.delivery.agentId } : {}),
+        ...(input.delivery.statusMessageKey ? { statusMessageKey: input.delivery.statusMessageKey } : {}),
+        ...(input.delivery.blocks ? { blocks: input.delivery.blocks } : {}),
+        ...(input.delivery.rich !== undefined ? { rich: input.delivery.rich } : {})
+      });
+      const deliveryMetadataJson = canonicalJsonStringify({
+        ...(safeDelivery.agentId ? { agentId: safeDelivery.agentId } : {}),
+        ...(safeDelivery.statusMessageKey ? { statusMessageKey: safeDelivery.statusMessageKey } : {}),
+        ...(safeDelivery.blocks ? { blocks: safeDelivery.blocks } : {}),
+        ...(safeDelivery.rich !== undefined ? { rich: safeDelivery.rich } : {})
+      });
+      const payloadDigest = canonicalSha256Json({
+        method: "POST",
+        mode: input.delivery.mode,
+        target: safeDelivery.target,
+        body: safeDelivery.body,
+        threadKey: safeDelivery.threadKey ?? null,
+        agentId: safeDelivery.agentId ?? null,
+        statusMessageKey: safeDelivery.statusMessageKey ?? null,
+        blocks: safeDelivery.blocks ?? null,
+        rich: safeDelivery.rich ?? null
+      });
+      if (payloadDigest !== receipt.payload.payloadDigest) {
+        throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
+      }
+      const createdAt = (input.now ?? new Date()).toISOString();
+      const receiptJson = canonicalJsonStringify(receipt);
+      return db.transaction((tx) => {
+        const assessmentProjection = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, input.destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, receipt.organizationId),
+          eq(controlPlaneProjectionOutbox.workThreadId, receipt.workThreadId),
+          eq(controlPlaneProjectionOutbox.receiptKind, "completion_assessment"),
+          eq(controlPlaneProjectionOutbox.receiptDigest, receipt.payload.assessmentDigest)
+        )).limit(1).get();
+        let assessmentEnvelope: CompletionAssessmentReceiptEnvelopeV1;
+        try {
+          if (!assessmentProjection) throw new Error("assessment projection missing");
+          assessmentEnvelope = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+            JSON.parse(assessmentProjection.envelopeJson)
+          );
+          assertProjectionCustodySafe(assessmentEnvelope);
+          assertProjectionDigests(assessmentEnvelope);
+          if (
+            assessmentEnvelope.receiptId !== assessmentProjection.receiptId
+            || assessmentEnvelope.receiptDigest !== receipt.payload.assessmentDigest
+            || assessmentEnvelope.payload.assessmentId !== receipt.payload.assessmentRef
+          ) throw new Error("assessment projection mismatch");
+        } catch {
+          throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+        }
+        const deliveryIdempotencyKey = `governed:${canonicalSha256Json({
+          destinationId: input.destinationId,
+          organizationId: receipt.organizationId,
+          localIntentId: receipt.payload.localIntentId,
+          idempotencyKey: input.idempotencyKey
+        })}`;
+        tx.insert(callbackDeliveries).values({
+          runId: receipt.runId,
+          kind: input.delivery.mode,
+          provider: input.delivery.provider,
+          uri: safeDelivery.target,
+          body: safeDelivery.body,
+          threadKey: safeDelivery.threadKey ?? null,
+          idempotencyKey: deliveryIdempotencyKey,
+          metadataJson: deliveryMetadataJson,
+          dispatchMode: "governed",
+          governedState: "pending",
+          status: "pending",
+          createdAt,
+          updatedAt: createdAt
+        }).onConflictDoNothing({ target: callbackDeliveries.idempotencyKey }).run();
+        const governedDelivery = tx.select().from(callbackDeliveries).where(
+          eq(callbackDeliveries.idempotencyKey, deliveryIdempotencyKey)
+        ).limit(1).get();
+        if (
+          !governedDelivery
+          || governedDelivery.dispatchMode !== "governed"
+          || governedDelivery.runId !== receipt.runId
+          || governedDelivery.kind !== input.delivery.mode
+          || governedDelivery.provider !== input.delivery.provider
+          || governedDelivery.uri !== safeDelivery.target
+          || governedDelivery.body !== safeDelivery.body
+          || governedDelivery.threadKey !== (safeDelivery.threadKey ?? null)
+          || governedDelivery.metadataJson !== deliveryMetadataJson
+          || governedCallbackPayloadDigest(governedDelivery) !== receipt.payload.payloadDigest
+        ) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_CONFLICT");
+        const existing = tx.select().from(governedCallbackIntents).where(or(
+          eq(governedCallbackIntents.localIntentId, receipt.payload.localIntentId),
+          and(
+            eq(governedCallbackIntents.destinationId, input.destinationId),
+            eq(governedCallbackIntents.organizationId, receipt.organizationId),
+            eq(governedCallbackIntents.idempotencyKey, input.idempotencyKey)
+          ),
+          and(
+            eq(governedCallbackIntents.destinationId, input.destinationId),
+            eq(governedCallbackIntents.organizationId, receipt.organizationId),
+            eq(governedCallbackIntents.operationId, receipt.operationId)
+          )
+        )).limit(1).get();
+        if (existing) {
+          const exact = existing.destinationId === input.destinationId
+            && existing.organizationId === receipt.organizationId
+            && existing.runnerId === input.runnerId
+            && existing.idempotencyKey === input.idempotencyKey
+            && existing.localIntentId === receipt.payload.localIntentId
+            && existing.runId === receipt.runId
+            && existing.workThreadId === receipt.workThreadId
+            && existing.runAttemptId === input.authority.attemptId
+            && existing.runAttemptNumber === input.authority.attemptNumber
+            && existing.fencingTokenDigest === input.authority.fencingTokenDigest
+            && existing.admissionId === input.authority.admissionId
+            && existing.admissionOperationId === input.authority.admissionOperationId
+            && existing.claimOperationId === input.authority.claimOperationId
+            && existing.completionOperationId === input.completionOperationId
+            && existing.assessmentReceiptId === assessmentEnvelope.receiptId
+            && existing.assessmentReceiptDigest === assessmentEnvelope.receiptDigest
+            && existing.localDeliveryId === governedDelivery.id
+            && existing.payloadDigest === receipt.payload.payloadDigest
+            && existing.intentReceiptDigest === receipt.receiptDigest
+            && existing.intentReceiptJson === receiptJson;
+          if (!exact) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_CONFLICT");
+          return { outcome: "replayed" as const, intent: governedCallbackIntentFromRow(existing) };
+        }
+        const authorityRow = {
+          localIntentId: receipt.payload.localIntentId,
+          idempotencyKey: input.idempotencyKey,
+          destinationId: input.destinationId,
+          organizationId: receipt.organizationId,
+          runnerId: input.runnerId,
+          producerId: receipt.producer.id,
+          credentialId: receipt.producer.credentialId,
+          registrationGeneration: receipt.producer.registrationGeneration,
+          runId: receipt.runId,
+          workThreadId: receipt.workThreadId,
+          runAttemptId: input.authority.attemptId,
+          runAttemptNumber: input.authority.attemptNumber,
+          fencingTokenDigest: input.authority.fencingTokenDigest,
+          admissionId: input.authority.admissionId,
+          admissionOperationId: input.authority.admissionOperationId,
+          claimOperationId: input.authority.claimOperationId,
+          completionOperationId: input.completionOperationId,
+          assessmentReceiptId: assessmentEnvelope.receiptId,
+          assessmentReceiptDigest: assessmentEnvelope.receiptDigest,
+          localDeliveryId: governedDelivery.id,
+          provider: receipt.payload.provider,
+          operationId: receipt.operationId,
+          payloadDigest: receipt.payload.payloadDigest,
+          intentReceiptId: receipt.receiptId,
+          intentReceiptDigest: receipt.receiptDigest,
+          intentReceiptJson: receiptJson,
+          state: "pending",
+          currentAttemptId: `callback_attempt_${canonicalSha256Json({
+            localIntentId: receipt.payload.localIntentId,
+            attemptNumber: 1,
+            payloadDigest: receipt.payload.payloadDigest
+          }).slice("sha256:".length)}`,
+          currentAttemptNumber: 1,
+          nextAttemptAt: createdAt,
+          createdAt,
+          updatedAt: createdAt
+        };
+        tx.insert(governedCallbackIntents).values(authorityRow).run();
+        tx.insert(governedCallbackAttempts).values({
+          localAttemptId: authorityRow.currentAttemptId,
+          localIntentId: receipt.payload.localIntentId,
+          attemptNumber: 1,
+          requestDigest: canonicalSha256Json({
+            localIntentId: receipt.payload.localIntentId,
+            attemptNumber: 1,
+            payloadDigest: receipt.payload.payloadDigest,
+            runId: receipt.runId,
+            runAttemptId: input.authority.attemptId,
+            fencingTokenDigest: input.authority.fencingTokenDigest
+          }),
+          state: "pending",
+          createdAt,
+          updatedAt: createdAt
+        }).run();
+        const created = tx.select().from(governedCallbackIntents)
+          .where(eq(governedCallbackIntents.localIntentId, receipt.payload.localIntentId))
+          .limit(1).get();
+        if (!created) throw new Error("governed_callback_intent_insert_lost");
+        assertGovernedCallbackAuthorityTx(tx, created);
+        const importedAuthority = tx.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, created.runId)).limit(1).get();
+        if (importedAuthority?.sourceIdentityDigest !== receipt.payload.sourceThreadIdentityDigest) {
+          throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+        }
+        assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+          destinationId: input.destinationId,
+          envelope: receipt,
+          dependsOnReceiptId: assessmentEnvelope.receiptId,
+          requiresLifecycleOperationId: input.completionOperationId,
+          ...(input.now ? { now: input.now } : {})
+        }));
+        tx.insert(runEvents).values(runEventValues({
+          runId: receipt.runId,
+          type: "callback.governed.intent_queued",
+          payload: {
+            localIntentId: receipt.payload.localIntentId,
+            provider: "github",
+            payloadDigest: receipt.payload.payloadDigest,
+            intentReceiptId: receipt.receiptId
+          },
+          visibility: "audit",
+          importance: "normal",
+          createdAt
+        })).run();
+        return { outcome: "created" as const, intent: governedCallbackIntentFromRow(created) };
+      }, { behavior: "immediate" });
+    },
+
+    async claimGovernedCallbackIntents(input: {
+      destinationId: string;
+      organizationId: string;
+      leaseOwner: string;
+      leaseSeconds: number;
+      limit?: number;
+      now?: Date;
+    }): Promise<ClaimedGovernedCallback[]> {
+      if (!input.leaseOwner || !Number.isFinite(input.leaseSeconds) || input.leaseSeconds <= 0) {
+        throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
+      }
+      const now = input.now ?? new Date();
+      const at = now.toISOString();
+      const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000).toISOString();
+      const limit = Math.min(100, Math.max(1, Math.trunc(input.limit ?? 50)));
+      return db.transaction((tx) => {
+        const due = tx.select().from(governedCallbackIntents).where(and(
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId),
+          eq(governedCallbackIntents.state, "pending"),
+          lte(governedCallbackIntents.nextAttemptAt, at)
+        )).orderBy(asc(governedCallbackIntents.createdAt), asc(governedCallbackIntents.localIntentId))
+          .limit(limit).all();
+        const claimed: ClaimedGovernedCallback[] = [];
+        for (const row of due) {
+          let localDelivery: typeof callbackDeliveries.$inferSelect;
+          try {
+            localDelivery = assertGovernedCallbackAuthorityTx(tx, row);
+          } catch (error) {
+            if (!(error instanceof GovernedCallbackConflictError)) throw error;
+            tx.update(governedCallbackIntents).set({
+              state: "attention",
+              nextAttemptAt: null,
+              lastReasonCode: "authority_conflict",
+              updatedAt: at,
+              terminalAt: at
+            }).where(and(
+              eq(governedCallbackIntents.localIntentId, row.localIntentId),
+              eq(governedCallbackIntents.state, "pending")
+            )).run();
+            if (row.localDeliveryId !== null) {
+              const governedDelivery = tx.select({
+                id: callbackDeliveries.id,
+                governedState: callbackDeliveries.governedState
+              })
+                .from(callbackDeliveries).where(and(
+                  eq(callbackDeliveries.id, row.localDeliveryId),
+                  eq(callbackDeliveries.dispatchMode, "governed")
+                )).limit(1).get();
+              const deliveryUpdated = tx.update(callbackDeliveries).set({
+                governedState: "attention",
+                updatedAt: at
+              }).where(and(
+                eq(callbackDeliveries.id, row.localDeliveryId),
+                eq(callbackDeliveries.dispatchMode, "governed"),
+                inArray(callbackDeliveries.governedState, ["pending", "leased", "sending"])
+              )).run();
+              if (
+                governedDelivery
+                && ["pending", "leased", "sending"].includes(governedDelivery.governedState ?? "")
+                && deliveryUpdated.changes !== 1
+              ) {
+                throw new Error("governed_callback_delivery_quarantine_update_lost");
+              }
+            }
+            continue;
+          }
+          const pendingAttempt = row.currentAttemptId
+            ? tx.select().from(governedCallbackAttempts).where(and(
+                eq(governedCallbackAttempts.localAttemptId, row.currentAttemptId),
+                eq(governedCallbackAttempts.localIntentId, row.localIntentId),
+                eq(governedCallbackAttempts.attemptNumber, row.currentAttemptNumber),
+                eq(governedCallbackAttempts.state, "pending")
+              )).limit(1).get()
+            : undefined;
+          if (!pendingAttempt) {
+            tx.update(governedCallbackIntents).set({
+              state: "attention",
+              nextAttemptAt: null,
+              lastReasonCode: "pending_attempt_missing",
+              updatedAt: at,
+              terminalAt: at
+            }).where(and(
+              eq(governedCallbackIntents.localIntentId, row.localIntentId),
+              eq(governedCallbackIntents.state, "pending")
+            )).run();
+            updateGovernedDeliveryStateTx(tx, {
+              deliveryId: row.localDeliveryId!,
+              from: "pending",
+              to: "attention",
+              updatedAt: at
+            });
+            continue;
+          }
+          const leaseToken = randomBytes(32).toString("hex");
+          const updated = tx.update(governedCallbackIntents).set({
+            state: "leased",
+            nextAttemptAt: null,
+            leaseOwner: input.leaseOwner,
+            leaseToken,
+            leaseExpiresAt,
+            lastReasonCode: null,
+            updatedAt: at
+          }).where(and(
+            eq(governedCallbackIntents.localIntentId, row.localIntentId),
+            eq(governedCallbackIntents.state, "pending"),
+            eq(governedCallbackIntents.currentAttemptId, pendingAttempt.localAttemptId),
+            eq(governedCallbackIntents.currentAttemptNumber, pendingAttempt.attemptNumber)
+          )).run();
+          if (updated.changes !== 1) continue;
+          const attemptUpdated = tx.update(governedCallbackAttempts).set({
+            state: "leased",
+            leaseOwner: input.leaseOwner,
+            leaseToken,
+            leaseExpiresAt,
+            updatedAt: at
+          }).where(and(
+            eq(governedCallbackAttempts.localAttemptId, pendingAttempt.localAttemptId),
+            eq(governedCallbackAttempts.state, "pending")
+          )).run();
+          if (attemptUpdated.changes !== 1) throw new Error("governed_callback_claim_update_lost");
+          updateGovernedDeliveryStateTx(tx, {
+            deliveryId: row.localDeliveryId!,
+            from: "pending",
+            to: "leased",
+            updatedAt: at
+          });
+          const intent = tx.select().from(governedCallbackIntents)
+            .where(eq(governedCallbackIntents.localIntentId, row.localIntentId)).limit(1).get()!;
+          const attempt = tx.select().from(governedCallbackAttempts)
+            .where(eq(governedCallbackAttempts.localAttemptId, pendingAttempt.localAttemptId)).limit(1).get()!;
+          claimed.push({
+            intent: governedCallbackIntentFromRow(intent),
+            attempt: governedCallbackAttemptFromRow(attempt),
+            delivery: callbackDeliveryFromRow({ ...localDelivery, governedState: "leased", updatedAt: at }),
+            producer: {
+              kind: "local_opentag",
+              id: row.producerId,
+              credentialId: row.credentialId,
+              registrationGeneration: row.registrationGeneration
+            },
+            intentReceiptDigest: row.intentReceiptDigest,
+            authority: {
+              attemptId: row.runAttemptId,
+              attemptNumber: row.runAttemptNumber,
+              epoch: row.runAttemptNumber,
+              fencingTokenDigest: row.fencingTokenDigest,
+              completionOperationId: row.completionOperationId!,
+              assessmentReceiptId: row.assessmentReceiptId!,
+              assessmentReceiptDigest: row.assessmentReceiptDigest!
+            }
+          });
+        }
+        return claimed;
+      }, { behavior: "immediate" });
+    },
+
+    async beginGovernedCallbackSending(input: {
+      destinationId: string;
+      organizationId: string;
+      localIntentId: string;
+      localAttemptId: string;
+      leaseToken: string;
+      now?: Date;
+    }): Promise<
+      | { outcome: "sending"; attemptedAt: string }
+      | { outcome: "stale_lease" }
+      | { outcome: "not_found" }
+    > {
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const intent = tx.select().from(governedCallbackIntents).where(and(
+          eq(governedCallbackIntents.localIntentId, input.localIntentId),
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId)
+        )).limit(1).get();
+        const attempt = tx.select().from(governedCallbackAttempts).where(and(
+          eq(governedCallbackAttempts.localAttemptId, input.localAttemptId),
+          eq(governedCallbackAttempts.localIntentId, input.localIntentId)
+        )).limit(1).get();
+        if (!intent || !attempt) return { outcome: "not_found" } as const;
+        assertGovernedCallbackAuthorityTx(tx, intent);
+        if (
+          intent.state !== "leased" || attempt.state !== "leased"
+          || intent.currentAttemptId !== input.localAttemptId
+          || intent.leaseToken !== input.leaseToken || attempt.leaseToken !== input.leaseToken
+          || !intent.leaseExpiresAt || intent.leaseExpiresAt <= at
+          || attempt.leaseExpiresAt !== intent.leaseExpiresAt
+        ) return { outcome: "stale_lease" } as const;
+        const intentUpdated = tx.update(governedCallbackIntents).set({ state: "sending", updatedAt: at })
+          .where(and(
+            eq(governedCallbackIntents.localIntentId, input.localIntentId),
+            eq(governedCallbackIntents.state, "leased"),
+            eq(governedCallbackIntents.currentAttemptId, input.localAttemptId),
+            eq(governedCallbackIntents.leaseToken, input.leaseToken),
+            gt(governedCallbackIntents.leaseExpiresAt, at)
+          )).run();
+        const attemptUpdated = tx.update(governedCallbackAttempts).set({
+          state: "sending",
+          attemptedAt: at,
+          updatedAt: at
+        }).where(and(
+          eq(governedCallbackAttempts.localAttemptId, input.localAttemptId),
+          eq(governedCallbackAttempts.state, "leased"),
+          eq(governedCallbackAttempts.leaseToken, input.leaseToken),
+          gt(governedCallbackAttempts.leaseExpiresAt, at)
+        )).run();
+        if (intentUpdated.changes !== 1 || attemptUpdated.changes !== 1) {
+          throw new Error("governed_callback_begin_sending_update_lost");
+        }
+        updateGovernedDeliveryStateTx(tx, {
+          deliveryId: intent.localDeliveryId!,
+          from: "leased",
+          to: "sending",
+          updatedAt: at
+        });
+        return { outcome: "sending", attemptedAt: at } as const;
+      }, { behavior: "immediate" });
+    },
+
+    async recoverExpiredGovernedCallbacks(input: {
+      destinationId: string;
+      organizationId: string;
+      now?: Date;
+    }): Promise<{ requeued: number; outcomeUnknown: number }> {
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        let requeued = 0;
+        let outcomeUnknown = 0;
+        const expired = tx.select().from(governedCallbackIntents).where(and(
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId),
+          inArray(governedCallbackIntents.state, ["leased", "sending"]),
+          lte(governedCallbackIntents.leaseExpiresAt, at)
+        )).all();
+        for (const intent of expired) {
+          const attempt = intent.currentAttemptId
+            ? tx.select().from(governedCallbackAttempts)
+                .where(eq(governedCallbackAttempts.localAttemptId, intent.currentAttemptId)).limit(1).get()
+            : undefined;
+          if (!attempt || attempt.leaseToken !== intent.leaseToken) continue;
+          let frozenAuthorityValid = true;
+          try {
+            assertGovernedCallbackAuthorityTx(tx, intent, { requireCurrentAssessment: false });
+          } catch (error) {
+            if (!(error instanceof GovernedCallbackConflictError)) throw error;
+            frozenAuthorityValid = false;
+          }
+          if (!frozenAuthorityValid && intent.state === "leased" && attempt.state === "leased") {
+            tx.update(governedCallbackAttempts).set({
+              state: "attention",
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              reasonCode: "authority_conflict",
+              updatedAt: at
+            }).where(eq(governedCallbackAttempts.localAttemptId, attempt.localAttemptId)).run();
+            tx.update(governedCallbackIntents).set({
+              state: "attention",
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              lastReasonCode: "authority_conflict",
+              updatedAt: at,
+              terminalAt: at
+            }).where(eq(governedCallbackIntents.localIntentId, intent.localIntentId)).run();
+            tx.update(callbackDeliveries).set({ governedState: "attention", updatedAt: at })
+              .where(and(
+                eq(callbackDeliveries.id, intent.localDeliveryId!),
+                eq(callbackDeliveries.dispatchMode, "governed"),
+                eq(callbackDeliveries.governedState, "leased")
+              )).run();
+            continue;
+          }
+          if (intent.state === "leased" && attempt.state === "leased") {
+            const attemptUpdated = tx.update(governedCallbackAttempts).set({
+              state: "pending",
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              updatedAt: at
+            }).where(and(
+              eq(governedCallbackAttempts.localAttemptId, attempt.localAttemptId),
+              eq(governedCallbackAttempts.state, "leased"),
+              eq(governedCallbackAttempts.leaseToken, attempt.leaseToken!)
+            )).run();
+            const intentUpdated = tx.update(governedCallbackIntents).set({
+              state: "pending",
+              nextAttemptAt: at,
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              lastReasonCode: "lease_expired_before_send",
+              updatedAt: at
+            }).where(and(
+              eq(governedCallbackIntents.localIntentId, intent.localIntentId),
+              eq(governedCallbackIntents.state, "leased"),
+              eq(governedCallbackIntents.leaseToken, attempt.leaseToken!)
+            )).run();
+            if (attemptUpdated.changes !== 1 || intentUpdated.changes !== 1) {
+              throw new Error("governed_callback_lease_recovery_update_lost");
+            }
+            updateGovernedDeliveryStateTx(tx, {
+              deliveryId: intent.localDeliveryId!,
+              from: "leased",
+              to: "pending",
+              updatedAt: at
+            });
+            requeued += 1;
+            continue;
+          }
+          if (intent.state === "sending" && attempt.state === "sending") {
+            const observation = buildExpiredSendingAttemptObservation(intent, attempt, at);
+            const observationJson = canonicalJsonStringify(observation);
+            const attemptUpdated = tx.update(governedCallbackAttempts).set({
+              state: "outcome_unknown",
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              observedAt: at,
+              reasonCode: "provider_receipt_missing",
+              nextAction: "reconcile-provider",
+              owner: intent.producerId,
+              attemptReceiptId: observation.receiptId,
+              attemptReceiptDigest: observation.receiptDigest,
+              attemptReceiptJson: observationJson,
+              updatedAt: at
+            }).where(and(
+              eq(governedCallbackAttempts.localAttemptId, attempt.localAttemptId),
+              eq(governedCallbackAttempts.state, "sending"),
+              eq(governedCallbackAttempts.leaseToken, attempt.leaseToken!)
+            )).run();
+            const intentUpdated = tx.update(governedCallbackIntents).set({
+              state: "attention",
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              lastReasonCode: "provider_receipt_missing",
+              updatedAt: at,
+              terminalAt: at
+            }).where(and(
+              eq(governedCallbackIntents.localIntentId, intent.localIntentId),
+              eq(governedCallbackIntents.state, "sending"),
+              eq(governedCallbackIntents.leaseToken, attempt.leaseToken!)
+            )).run();
+            if (attemptUpdated.changes !== 1 || intentUpdated.changes !== 1) {
+              throw new Error("governed_callback_unknown_recovery_update_lost");
+            }
+            updateGovernedDeliveryStateTx(tx, {
+              deliveryId: intent.localDeliveryId!,
+              from: "sending",
+              to: "attention",
+              updatedAt: at
+            });
+            if (frozenAuthorityValid) {
+              assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+                destinationId: intent.destinationId,
+                envelope: observation,
+                dependsOnReceiptId: intent.intentReceiptId,
+                now: new Date(at)
+              }));
+            }
+            tx.insert(runEvents).values(runEventValues({
+              runId: intent.runId,
+              type: "callback.governed.outcome_unknown",
+              payload: {
+                localIntentId: intent.localIntentId,
+                localAttemptId: attempt.localAttemptId,
+                reasonCode: "provider_receipt_missing",
+                nextAction: "reconcile-provider",
+                owner: intent.producerId
+              },
+              visibility: "audit",
+              importance: "high",
+              createdAt: at
+            })).run();
+            outcomeUnknown += 1;
+          }
+        }
+        return { requeued, outcomeUnknown };
+      }, { behavior: "immediate" });
+    },
+
+    async finalizeGovernedCallbackAttempt(input: {
+      destinationId: string;
+      organizationId: string;
+      localIntentId: string;
+      localAttemptId: string;
+      leaseToken: string;
+      attemptReceipt: typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output;
+      providerReceipt?: typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+      now?: Date;
+    }): Promise<"finalized" | "replayed" | "stale_lease" | "not_found"> {
+      const attemptReceipt = validateCallbackProjectionEnvelope(
+        CallbackAttemptObservationReceiptEnvelopeV1Schema,
+        input.attemptReceipt
+      );
+      const providerReceipt = input.providerReceipt
+        ? validateCallbackProjectionEnvelope(
+            CallbackProviderObservationReceiptEnvelopeV1Schema,
+            input.providerReceipt
+          )
+        : undefined;
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const intent = tx.select().from(governedCallbackIntents).where(and(
+          eq(governedCallbackIntents.localIntentId, input.localIntentId),
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId)
+        )).limit(1).get();
+        const attempt = tx.select().from(governedCallbackAttempts).where(and(
+          eq(governedCallbackAttempts.localAttemptId, input.localAttemptId),
+          eq(governedCallbackAttempts.localIntentId, input.localIntentId)
+        )).limit(1).get();
+        if (!intent || !attempt) return "not_found" as const;
+        const attemptJson = canonicalJsonStringify(attemptReceipt);
+        const providerJson = providerReceipt ? canonicalJsonStringify(providerReceipt) : null;
+        if (["accepted", "rejected", "outcome_unknown"].includes(attempt.state)) {
+          return attempt.attemptReceiptDigest === attemptReceipt.receiptDigest
+            && attempt.attemptReceiptJson === attemptJson
+            && attempt.providerReceiptDigest === (providerReceipt?.receiptDigest ?? null)
+            && attempt.providerReceiptJson === providerJson
+            ? "replayed" as const
+            : "stale_lease" as const;
+        }
+        assertGovernedCallbackAuthorityTx(tx, intent, { requireCurrentAssessment: false });
+        const outcome = attemptReceipt.payload.outcome;
+        const expectedProviderOutcome = outcome === "accepted"
+          ? "succeeded"
+          : outcome === "rejected" ? "failed" : "outcome_unknown";
+        if (
+          (outcome !== "outcome_unknown" && !providerReceipt)
+          || intent.state !== "sending" || attempt.state !== "sending"
+          || intent.currentAttemptId !== attempt.localAttemptId
+          || intent.leaseToken !== input.leaseToken || attempt.leaseToken !== input.leaseToken
+          || attemptReceipt.organizationId !== intent.organizationId
+          || attemptReceipt.runId !== intent.runId
+          || attemptReceipt.workThreadId !== intent.workThreadId
+          || attemptReceipt.producer.id !== intent.producerId
+          || attemptReceipt.producer.credentialId !== intent.credentialId
+          || attemptReceipt.producer.registrationGeneration !== intent.registrationGeneration
+          || attemptReceipt.payload.localIntentId !== intent.localIntentId
+          || attemptReceipt.payload.localAttemptId !== attempt.localAttemptId
+          || attemptReceipt.payload.attemptNumber !== attempt.attemptNumber
+          || attemptReceipt.payload.requestDigest !== attempt.requestDigest
+          || !attemptReceipt.predecessorReceiptDigests?.includes(
+            intent.intentReceiptDigest
+          )
+          || attemptReceipt.payload.attemptedAt !== attempt.attemptedAt
+          || (providerReceipt && (
+            providerReceipt.organizationId !== intent.organizationId
+            || providerReceipt.runId !== intent.runId
+            || providerReceipt.workThreadId !== intent.workThreadId
+            || providerReceipt.producer.id !== intent.producerId
+            || providerReceipt.producer.credentialId !== intent.credentialId
+            || providerReceipt.producer.registrationGeneration !== intent.registrationGeneration
+            || providerReceipt.payload.localIntentId !== intent.localIntentId
+            || providerReceipt.payload.localAttemptId !== attempt.localAttemptId
+            || providerReceipt.payload.outcome !== expectedProviderOutcome
+            || providerReceipt.payload.reasonCode !== attemptReceipt.payload.reasonCode
+            || Date.parse(providerReceipt.payload.observedAt)
+              < Date.parse(attempt.attemptedAt!)
+            || Date.parse(providerReceipt.payload.observedAt)
+              < Date.parse(attemptReceipt.payload.observedAt)
+            || !providerReceipt.predecessorReceiptDigests?.includes(
+              attemptReceipt.receiptDigest
+            )
+          ))
+        ) return "stale_lease" as const;
+        const attemptUpdated = tx.update(governedCallbackAttempts).set({
+          state: outcome,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          observedAt: attemptReceipt.payload.observedAt,
+          reasonCode: attemptReceipt.payload.reasonCode,
+          nextAction: attemptReceipt.payload.nextAction ?? null,
+          owner: attemptReceipt.payload.owner ?? null,
+          attemptReceiptId: attemptReceipt.receiptId,
+          attemptReceiptDigest: attemptReceipt.receiptDigest,
+          attemptReceiptJson: attemptJson,
+          providerReceiptId: providerReceipt?.payload.providerReceiptId ?? null,
+          resourceIdentity: providerReceipt?.payload.resourceIdentity ?? null,
+          providerReceiptDigest: providerReceipt?.receiptDigest ?? null,
+          providerReceiptJson: providerJson,
+          updatedAt: at
+        }).where(and(
+          eq(governedCallbackAttempts.localAttemptId, attempt.localAttemptId),
+          eq(governedCallbackAttempts.state, "sending"),
+          eq(governedCallbackAttempts.leaseToken, input.leaseToken)
+        )).run();
+        const intentState = outcome === "outcome_unknown" ? "outcome_unknown" : outcome;
+        const intentUpdated = tx.update(governedCallbackIntents).set({
+          state: intentState,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          lastReasonCode: attemptReceipt.payload.reasonCode,
+          updatedAt: at,
+          terminalAt: at
+        }).where(and(
+          eq(governedCallbackIntents.localIntentId, intent.localIntentId),
+          eq(governedCallbackIntents.state, "sending"),
+          eq(governedCallbackIntents.currentAttemptId, attempt.localAttemptId),
+          eq(governedCallbackIntents.leaseToken, input.leaseToken)
+        )).run();
+        if (attemptUpdated.changes !== 1 || intentUpdated.changes !== 1) {
+          throw new Error("governed_callback_finalize_update_lost");
+        }
+        updateGovernedDeliveryStateTx(tx, {
+          deliveryId: intent.localDeliveryId!,
+          from: "sending",
+          to: intentState,
+          updatedAt: at
+        });
+        assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+          destinationId: intent.destinationId,
+          envelope: attemptReceipt,
+          dependsOnReceiptId: intent.intentReceiptId,
+          ...(input.now ? { now: input.now } : {})
+        }));
+        if (providerReceipt) {
+          assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+            destinationId: intent.destinationId,
+            envelope: providerReceipt,
+            dependsOnReceiptId: attemptReceipt.receiptId,
+            ...(input.now ? { now: input.now } : {})
+          }));
+        }
+        tx.insert(runEvents).values(runEventValues({
+          runId: intent.runId,
+          type: `callback.governed.${outcome}`,
+          payload: {
+            localIntentId: intent.localIntentId,
+            localAttemptId: attempt.localAttemptId,
+            ...(providerReceipt ? {
+              providerReceiptId: providerReceipt.payload.providerReceiptId,
+              resourceIdentity: providerReceipt.payload.resourceIdentity
+            } : {}),
+            reasonCode: attemptReceipt.payload.reasonCode,
+            ...(attemptReceipt.payload.nextAction ? { nextAction: attemptReceipt.payload.nextAction } : {}),
+            ...(attemptReceipt.payload.owner ? { owner: attemptReceipt.payload.owner } : {})
+          },
+          visibility: "audit",
+          importance: outcome === "outcome_unknown" ? "high" : "normal",
+          createdAt: at
+        })).run();
+        return "finalized" as const;
+      }, { behavior: "immediate" });
+    },
+
+    async reconcileGovernedCallbackOutcome(input: {
+      destinationId: string;
+      organizationId: string;
+      localIntentId: string;
+      localAttemptId: string;
+      providerReceipt: typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+      now?: Date;
+    }): Promise<{ outcome: "recorded" | "replayed" }> {
+      const evidence = validateCallbackProjectionEnvelope(
+        CallbackProviderObservationReceiptEnvelopeV1Schema,
+        input.providerReceipt
+      );
+      const evidenceJson = canonicalJsonStringify(evidence);
+      const evidenceDigest = evidence.receiptDigest;
+      const resolution = evidence.payload.outcome === "succeeded"
+        ? "accepted"
+        : evidence.payload.outcome === "failed" ? "rejected" : null;
+      if (!resolution) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const intent = tx.select().from(governedCallbackIntents).where(and(
+          eq(governedCallbackIntents.localIntentId, input.localIntentId),
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId)
+        )).limit(1).get();
+        const existing = tx.select().from(governedCallbackReconciliations)
+          .where(or(
+            eq(governedCallbackReconciliations.reconciliationId, evidence.receiptId),
+            eq(governedCallbackReconciliations.localAttemptId, input.localAttemptId)
+          ))
+          .limit(1).get();
+        if (existing) {
+          const exact = intent
+            && existing.reconciliationId === evidence.receiptId
+            && existing.localIntentId === input.localIntentId
+            && existing.localAttemptId === input.localAttemptId
+            && existing.resolution === resolution
+            && existing.evidenceDigest === evidenceDigest
+            && existing.evidenceJson === evidenceJson
+            && existing.owner === evidence.producer.id
+            && existing.retryAttemptId === null;
+          if (!exact) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_CONFLICT");
+          return { outcome: "replayed" as const };
+        }
+        const attempt = tx.select().from(governedCallbackAttempts).where(and(
+          eq(governedCallbackAttempts.localAttemptId, input.localAttemptId),
+          eq(governedCallbackAttempts.localIntentId, input.localIntentId),
+          eq(governedCallbackAttempts.state, "outcome_unknown")
+        )).limit(1).get();
+        if (!intent || !attempt || !["outcome_unknown", "attention"].includes(intent.state)) {
+          throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_RECONCILIATION_REQUIRED");
+        }
+        let originalProviderReceipt: typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+        try {
+          if (!attempt.providerReceiptJson || !attempt.providerReceiptDigest) throw new Error();
+          originalProviderReceipt = CallbackProviderObservationReceiptEnvelopeV1Schema.parse(
+            JSON.parse(attempt.providerReceiptJson)
+          );
+        } catch {
+          throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_RECONCILIATION_REQUIRED");
+        }
+        assertGovernedCallbackAuthorityTx(tx, intent, { requireCurrentAssessment: false });
+        if (
+          originalProviderReceipt.payload.outcome !== "outcome_unknown"
+          || originalProviderReceipt.receiptDigest !== attempt.providerReceiptDigest
+          || evidence.receiptId === originalProviderReceipt.receiptId
+          || evidence.receiptDigest === originalProviderReceipt.receiptDigest
+          || evidence.organizationId !== intent.organizationId
+          || evidence.runId !== intent.runId
+          || evidence.workThreadId !== intent.workThreadId
+          || evidence.producer.id !== intent.producerId
+          || evidence.producer.credentialId !== intent.credentialId
+          || evidence.producer.registrationGeneration !== intent.registrationGeneration
+          || evidence.payload.localIntentId !== intent.localIntentId
+          || evidence.payload.localAttemptId !== attempt.localAttemptId
+          || evidence.payload.resourceIdentity !== originalProviderReceipt.payload.resourceIdentity
+          || evidence.payload.resourceIdentity !== attempt.resourceIdentity
+          || !evidence.payload.resourceIdentity.startsWith("github:")
+          || !evidence.predecessorReceiptDigests?.includes(originalProviderReceipt.receiptDigest)
+          || Date.parse(evidence.payload.observedAt) < Date.parse(attempt.attemptedAt!)
+          || Date.parse(evidence.payload.observedAt) < Date.parse(attempt.observedAt!)
+          || Date.parse(evidence.payload.observedAt)
+            < Date.parse(originalProviderReceipt.payload.observedAt)
+          || (resolution === "accepted" && evidence.payload.reasonCode !== "provider_accepted")
+          || (resolution === "rejected" && evidence.payload.reasonCode !== "provider_rejected")
+        ) {
+          throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+        }
+        const updated = tx.update(governedCallbackIntents).set({
+          state: resolution,
+          lastReasonCode: "reconciled_provider_evidence",
+          updatedAt: at,
+          terminalAt: at
+        }).where(and(
+          eq(governedCallbackIntents.localIntentId, input.localIntentId),
+          inArray(governedCallbackIntents.state, ["outcome_unknown", "attention"]),
+          eq(governedCallbackIntents.currentAttemptId, input.localAttemptId)
+        )).run();
+        if (updated.changes !== 1) throw new Error("governed_callback_reconciliation_update_lost");
+        updateGovernedDeliveryStateTx(tx, {
+          deliveryId: intent.localDeliveryId!,
+          from: ["outcome_unknown", "attention"],
+          to: resolution,
+          updatedAt: at
+        });
+        tx.insert(governedCallbackReconciliations).values({
+          reconciliationId: evidence.receiptId,
+          localIntentId: input.localIntentId,
+          localAttemptId: input.localAttemptId,
+          resolution,
+          evidenceDigest,
+          evidenceJson,
+          owner: evidence.producer.id,
+          retryAttemptId: null,
+          createdAt: at
+        }).run();
+        tx.insert(runEvents).values(runEventValues({
+          runId: intent.runId,
+          type: "callback.governed.reconciled",
+          payload: {
+            reconciliationId: evidence.receiptId,
+            localIntentId: input.localIntentId,
+            localAttemptId: input.localAttemptId,
+            resolution,
+            evidenceDigest,
+            owner: evidence.producer.id,
+            resourceIdentity: evidence.payload.resourceIdentity
+          },
+          visibility: "audit",
+          importance: "high",
+          createdAt: at
+        })).run();
+        assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+          destinationId: intent.destinationId,
+          envelope: evidence,
+          dependsOnReceiptId: originalProviderReceipt.receiptId,
+          ...(input.now ? { now: input.now } : {})
+        }));
+        return { outcome: "recorded" as const };
+      }, { behavior: "immediate" });
+    },
+
     async enqueueCallbackDelivery(input: {
       runId: string;
       kind: CallbackDeliveryKind;
@@ -11821,6 +13251,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             ...(safeDelivery.blocks ? { blocks: safeDelivery.blocks } : {}),
             ...(safeDelivery.rich !== undefined ? { rich: safeDelivery.rich } : {})
           }),
+          dispatchMode: "legacy",
+          governedState: null,
           status: "pending",
           createdAt,
           updatedAt: createdAt
@@ -11858,7 +13290,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const row = await db
         .select()
         .from(callbackDeliveries)
-        .where(eq(callbackDeliveries.id, input.deliveryId))
+        .where(and(
+          eq(callbackDeliveries.id, input.deliveryId),
+          eq(callbackDeliveries.dispatchMode, "legacy")
+        ))
         .limit(1)
         .get();
       if (!row) return;
@@ -11870,7 +13305,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       await db
         .update(callbackDeliveries)
         .set({ status: "delivered", attempts: row.attempts + 1, lastError: null, nextAttemptAt: null, metadataJson, updatedAt })
-        .where(eq(callbackDeliveries.id, input.deliveryId));
+        .where(and(
+          eq(callbackDeliveries.id, input.deliveryId),
+          eq(callbackDeliveries.dispatchMode, "legacy")
+        ));
       const deliveredRow = { ...row, metadataJson };
       await appendRunEvent({
         runId: row.runId,
@@ -11892,7 +13330,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const rows = await db
         .select()
         .from(callbackDeliveries)
-        .where(and(eq(callbackDeliveries.runId, input.runId), eq(callbackDeliveries.provider, input.provider), eq(callbackDeliveries.status, "delivered")))
+        .where(and(
+          eq(callbackDeliveries.runId, input.runId),
+          eq(callbackDeliveries.provider, input.provider),
+          eq(callbackDeliveries.status, "delivered"),
+          eq(callbackDeliveries.dispatchMode, "legacy")
+        ))
         .orderBy(desc(callbackDeliveries.updatedAt), desc(callbackDeliveries.id));
 
       for (const row of rows) {
@@ -11909,7 +13352,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const row = await db
         .select()
         .from(callbackDeliveries)
-        .where(eq(callbackDeliveries.id, input.deliveryId))
+        .where(and(
+          eq(callbackDeliveries.id, input.deliveryId),
+          eq(callbackDeliveries.dispatchMode, "legacy")
+        ))
         .limit(1)
         .get();
       if (!row) return;
@@ -11920,7 +13366,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       await db
         .update(callbackDeliveries)
         .set({ status: "failed", attempts: attemptCount, lastError: safeError, nextAttemptAt: input.nextAttemptAt ?? null, updatedAt })
-        .where(eq(callbackDeliveries.id, input.deliveryId));
+        .where(and(
+          eq(callbackDeliveries.id, input.deliveryId),
+          eq(callbackDeliveries.dispatchMode, "legacy")
+        ));
       await appendRunEvent({
         runId: row.runId,
         type: `callback.${row.kind}.failed`,
@@ -11962,7 +13411,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const rows = await db
         .select()
         .from(callbackDeliveries)
-        .where(inArray(callbackDeliveries.status, ["pending", "failed"]))
+        .where(and(
+          eq(callbackDeliveries.dispatchMode, "legacy"),
+          inArray(callbackDeliveries.status, ["pending", "failed"])
+        ))
         .orderBy(asc(callbackDeliveries.id));
       return rows
         .map(callbackDeliveryFromRow)
@@ -11980,7 +13432,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const rows = await db
         .select()
         .from(callbackDeliveries)
-        .where(inArray(callbackDeliveries.status, ["pending", "failed", "delivering"]))
+        .where(and(
+          eq(callbackDeliveries.dispatchMode, "legacy"),
+          inArray(callbackDeliveries.status, ["pending", "failed", "delivering"])
+        ))
         .orderBy(asc(callbackDeliveries.id));
 
       const claimed: CallbackDelivery[] = [];
@@ -11993,8 +13448,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const updatedAt = input.now ? input.now.toISOString() : nowIso();
         const claimWhere =
           row.status === "delivering"
-            ? and(eq(callbackDeliveries.id, row.id), eq(callbackDeliveries.status, "delivering"), eq(callbackDeliveries.updatedAt, row.updatedAt))
-            : and(eq(callbackDeliveries.id, row.id), inArray(callbackDeliveries.status, ["pending", "failed"]));
+            ? and(eq(callbackDeliveries.id, row.id), eq(callbackDeliveries.dispatchMode, "legacy"), eq(callbackDeliveries.status, "delivering"), eq(callbackDeliveries.updatedAt, row.updatedAt))
+            : and(eq(callbackDeliveries.id, row.id), eq(callbackDeliveries.dispatchMode, "legacy"), inArray(callbackDeliveries.status, ["pending", "failed"]));
         const claimResult = await db.update(callbackDeliveries).set({ status: "delivering", updatedAt }).where(claimWhere);
         if (claimResult.changes === 0) continue;
 
