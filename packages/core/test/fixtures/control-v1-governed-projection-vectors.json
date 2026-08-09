@@ -10,7 +10,9 @@
       "operationId": "operation-1",
       "producer": {
         "kind": "local_opentag",
-        "id": "local-opentag-1"
+        "id": "local-opentag-1",
+        "credentialId": "runtime-credential-1",
+        "registrationGeneration": 1
       },
       "predecessorReceiptDigests": [
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -38,10 +40,25 @@
         "localCreationReceiptId": "local-create-1",
         "localCreationReceiptDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
         "lineageKind": "github_issue",
+        "hostedAuthorityRef": {
+          "claimOperationId": "claim-operation-1",
+          "authorityDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "attempt": {
+            "attemptId": "attempt-2",
+            "attemptNumber": 2,
+            "epoch": 2,
+            "fencingTokenDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          },
+          "admissionPolicySnapshot": {
+            "receiptId": "policy-receipt-1",
+            "snapshotId": "policy-1",
+            "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+          }
+        },
         "createdAt": "2026-08-09T01:02:03.000Z"
       },
-      "payloadDigest": "sha256:433fbbd61b25f42b04c3e7094393397ebf4e01588ea77b8ba9ff0d9d477b4710",
-      "receiptDigest": "sha256:501a5798069bbd6367efbb3df9b38c2c724887dce37db3f1ed5183a11c7ab58d"
+      "payloadDigest": "sha256:a2652ba630fc3afae2fa2f1590477bdff80a80ab516472d466eb327d6c503a17",
+      "receiptDigest": "sha256:23ec9201d32a1f75b94c0843d9142069841284bbceebf189f8cb7cf170faadfd"
     },
     "completionContractRef": {
       "schemaVersion": 1,
@@ -50,7 +67,9 @@
       "operationId": "operation-1",
       "producer": {
         "kind": "local_opentag",
-        "id": "local-opentag-1"
+        "id": "local-opentag-1",
+        "credentialId": "runtime-credential-1",
+        "registrationGeneration": 1
       },
       "predecessorReceiptDigests": [
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -92,7 +111,7 @@
         "supersedesContractId": "contract-0"
       },
       "payloadDigest": "sha256:a62fab4eb55043218aec48432a06e68ded6bd88f9caa77c95cf6e243901f8b31",
-      "receiptDigest": "sha256:251bc99d59f84e583d6ac1a0c66454b0d357442df49eb625cf973b3a019be389"
+      "receiptDigest": "sha256:72812b5f7889fc27e520012d873d8e3815807a4405aade4b8d30b20058f02a54"
     },
     "completionAssessment": {
       "schemaVersion": 1,
@@ -101,7 +120,9 @@
       "operationId": "operation-1",
       "producer": {
         "kind": "local_opentag",
-        "id": "local-opentag-1"
+        "id": "local-opentag-1",
+        "credentialId": "runtime-credential-1",
+        "registrationGeneration": 1
       },
       "predecessorReceiptDigests": [
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -149,6 +170,13 @@
           "epoch": 2,
           "fencingTokenDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
         },
+        "executorResultReceiptRef": {
+          "receiptId": "lifecycle_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "operationId": "op_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "requestId": "req_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "requestDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "resultDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+        },
         "assessmentInputDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
         "evidenceReceiptDigests": [
           "sha256:4444444444444444444444444444444444444444444444444444444444444444",
@@ -181,8 +209,8 @@
           "reasonDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
         }
       },
-      "payloadDigest": "sha256:7187387e9d7351d14d62065ce6723111c8f1cff2ec6b097ea7daa36081506e3a",
-      "receiptDigest": "sha256:3c51faaf00f9e68a3dd8ab7e95e06691f1f52e1dee135931a42363755a4cd6c2"
+      "payloadDigest": "sha256:c8f38c7c954376ae0c771d5304cb5e573e263b8b8f17758e1d33db588530ea7f",
+      "receiptDigest": "sha256:95de8e8a53ca4e2d8cead5eb59fc3d731bd8b4d596625029100ec322453215db"
     },
     "callbackIntentObservation": {
       "schemaVersion": 1,
@@ -191,7 +219,9 @@
       "operationId": "operation-1",
       "producer": {
         "kind": "local_opentag",
-        "id": "local-opentag-1"
+        "id": "local-opentag-1",
+        "credentialId": "runtime-credential-1",
+        "registrationGeneration": 1
       },
       "predecessorReceiptDigests": [
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -224,7 +254,7 @@
         "createdAt": "2026-08-09T01:02:03.000Z"
       },
       "payloadDigest": "sha256:1ddfe72706d13d22331723b9553b13dfe8082f936304332c268b101d2e48f13a",
-      "receiptDigest": "sha256:5f2f641f0efad3c5ea939b13c85daad5adf46852bf97b360d6e7826434e1bc80"
+      "receiptDigest": "sha256:5e358645d03201a465e42ed19cc863f2770e54a22048d0f4d71d7c36f9c9cfdd"
     },
     "callbackAttemptObservation": {
       "schemaVersion": 1,
@@ -233,7 +263,9 @@
       "operationId": "operation-1",
       "producer": {
         "kind": "local_opentag",
-        "id": "local-opentag-1"
+        "id": "local-opentag-1",
+        "credentialId": "runtime-credential-1",
+        "registrationGeneration": 1
       },
       "predecessorReceiptDigests": [
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -269,7 +301,7 @@
         "observedAt": "2026-08-09T01:03:04.000Z"
       },
       "payloadDigest": "sha256:17a0ed91247ba32d118423959f99dd211bd29610d90757840d88dd3a3eb7ab2d",
-      "receiptDigest": "sha256:187ecaff7d0ed64949ae4c1937cc66e9f3a5e4a971b074f3d38e2798f18facae"
+      "receiptDigest": "sha256:4a2a7f41e0c1d1032486d0d13814b5006e7a05b52a0950e26e26091e81876b37"
     },
     "callbackProviderObservation": {
       "schemaVersion": 1,
@@ -278,7 +310,9 @@
       "operationId": "operation-1",
       "producer": {
         "kind": "local_opentag",
-        "id": "local-opentag-1"
+        "id": "local-opentag-1",
+        "credentialId": "runtime-credential-1",
+        "registrationGeneration": 1
       },
       "predecessorReceiptDigests": [
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -314,7 +348,7 @@
         "owner": "local-opentag-1"
       },
       "payloadDigest": "sha256:fdea943a296cc0db35325071b8e8d56039ca0dcd34decd7e2359bcb90b653722",
-      "receiptDigest": "sha256:905c79c519c9452bfacac0dcce855cc295320f50bc1bbeccd0725d03dbba9001"
+      "receiptDigest": "sha256:6774f1e262fe3ba444fc56c5066a4303799646d2d291c42788cbea6bc0979dd3"
     }
   }
 }

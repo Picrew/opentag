@@ -2389,8 +2389,68 @@ export async function verifyHostedLifecycleReceiptV1(input: {
         > Date.parse(HostedHeartbeatRequestV1Schema.parse(request)
           .expectedLeaseExpiresAt)
       )
-    );
+  );
 }
+
+export async function computeHostedLifecycleReceiptIdV1(input: {
+  organizationId: string;
+  operationId: string;
+}): Promise<string> {
+  const organizationId = HostedLifecycleStableIdV1Schema.parse(
+    input.organizationId,
+  );
+  const operationId = HostedLifecycleMachineOperationIdV1Schema.parse(
+    input.operationId,
+  );
+  const digest = await computeControlPayloadDigestV1({
+    organizationId,
+    operationId,
+  });
+  return `lifecycle_${digest.slice("sha256:".length)}`;
+}
+
+export const GovernedProjectionAttemptRefV1Schema = z
+  .object({
+    attemptId: GovernedProjectionStableReferenceV1Schema,
+    attemptNumber: z.number().int().positive(),
+    epoch: z.number().int().positive(),
+    fencingTokenDigest: ReceiptDigestSchema,
+  })
+  .strict()
+  .superRefine((attempt, ctx) => {
+    if (attempt.epoch !== attempt.attemptNumber) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["epoch"],
+        message: "Attempt epoch must equal the Run-scoped attempt number.",
+      });
+    }
+  });
+
+export const HostedAuthorityRefV1Schema = z
+  .object({
+    claimOperationId: GovernedProjectionStableReferenceV1Schema,
+    authorityDigest: ReceiptDigestSchema,
+    attempt: GovernedProjectionAttemptRefV1Schema,
+    admissionPolicySnapshot: z
+      .object({
+        receiptId: GovernedProjectionStableReferenceV1Schema,
+        snapshotId: GovernedProjectionStableReferenceV1Schema,
+        digest: ReceiptDigestSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
+export const HostedExecutorResultReceiptRefV1Schema = z
+  .object({
+    receiptId: z.string().regex(/^lifecycle_[0-9a-f]{64}$/u),
+    operationId: HostedLifecycleMachineOperationIdV1Schema,
+    requestId: HostedLifecycleMachineRequestIdV1Schema,
+    requestDigest: ReceiptDigestSchema,
+    resultDigest: ReceiptDigestSchema,
+  })
+  .strict();
 
 export const WorkThreadRefPayloadV1Schema = z
   .object({
@@ -2399,6 +2459,7 @@ export const WorkThreadRefPayloadV1Schema = z
     localCreationReceiptId: GovernedProjectionStableReferenceV1Schema,
     localCreationReceiptDigest: ReceiptDigestSchema,
     lineageKind: GovernedProjectionStableReferenceV1Schema,
+    hostedAuthorityRef: HostedAuthorityRefV1Schema,
     createdAt: ControlTimestampSchema,
   })
   .strict();
@@ -2416,24 +2477,6 @@ export const CompletionContractRefPayloadV1Schema = z
     supersedesContractId: GovernedProjectionStableReferenceV1Schema.optional(),
   })
   .strict();
-
-const GovernedProjectionAttemptRefV1Schema = z
-  .object({
-    attemptId: GovernedProjectionStableReferenceV1Schema,
-    attemptNumber: z.number().int().positive(),
-    epoch: z.number().int().positive(),
-    fencingTokenDigest: ReceiptDigestSchema,
-  })
-  .strict()
-  .superRefine((attempt, ctx) => {
-    if (attempt.epoch !== attempt.attemptNumber) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["epoch"],
-        message: "Attempt epoch must equal the Run-scoped attempt number.",
-      });
-    }
-  });
 
 const ContractAssessmentRefV1Schema = z
   .object({
@@ -2457,6 +2500,7 @@ export const CompletionAssessmentPayloadV1Schema = z
       .strict(),
     runId: GovernedProjectionRunIdV1Schema,
     attempt: GovernedProjectionAttemptRefV1Schema,
+    executorResultReceiptRef: HostedExecutorResultReceiptRefV1Schema,
     assessmentInputDigest: ReceiptDigestSchema,
     evidenceReceiptDigests: DigestSetSchema,
     gateResults: z.array(
@@ -2534,7 +2578,15 @@ export const WorkThreadRefReceiptEnvelopeV1Schema = z
     }
     if (
       receipt.producer.kind !== "local_opentag" ||
+      receipt.producer.credentialId === undefined ||
+      receipt.producer.registrationGeneration === undefined ||
       receipt.payload.workThreadId !== receipt.workThreadId ||
+      !(receipt.predecessorReceiptDigests ?? []).includes(
+        receipt.payload.hostedAuthorityRef.authorityDigest,
+      ) ||
+      !(receipt.predecessorReceiptDigests ?? []).includes(
+        receipt.payload.hostedAuthorityRef.admissionPolicySnapshot.digest,
+      ) ||
       !hasExactReceiptIdentity(receipt.identity, "opentag.control.receipt/work-thread-ref/v1", [
         receipt.organizationId,
         receipt.runId,
@@ -2558,6 +2610,8 @@ export const CompletionContractRefReceiptEnvelopeV1Schema = z
     }
     if (
       receipt.producer.kind !== "local_opentag" ||
+      receipt.producer.credentialId === undefined ||
+      receipt.producer.registrationGeneration === undefined ||
       !hasExactReceiptIdentity(receipt.identity, "opentag.control.receipt/completion-contract-ref/v1", [
         receipt.organizationId,
         receipt.workThreadId,
@@ -2586,6 +2640,8 @@ export const CompletionAssessmentReceiptEnvelopeV1Schema = z
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["producer", "kind"], message: "Completion assessments are locally authoritative." });
     }
     if (
+      receipt.producer.credentialId === undefined ||
+      receipt.producer.registrationGeneration === undefined ||
       receipt.payload.runId !== receipt.runId ||
       receipt.payload.workThreadId !== receipt.workThreadId ||
       receipt.payload.attempt.attemptId !== receipt.attempt.attemptId ||
@@ -2713,7 +2769,11 @@ function callbackEnvelope<const TReceiptKind extends string, TPayload extends z.
       if (!receipt.requiredCapabilities.includes("relay.callback-observation.v1")) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requiredCapabilities"], message: "Callback observation capability is required." });
       }
-      if (receipt.producer.kind !== "local_opentag") {
+      if (
+        receipt.producer.kind !== "local_opentag"
+        || receipt.producer.credentialId === undefined
+        || receipt.producer.registrationGeneration === undefined
+      ) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["producer", "kind"], message: "Callback observations are locally authoritative." });
       }
       const callbackPayload = (
@@ -2851,6 +2911,22 @@ export type HostedClaimExpectedAuthorityV1 = z.infer<
 >;
 export type HostedClaimV1 = z.infer<typeof HostedClaimV1Schema>;
 export type AdmissionPolicySnapshotReceiptEnvelopeV1 = z.infer<typeof AdmissionPolicySnapshotReceiptEnvelopeV1Schema>;
+export type GovernedProjectionAttemptRefV1 = z.infer<
+  typeof GovernedProjectionAttemptRefV1Schema
+>;
+export type HostedAuthorityRefV1 = z.infer<typeof HostedAuthorityRefV1Schema>;
+export type HostedExecutorResultReceiptRefV1 = z.infer<
+  typeof HostedExecutorResultReceiptRefV1Schema
+>;
 export type WorkThreadRefReceiptEnvelopeV1 = z.infer<typeof WorkThreadRefReceiptEnvelopeV1Schema>;
 export type CompletionContractRefReceiptEnvelopeV1 = z.infer<typeof CompletionContractRefReceiptEnvelopeV1Schema>;
 export type CompletionAssessmentReceiptEnvelopeV1 = z.infer<typeof CompletionAssessmentReceiptEnvelopeV1Schema>;
+export type CallbackIntentObservationReceiptEnvelopeV1 = z.infer<
+  typeof CallbackIntentObservationReceiptEnvelopeV1Schema
+>;
+export type CallbackAttemptObservationReceiptEnvelopeV1 = z.infer<
+  typeof CallbackAttemptObservationReceiptEnvelopeV1Schema
+>;
+export type CallbackProviderObservationReceiptEnvelopeV1 = z.infer<
+  typeof CallbackProviderObservationReceiptEnvelopeV1Schema
+>;

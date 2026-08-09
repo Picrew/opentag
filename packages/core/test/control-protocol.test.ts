@@ -34,6 +34,7 @@ import {
   computeHostedLifecycleOperationIdV1,
   computeHostedLifecycleRequestDigestV1,
   computeHostedLifecycleRequestIdV1,
+  computeHostedLifecycleReceiptIdV1,
   computeGitHubIssueCommentSourceIdentityDigestV1,
   computePermissionFencingTokenDigestV1,
   computePermissionRequestDigestV1,
@@ -44,7 +45,10 @@ import {
   HostedClaimRequestV1Schema,
   HostedClaimV1Schema,
   HostedCompleteRequestV1Schema,
+  HostedAuthorityRefV1Schema,
+  HostedExecutorResultReceiptRefV1Schema,
   HostedExecutorResultReasonCodeV1Schema,
+  GovernedProjectionAttemptRefV1Schema,
   HostedHeartbeatRequestV1Schema,
   HostedLifecycleReceiptPayloadV1Schema,
   HostedLifecycleReceiptEnvelopeV1Schema,
@@ -83,7 +87,13 @@ import {
   verifyHostedClaimFencingTokenDigestV1,
   verifyHostedLifecycleReceiptV1,
   type CompletionAssessmentReceiptEnvelopeV1,
+  type CallbackAttemptObservationReceiptEnvelopeV1,
+  type CallbackIntentObservationReceiptEnvelopeV1,
+  type CallbackProviderObservationReceiptEnvelopeV1,
   type RunnerReadinessReceiptEnvelopeV1,
+  type GovernedProjectionAttemptRefV1,
+  type HostedAuthorityRefV1,
+  type HostedExecutorResultReceiptRefV1,
 } from "../src/control-protocol.js";
 import { canonicalJsonStringify } from "../src/canonical-json.js";
 
@@ -100,7 +110,7 @@ const GOVERNED_PROJECTION_VECTORS_PATH = new URL(
   "./fixtures/control-v1-governed-projection-vectors.json",
   import.meta.url,
 );
-const GOVERNED_PROJECTION_VECTORS_SHA256 = "daafcf4c6d4c886d5f0ac74b8ef43e93e8526e6d5bd6dc995e349a3ff7d41722";
+const GOVERNED_PROJECTION_VECTORS_SHA256 = "3b8e73c01b07d8db306bfcb71071324d3e685f03012137eadc5a9139672200e0";
 
 function assessmentReceipt(): CompletionAssessmentReceiptEnvelopeV1 {
   return {
@@ -150,6 +160,13 @@ function assessmentReceipt(): CompletionAssessmentReceiptEnvelopeV1 {
         attemptNumber: 1,
         epoch: 1,
         fencingTokenDigest: digest,
+      },
+      executorResultReceiptRef: {
+        receiptId: `lifecycle_${"c".repeat(64)}`,
+        operationId: `op_${"d".repeat(64)}`,
+        requestId: `req_${"e".repeat(64)}`,
+        requestDigest: otherDigest,
+        resultDigest: otherDigest,
       },
       assessmentInputDigest: digest,
       evidenceReceiptDigests: [digest, otherDigest],
@@ -2497,6 +2514,21 @@ describe("governed projection fixture vectors", () => {
         const changed = refreshDigests({ ...fixture, [field]: unsafeValue });
         expect(schema.safeParse(changed).success, `${name} ${field}: ${unsafeValue}`).toBe(false);
       }
+      const producer = fixture.producer as Record<string, unknown>;
+      for (const missingField of [
+        "credentialId",
+        "registrationGeneration",
+      ] as const) {
+        const { [missingField]: _missing, ...downgradedProducer } = producer;
+        const changed = refreshDigests({
+          ...fixture,
+          producer: downgradedProducer,
+        });
+        expect(
+          schema.safeParse(changed).success,
+          `${name} producer missing ${missingField}`,
+        ).toBe(false);
+      }
     }
 
     const payloadMutations = {
@@ -2534,10 +2566,116 @@ describe("governed projection fixture vectors", () => {
       const changed = refreshDigests({ ...fixture, payload });
       expect(schema.safeParse(changed).success, `${name} unsafe payload reference`).toBe(false);
     }
+
+    const workThread = artifact.fixtures.workThreadRef as Record<string, unknown>;
+    const workThreadPayload = workThread.payload as Record<string, unknown>;
+    const { hostedAuthorityRef: _authorityRef, ...workThreadWithoutAuthority } =
+      workThreadPayload;
+    expect(WorkThreadRefReceiptEnvelopeV1Schema.safeParse(refreshDigests({
+      ...workThread,
+      payload: workThreadWithoutAuthority,
+    })).success).toBe(false);
+    expect(WorkThreadRefReceiptEnvelopeV1Schema.safeParse(refreshDigests({
+      ...workThread,
+      producer: { kind: "local_opentag", id: "local-opentag-1" },
+    })).success).toBe(false);
+    expect(WorkThreadRefReceiptEnvelopeV1Schema.safeParse(refreshDigests({
+      ...workThread,
+      predecessorReceiptDigests: [
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      ],
+    })).success).toBe(false);
+
+    const assessment = artifact.fixtures.completionAssessment as Record<
+      string,
+      unknown
+    >;
+    const assessmentPayload = assessment.payload as Record<string, unknown>;
+    const { executorResultReceiptRef: _executorRef, ...assessmentWithoutResult } =
+      assessmentPayload;
+    expect(CompletionAssessmentReceiptEnvelopeV1Schema.safeParse(
+      refreshDigests({ ...assessment, payload: assessmentWithoutResult }),
+    ).success).toBe(false);
+    expect(CompletionAssessmentReceiptEnvelopeV1Schema.safeParse(
+      refreshDigests({
+        ...assessment,
+        producer: { kind: "local_opentag", id: "local-opentag-1" },
+      }),
+    ).success).toBe(false);
   });
 });
 
 describe("ReceiptEnvelope V1", () => {
+  it("derives the Cloud-compatible deterministic lifecycle receipt ID", async () => {
+    await expect(computeHostedLifecycleReceiptIdV1({
+      organizationId: "org_1",
+      operationId: `op_${"a".repeat(64)}`,
+    })).resolves.toBe(
+      "lifecycle_67f01d34799beb777a0ade60037bb204a00115564356802a72d27b4d4d6db2c2",
+    );
+  });
+
+  it("validates strict hosted authority and executor-result references", () => {
+    const attempt = {
+      attemptId: "attempt_1",
+      attemptNumber: 1,
+      epoch: 1,
+      fencingTokenDigest: digest,
+    };
+    const authority = {
+      claimOperationId: "claim_operation_1",
+      authorityDigest: otherDigest,
+      attempt,
+      admissionPolicySnapshot: {
+        receiptId: "policy_receipt_1",
+        snapshotId: "policy_1",
+        digest,
+      },
+    };
+    const executorResult = {
+      receiptId: `lifecycle_${"c".repeat(64)}`,
+      operationId: `op_${"d".repeat(64)}`,
+      requestId: `req_${"e".repeat(64)}`,
+      requestDigest: digest,
+      resultDigest: otherDigest,
+    };
+    expect(GovernedProjectionAttemptRefV1Schema.safeParse(attempt).success)
+      .toBe(true);
+    expect(HostedAuthorityRefV1Schema.safeParse(authority).success).toBe(true);
+    expect(HostedExecutorResultReceiptRefV1Schema.safeParse(executorResult).success)
+      .toBe(true);
+    expectTypeOf<GovernedProjectionAttemptRefV1>().toMatchTypeOf(attempt);
+    expectTypeOf<HostedAuthorityRefV1>().toMatchTypeOf(authority);
+    expectTypeOf<HostedExecutorResultReceiptRefV1>().toMatchTypeOf(
+      executorResult,
+    );
+    expect(GovernedProjectionAttemptRefV1Schema.safeParse({
+      ...attempt,
+      epoch: 2,
+    }).success).toBe(false);
+    for (const poison of [
+      { authorityDigest: "ghp_private-token" },
+      { claimOperationId: "/Users/alice/private/claim" },
+      { rawFencingToken: "raw-secret" },
+      { rawResult: { summary: "private-message" } },
+    ]) {
+      expect(HostedAuthorityRefV1Schema.safeParse({
+        ...authority,
+        ...poison,
+      }).success).toBe(false);
+    }
+    for (const poison of [
+      { receiptId: "lifecycle_private-message" },
+      { requestDigest: "sk_live_private-token" },
+      { rawResult: { summary: "private-message" } },
+    ]) {
+      expect(HostedExecutorResultReceiptRefV1Schema.safeParse({
+        ...executorResult,
+        ...poison,
+      }).success).toBe(false);
+    }
+  });
+
   it("types readiness producer authority exactly", () => {
     expectTypeOf<
       RunnerReadinessReceiptEnvelopeV1["producer"]["kind"]
@@ -2563,10 +2701,29 @@ describe("ReceiptEnvelope V1", () => {
     expectTypeOf<typeof CallbackProviderV1Schema._output>().toEqualTypeOf<"github">();
     expectTypeOf<typeof CallbackNextActionV1Schema._output>().toEqualTypeOf<"reconcile-provider">();
     expectTypeOf<typeof CallbackOpaqueStableIdV1Schema._output>().toEqualTypeOf<string>();
+    expectTypeOf<
+      CallbackIntentObservationReceiptEnvelopeV1["receiptKind"]
+    >().toEqualTypeOf<"callback_intent_observation">();
+    expectTypeOf<
+      CallbackAttemptObservationReceiptEnvelopeV1["receiptKind"]
+    >().toEqualTypeOf<"callback_attempt_observation">();
+    expectTypeOf<
+      CallbackProviderObservationReceiptEnvelopeV1["receiptKind"]
+    >().toEqualTypeOf<"callback_provider_observation">();
   });
 
   it("accepts an executor-neutral, locally authored completion assessment", () => {
-    expect(CompletionAssessmentReceiptEnvelopeV1Schema.safeParse(assessmentReceipt()).success).toBe(true);
+    const receipt = assessmentReceipt();
+    expect(receipt.payload.assessmentInputDigest).not.toBe(
+      receipt.payload.executorResultReceiptRef.resultDigest,
+    );
+    expect(CompletionAssessmentReceiptEnvelopeV1Schema.safeParse(receipt).success)
+      .toBe(true);
+    const { executorResultReceiptRef: _ref, ...withoutRef } = receipt.payload;
+    expect(CompletionAssessmentReceiptEnvelopeV1Schema.safeParse({
+      ...receipt,
+      payload: withoutRef,
+    }).success).toBe(false);
   });
 
   it("uses the Run-scoped attempt number as the receipt fencing epoch", () => {
