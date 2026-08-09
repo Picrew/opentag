@@ -2450,7 +2450,54 @@ export const HostedExecutorResultReceiptRefV1Schema = z
     requestDigest: ReceiptDigestSchema,
     resultDigest: ReceiptDigestSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((reference, ctx) => {
+    const requestDigest = ReceiptDigestSchema.safeParse(
+      reference.requestDigest,
+    );
+    if (
+      requestDigest.success
+      && reference.operationId
+        !== computeHostedLifecycleOperationIdV1(requestDigest.data)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["operationId"],
+        message: "Executor-result operation ID must derive from requestDigest.",
+      });
+    }
+  });
+
+/**
+ * Verifies the deterministic identity of a hosted executor-result receipt.
+ *
+ * The reference intentionally omits receiptDigest: local assessment remains
+ * authoritative while Cloud is unavailable, before Cloud chooses observedAt
+ * and can finalize the receipt bytes. The deterministic receiptId identifies
+ * the unique immutable Cloud receipt that must later resolve to the same
+ * operation, request, and result digests.
+ */
+export async function verifyHostedExecutorResultReceiptRefV1(input: {
+  organizationId: string;
+  reference: HostedExecutorResultReceiptRefV1;
+}): Promise<boolean> {
+  const organizationId = HostedLifecycleStableIdV1Schema.parse(
+    input.organizationId,
+  );
+  const reference = HostedExecutorResultReceiptRefV1Schema.parse(
+    input.reference,
+  );
+  return reference.requestId
+    === await computeHostedLifecycleRequestIdV1({
+      operationId: reference.operationId,
+      requestDigest: reference.requestDigest,
+    })
+    && reference.receiptId
+      === await computeHostedLifecycleReceiptIdV1({
+        organizationId,
+        operationId: reference.operationId,
+      });
+}
 
 export const WorkThreadRefPayloadV1Schema = z
   .object({
@@ -2538,10 +2585,10 @@ export const CompletionAssessmentPayloadV1Schema = z
 
 const GovernedProjectionProducerV1Schema = z
   .object({
-    kind: z.enum(["cloud", "runner", "local_opentag"]),
+    kind: z.literal("local_opentag"),
     id: GovernedProjectionStableReferenceV1Schema,
-    credentialId: GovernedProjectionStableReferenceV1Schema.optional(),
-    registrationGeneration: z.number().int().positive().optional(),
+    credentialId: GovernedProjectionStableReferenceV1Schema,
+    registrationGeneration: z.number().int().positive(),
   })
   .strict();
 

@@ -85,7 +85,9 @@ import {
   verifyHostedAdmissionEnvelopeDigestV1,
   verifyHostedClaimExpectedAuthorityV1,
   verifyHostedClaimFencingTokenDigestV1,
+  verifyHostedExecutorResultReceiptRefV1,
   verifyHostedLifecycleReceiptV1,
+  type CompletionContractRefReceiptEnvelopeV1,
   type CompletionAssessmentReceiptEnvelopeV1,
   type CallbackAttemptObservationReceiptEnvelopeV1,
   type CallbackIntentObservationReceiptEnvelopeV1,
@@ -94,6 +96,7 @@ import {
   type GovernedProjectionAttemptRefV1,
   type HostedAuthorityRefV1,
   type HostedExecutorResultReceiptRefV1,
+  type WorkThreadRefReceiptEnvelopeV1,
 } from "../src/control-protocol.js";
 import { canonicalJsonStringify } from "../src/canonical-json.js";
 
@@ -110,7 +113,7 @@ const GOVERNED_PROJECTION_VECTORS_PATH = new URL(
   "./fixtures/control-v1-governed-projection-vectors.json",
   import.meta.url,
 );
-const GOVERNED_PROJECTION_VECTORS_SHA256 = "3b8e73c01b07d8db306bfcb71071324d3e685f03012137eadc5a9139672200e0";
+const GOVERNED_PROJECTION_VECTORS_SHA256 = "1bb2055f123754c8fcbad90723c06f0b14d3b10f798b70a8c919da1dbc75a36c";
 
 function assessmentReceipt(): CompletionAssessmentReceiptEnvelopeV1 {
   return {
@@ -162,10 +165,10 @@ function assessmentReceipt(): CompletionAssessmentReceiptEnvelopeV1 {
         fencingTokenDigest: digest,
       },
       executorResultReceiptRef: {
-        receiptId: `lifecycle_${"c".repeat(64)}`,
-        operationId: `op_${"d".repeat(64)}`,
-        requestId: `req_${"e".repeat(64)}`,
-        requestDigest: otherDigest,
+        receiptId: "lifecycle_6c6fe8b2a09240e9d9ac50289a235027ed5e626efa625a09dd7883dd6ef5e4b2",
+        operationId: `op_${"5".repeat(64)}`,
+        requestId: "req_40ed5e0d48213af23c5b2da0ffc096e166a671537f30d1b68e25c9fb21cd2368",
+        requestDigest: `sha256:${"5".repeat(64)}`,
         resultDigest: otherDigest,
       },
       assessmentInputDigest: digest,
@@ -2633,9 +2636,9 @@ describe("ReceiptEnvelope V1", () => {
       },
     };
     const executorResult = {
-      receiptId: `lifecycle_${"c".repeat(64)}`,
-      operationId: `op_${"d".repeat(64)}`,
-      requestId: `req_${"e".repeat(64)}`,
+      receiptId: "lifecycle_67f01d34799beb777a0ade60037bb204a00115564356802a72d27b4d4d6db2c2",
+      operationId: `op_${"a".repeat(64)}`,
+      requestId: "req_09915605eebcfc604d71b76430cc4e46106cc8fc5a301fd4f350306f2c99b724",
       requestDigest: digest,
       resultDigest: otherDigest,
     };
@@ -2666,6 +2669,7 @@ describe("ReceiptEnvelope V1", () => {
     }
     for (const poison of [
       { receiptId: "lifecycle_private-message" },
+      { operationId: `op_${"b".repeat(64)}` },
       { requestDigest: "sk_live_private-token" },
       { rawResult: { summary: "private-message" } },
     ]) {
@@ -2674,6 +2678,31 @@ describe("ReceiptEnvelope V1", () => {
         ...poison,
       }).success).toBe(false);
     }
+  });
+
+  it("verifies the tenant-scoped executor-result receipt identity", async () => {
+    const reference = HostedExecutorResultReceiptRefV1Schema.parse({
+      receiptId: "lifecycle_6c6fe8b2a09240e9d9ac50289a235027ed5e626efa625a09dd7883dd6ef5e4b2",
+      operationId: `op_${"5".repeat(64)}`,
+      requestId: "req_40ed5e0d48213af23c5b2da0ffc096e166a671537f30d1b68e25c9fb21cd2368",
+      requestDigest: `sha256:${"5".repeat(64)}`,
+      resultDigest: `sha256:${"6".repeat(64)}`,
+    });
+    await expect(verifyHostedExecutorResultReceiptRefV1({
+      organizationId: "org-1",
+      reference,
+    })).resolves.toBe(true);
+    await expect(verifyHostedExecutorResultReceiptRefV1({
+      organizationId: "org-2",
+      reference,
+    })).resolves.toBe(false);
+    await expect(verifyHostedExecutorResultReceiptRefV1({
+      organizationId: "org-1",
+      reference: {
+        ...reference,
+        requestId: `req_${"0".repeat(64)}`,
+      },
+    })).resolves.toBe(false);
   });
 
   it("types readiness producer authority exactly", () => {
@@ -2710,6 +2739,19 @@ describe("ReceiptEnvelope V1", () => {
     expectTypeOf<
       CallbackProviderObservationReceiptEnvelopeV1["receiptKind"]
     >().toEqualTypeOf<"callback_provider_observation">();
+    type GovernedReceipt =
+      | WorkThreadRefReceiptEnvelopeV1
+      | CompletionContractRefReceiptEnvelopeV1
+      | CompletionAssessmentReceiptEnvelopeV1
+      | CallbackIntentObservationReceiptEnvelopeV1
+      | CallbackAttemptObservationReceiptEnvelopeV1
+      | CallbackProviderObservationReceiptEnvelopeV1;
+    expectTypeOf<GovernedReceipt["producer"]["kind"]>()
+      .toEqualTypeOf<"local_opentag">();
+    expectTypeOf<GovernedReceipt["producer"]["credentialId"]>()
+      .toEqualTypeOf<string>();
+    expectTypeOf<GovernedReceipt["producer"]["registrationGeneration"]>()
+      .toEqualTypeOf<number>();
   });
 
   it("accepts an executor-neutral, locally authored completion assessment", () => {
