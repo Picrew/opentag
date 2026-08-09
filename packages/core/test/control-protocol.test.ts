@@ -11,6 +11,7 @@ import {
   CallbackIntentObservationPayloadV1Schema,
   CallbackProviderObservationReceiptEnvelopeV1Schema,
   CallbackProviderObservationPayloadV1Schema,
+  GitHubIssueCommentsTargetV1Schema,
   CallbackNextActionV1Schema,
   CallbackOpaqueStableIdV1Schema,
   CallbackObservationReasonCodeV1Schema,
@@ -36,6 +37,7 @@ import {
   computeHostedLifecycleRequestIdV1,
   computeHostedLifecycleReceiptIdV1,
   computeGitHubIssueCommentSourceIdentityDigestV1,
+  parseGitHubIssueCommentsTargetV1,
   computePermissionFencingTokenDigestV1,
   computePermissionRequestDigestV1,
   GitHubIssueCommentSourceIdentityDigestInputV1Schema,
@@ -113,7 +115,7 @@ const GOVERNED_PROJECTION_VECTORS_PATH = new URL(
   "./fixtures/control-v1-governed-projection-vectors.json",
   import.meta.url,
 );
-const GOVERNED_PROJECTION_VECTORS_SHA256 = "1bb2055f123754c8fcbad90723c06f0b14d3b10f798b70a8c919da1dbc75a36c";
+const GOVERNED_PROJECTION_VECTORS_SHA256 = "4b14911bdba4fb8d2bdefebf6e5c974e14feff8ecec0be54dbe2a0b58d2b656f";
 
 function assessmentReceipt(): CompletionAssessmentReceiptEnvelopeV1 {
   return {
@@ -2728,7 +2730,9 @@ describe("ReceiptEnvelope V1", () => {
       typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output.receiptKind
     >().toEqualTypeOf<"callback_provider_observation">();
     expectTypeOf<typeof CallbackProviderV1Schema._output>().toEqualTypeOf<"github">();
-    expectTypeOf<typeof CallbackNextActionV1Schema._output>().toEqualTypeOf<"reconcile-provider">();
+    expectTypeOf<typeof CallbackNextActionV1Schema._output>().toEqualTypeOf<
+      "reconcile-provider" | "repair-local-callback"
+    >();
     expectTypeOf<typeof CallbackOpaqueStableIdV1Schema._output>().toEqualTypeOf<string>();
     expectTypeOf<
       CallbackIntentObservationReceiptEnvelopeV1["receiptKind"]
@@ -3054,6 +3058,7 @@ describe("ReceiptEnvelope V1", () => {
         localAttemptId: "callback_attempt_1",
         providerReceiptId: "comment_1",
         resourceIdentity: "github:comment:1",
+        targetIdentityDigest: digest,
         outcome: "outcome_unknown",
         observedAt,
       }).success,
@@ -3064,13 +3069,14 @@ describe("ReceiptEnvelope V1", () => {
         localAttemptId: "callback_attempt_1",
         providerReceiptId: "comment_1",
         resourceIdentity: "github:comment:1",
+        targetIdentityDigest: digest,
         outcome: "outcome_unknown",
         observedAt,
         reasonCode: "provider_timeout",
         nextAction: "reconcile-provider",
         owner: "local_opentag",
       }).success,
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("validates callback attempt unknown metadata, reason registry, and timestamp ordering", () => {
@@ -3115,19 +3121,101 @@ describe("ReceiptEnvelope V1", () => {
         owner: undefined,
       }).success,
     ).toBe(true);
+    const attentionAttempt = {
+      ...attempt,
+      outcome: "attention",
+      reasonCode: "callback_target_invalid",
+      nextAction: "repair-local-callback",
+    } as const;
+    expect(CallbackAttemptObservationPayloadV1Schema.safeParse(attentionAttempt).success).toBe(true);
+    expect(
+      CallbackAttemptObservationPayloadV1Schema.safeParse({
+        ...attentionAttempt,
+        nextAction: "reconcile-provider",
+      }).success,
+    ).toBe(false);
+    expect(
+      CallbackAttemptObservationPayloadV1Schema.safeParse({
+        ...attentionAttempt,
+        reasonCode: "provider_timeout",
+      }).success,
+    ).toBe(false);
+    expect(
+      CallbackAttemptObservationPayloadV1Schema.safeParse({
+        ...attentionAttempt,
+        owner: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      CallbackAttemptObservationPayloadV1Schema.safeParse({
+        ...attempt,
+        outcome: "accepted",
+        reasonCode: "provider_accepted",
+        nextAction: "repair-local-callback",
+      }).success,
+    ).toBe(false);
     expect(
       CallbackProviderObservationPayloadV1Schema.safeParse({
         localIntentId: "intent_1",
         localAttemptId: "callback_attempt_1",
         providerReceiptId: "comment_1",
         resourceIdentity: "github:comment:1",
+        targetIdentityDigest: digest,
         outcome: "succeeded",
         reasonCode: "provider_error",
         observedAt,
       }).success,
     ).toBe(false);
     expect(CallbackObservationReasonCodeV1Schema.safeParse("provider_timeout").success).toBe(true);
+    expect(CallbackObservationReasonCodeV1Schema.safeParse("callback_local_error").success).toBe(true);
     expect(RunnerReadinessReasonCodeV1Schema.safeParse("made_up_reason").success).toBe(false);
+  });
+
+  it("parses and binds strict GitHub issue-comments callback targets", async () => {
+    const target = await parseGitHubIssueCommentsTargetV1(
+      "https://api.github.com/repos/Example/Repo/issues/42/comments",
+      "example/repo#42",
+    );
+
+    expect(target).toEqual({
+      provider: "github",
+      owner: "example",
+      repo: "repo",
+      issueNumber: 42,
+      canonicalUri: "https://api.github.com/repos/example/repo/issues/42/comments",
+      resourceIdentity: "github:issue:42",
+      targetIdentityDigest:
+        "sha256:19568d5ca3fd27fcee6e31580558d18691a37465d664c84c2648d532b169f2f1",
+    });
+    expect(GitHubIssueCommentsTargetV1Schema.safeParse(target).success).toBe(true);
+
+    for (const invalidTarget of [
+      "http://api.github.com/repos/example/repo/issues/42/comments",
+      "https://github.com/repos/example/repo/issues/42/comments",
+      "https://user@api.github.com/repos/example/repo/issues/42/comments",
+      "https://api.github.com:443/repos/example/repo/issues/42/comments",
+      "https://api.github.com/repos/example/repo/issues/42/comments?token=secret",
+      "https://api.github.com/repos/example/repo/issues/42/comments#fragment",
+      "https://api.github.com/repos/example%2Frepo/other/issues/42/comments",
+      "https://api.github.com/repos/example/%2E%2E/issues/42/comments",
+      "https://api.github.com/repos/example/repo/issues/0/comments",
+      "https://api.github.com/repos/example/repo/issues/01/comments",
+      "https://api.github.com/repos/example/repo/issues/42/comments/",
+    ]) {
+      await expect(parseGitHubIssueCommentsTargetV1(invalidTarget)).rejects.toThrow();
+    }
+    await expect(
+      parseGitHubIssueCommentsTargetV1(
+        "https://api.github.com/repos/example/repo/issues/42/comments",
+        "example/other#42",
+      ),
+    ).rejects.toThrow("does not match");
+    await expect(
+      parseGitHubIssueCommentsTargetV1(
+        "https://api.github.com/repos/example/repo/issues/42/comments",
+        "example/repo#43",
+      ),
+    ).rejects.toThrow("does not match");
   });
 
   it("rejects callback custody, credentials, paths, commands, and unregistered literals", () => {
@@ -3156,6 +3244,7 @@ describe("ReceiptEnvelope V1", () => {
       localAttemptId: "callback_attempt_1",
       providerReceiptId: "comment_1",
       resourceIdentity: "github:comment:1",
+      targetIdentityDigest: digest,
       outcome: "succeeded",
       reasonCode: "provider_accepted",
       observedAt,
@@ -3276,6 +3365,27 @@ describe("ReceiptEnvelope V1", () => {
     expect(CallbackIntentObservationPayloadV1Schema.safeParse(intent).success).toBe(true);
     expect(CallbackAttemptObservationPayloadV1Schema.safeParse(attempt).success).toBe(true);
     expect(CallbackProviderObservationPayloadV1Schema.safeParse(provider).success).toBe(true);
+    expect(
+      CallbackProviderObservationPayloadV1Schema.safeParse({
+        ...provider,
+        targetIdentityDigest: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      CallbackProviderObservationPayloadV1Schema.safeParse({
+        ...provider,
+        reasonCode: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      CallbackProviderObservationPayloadV1Schema.safeParse({
+        ...provider,
+        outcome: "failed",
+        resourceIdentity: "github:issue:1",
+        providerReceiptId: "issue_1",
+        reasonCode: undefined,
+      }).success,
+    ).toBe(false);
     expect(CallbackIntentObservationPayloadV1Schema.safeParse({ ...intent, localIntentId: "callback_1" }).success).toBe(false);
     expect(CallbackAttemptObservationPayloadV1Schema.safeParse({ ...attempt, localAttemptId: "attempt_1" }).success).toBe(false);
     expect(CallbackProviderObservationPayloadV1Schema.safeParse({
@@ -3354,6 +3464,7 @@ describe("ReceiptEnvelope V1", () => {
         localAttemptId: "callback_attempt_1",
         providerReceiptId: "comment_1",
         resourceIdentity: "github:comment:1",
+        targetIdentityDigest: digest,
         outcome: "succeeded",
         reasonCode: "provider_accepted",
         observedAt,
@@ -3406,6 +3517,25 @@ describe("ReceiptEnvelope V1", () => {
         payload: { ...unknownAttemptEnvelope.payload, owner: "different-local-owner" },
       }).success,
     ).toBe(false);
+    const attentionAttemptEnvelope = {
+      ...attemptEnvelope,
+      payload: {
+        ...attemptEnvelope.payload,
+        outcome: "attention",
+        reasonCode: "callback_local_error",
+        nextAction: "repair-local-callback",
+        owner: attemptEnvelope.producer.id,
+      },
+    } as const;
+    expect(CallbackAttemptObservationReceiptEnvelopeV1Schema.safeParse(
+      attentionAttemptEnvelope,
+    ).success).toBe(true);
+    expect(
+      CallbackAttemptObservationReceiptEnvelopeV1Schema.safeParse({
+        ...attentionAttemptEnvelope,
+        payload: { ...attentionAttemptEnvelope.payload, owner: "different-local-owner" },
+      }).success,
+    ).toBe(false);
     const unknownProviderEnvelope = {
       ...providerEnvelope,
       payload: {
@@ -3416,7 +3546,7 @@ describe("ReceiptEnvelope V1", () => {
         owner: providerEnvelope.producer.id,
       },
     } as const;
-    expect(CallbackProviderObservationReceiptEnvelopeV1Schema.safeParse(unknownProviderEnvelope).success).toBe(true);
+    expect(CallbackProviderObservationReceiptEnvelopeV1Schema.safeParse(unknownProviderEnvelope).success).toBe(false);
     expect(
       CallbackProviderObservationReceiptEnvelopeV1Schema.safeParse({
         ...unknownProviderEnvelope,

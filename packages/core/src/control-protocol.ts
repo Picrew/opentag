@@ -94,6 +94,9 @@ export const RunnerReadinessReasonCodeV1Schema = z.enum([
 ]);
 
 export const CallbackObservationReasonCodeV1Schema = z.enum([
+  "callback_local_error",
+  "callback_sink_unhandled",
+  "callback_target_invalid",
   "provider_accepted",
   "provider_error",
   "provider_receipt_missing",
@@ -102,7 +105,10 @@ export const CallbackObservationReasonCodeV1Schema = z.enum([
 ]);
 
 export const CallbackProviderV1Schema = z.literal("github");
-export const CallbackNextActionV1Schema = z.literal("reconcile-provider");
+export const CallbackNextActionV1Schema = z.enum([
+  "reconcile-provider",
+  "repair-local-callback",
+]);
 
 function isCredentialSafeStableReference(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
@@ -170,6 +176,89 @@ export const CallbackResourceIdentityV1Schema = z
     isCredentialSafeStableReference,
     "Callback resource identity must not contain credential-like data.",
   );
+
+const GitHubTargetSegmentV1Schema = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u)
+  .refine((value) => value !== "." && value !== "..", "GitHub target segment cannot be a dot segment.");
+
+export const GitHubIssueCommentsTargetV1Schema = z
+  .object({
+    provider: z.literal("github"),
+    owner: GitHubTargetSegmentV1Schema,
+    repo: GitHubTargetSegmentV1Schema,
+    issueNumber: z.number().int().positive(),
+    canonicalUri: z.string().url(),
+    resourceIdentity: CallbackResourceIdentityV1Schema,
+    targetIdentityDigest: ReceiptDigestSchema,
+  })
+  .strict();
+
+export type GitHubIssueCommentsTargetV1 = z.infer<
+  typeof GitHubIssueCommentsTargetV1Schema
+>;
+
+/**
+ * Parses the one GitHub callback target shape admitted by Control V1.
+ * The exact raw-string match intentionally rejects URL features whose
+ * normalization could otherwise change target identity.
+ */
+export async function parseGitHubIssueCommentsTargetV1(
+  value: string,
+  threadKey?: string,
+): Promise<GitHubIssueCommentsTargetV1> {
+  const match = /^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)\/issues\/([1-9][0-9]*)\/comments$/u.exec(
+    value,
+  );
+  if (!match) {
+    throw new Error("GitHub callback target must be an HTTPS API issue-comments URI.");
+  }
+
+  const owner = GitHubTargetSegmentV1Schema.parse(match[1]);
+  const repo = GitHubTargetSegmentV1Schema.parse(match[2]);
+  const issueNumber = Number(match[3]);
+  if (!Number.isSafeInteger(issueNumber)) {
+    throw new Error("GitHub callback issue number must be a positive safe integer.");
+  }
+
+  if (threadKey !== undefined) {
+    const threadMatch = /^([^/#]+)\/([^/#]+)#([1-9][0-9]*)$/u.exec(threadKey);
+    if (!threadMatch) {
+      throw new Error("GitHub callback thread key must use owner/repo#issue.");
+    }
+    const threadOwner = GitHubTargetSegmentV1Schema.parse(threadMatch[1]);
+    const threadRepo = GitHubTargetSegmentV1Schema.parse(threadMatch[2]);
+    const threadIssueNumber = Number(threadMatch[3]);
+    if (
+      threadOwner.toLowerCase() !== owner.toLowerCase() ||
+      threadRepo.toLowerCase() !== repo.toLowerCase() ||
+      threadIssueNumber !== issueNumber
+    ) {
+      throw new Error("GitHub callback target does not match its source thread key.");
+    }
+  }
+
+  const canonicalOwner = owner.toLowerCase();
+  const canonicalRepo = repo.toLowerCase();
+  const canonicalUri = `https://api.github.com/repos/${canonicalOwner}/${canonicalRepo}/issues/${issueNumber}/comments`;
+  const targetIdentityDigest = await sha256Utf8V1(canonicalJsonStringify({
+    provider: "github",
+    owner: canonicalOwner,
+    repo: canonicalRepo,
+    issueNumber,
+  }));
+  return GitHubIssueCommentsTargetV1Schema.parse({
+    provider: "github",
+    owner: canonicalOwner,
+    repo: canonicalRepo,
+    issueNumber,
+    canonicalUri,
+    resourceIdentity: `github:issue:${issueNumber}`,
+    targetIdentityDigest,
+  });
+}
 
 export const PermissionResolutionReasonCodeV1Schema = z.enum([
   "human_approval_required",
@@ -2724,7 +2813,7 @@ export const CallbackAttemptObservationPayloadV1Schema = z
     localAttemptId: CallbackLocalAttemptIdV1Schema,
     attemptNumber: z.number().int().positive(),
     requestDigest: ReceiptDigestSchema,
-    outcome: z.enum(["accepted", "rejected", "outcome_unknown"]),
+    outcome: z.enum(["accepted", "rejected", "outcome_unknown", "attention"]),
     reasonCode: CallbackObservationReasonCodeV1Schema,
     nextAction: CallbackNextActionV1Schema.optional(),
     owner: GovernedProjectionStableReferenceV1Schema.optional(),
@@ -2737,6 +2826,7 @@ export const CallbackAttemptObservationPayloadV1Schema = z
       accepted: ["provider_accepted"],
       rejected: ["provider_rejected"],
       outcome_unknown: ["provider_receipt_missing", "provider_timeout"],
+      attention: ["callback_sink_unhandled", "callback_target_invalid", "callback_local_error"],
     } as const;
     if (!(compatibleReasonCodes[observation.outcome] as readonly string[]).includes(observation.reasonCode)) {
       ctx.addIssue({
@@ -2745,11 +2835,20 @@ export const CallbackAttemptObservationPayloadV1Schema = z
         message: "Callback attempt reason code is incompatible with its outcome.",
       });
     }
-    if (observation.outcome === "outcome_unknown" && (!observation.nextAction || !observation.owner)) {
+    const requiredNextAction = observation.outcome === "outcome_unknown"
+      ? "reconcile-provider"
+      : observation.outcome === "attention"
+        ? "repair-local-callback"
+        : undefined;
+    if (
+      requiredNextAction === undefined
+        ? observation.nextAction !== undefined || observation.owner !== undefined
+        : observation.nextAction !== requiredNextAction || !observation.owner
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["outcome"],
-        message: "Unknown callback attempts require a next action and owner.",
+        path: ["nextAction"],
+        message: "Callback attempt next action and owner are incompatible with its outcome.",
       });
     }
     if (Date.parse(observation.observedAt) < Date.parse(observation.attemptedAt)) {
@@ -2767,9 +2866,10 @@ export const CallbackProviderObservationPayloadV1Schema = z
     localAttemptId: CallbackLocalAttemptIdV1Schema,
     providerReceiptId: CallbackProviderReceiptIdV1Schema,
     resourceIdentity: CallbackResourceIdentityV1Schema,
-    outcome: z.enum(["succeeded", "failed", "outcome_unknown"]),
+    targetIdentityDigest: ReceiptDigestSchema,
+    outcome: z.enum(["succeeded", "failed"]),
     observedAt: ControlTimestampSchema,
-    reasonCode: CallbackObservationReasonCodeV1Schema.optional(),
+    reasonCode: CallbackObservationReasonCodeV1Schema,
     nextAction: CallbackNextActionV1Schema.optional(),
     owner: GovernedProjectionStableReferenceV1Schema.optional(),
   })
@@ -2778,11 +2878,11 @@ export const CallbackProviderObservationPayloadV1Schema = z
     const compatibleReasonCodes = {
       succeeded: ["provider_accepted"],
       failed: ["provider_error", "provider_rejected"],
-      outcome_unknown: ["provider_receipt_missing", "provider_timeout"],
     } as const;
     if (
-      observation.reasonCode !== undefined &&
-      !(compatibleReasonCodes[observation.outcome] as readonly string[]).includes(observation.reasonCode)
+      !(compatibleReasonCodes[observation.outcome] as readonly string[]).includes(
+        observation.reasonCode,
+      )
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -2790,11 +2890,11 @@ export const CallbackProviderObservationPayloadV1Schema = z
         message: "Callback provider reason code is incompatible with its outcome.",
       });
     }
-    if (observation.outcome === "outcome_unknown" && (!observation.reasonCode || !observation.nextAction || !observation.owner)) {
+    if (observation.nextAction !== undefined || observation.owner !== undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["outcome"],
-        message: "Unknown callback outcomes require a reason, next action, and owner.",
+        path: ["nextAction"],
+        message: "Terminal provider observations cannot require local follow-up.",
       });
     }
   });
@@ -2827,14 +2927,14 @@ function callbackEnvelope<const TReceiptKind extends string, TPayload extends z.
         receipt as unknown as { payload: { outcome?: string; owner?: string } }
       ).payload;
       if (
-        callbackPayload.outcome === "outcome_unknown" &&
+        (callbackPayload.outcome === "outcome_unknown" || callbackPayload.outcome === "attention") &&
         callbackPayload.owner !== undefined &&
         callbackPayload.owner !== receipt.producer.id
       ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["payload", "owner"],
-          message: "Unknown callback observation owner must match the local producer.",
+          message: "Actionable callback observation owner must match the local producer.",
         });
       }
     });

@@ -341,14 +341,13 @@
         "localAttemptId": "callback-attempt-1",
         "providerReceiptId": "provider-receipt-1",
         "resourceIdentity": "github:issue:42",
-        "outcome": "outcome_unknown",
+        "targetIdentityDigest": "sha256:19568d5ca3fd27fcee6e31580558d18691a37465d664c84c2648d532b169f2f1",
+        "outcome": "succeeded",
         "observedAt": "2026-08-09T01:03:04.000Z",
-        "reasonCode": "provider_receipt_missing",
-        "nextAction": "reconcile-provider",
-        "owner": "local-opentag-1"
+        "reasonCode": "provider_accepted"
       },
-      "payloadDigest": "sha256:fdea943a296cc0db35325071b8e8d56039ca0dcd34decd7e2359bcb90b653722",
-      "receiptDigest": "sha256:6774f1e262fe3ba444fc56c5066a4303799646d2d291c42788cbea6bc0979dd3"
+      "payloadDigest": "sha256:b525e9638cbabb7bd3a3829288759a78917b4a371efaa88d4f5238a2f4afbed6",
+      "receiptDigest": "sha256:9125f677ebacccb951186d911564e56c9e875170e63764ca24bddfc443c23dc0"
     }
   }
 }
