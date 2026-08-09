@@ -11,6 +11,9 @@ import type {
   HostedClaimRequestV1,
   HostedClaimV1,
   HostedExecutorResultReasonCodeV1,
+  HostedLifecycleActionV1,
+  HostedLifecycleReceiptEnvelopeV1,
+  HostedLifecycleRequestV1,
   MaterialActionReceipt,
   RunnerReadinessReceiptEnvelopeV1,
   RunnerControlContextResponseV1,
@@ -56,6 +59,7 @@ const READINESS_PROBE_CACHE_RATIO = 0.5;
 const CONTROL_TRANSFER_TIMEOUT_MS = 30_000;
 const CONTROL_LEASE_SAFETY_MS = 5_000;
 const DEFAULT_CONTROL_LEASE_SECONDS = 90;
+const DEFAULT_CLOSE_DRAIN_TIMEOUT_MS = 5_000;
 const HOSTED_CLAIM_CAPABILITIES = [
   "relay.claim-fence.v1",
   "relay.hosted-admission.v1",
@@ -111,6 +115,68 @@ export type ControlProjectionClient = Pick<OpenTagClient,
   "projectCompletionContractRefControlV1" | "projectCompletionAssessmentControlV1" |
   "projectCallbackObservationControlV1">;
 
+export type HostedLifecycleOperationEntry = {
+  destinationId: string;
+  organizationId: string;
+  runnerId: string;
+  credentialId: string;
+  operationId: string;
+  requestId: string;
+  action: HostedLifecycleActionV1;
+  runId: string;
+  request: HostedLifecycleRequestV1;
+  state: "pending" | "leased" | "acknowledged" | "attention";
+  attemptCount: number;
+  leaseToken?: string;
+  leaseExpiresAt?: string;
+};
+
+export type HostedLifecycleRepository = {
+  recoverExpiredHostedLifecycleOperations(input: {
+    destinationId: string;
+    organizationId: string;
+    now?: Date;
+  }): Promise<unknown>;
+  claimDueHostedLifecycleOperations(input: {
+    destinationId: string;
+    organizationId: string;
+    leaseOwner: string;
+    leaseSeconds: number;
+    limit?: number;
+    now?: Date;
+  }): Promise<HostedLifecycleOperationEntry[]>;
+  acknowledgeHostedLifecycleOperation(input: {
+    destinationId: string;
+    organizationId: string;
+    operationId: string;
+    leaseToken: string;
+    receipt: HostedLifecycleReceiptEnvelopeV1;
+    now?: Date;
+  }): Promise<"acknowledged" | "stale_lease" | "not_found">;
+  retryHostedLifecycleOperation(input: {
+    destinationId: string;
+    organizationId: string;
+    operationId: string;
+    leaseToken: string;
+    nextAttemptAt: string;
+    reasonCode: string;
+    now?: Date;
+  }): Promise<"retried" | "stale_lease" | "not_found">;
+  markHostedLifecycleOperationAttention(input: {
+    destinationId: string;
+    organizationId: string;
+    operationId: string;
+    leaseToken: string;
+    reasonCode: string;
+    now?: Date;
+  }): Promise<"attention" | "stale_lease" | "not_found">;
+};
+
+export type HostedLifecycleClient = Pick<OpenTagClient,
+  "heartbeatHostedRunControlV1" | "markHostedRunRunningControlV1" |
+  "progressHostedRunControlV1" | "completeHostedRunControlV1" |
+  "rejectHostedAttemptStartControlV1">;
+
 function httpStatus(error: unknown): number | undefined {
   if (!error || typeof error !== "object") return undefined;
   const value = (error as { status?: unknown }).status;
@@ -122,6 +188,17 @@ function retryable(status: number | undefined): boolean {
     || status === 408
     || status === 429
     || (status !== undefined && status >= 500 && status < 600);
+}
+
+function transportFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object" || httpStatus(error) !== undefined) {
+    return false;
+  }
+  const name = (error as { name?: unknown }).name;
+  return error instanceof TypeError
+    || name === "AbortError"
+    || name === "FetchError"
+    || name === "NetworkError";
 }
 
 function retryAfterMs(error: unknown): number {
@@ -162,6 +239,7 @@ export async function pumpControlPlaneProjections(input: {
   retryMaxMs?: number;
   transferTimeoutMs?: number;
   now?: Date | (() => Date);
+  cancelled?: () => boolean;
 }): Promise<{ delivered: number; retried: number; attention: number }> {
   const clock = typeof input.now === "function"
     ? input.now
@@ -211,9 +289,11 @@ export async function pumpControlPlaneProjections(input: {
     }
     try {
       const status = await deliverProjection(input.client, entry.envelope);
+      if (input.cancelled?.()) return summary;
       const outcome = await input.repo.acknowledgeControlPlaneProjection({ destinationId: input.destinationId, organizationId: input.organizationId, receiptId: entry.receiptId, leaseToken: entry.leaseToken, httpStatus: status, now: clock() });
       if (outcome.outcome === "acknowledged") summary.delivered += 1;
     } catch (error) {
+      if (input.cancelled?.()) return summary;
       const status = httpStatus(error);
       const failureNow = clock();
       if (retryable(status)) {
@@ -224,6 +304,148 @@ export async function pumpControlPlaneProjections(input: {
       } else {
         const outcome = await input.repo.markControlPlaneProjectionAttention({ destinationId: input.destinationId, organizationId: input.organizationId, receiptId: entry.receiptId, leaseToken: entry.leaseToken, reasonCode: status === undefined ? "unexpected_error" : `http_${status}`, ...(status ? { httpStatus: status } : {}), now: failureNow });
         if (outcome.outcome === "attention") summary.attention += 1;
+      }
+    }
+  }
+  return summary;
+}
+
+async function deliverHostedLifecycle(
+  client: HostedLifecycleClient,
+  entry: HostedLifecycleOperationEntry,
+): Promise<HostedLifecycleReceiptEnvelopeV1> {
+  const common = {
+    organizationId: entry.organizationId,
+    credentialId: entry.credentialId,
+    runnerId: entry.runnerId,
+    runId: entry.runId,
+  };
+  const result = entry.action === "heartbeat"
+    ? await client.heartbeatHostedRunControlV1({
+      ...common,
+      request: HostedHeartbeatRequestV1Schema.parse(entry.request),
+    })
+    : entry.action === "running"
+      ? await client.markHostedRunRunningControlV1({
+        ...common,
+        request: HostedRunningRequestV1Schema.parse(entry.request),
+      })
+      : entry.action === "progress"
+        ? await client.progressHostedRunControlV1({
+          ...common,
+          request: HostedProgressRequestV1Schema.parse(entry.request),
+        })
+        : entry.action === "complete"
+          ? await client.completeHostedRunControlV1({
+            ...common,
+            request: HostedCompleteRequestV1Schema.parse(entry.request),
+          })
+          : await client.rejectHostedAttemptStartControlV1({
+            ...common,
+            request: HostedRejectStartRequestV1Schema.parse(entry.request),
+          });
+  return result.receipt;
+}
+
+export async function pumpHostedLifecycleOperations(input: {
+  repo: HostedLifecycleRepository;
+  client: HostedLifecycleClient;
+  destinationId: string;
+  organizationId: string;
+  leaseOwner: string;
+  leaseSeconds?: number;
+  limit?: number;
+  retryBaseMs?: number;
+  retryMaxMs?: number;
+  now?: Date | (() => Date);
+  cancelled?: () => boolean;
+}): Promise<{ delivered: number; retried: number; attention: number }> {
+  const clock = typeof input.now === "function"
+    ? input.now
+    : input.now
+      ? () => input.now as Date
+      : () => new Date();
+  const summary = { delivered: 0, retried: 0, attention: 0 };
+  if (input.cancelled?.()) return summary;
+  const claimNow = clock();
+  await input.repo.recoverExpiredHostedLifecycleOperations({
+    destinationId: input.destinationId,
+    organizationId: input.organizationId,
+    now: claimNow,
+  });
+  if (input.cancelled?.()) return summary;
+  const limit = input.limit ?? 25;
+  for (let index = 0; index < limit; index += 1) {
+    if (input.cancelled?.()) return summary;
+    const claimed = await input.repo.claimDueHostedLifecycleOperations({
+      destinationId: input.destinationId,
+      organizationId: input.organizationId,
+      leaseOwner: input.leaseOwner,
+      leaseSeconds: input.leaseSeconds ?? DEFAULT_CONTROL_LEASE_SECONDS,
+      limit: 1,
+      now: index === 0 ? claimNow : clock(),
+    });
+    if (input.cancelled?.()) return summary;
+    const entry = claimed[0];
+    if (!entry) break;
+    if (!entry.leaseToken) continue;
+    try {
+      if (input.cancelled?.()) return summary;
+      const receipt = await deliverHostedLifecycle(input.client, entry);
+      if (input.cancelled?.()) return summary;
+      const outcome = await input.repo.acknowledgeHostedLifecycleOperation({
+        destinationId: input.destinationId,
+        organizationId: input.organizationId,
+        operationId: entry.operationId,
+        leaseToken: entry.leaseToken,
+        receipt,
+        now: clock(),
+      });
+      if (outcome === "acknowledged") summary.delivered += 1;
+      else if (outcome === "stale_lease") {
+        const attention = await input.repo.markHostedLifecycleOperationAttention({
+          destinationId: input.destinationId,
+          organizationId: input.organizationId,
+          operationId: entry.operationId,
+          leaseToken: entry.leaseToken,
+          reasonCode: "receipt_rejected",
+          now: clock(),
+        });
+        if (attention === "attention") summary.attention += 1;
+      }
+    } catch (error) {
+      if (input.cancelled?.()) return summary;
+      const status = httpStatus(error);
+      const failureNow = clock();
+      if (retryable(status) || transportFailure(error)) {
+        const backoff = Math.min(
+          input.retryMaxMs ?? 60_000,
+          (input.retryBaseMs ?? 1_000)
+            * 2 ** Math.max(0, entry.attemptCount - 1),
+        );
+        const delay = Math.max(backoff, retryAfterMs(error));
+        const outcome = await input.repo.retryHostedLifecycleOperation({
+          destinationId: input.destinationId,
+          organizationId: input.organizationId,
+          operationId: entry.operationId,
+          leaseToken: entry.leaseToken,
+          nextAttemptAt: new Date(failureNow.getTime() + delay).toISOString(),
+          reasonCode: status ? `http_${status}` : "transport_failed",
+          now: failureNow,
+        });
+        if (outcome === "retried") summary.retried += 1;
+      } else {
+        const outcome = await input.repo.markHostedLifecycleOperationAttention({
+          destinationId: input.destinationId,
+          organizationId: input.organizationId,
+          operationId: entry.operationId,
+          leaseToken: entry.leaseToken,
+          reasonCode: status === undefined
+            ? "invalid_receipt_or_unexpected_error"
+            : `http_${status}`,
+          now: failureNow,
+        });
+        if (outcome === "attention") summary.attention += 1;
       }
     }
   }
@@ -571,6 +793,36 @@ type HostedExecutionRepository = Omit<
     outcome: "created" | "replayed";
     operation: { operationId: string; requestId: string; request: HostedClaimRequestV1 };
   }>;
+  persistHostedClaimAuthorityShell(input: {
+    destinationId: string;
+    credentialId: string;
+    request: HostedClaimRequestV1;
+    claim: HostedClaimV1;
+  }): Promise<unknown>;
+  getHostedPreImportAuthorityRecovery(input: {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+  }): Promise<
+    | {
+        state: "claim_retry";
+        operation: {
+          operationId: string;
+          requestId: string;
+          request: HostedClaimRequestV1;
+        };
+      }
+    | {
+        state: "reject_pending" | "reject_attention";
+        operation: {
+          operationId: string;
+          requestId: string;
+          request: HostedClaimRequestV1;
+        };
+        lifecycleOperation: HostedLifecycleOperationEntry;
+      }
+    | null
+  >;
   acknowledgeHostedClaimEmpty(input: {
     operationId: string;
     requestId: string;
@@ -583,6 +835,10 @@ type HostedExecutionRepository = Omit<
     outcome: "created" | "replayed";
     executionState: "ready_to_start" | "already_started" | "terminal" | "superseded";
     claimed: ClaimedRun | null;
+    hostedAuthority: HostedClaimV1["authority"] & {
+      policyReceiptDigest: string;
+      importedAt: string;
+    };
   }>;
   acquireHostedExecutionStart(input: {
     runId: string;
@@ -603,6 +859,7 @@ type HostedExecutionRepository = Omit<
     leaseExpiresAt: string;
     hostedAuthority: HostedClaimV1["authority"] & {
       policyReceiptDigest: string;
+      importedAt: string;
     };
   } | null>;
   isHostedExecutionCurrent(input: {
@@ -610,29 +867,6 @@ type HostedExecutionRepository = Omit<
     attemptId: string;
     fencingToken: string;
   }): Promise<boolean>;
-  markRunning(input: {
-    runnerId: string;
-    attemptId: string;
-    fencingToken: string;
-    executor: string;
-    executorCapability?: unknown;
-    runTimeoutMs?: number;
-    idempotencyKey?: string;
-  }): Promise<string>;
-  heartbeat(input: {
-    runId: string;
-    runnerId: string;
-    attemptId: string;
-    fencingToken: string;
-  }): Promise<string>;
-  rejectAttemptStart(input: {
-    runId: string;
-    runnerId: string;
-    attemptId: string;
-    fencingToken: string;
-    executorId: string;
-    reason: string;
-  }): Promise<string>;
   completeRun(input: {
     runId: string;
     runnerId: string;
@@ -641,15 +875,6 @@ type HostedExecutionRepository = Omit<
     result: import("@opentag/core").OpenTagRunResult;
     idempotencyKey?: string;
   }): Promise<string>;
-  appendRunEvent(input: {
-    runId: string;
-    type: string;
-    payload: unknown;
-    createdAt?: string;
-    visibility?: "audit" | "human" | "debug";
-    importance?: "blocking" | "low" | "high" | "normal";
-    message?: string;
-  }): Promise<unknown>;
 };
 
 function permissionResolutionFromReceipt(input: {
@@ -746,14 +971,23 @@ async function createHostedExecutionClient(input: {
     fencingToken: string;
     fencingTokenDigest: string;
     credentialId: string;
+    executorId: string;
     executorCapabilityDigest: string;
     leaseExpiresAt: string;
     policySnapshotRef: string;
     policySnapshotDigest: string;
+    runningOccurredAt: string;
   };
+  now?: () => Date;
+  cancelled?: () => boolean;
+  buildHostedLifecycleRequestImpl?: typeof buildHostedLifecycleRequestV1;
 }): Promise<ClaimedRunExecutionClient> {
   const { client, repo, authority } = input;
-  const executionOccurredAt = new Date().toISOString();
+  const clock = input.now ?? (() => new Date());
+  const buildLifecycleRequest = input.buildHostedLifecycleRequestImpl
+    ?? buildHostedLifecycleRequestV1;
+  const executionOccurredAt = clock().toISOString();
+  let executionStarted = false;
   const permissionRequests = new Map<string, {
     request: ActionPermissionRequest;
     permissionRequestId: string;
@@ -766,29 +1000,41 @@ async function createHostedExecutionClient(input: {
     fencingToken: authority.fencingToken,
     fencingTokenDigest: authority.fencingTokenDigest,
   };
+  const pumpLifecycle = () => pumpHostedLifecycleOperations({
+    repo,
+    client,
+    destinationId: "cloud",
+    organizationId: authority.organizationId,
+    leaseOwner: `runner_${authority.runnerId}`,
+    now: clock,
+    ...(input.cancelled ? { cancelled: input.cancelled } : {}),
+  });
+  const assertNotCancelled = () => {
+    if (input.cancelled?.()) {
+      throw new Error("hosted_control_operation_cancelled");
+    }
+  };
   return {
     async markRunning(runId, executor, lease, options) {
+      assertNotCancelled();
       const request = HostedRunningRequestV1Schema.parse(
-        await buildHostedLifecycleRequestV1({
+        await buildLifecycleRequest({
         action: "running",
         organizationId: authority.organizationId,
         runnerId: authority.runnerId,
         runId,
         attempt,
-        occurredAt: executionOccurredAt,
+        occurredAt: authority.runningOccurredAt,
         executorId: executor,
         executorCapabilityDigest: authority.executorCapabilityDigest,
         ...(options?.runTimeoutMs ? { runTimeoutMs: options.runTimeoutMs } : {}),
         }),
       );
-      await client.markHostedRunRunningControlV1({
+      assertNotCancelled();
+      const localInput = {
+        destinationId: "cloud",
         organizationId: authority.organizationId,
         credentialId: authority.credentialId,
-        runnerId: authority.runnerId,
-        runId,
-        request,
-      });
-      const outcome = await repo.markRunning({
         runnerId: authority.runnerId,
         runId,
         executor,
@@ -796,14 +1042,33 @@ async function createHostedExecutionClient(input: {
         ...(options?.executorCapability ? { executorCapability: options.executorCapability } : {}),
         ...(options?.runTimeoutMs ? { runTimeoutMs: options.runTimeoutMs } : {}),
         ...(options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
-      });
-      if (outcome !== "running" && outcome !== "duplicate") {
+        request,
+      };
+      const local = await repo.markHostedRunRunningLocally(localInput);
+      assertNotCancelled();
+      if (local.outcome !== "running" && local.outcome !== "duplicate") {
         throw new Error("hosted_local_mark_running_split_outcome");
       }
+      if (local.operation.state !== "acknowledged") await pumpLifecycle();
+      assertNotCancelled();
+      const replayed = await repo.markHostedRunRunningLocally(localInput);
+      assertNotCancelled();
+      if (replayed.operation.state !== "acknowledged") {
+        throw new Error("hosted_running_not_acknowledged");
+      }
+      const acquired = await repo.acquireHostedExecutionStart({
+        runId,
+        attemptId: lease.attemptId,
+        fencingToken: lease.fencingToken,
+      });
+      assertNotCancelled();
+      if (!acquired) throw new Error("hosted_execution_start_not_acquired");
+      executionStarted = true;
     },
     async rejectAttemptStart(runId, executorId, reason, lease) {
+      assertNotCancelled();
       const request = HostedRejectStartRequestV1Schema.parse(
-        await buildHostedLifecycleRequestV1({
+        await buildLifecycleRequest({
         action: "reject-start",
         organizationId: authority.organizationId,
         runnerId: authority.runnerId,
@@ -814,25 +1079,27 @@ async function createHostedExecutionClient(input: {
         reasonCode: "unknown_safe_failure",
         }),
       );
-      await client.rejectHostedAttemptStartControlV1({
+      assertNotCancelled();
+      const local = await repo.rejectHostedAttemptStartLocally({
+        destinationId: "cloud",
         organizationId: authority.organizationId,
         credentialId: authority.credentialId,
-        runnerId: authority.runnerId,
-        runId,
-        request,
-      });
-      const outcome = await repo.rejectAttemptStart({
         runnerId: authority.runnerId,
         runId,
         executorId,
         reason,
         ...lease,
+        request,
       });
-      if (outcome !== "requeued" && outcome !== "duplicate") {
+      assertNotCancelled();
+      if (local.outcome !== "requeued" && local.outcome !== "duplicate") {
         throw new Error("hosted_local_reject_start_split_outcome");
       }
+      if (local.operation.state !== "acknowledged") await pumpLifecycle();
+      assertNotCancelled();
     },
     async heartbeat(runId, _lease) {
+      assertNotCancelled();
       const journalAuthority = {
         destinationId: "cloud",
         organizationId: authority.organizationId,
@@ -845,52 +1112,53 @@ async function createHostedExecutionClient(input: {
       let operation = await repo.getHostedHeartbeatOperationForRetry(
         journalAuthority,
       );
+      assertNotCancelled();
       if (!operation) {
         const currentLease = await repo.getHostedExecutionLease(
           journalAuthority,
         );
+        assertNotCancelled();
         if (!currentLease) {
           throw new Error("hosted_execution_authority_expired");
         }
         const request = HostedHeartbeatRequestV1Schema.parse(
-          await buildHostedLifecycleRequestV1({
+          await buildLifecycleRequest({
             action: "heartbeat",
             organizationId: authority.organizationId,
             runnerId: authority.runnerId,
             runId,
             attempt,
-            occurredAt: new Date().toISOString(),
+            occurredAt: clock().toISOString(),
             expectedLeaseExpiresAt: currentLease.leaseExpiresAt,
           }),
         );
+        assertNotCancelled();
         operation = (await repo.beginHostedHeartbeatOperation({
           ...journalAuthority,
           request,
         })).operation;
+        assertNotCancelled();
       }
-      const accepted = await client.heartbeatHostedRunControlV1({
-        organizationId: authority.organizationId,
-        credentialId: authority.credentialId,
-        runnerId: authority.runnerId,
-        runId,
-        request: operation.request,
-      });
-      const outcome = await repo.applyHostedHeartbeatReceipt({
-        ...journalAuthority,
-        operationId: operation.operationId,
-        requestId: operation.requestId,
-        receipt: accepted.receipt,
-      });
-      if (outcome !== "accepted" && outcome !== "replayed") {
+      if (operation.state !== "acknowledged") await pumpLifecycle();
+      assertNotCancelled();
+      const acceptedLease = await repo.getHostedExecutionLease(journalAuthority);
+      assertNotCancelled();
+      if (
+        !acceptedLease
+        || Date.parse(acceptedLease.leaseExpiresAt)
+          <= Date.parse(operation.request.expectedLeaseExpiresAt)
+      ) {
         throw new Error("hosted_heartbeat_receipt_rejected");
       }
     },
     async progress(runId, lease, progress) {
+      assertNotCancelled();
       const progressMetadata = await buildHostedProgressMetadataForControlV1(
         progress,
       );
+      assertNotCancelled();
       const request = HostedProgressRequestV1Schema.parse(
-        await buildHostedLifecycleRequestV1({
+        await buildLifecycleRequest({
         action: "progress",
         organizationId: authority.organizationId,
         runnerId: authority.runnerId,
@@ -900,64 +1168,104 @@ async function createHostedExecutionClient(input: {
         ...progressMetadata,
         }),
       );
-      await client.progressHostedRunControlV1({
+      assertNotCancelled();
+      const local = await repo.recordHostedProgressLocally({
+        destinationId: "cloud",
         organizationId: authority.organizationId,
         credentialId: authority.credentialId,
         runnerId: authority.runnerId,
         runId,
-        request,
-      });
-      await repo.appendRunEvent({
-        runId,
-        type: "run.progress",
-        payload: progress,
-        createdAt: progress.at,
+        ...lease,
+        type: "progress",
+        at: progress.at,
         visibility: "human",
         importance: "normal",
         message: progress.message,
-      });
-    },
-    async complete(runId, lease, result) {
-      const completionMetadata =
-        await buildHostedCompletionMetadataForControlV1(result);
-      const request = HostedCompleteRequestV1Schema.parse(
-        await buildHostedLifecycleRequestV1({
-        action: "complete",
-        organizationId: authority.organizationId,
-        runnerId: authority.runnerId,
-        runId,
-        attempt,
-        occurredAt: executionOccurredAt,
-        ...completionMetadata,
-        }),
-      );
-      await client.completeHostedRunControlV1({
-        organizationId: authority.organizationId,
-        credentialId: authority.credentialId,
-        runnerId: authority.runnerId,
-        runId,
+        idempotencyKey: request.progressId,
         request,
       });
-      const outcome = await repo.completeRun({
+      assertNotCancelled();
+      if (local.operation.state !== "acknowledged") await pumpLifecycle();
+      assertNotCancelled();
+    },
+    async complete(runId, lease, result) {
+      assertNotCancelled();
+      if (!executionStarted) {
+        const request = HostedRejectStartRequestV1Schema.parse(
+          await buildLifecycleRequest({
+            action: "reject-start",
+            organizationId: authority.organizationId,
+            runnerId: authority.runnerId,
+            runId,
+            attempt,
+            occurredAt: executionOccurredAt,
+            executorId: authority.executorId,
+            reasonCode: "unknown_safe_failure",
+          }),
+        );
+        assertNotCancelled();
+        const rejected = await repo.rejectHostedAttemptStartLocally({
+          destinationId: "cloud",
+          organizationId: authority.organizationId,
+          credentialId: authority.credentialId,
+          runnerId: authority.runnerId,
+          runId,
+          executorId: authority.executorId,
+          reason: result.summary,
+          ...lease,
+          request,
+        });
+        assertNotCancelled();
+        if (rejected.outcome !== "requeued" && rejected.outcome !== "duplicate") {
+          throw new Error("hosted_local_reject_start_split_outcome");
+        }
+        if (rejected.operation.state !== "acknowledged") await pumpLifecycle();
+        assertNotCancelled();
+        return;
+      }
+      const completionMetadata =
+        await buildHostedCompletionMetadataForControlV1(result);
+      assertNotCancelled();
+      const request = HostedCompleteRequestV1Schema.parse(
+        await buildLifecycleRequest({
+          action: "complete",
+          organizationId: authority.organizationId,
+          runnerId: authority.runnerId,
+          runId,
+          attempt,
+          occurredAt: executionOccurredAt,
+          ...completionMetadata,
+        }),
+      );
+      assertNotCancelled();
+      const outcome = await repo.completeHostedRunLocally({
+        destinationId: "cloud",
+        organizationId: authority.organizationId,
+        credentialId: authority.credentialId,
         runnerId: authority.runnerId,
         runId,
         ...lease,
         result,
+        request,
       });
+      assertNotCancelled();
       if (outcome !== "completed" && outcome !== "duplicate") {
         throw new Error("hosted_local_complete_split_outcome");
       }
     },
     async requestActionPermission(runId, lease, request) {
+      assertNotCancelled();
       const actionId = `action_${(await computeControlPayloadDigestV1({
         runId,
         attemptId: lease.attemptId,
         toolCallId: request.toolCallId,
       })).slice("sha256:".length, "sha256:".length + 24)}`;
+      assertNotCancelled();
       const permissionRequestId = `permission_${(await computeControlPayloadDigestV1({
         actionId,
         request,
       })).slice("sha256:".length, "sha256:".length + 24)}`;
+      assertNotCancelled();
       const requestedAt = new Date().toISOString();
       const actionFamily = request.operation.toLowerCase().replace(/[^a-z0-9._-]/gu, "_").slice(0, 64) || "tool";
       const targetFingerprint = request.targetFingerprint
@@ -967,6 +1275,7 @@ async function createHostedExecutionClient(input: {
           resource: request.resource ?? null,
           targetConstraints: request.targetConstraints ?? null,
         });
+      assertNotCancelled();
       const digestInput = {
         schemaVersion: 1 as const,
         protocolVersion: "1.0" as const,
@@ -991,6 +1300,7 @@ async function createHostedExecutionClient(input: {
         requestedAt,
       };
       const permissionRequestDigest = await computePermissionRequestDigestV1(digestInput);
+      assertNotCancelled();
       const result = await client.requestActionPermissionControlV1({
         ...digestInput,
         requestId: permissionRequestId,
@@ -998,10 +1308,12 @@ async function createHostedExecutionClient(input: {
         attempt,
         permissionRequestDigest,
       });
+      assertNotCancelled();
       permissionRequests.set(actionId, { request, permissionRequestId, permissionRequestDigest });
       return permissionResolutionFromReceipt({ receipt: result.receipt, request });
     },
     async resolveActionPermission(runId, _lease, actionId) {
+      assertNotCancelled();
       const pending = permissionRequests.get(actionId);
       if (!pending) throw new Error("hosted_permission_request_unknown");
       const result = await client.getActionPermissionCurrentControlV1({
@@ -1018,9 +1330,11 @@ async function createHostedExecutionClient(input: {
         permissionRequestId: pending.permissionRequestId,
         permissionRequestDigest: pending.permissionRequestDigest,
       });
+      assertNotCancelled();
       return permissionResolutionFromReceipt({ receipt: result.receipt, request: pending.request });
     },
     async recordMaterialActionReceipt(runId, _lease, actionId, receipt: MaterialActionReceipt) {
+      assertNotCancelled();
       const pending = permissionRequests.get(actionId);
       if (!pending) throw new Error("hosted_material_action_permission_unknown");
       const observedAt = receipt.observedAt;
@@ -1048,6 +1362,7 @@ async function createHostedExecutionClient(input: {
           ? { nextAction: "reconcile_provider_receipt", owner: "local_operator" }
           : {}),
       };
+      assertNotCancelled();
       const receiptId = receipt.id;
       const envelopeBase = {
         schemaVersion: 1 as const,
@@ -1073,15 +1388,18 @@ async function createHostedExecutionClient(input: {
         payload,
         payloadDigest: await computeMaterialActionPayloadDigestV1(payload),
       };
+      assertNotCancelled();
       const envelope = {
         ...envelopeBase,
         receiptDigest: await computeMaterialActionReceiptDigestV1(envelopeBase),
       };
+      assertNotCancelled();
       await client.recordMaterialActionReceiptControlV1({
         runnerId: authority.runnerId,
         fencingToken: attempt.fencingToken,
         receipt: envelope,
       });
+      assertNotCancelled();
       const resolved = await client.getActionPermissionCurrentControlV1({
         organizationId: authority.organizationId,
         runnerId: authority.runnerId,
@@ -1096,6 +1414,7 @@ async function createHostedExecutionClient(input: {
         permissionRequestId: pending.permissionRequestId,
         permissionRequestDigest: pending.permissionRequestDigest,
       });
+      assertNotCancelled();
       return permissionResolutionFromReceipt({ receipt: resolved.receipt, request: pending.request });
     },
   };
@@ -1116,6 +1435,8 @@ export function createHostedControlLoop(input: {
   };
   executeClaimedRunImpl?: typeof executeClaimedRun;
   refetchGitHubIssueCommentImpl?: typeof refetchGitHubIssueCommentForHostedAdmission;
+  buildHostedLifecycleRequestImpl?: typeof buildHostedLifecycleRequestV1;
+  closeDrainTimeoutMs?: number;
 }): HostedControlLoop | undefined {
   const registration = input.config.controlRegistration;
   if (!registration || registration.state !== "paired" || !input.config.runnerToken) return undefined;
@@ -1138,12 +1459,23 @@ export function createHostedControlLoop(input: {
   let closed = false;
   const pump = async () => {
     if (!context) return;
+    await pumpHostedLifecycleOperations({
+      repo,
+      client,
+      destinationId: "cloud",
+      organizationId: context.organizationId,
+      leaseOwner: `runner_${input.config.runnerId}`,
+      now: clock,
+      cancelled: () => closed,
+    });
+    if (closed) return;
     await pumpControlPlaneProjections({
       repo,
       client,
       destinationId: "cloud",
       organizationId: context.organizationId,
       leaseOwner: `runner_${input.config.runnerId}`,
+      cancelled: () => closed,
     });
   };
   const track = <T>(operation: Promise<T>): Promise<T> => {
@@ -1158,6 +1490,7 @@ export function createHostedControlLoop(input: {
         const nextContext = await client.getRunnerControlContextV1({
           runnerId: input.config.runnerId,
         });
+        if (closed) return false;
         assertRunnerControlContextRegistrationV1({
           context: nextContext,
           registration,
@@ -1168,6 +1501,44 @@ export function createHostedControlLoop(input: {
           throw new Error("runner_control_context_stale");
         }
         context = nextContext;
+        const preImportRecovery =
+          await repo.getHostedPreImportAuthorityRecovery({
+            destinationId: "cloud",
+            organizationId: context.organizationId,
+            runnerId: context.runnerId,
+          });
+        if (closed) return false;
+        if (preImportRecovery?.state === "reject_attention") return false;
+        if (preImportRecovery?.state === "reject_pending") {
+          await pumpHostedLifecycleOperations({
+            repo,
+            client,
+            destinationId: "cloud",
+            organizationId: context.organizationId,
+            leaseOwner: `runner_${input.config.runnerId}`,
+            now: clock,
+            cancelled: () => closed,
+          });
+          return false;
+        }
+        const existing = preImportRecovery?.state === "claim_retry"
+          ? preImportRecovery.operation
+          : await repo.getHostedClaimOperationForRetry({
+            destinationId: "cloud",
+            organizationId: context.organizationId,
+            runnerId: context.runnerId,
+          });
+        if (closed) return false;
+        await pumpHostedLifecycleOperations({
+          repo,
+          client,
+          destinationId: "cloud",
+          organizationId: context.organizationId,
+          leaseOwner: `runner_${input.config.runnerId}`,
+          now: clock,
+          cancelled: () => closed,
+        });
+        if (closed) return false;
         const localReadiness = await buildRunnerReadinessReceipt({
           context,
           executors: input.executors,
@@ -1175,11 +1546,13 @@ export function createHostedControlLoop(input: {
           now: clock,
           readinessProbeCache,
         });
+        if (closed) return false;
         const recovery = await repo.getHostedAssignedRunForRecovery({
           destinationId: "cloud",
           organizationId: context.organizationId,
           runnerId: context.runnerId,
         });
+        if (closed) return false;
         if (recovery) {
           const authority = recovery.hostedAuthority;
           const target = context.targets.find(
@@ -1206,19 +1579,19 @@ export function createHostedControlLoop(input: {
           ) {
             throw new Error("hosted_recovery_current_authority_mismatch");
           }
-          const acquired = await repo.acquireHostedExecutionStart({
-            runId: recovery.claimed.run.id,
-            attemptId: recovery.claimed.attemptId,
-            fencingToken: recovery.claimed.fencingToken,
-          });
-          if (!acquired) return false;
           const executionClient = await createHostedExecutionClient({
             client,
             repo,
+            now: clock,
+            cancelled: () => closed,
+            ...(input.buildHostedLifecycleRequestImpl
+              ? { buildHostedLifecycleRequestImpl: input.buildHostedLifecycleRequestImpl }
+              : {}),
             authority: {
               organizationId: authority.organizationId,
               runnerId: authority.runnerId,
               credentialId: authority.credentialId,
+              executorId: authority.executorId,
               attemptId: authority.attemptId,
               attemptNumber: authority.attemptNumber,
               epoch: authority.epoch,
@@ -1228,8 +1601,10 @@ export function createHostedControlLoop(input: {
               leaseExpiresAt: recovery.leaseExpiresAt,
               policySnapshotRef: authority.admissionPolicySnapshotId,
               policySnapshotDigest: authority.policyReceiptDigest,
+              runningOccurredAt: authority.importedAt,
             },
           });
+          if (closed) return false;
           await (input.executeClaimedRunImpl ?? executeClaimedRun)({
             runnerId: context.runnerId,
             repositories: input.config.repositories,
@@ -1247,13 +1622,18 @@ export function createHostedControlLoop(input: {
             hostedExecutionAuthority: {
               leaseExpiresAt: recovery.leaseExpiresAt,
               now: clock,
-              assertCurrent: () => repo.isHostedExecutionCurrent({
-                runId: recovery.claimed.run.id,
-                attemptId: recovery.claimed.attemptId,
-                fencingToken: recovery.claimed.fencingToken,
-              }),
-              readAcceptedLeaseExpiresAt: async () =>
-                (await repo.getHostedExecutionLease({
+              assertCurrent: async () => {
+                if (closed) return false;
+                const current = await repo.isHostedExecutionCurrent({
+                  runId: recovery.claimed.run.id,
+                  attemptId: recovery.claimed.attemptId,
+                  fencingToken: recovery.claimed.fencingToken,
+                });
+                return !closed && current;
+              },
+              readAcceptedLeaseExpiresAt: async () => {
+                if (closed) return null;
+                const lease = await repo.getHostedExecutionLease({
                   destinationId: "cloud",
                   organizationId: authority.organizationId,
                   runnerId: authority.runnerId,
@@ -1261,16 +1641,13 @@ export function createHostedControlLoop(input: {
                   runId: recovery.claimed.run.id,
                   attemptId: recovery.claimed.attemptId,
                   fencingToken: recovery.claimed.fencingToken,
-                }))?.leaseExpiresAt ?? null,
+                });
+                return closed ? null : lease?.leaseExpiresAt ?? null;
+              },
             },
           });
-          return true;
+          return !closed;
         }
-        const existing = await repo.getHostedClaimOperationForRetry({
-          destinationId: "cloud",
-          organizationId: context.organizationId,
-          runnerId: context.runnerId,
-        });
         let operation = existing;
         if (!operation) {
           // A new claim is forbidden until Cloud has synchronously accepted
@@ -1278,6 +1655,7 @@ export function createHostedControlLoop(input: {
           const acceptedReadiness = await client.reportRunnerReadinessControlV1(
             localReadiness,
           );
+          if (closed) return false;
           operation = (await repo.beginHostedClaimOperation({
             destinationId: "cloud",
             organizationId: context.organizationId,
@@ -1290,6 +1668,7 @@ export function createHostedControlLoop(input: {
             }),
           })).operation;
         }
+        if (closed) return false;
         let claim: HostedClaimV1 | null;
         try {
           claim = await client.claimHostedRunControlV1({
@@ -1297,6 +1676,7 @@ export function createHostedControlLoop(input: {
             request: operation.request,
           });
         } catch (error) {
+          if (closed) return false;
           const controlError = error as { status?: unknown; code?: unknown };
           if (
             controlError.status === 409
@@ -1311,6 +1691,7 @@ export function createHostedControlLoop(input: {
           }
           throw error;
         }
+        if (closed) return false;
         if (!claim) {
           await repo.acknowledgeHostedClaimEmpty({
             operationId: operation.operationId,
@@ -1325,6 +1706,14 @@ export function createHostedControlLoop(input: {
           request: operation.request,
           now: clock(),
         });
+        if (closed) return false;
+        await repo.persistHostedClaimAuthorityShell({
+          destinationId: "cloud",
+          credentialId: context.credentialId,
+          request: operation.request,
+          claim,
+        });
+        if (closed) return false;
         let imported: Awaited<ReturnType<HostedExecutionRepository["importHostedAssignedRun"]>>;
         try {
           if (!input.config.githubToken) {
@@ -1337,6 +1726,7 @@ export function createHostedControlLoop(input: {
             ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
             now: clock,
           });
+          if (closed) return false;
           if (Date.parse(claim.attempt.leaseExpiresAt) <= clock().getTime()) {
             throw new Error("hosted_claim_lease_expired");
           }
@@ -1346,11 +1736,13 @@ export function createHostedControlLoop(input: {
             sourceReceipt: refetched.receipt,
           });
         } catch (error) {
+          if (closed) return false;
           // A rejection is itself fenced lifecycle mutation. Never emit it
           // after expiry or when the current Cloud authority was not verified.
           if (Date.parse(claim.attempt.leaseExpiresAt) > clock().getTime()) {
             const request = HostedRejectStartRequestV1Schema.parse(
-              await buildHostedLifecycleRequestV1({
+              await (input.buildHostedLifecycleRequestImpl
+                ?? buildHostedLifecycleRequestV1)({
               organizationId: claim.organizationId,
               runnerId: claim.runnerId,
               runId: claim.runId,
@@ -1367,16 +1759,38 @@ export function createHostedControlLoop(input: {
               reasonCode: "unknown_safe_failure",
               }),
             );
-            await client.rejectHostedAttemptStartControlV1({
+            if (closed) return false;
+            const rejected = await repo.rejectHostedAttemptStartLocally({
+              destinationId: "cloud",
               organizationId: claim.organizationId,
               credentialId: claim.authority.credentialId,
               runnerId: claim.runnerId,
               runId: claim.runId,
+              attemptId: claim.attempt.id,
+              fencingToken: claim.attempt.fencingToken,
+              executorId: claim.executorId,
+              reason: error instanceof Error
+                ? error.message
+                : "hosted_admission_failed",
               request,
             });
+            if (closed) return false;
+            if (rejected.operation.state !== "acknowledged") {
+              await pumpHostedLifecycleOperations({
+                repo,
+                client,
+                destinationId: "cloud",
+                organizationId: claim.organizationId,
+                leaseOwner: `runner_${claim.runnerId}`,
+                now: clock,
+                cancelled: () => closed,
+              });
+              if (closed) return false;
+            }
           }
           throw error;
         }
+        if (closed) return false;
         if (Date.parse(claim.attempt.leaseExpiresAt) <= clock().getTime()) {
           throw new Error("hosted_claim_lease_expired_after_import");
         }
@@ -1384,19 +1798,19 @@ export function createHostedControlLoop(input: {
         if (!imported.claimed) {
           throw new Error("hosted_import_ready_without_claimed_run");
         }
-        const acquired = await repo.acquireHostedExecutionStart({
-          runId: claim.runId,
-          attemptId: claim.attempt.id,
-          fencingToken: claim.attempt.fencingToken,
-        });
-        if (!acquired) return false;
         const executionClient = await createHostedExecutionClient({
           client,
           repo,
+          now: clock,
+          cancelled: () => closed,
+          ...(input.buildHostedLifecycleRequestImpl
+            ? { buildHostedLifecycleRequestImpl: input.buildHostedLifecycleRequestImpl }
+            : {}),
           authority: {
             organizationId: claim.organizationId,
             runnerId: claim.runnerId,
             credentialId: claim.authority.credentialId,
+            executorId: claim.executorId,
             attemptId: claim.attempt.id,
             attemptNumber: claim.attempt.number,
             epoch: claim.attempt.epoch,
@@ -1406,8 +1820,10 @@ export function createHostedControlLoop(input: {
             leaseExpiresAt: claim.attempt.leaseExpiresAt,
             policySnapshotRef: claim.admissionPolicySnapshot.payload.snapshotId,
             policySnapshotDigest: claim.admissionPolicySnapshot.receiptDigest,
+            runningOccurredAt: imported.hostedAuthority.importedAt,
           },
         });
+        if (closed) return false;
         await (input.executeClaimedRunImpl ?? executeClaimedRun)({
           runnerId: claim.runnerId,
           repositories: input.config.repositories,
@@ -1425,13 +1841,18 @@ export function createHostedControlLoop(input: {
           hostedExecutionAuthority: {
             leaseExpiresAt: claim.attempt.leaseExpiresAt,
             now: clock,
-            assertCurrent: () => repo.isHostedExecutionCurrent({
-              runId: claim.runId,
-              attemptId: claim.attempt.id,
-              fencingToken: claim.attempt.fencingToken,
-            }),
-            readAcceptedLeaseExpiresAt: async () =>
-              (await repo.getHostedExecutionLease({
+            assertCurrent: async () => {
+              if (closed) return false;
+              const current = await repo.isHostedExecutionCurrent({
+                runId: claim.runId,
+                attemptId: claim.attempt.id,
+                fencingToken: claim.attempt.fencingToken,
+              });
+              return !closed && current;
+            },
+            readAcceptedLeaseExpiresAt: async () => {
+              if (closed) return null;
+              const lease = await repo.getHostedExecutionLease({
                 destinationId: "cloud",
                 organizationId: claim.organizationId,
                 runnerId: claim.runnerId,
@@ -1439,10 +1860,12 @@ export function createHostedControlLoop(input: {
                 runId: claim.runId,
                 attemptId: claim.attempt.id,
                 fencingToken: claim.attempt.fencingToken,
-              }))?.leaseExpiresAt ?? null,
+              });
+              return closed ? null : lease?.leaseExpiresAt ?? null;
+            },
           },
         });
-        return true;
+        return !closed;
       })());
     },
     afterIteration() {
@@ -1454,13 +1877,66 @@ export function createHostedControlLoop(input: {
     async close() {
       if (closed) return;
       closed = true;
-      abortController.abort();
-      try {
-        await inFlight;
-      } catch {
-        // The abort path is expected to reject an in-flight transport call.
+      const drainTimeoutMs = Math.max(
+        0,
+        input.closeDrainTimeoutMs ?? DEFAULT_CLOSE_DRAIN_TIMEOUT_MS,
+      );
+      const settleWithin = async (operation: Promise<unknown>) => {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        let settled = false;
+        try {
+          settled = await Promise.race([
+            operation.then(
+              () => true,
+              () => true,
+            ),
+            new Promise<false>((resolve) => {
+              timeout = setTimeout(() => resolve(false), drainTimeoutMs);
+            }),
+          ]);
+        } catch {
+          // Durable journals retain unacknowledged work for restart replay.
+        } finally {
+          if (timeout) clearTimeout(timeout);
+        }
+        return settled;
+      };
+      let storeClosed = false;
+      const closeStoreOnce = () => {
+        if (storeClosed) return;
+        storeClosed = true;
+        store.close();
+      };
+      const active = inFlight;
+      if (active) {
+        // Abort a possibly stuck transport before bounded draining. The
+        // durable lifecycle journal is the shutdown/restart handoff.
+        abortController.abort();
+        if (await settleWithin(active)) closeStoreOnce();
+        else void active.finally(closeStoreOnce).catch(() => undefined);
+      } else if (context) {
+        // The client remains usable for one bounded best-effort transfer. The
+        // repository only acknowledges after a verified Cloud receipt.
+        let shutdownPumpCancelled = false;
+        const shutdownPump = pumpHostedLifecycleOperations({
+          repo,
+          client,
+          destinationId: "cloud",
+          organizationId: context.organizationId,
+          leaseOwner: `runner_${input.config.runnerId}`,
+          limit: 1,
+          now: clock,
+          cancelled: () => shutdownPumpCancelled,
+        });
+        const settled = await settleWithin(shutdownPump);
+        shutdownPumpCancelled = !settled;
+        abortController.abort();
+        if (settled) closeStoreOnce();
+        else void shutdownPump.finally(closeStoreOnce).catch(() => undefined);
+      } else {
+        abortController.abort();
+        closeStoreOnce();
       }
-      store.close();
     },
   };
 }
