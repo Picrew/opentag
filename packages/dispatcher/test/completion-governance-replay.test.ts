@@ -111,6 +111,7 @@ describe("GitHub completion governance replay", () => {
         callbackSink: {
           async deliver(message) {
             delivered.push(message);
+            return { handled: true, outcome: "accepted" } as const;
           }
         }
       });

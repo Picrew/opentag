@@ -1073,10 +1073,26 @@ describe("createGitHubCallbackSink", () => {
 
   it("serializes concurrent GitHub callback deliveries for the same run", async () => {
     const requests: { url: string; method: string; body: unknown }[] = [];
-    let resolveFirst: (() => void) | undefined;
-    const firstRequest = new Promise<void>((resolve) => {
-      resolveFirst = resolve;
+    const originalDigest = crypto.subtle.digest.bind(crypto.subtle);
+    let digestCalls = 0;
+    let releaseFirstDigest: (() => void) | undefined;
+    let markFirstDigestStarted: (() => void) | undefined;
+    const firstDigestStarted = new Promise<void>((resolve) => {
+      markFirstDigestStarted = resolve;
     });
+    const firstDigestGate = new Promise<void>((resolve) => {
+      releaseFirstDigest = resolve;
+    });
+    const digestSpy = vi.spyOn(crypto.subtle, "digest").mockImplementation(
+      async (algorithm, data) => {
+        digestCalls += 1;
+        if (digestCalls === 1) {
+          markFirstDigestStarted?.();
+          await firstDigestGate;
+        }
+        return await originalDigest(algorithm, data);
+      }
+    );
     const sink = createGitHubCallbackSink({
       token: "ghs_test",
       fetchImpl: (async (url, init) => {
@@ -1085,32 +1101,40 @@ describe("createGitHubCallbackSink", () => {
           method: init?.method ?? "GET",
           body: JSON.parse(String(init?.body))
         });
-        if (requests.length === 1) {
-          await firstRequest;
-          return Response.json(githubReceipt(123));
-        }
         return Response.json(githubReceipt(123));
       }) as typeof fetch
     });
 
-    const first = sink.deliver({
-      runId: "run_1",
-      kind: "acknowledgement",
-      provider: "github",
-      uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
-      threadKey: "acme/demo#1",
-      body: "Starting"
-    });
-    const second = sink.deliver({
-      runId: "run_1",
-      kind: "progress",
-      provider: "github",
-      uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
-      threadKey: "acme/demo#1",
-      body: "Still working"
-    });
-    resolveFirst?.();
-    await Promise.all([first, second]);
+    const deliveries: Promise<unknown>[] = [];
+    try {
+      const first = sink.deliver({
+        runId: "run_1",
+        kind: "acknowledgement",
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo#1",
+        body: "Starting"
+      });
+      deliveries.push(first);
+      await firstDigestStarted;
+      const second = sink.deliver({
+        runId: "run_1",
+        kind: "progress",
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo#1",
+        body: "Still working"
+      });
+      deliveries.push(second);
+
+      expect(digestCalls).toBe(1);
+      releaseFirstDigest?.();
+      await Promise.all([first, second]);
+    } finally {
+      releaseFirstDigest?.();
+      await Promise.allSettled(deliveries);
+      digestSpy.mockRestore();
+    }
 
     expect(requests).toEqual([
       {

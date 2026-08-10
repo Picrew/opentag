@@ -102,6 +102,7 @@ describe("source-thread replay harness", () => {
         callbackSink: {
           async deliver(message) {
             delivered.push({ kind: message.kind, body: message.body });
+            return { handled: true, outcome: "accepted" } as const;
           }
         }
       });

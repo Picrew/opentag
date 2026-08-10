@@ -117,6 +117,7 @@ async function startRun(input: {
     callbackSink: {
       async deliver(message) {
         delivered.push(message);
+        return { handled: true, outcome: "accepted" } as const;
       }
     }
   });
@@ -977,7 +978,7 @@ describe("dispatcher completion governance", () => {
     createDispatcherApp({
       databasePath,
       completionPolicies: [strictPolicy],
-      callbackSink: { async deliver(message) { recoveredCallbacks.push(message); } }
+      callbackSink: { async deliver(message) { recoveredCallbacks.push(message); return { handled: true, outcome: "accepted" } as const; } }
     });
 
     for (let attempt = 0; attempt < 50 && recoveredCallbacks.length === 0; attempt += 1) {
@@ -1533,7 +1534,7 @@ describe("dispatcher completion governance", () => {
     const restarted = createDispatcherApp({
       databasePath,
       completionPolicies: [strictPolicy],
-      callbackSink: { async deliver(message) { restartedDeliveries.push(message); } }
+      callbackSink: { async deliver(message) { restartedDeliveries.push(message); return { handled: true, outcome: "accepted" } as const; } }
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
     await expect((await restarted.request(`/v1/runs/${currentRunId}/completion`)).json()).resolves.toMatchObject({
@@ -1917,7 +1918,7 @@ describe("dispatcher completion governance", () => {
     const app = createDispatcherApp({
       databasePath: ":memory:",
       completionPolicies: [strictPolicy],
-      callbackSink: { async deliver(message) { delivered.push(message); } }
+      callbackSink: { async deliver(message) { delivered.push(message); return { handled: true, outcome: "accepted" } as const; } }
     });
     const early = await app.request("/v1/completion-evidence/github", jsonRequest(githubSnapshot({ deliveryId: "delivery-early" })));
     expect(early.status).toBe(200);

@@ -1482,6 +1482,7 @@ describe("dispatcher API", () => {
             body: message.body,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -1586,6 +1587,7 @@ describe("dispatcher API", () => {
             body: message.body,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -1708,6 +1710,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       sourceReceiptSink: {
@@ -3376,6 +3379,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -3997,6 +4001,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           callbacks.push({ kind: message.kind });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       sourceReceiptSink: {
@@ -4056,6 +4061,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           callbacks.push({ kind: message.kind, ...(message.rich ? { hasRich: true } : {}) });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -5423,6 +5429,7 @@ describe("dispatcher API", () => {
             body: message.body,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -5529,7 +5536,7 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: { async deliver(message) { delivered.push({ kind: message.kind, body: message.body }); } }
+      callbackSink: { async deliver(message) { delivered.push({ kind: message.kind, body: message.body }); return { handled: true, outcome: "accepted" } as const; } }
     });
     await app.request("/v1/repo-bindings", jsonRequest({
       provider: "github",
@@ -6688,6 +6695,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -6767,6 +6775,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -6814,6 +6823,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -7105,6 +7115,7 @@ describe("dispatcher API", () => {
             kind: message.kind,
             ...(message.agentId ? { agentId: message.agentId } : {})
           });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       sourceReceiptSink: {
@@ -7175,6 +7186,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7279,6 +7291,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -7321,6 +7334,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7374,6 +7388,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7425,6 +7440,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7486,6 +7502,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7541,6 +7558,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7620,6 +7638,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7792,6 +7811,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -8612,6 +8632,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -8676,6 +8697,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -8858,6 +8880,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -8971,6 +8994,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -9089,7 +9113,7 @@ describe("dispatcher API", () => {
     const delivered: CallbackMessage[] = [];
     const app = createDispatcherApp({
       databasePath,
-      callbackSink: { async deliver(message) { delivered.push(message); } }
+      callbackSink: { async deliver(message) { delivered.push(message); return { handled: true, outcome: "accepted" } as const; } }
     });
     await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Local Runner" }));
     await app.request("/v1/channel-bindings", jsonRequest({
@@ -9315,6 +9339,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       gitlabApply: {
@@ -9431,6 +9456,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       linearApply: {
@@ -9542,6 +9568,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       gitlabApply: {
@@ -9660,6 +9687,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -9766,6 +9794,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       linearApply: {
@@ -9996,6 +10025,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -10083,6 +10113,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {

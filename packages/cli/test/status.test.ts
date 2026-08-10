@@ -289,7 +289,7 @@ function completionExplanationFixture(): CompletionExplanation {
         gateId: "pull_request",
         targetKey: "primary_change",
         state: "passed" as const,
-        evidenceIds: [],
+        evidenceIds: ["artifact-pr-7"],
         reasonCode: "artifact_requirement_satisfied" as const,
         reason: "The pull request artifact exists.",
         evaluatedAt

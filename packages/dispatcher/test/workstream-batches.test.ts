@@ -74,7 +74,7 @@ async function factorySetup(input: {
   const app = createDispatcherApp({
     databasePath: input.databasePath ?? ":memory:",
     reassessmentObligations: input.reassessmentObligations ?? { autoStart: false },
-    callbackSink: { async deliver(message) { input.callbackMessages?.push(message); } },
+    callbackSink: { async deliver(message) { input.callbackMessages?.push(message); return { handled: true, outcome: "accepted" } as const; } },
     sourceReceiptSink: { async deliver(receipt) { input.sourceReceipts?.push(receipt); return { delivered: true }; } },
     ...(input.agentAccessProfileCheck ? { agentAccessProfileCheck: input.agentAccessProfileCheck } : {}),
     ...(input.completionNow ? { completionNow: input.completionNow } : {}),

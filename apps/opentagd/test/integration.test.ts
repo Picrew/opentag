@@ -119,6 +119,7 @@ describe("opentagd local integration", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push(`${message.kind}:${message.body}`);
+          return { handled: true, outcome: 'accepted' } as const;
         }
       }
     });
@@ -199,6 +200,7 @@ describe("opentagd local integration", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push(`${message.kind}:${message.body}`);
+          return { handled: true, outcome: 'accepted' } as const;
         }
       }
     });

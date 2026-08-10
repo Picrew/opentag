@@ -466,82 +466,76 @@ export function createGitHubCallbackSink(input: {
       return result.handled ? { handled: true } : result;
     },
     async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult> {
-      const ready = await preflight(message);
-      if (!ready.handled || !ready.target) return { handled: false };
-      const target = ready.target;
-
       const statusKey = message.statusMessageKey ?? `${message.runId}:status`;
-      const previous = deliveryByKey.get(statusKey) ?? Promise.resolve<CallbackDeliveryResult>({ handled: false });
-      const attempted = previous.catch(() => ({ handled: false } as const)).then(async (): Promise<CallbackDeliveryResult> => {
-        const latchedUnknown = replayCallbackOutcomeUnknown(unknownByKey.get(statusKey));
-        if (latchedUnknown) return latchedUnknown;
-        const commentId = message.statusMessageKey && message.externalMessageId
-          ? githubExternalCommentId(message.externalMessageId)
-          : commentIdByKey.get(statusKey);
-        const uri = commentId ? githubCommentUri(target, commentId) : target.canonicalUri;
-        const controller = new AbortController();
-        const abort = () => controller.abort();
-        input.signal?.addEventListener("abort", abort, { once: true });
-        if (input.signal?.aborted) {
-          input.signal.removeEventListener("abort", abort);
-          return { handled: false };
-        }
-        const timeout = setTimeout(abort, deadlineMs);
-        let response: Response;
-        try {
-          response = await fetchImpl(uri, {
-            method: commentId ? "PATCH" : "POST",
-            headers: {
-              accept: "application/vnd.github+json",
-              authorization: `Bearer ${token}`,
-              "content-type": "application/json",
-              "x-github-api-version": "2022-11-28"
-            },
-            body: JSON.stringify({ body: message.body }),
-            signal: controller.signal
-          });
-        } catch {
-          throw new CallbackProviderOutcomeUnknownError("provider_timeout");
-        } finally {
-          clearTimeout(timeout);
-          input.signal?.removeEventListener("abort", abort);
-        }
-        if (!response.ok) {
-          if (response.status >= 400 && response.status < 500 && response.status !== 408) {
-            return callbackRejected();
+      return await serializeCallbackDelivery({
+        deliveries: deliveryByKey,
+        observations: unknownByKey,
+        statusKey,
+        deliver: async () => {
+          const ready = await preflight(message);
+          if (!ready.handled || !ready.target) return { handled: false };
+          const target = ready.target;
+          const commentId = message.statusMessageKey && message.externalMessageId
+            ? githubExternalCommentId(message.externalMessageId)
+            : commentIdByKey.get(statusKey);
+          const uri = commentId ? githubCommentUri(target, commentId) : target.canonicalUri;
+          const controller = new AbortController();
+          const abort = () => controller.abort();
+          input.signal?.addEventListener("abort", abort, { once: true });
+          if (input.signal?.aborted) {
+            input.signal.removeEventListener("abort", abort);
+            return { handled: false };
           }
-          throw new CallbackProviderOutcomeUnknownError("provider_timeout");
-        }
+          const timeout = setTimeout(abort, deadlineMs);
+          let response: Response;
+          try {
+            response = await fetchImpl(uri, {
+              method: commentId ? "PATCH" : "POST",
+              headers: {
+                accept: "application/vnd.github+json",
+                authorization: `Bearer ${token}`,
+                "content-type": "application/json",
+                "x-github-api-version": "2022-11-28"
+              },
+              body: JSON.stringify({ body: message.body }),
+              signal: controller.signal
+            });
+          } catch {
+            throw new CallbackProviderOutcomeUnknownError("provider_timeout");
+          } finally {
+            clearTimeout(timeout);
+            input.signal?.removeEventListener("abort", abort);
+          }
+          if (!response.ok) {
+            if (response.status >= 400 && response.status < 500 && response.status !== 408) {
+              return callbackRejected();
+            }
+            throw new CallbackProviderOutcomeUnknownError("provider_timeout");
+          }
 
-        let body: GitHubCommentReceipt;
-        try {
-          const parsed: unknown = await response.json();
-          body = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-            ? parsed as GitHubCommentReceipt
-            : {};
-        } catch {
-          throw new CallbackProviderOutcomeUnknownError("provider_receipt_missing");
-        }
-        const receipt = parseGitHubCommentReceipt({
-          body,
-          target,
-          ...(commentId ? { expectedCommentId: commentId } : {})
-        });
-        commentIdByKey.set(statusKey, receipt.commentId);
-        if (message.kind === "final") commentIdByKey.delete(statusKey);
-        return {
-          handled: true,
-          outcome: "accepted",
-          externalMessageId: receipt.providerReceiptId,
-          providerReceiptId: receipt.providerReceiptId,
-          providerResourceUri: receipt.providerResourceUri
-        };
-      });
-      const current = trackCallbackOutcomeUnknown(attempted, unknownByKey, statusKey);
-      deliveryByKey.set(statusKey, current);
-      return await current.finally(() => {
-        if (deliveryByKey.get(statusKey) === current) {
-          deliveryByKey.delete(statusKey);
+          let body: GitHubCommentReceipt;
+          try {
+            const parsed: unknown = await response.json();
+            body = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+              ? parsed as GitHubCommentReceipt
+              : {};
+          } catch {
+            throw new CallbackProviderOutcomeUnknownError("provider_receipt_missing");
+          }
+          const receipt = parseGitHubCommentReceipt({
+            body,
+            target,
+            ...(commentId ? { expectedCommentId: commentId } : {})
+          });
+          commentIdByKey.set(statusKey, receipt.commentId);
+          if (message.kind === "final") commentIdByKey.delete(statusKey);
+          return {
+            handled: true,
+            outcome: "accepted",
+            externalMessageId: receipt.providerReceiptId,
+            providerReceiptId: receipt.providerReceiptId,
+            providerResourceUri: receipt.providerResourceUri
+          };
         }
       });
     }
