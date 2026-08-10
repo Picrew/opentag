@@ -28,6 +28,7 @@ export const RelayCapabilitySchema = z.enum([
   "relay.work-thread-ref.v1",
   "relay.completion-contract-ref.v1",
   "relay.completion-assessment.v1",
+  "relay.completion-evidence.v1",
   "relay.callback-observation.v1",
   "relay.check-observation.v1",
 ]);
@@ -2804,6 +2805,217 @@ export const CompletionAssessmentReceiptEnvelopeV1Schema = z
     }
   });
 
+const CompletionEvidenceMetadataRefV1Schema =
+  GovernedProjectionStableReferenceV1Schema;
+
+const CompletionEvidenceTargetV1Schema = z
+  .object({
+    provider: CompletionEvidenceMetadataRefV1Schema,
+    resourceRef: CompletionEvidenceMetadataRefV1Schema,
+    resourceVersion: CompletionEvidenceMetadataRefV1Schema,
+  })
+  .strict();
+
+const CompletionEvidencePayloadAuthorityShape = {
+  evidenceId: CompletionEvidenceMetadataRefV1Schema,
+  authorityDigest: ReceiptDigestSchema,
+};
+
+export const RunArtifactCompletionEvidenceObservationPayloadV1Schema = z
+  .object({
+    evidenceType: z.literal("run_artifact"),
+    ...CompletionEvidencePayloadAuthorityShape,
+    artifactKind: CompletionEvidenceMetadataRefV1Schema,
+    sourceRunId: GovernedProjectionRunIdV1Schema,
+    target: CompletionEvidenceTargetV1Schema.optional(),
+    observedAt: ControlTimestampSchema,
+  })
+  .strict();
+
+export const VerificationCompletionEvidenceObservationPayloadV1Schema = z
+  .object({
+    evidenceType: z.literal("verification_evidence"),
+    ...CompletionEvidencePayloadAuthorityShape,
+    evidenceKind: CompletionEvidenceMetadataRefV1Schema,
+    assurance: z.enum(["verified", "reported", "unverifiable"]),
+    subject: CompletionEvidenceTargetV1Schema,
+    claim: z
+      .object({
+        predicate: CompletionEvidenceMetadataRefV1Schema,
+        outcome: CompletionEvidenceMetadataRefV1Schema,
+        observationsDigest: ReceiptDigestSchema.optional(),
+      })
+      .strict(),
+    provenancePayloadDigest: ReceiptDigestSchema,
+    observedAt: ControlTimestampSchema,
+    receivedAt: ControlTimestampSchema,
+  })
+  .strict()
+  .superRefine((evidence, ctx) => {
+    if (Date.parse(evidence.receivedAt) < Date.parse(evidence.observedAt)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["receivedAt"],
+        message: "Verification evidence cannot be received before it was observed.",
+      });
+    }
+  });
+
+export const MaterialActionCompletionEvidenceObservationPayloadV1Schema = z
+  .object({
+    evidenceType: z.literal("material_action"),
+    ...CompletionEvidencePayloadAuthorityShape,
+    actionId: CompletionEvidenceMetadataRefV1Schema,
+    actionFamily: CompletionEvidenceMetadataRefV1Schema,
+    outcome: CompletionEvidenceMetadataRefV1Schema,
+    observedAt: ControlTimestampSchema,
+  })
+  .strict();
+
+export const CompletionWaiverEvidenceObservationPayloadV1Schema = z
+  .object({
+    evidenceType: z.literal("completion_waiver"),
+    ...CompletionEvidencePayloadAuthorityShape,
+    contractId: CompletionEvidenceMetadataRefV1Schema,
+    version: z.number().int().positive(),
+    cycle: z.number().int().positive(),
+    runId: GovernedProjectionRunIdV1Schema,
+    gateIds: sortedUniqueArray(CompletionEvidenceMetadataRefV1Schema),
+    actorRef: CompletionEvidenceMetadataRefV1Schema,
+    reasonDigest: ReceiptDigestSchema,
+    waivedAt: ControlTimestampSchema,
+    expiresAt: ControlTimestampSchema.optional(),
+  })
+  .strict()
+  .superRefine((waiver, ctx) => {
+    if (
+      waiver.expiresAt !== undefined
+      && Date.parse(waiver.expiresAt) <= Date.parse(waiver.waivedAt)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["expiresAt"],
+        message: "Completion waiver expiry must follow the waiver instant.",
+      });
+    }
+  });
+
+export const HumanEscalationCompletionEvidenceObservationPayloadV1Schema = z
+  .object({
+    evidenceType: z.literal("human_escalation"),
+    ...CompletionEvidencePayloadAuthorityShape,
+    class: CompletionEvidenceMetadataRefV1Schema,
+    state: z.enum(["open", "acknowledged"]),
+    blocking: z.literal(true),
+    reasonDigest: ReceiptDigestSchema,
+    observedAt: ControlTimestampSchema,
+  })
+  .strict();
+
+export const CompletionEvidenceObservationPayloadV1Schema = z.discriminatedUnion(
+  "evidenceType",
+  [
+    RunArtifactCompletionEvidenceObservationPayloadV1Schema,
+    VerificationCompletionEvidenceObservationPayloadV1Schema,
+    MaterialActionCompletionEvidenceObservationPayloadV1Schema,
+    CompletionWaiverEvidenceObservationPayloadV1Schema,
+    HumanEscalationCompletionEvidenceObservationPayloadV1Schema,
+  ],
+);
+
+const CompletionEvidenceObservationReceiptEnvelopeBaseV1Schema = z
+  .object({
+    ...GovernedReceiptEnvelopeShape,
+    receiptKind: z.literal("completion_evidence_observation"),
+    attempt: GovernedProjectionAttemptRefV1Schema,
+    payload: CompletionEvidenceObservationPayloadV1Schema,
+  })
+  .strict();
+
+export const CompletionEvidenceObservationReceiptDigestInputV1Schema =
+  CompletionEvidenceObservationReceiptEnvelopeBaseV1Schema.omit({
+    receiptDigest: true,
+  });
+
+export const CompletionEvidenceObservationReceiptEnvelopeV1Schema =
+  CompletionEvidenceObservationReceiptEnvelopeBaseV1Schema.superRefine(
+    (receipt, ctx) => {
+      if (
+        !receipt.requiredCapabilities.includes("relay.completion-evidence.v1")
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["requiredCapabilities"],
+          message: "Completion evidence capability is required.",
+        });
+      }
+      const payloadObservedAt = receipt.payload.evidenceType === "completion_waiver"
+        ? receipt.payload.waivedAt
+        : receipt.payload.observedAt;
+      if (
+        receipt.producer.kind !== "local_opentag"
+        || payloadObservedAt !== receipt.observedAt
+        || (
+          receipt.payload.evidenceType === "run_artifact"
+          && receipt.payload.sourceRunId !== receipt.runId
+        )
+        || (
+          receipt.payload.evidenceType === "completion_waiver"
+          && receipt.payload.runId !== receipt.runId
+        )
+        || !hasExactReceiptIdentity(
+          receipt.identity,
+          "opentag.control.receipt/completion-evidence-observation/v1",
+          [
+            receipt.organizationId,
+            receipt.workThreadId,
+            receipt.runId,
+            receipt.payload.evidenceType,
+            receipt.payload.evidenceId,
+            receipt.payload.authorityDigest,
+          ],
+        )
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["payload"],
+          message: "Completion evidence must preserve local authority, custody, and exact identity.",
+        });
+      }
+    },
+  );
+
+export function computeCompletionEvidenceObservationPayloadDigestV1(
+  payload: z.input<typeof CompletionEvidenceObservationPayloadV1Schema>,
+): Promise<string> {
+  return computeControlPayloadDigestV1(
+    CompletionEvidenceObservationPayloadV1Schema.parse(payload),
+  );
+}
+
+export function computeCompletionEvidenceObservationReceiptDigestV1(
+  receipt: z.input<
+    typeof CompletionEvidenceObservationReceiptDigestInputV1Schema
+  >,
+): Promise<string> {
+  return computeControlReceiptDigestV1(
+    CompletionEvidenceObservationReceiptDigestInputV1Schema.parse(receipt),
+  );
+}
+
+export async function verifyCompletionEvidenceObservationReceiptDigestsV1(
+  receipt: z.input<typeof CompletionEvidenceObservationReceiptEnvelopeV1Schema>,
+): Promise<boolean> {
+  const parsed = CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+    receipt,
+  );
+  const { receiptDigest, ...digestInput } = parsed;
+  return parsed.payloadDigest
+      === await computeCompletionEvidenceObservationPayloadDigestV1(parsed.payload)
+    && receiptDigest
+      === await computeCompletionEvidenceObservationReceiptDigestV1(digestInput);
+}
+
 export const CallbackIntentObservationPayloadV1Schema = z
   .object({
     localIntentId: CallbackLocalIntentIdV1Schema,
@@ -3078,6 +3290,15 @@ export type HostedExecutorResultReceiptRefV1 = z.infer<
 export type WorkThreadRefReceiptEnvelopeV1 = z.infer<typeof WorkThreadRefReceiptEnvelopeV1Schema>;
 export type CompletionContractRefReceiptEnvelopeV1 = z.infer<typeof CompletionContractRefReceiptEnvelopeV1Schema>;
 export type CompletionAssessmentReceiptEnvelopeV1 = z.infer<typeof CompletionAssessmentReceiptEnvelopeV1Schema>;
+export type CompletionEvidenceObservationPayloadV1 = z.infer<
+  typeof CompletionEvidenceObservationPayloadV1Schema
+>;
+export type CompletionEvidenceObservationReceiptDigestInputV1 = z.infer<
+  typeof CompletionEvidenceObservationReceiptDigestInputV1Schema
+>;
+export type CompletionEvidenceObservationReceiptEnvelopeV1 = z.infer<
+  typeof CompletionEvidenceObservationReceiptEnvelopeV1Schema
+>;
 export type CallbackIntentObservationReceiptEnvelopeV1 = z.infer<
   typeof CallbackIntentObservationReceiptEnvelopeV1Schema
 >;

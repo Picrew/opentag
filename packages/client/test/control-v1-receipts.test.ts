@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  CompletionEvidenceObservationReceiptEnvelopeV1Schema,
+  computeCompletionEvidenceObservationPayloadDigestV1,
+  computeCompletionEvidenceObservationReceiptDigestV1,
+  type CompletionEvidenceObservationReceiptEnvelopeV1,
+} from "@opentag/core";
+import {
   createOpenTagClient,
   OpenTagControlV1HttpError,
   type CallbackObservationReceiptEnvelopeV1,
@@ -31,7 +37,12 @@ const base = {
   schemaVersion: 1 as const,
   protocolVersion: "1.0" as const,
   organizationId: "org_1",
-  producer: { kind: "local_opentag" as const, id: "local_1" },
+  producer: {
+    kind: "local_opentag" as const,
+    id: "local_1",
+    credentialId: "runtime_credential_1",
+    registrationGeneration: 1,
+  },
   observedAt,
   payloadDigest: digest,
   receiptDigest: otherDigest
@@ -80,12 +91,23 @@ function workThreadRef(): WorkThreadRefReceiptEnvelopeV1 {
       namespace: "opentag.control.receipt/work-thread-ref/v1",
       parts: ["org_1", "run/1", "thread_1"]
     },
+    predecessorReceiptDigests: [digest, otherDigest],
     payload: {
       workThreadId: "thread_1",
       sourceIdentityDigest: digest,
       localCreationReceiptId: "local_creation_1",
       localCreationReceiptDigest: digest,
       lineageKind: "source_thread",
+      hostedAuthorityRef: {
+        claimOperationId: "claim_operation_1",
+        authorityDigest: digest,
+        attempt,
+        admissionPolicySnapshot: {
+          receiptId: "admission_receipt_1",
+          snapshotId: "policy_1",
+          digest: otherDigest,
+        },
+      },
       createdAt: observedAt
     }
   };
@@ -145,6 +167,13 @@ function assessment(): CompletionAssessmentReceiptEnvelopeV1 {
       admissionPolicySnapshot: { snapshotId: "policy_1", digest },
       runId: "run_1",
       attempt,
+      executorResultReceiptRef: {
+        receiptId: `lifecycle_${"c".repeat(64)}`,
+        operationId: `op_${"1".repeat(64)}`,
+        requestId: `req_${"d".repeat(64)}`,
+        requestDigest: digest,
+        resultDigest: otherDigest,
+      },
       assessmentInputDigest: digest,
       evidenceReceiptDigests: [digest],
       gateResults: [{
@@ -232,11 +261,74 @@ function callbackProvider(): CallbackObservationReceiptEnvelopeV1 {
       localAttemptId: "callback_attempt_1",
       providerReceiptId: "provider_receipt_1",
       resourceIdentity: "github:comment:1",
+      targetIdentityDigest: digest,
       outcome: "succeeded",
       observedAt,
       reasonCode: "provider_accepted"
     }
   };
+}
+
+async function completionEvidence(): Promise<
+  CompletionEvidenceObservationReceiptEnvelopeV1
+> {
+  const payload = {
+    evidenceType: "verification_evidence" as const,
+    evidenceId: "verification_1",
+    authorityDigest: digest,
+    evidenceKind: "github_check",
+    assurance: "verified" as const,
+    subject: {
+      provider: "github",
+      resourceRef: "github:pull-request:42",
+      resourceVersion: "sha-abcdef1",
+    },
+    claim: {
+      predicate: "required_checks_passed",
+      outcome: "passed",
+      observationsDigest: otherDigest,
+    },
+    provenancePayloadDigest: otherDigest,
+    observedAt,
+    receivedAt: observedAt,
+  };
+  const { receiptDigest: _receiptDigest, ...baseWithoutReceiptDigest } = base;
+  const input = {
+    ...baseWithoutReceiptDigest,
+    receiptKind: "completion_evidence_observation" as const,
+    receiptId: "receipt_completion_evidence_1",
+    operationId: "op_completion_evidence_1",
+    requiredCapabilities: ["relay.completion-evidence.v1"] as const,
+    producer: {
+      kind: "local_opentag" as const,
+      id: "local_1",
+      credentialId: "runtime_credential_1",
+      registrationGeneration: 1,
+    },
+    runId: "run_1",
+    workThreadId: "thread_1",
+    attempt,
+    identity: {
+      namespace:
+        "opentag.control.receipt/completion-evidence-observation/v1",
+      parts: [
+        "org_1",
+        "thread_1",
+        "run_1",
+        "verification_evidence",
+        "verification_1",
+        digest,
+      ],
+    },
+    payload,
+    payloadDigest:
+      await computeCompletionEvidenceObservationPayloadDigestV1(payload),
+  };
+  return CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse({
+    ...input,
+    receiptDigest:
+      await computeCompletionEvidenceObservationReceiptDigestV1(input),
+  });
 }
 
 function client(fetchImpl: typeof fetch) {
@@ -295,6 +387,42 @@ describe("Control V1 typed receipt transport", () => {
       .reportRunnerReadinessControlV1(receipt);
 
     expect(result).toEqual({ status: 200, replayed: true, outcome: "accepted", receipt });
+  });
+
+  it("posts a digest-verified completion evidence observation to its dedicated route", async () => {
+    const receipt = await completionEvidence();
+    let requestUrl = "";
+    const result = await client(async (url) => {
+      requestUrl = String(url);
+      return jsonResponse(receipt, 201);
+    }).projectCompletionEvidenceControlV1(receipt);
+
+    expect(requestUrl).toBe(
+      "https://control.example/base/v1/runs/run_1/receipts/completion-evidence",
+    );
+    expect(result).toEqual({
+      status: 201,
+      replayed: false,
+      outcome: "accepted",
+      receipt,
+    });
+  });
+
+  it("rejects a completion evidence digest mismatch before transport", async () => {
+    const receipt = await completionEvidence();
+    let fetchCalls = 0;
+    await expect(
+      client(async () => {
+        fetchCalls += 1;
+        return jsonResponse({}, 500);
+      }).projectCompletionEvidenceControlV1({
+        ...receipt,
+        payloadDigest: otherDigest,
+      }),
+    ).rejects.toMatchObject({
+      responseBody: "invalid_completion_evidence_digest",
+    });
+    expect(fetchCalls).toBe(0);
   });
 
   it.each([

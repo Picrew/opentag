@@ -20,6 +20,8 @@ import {
   CompletionContractRefReceiptEnvelopeV1Schema,
   CompletionAssessmentPayloadV1Schema,
   CompletionAssessmentReceiptEnvelopeV1Schema,
+  CompletionEvidenceObservationPayloadV1Schema,
+  CompletionEvidenceObservationReceiptEnvelopeV1Schema,
   ControlMutationRequestV1Schema,
   ControlErrorHttpResponseV1Schema,
   ControlWaitingHttpResponseV1Schema,
@@ -28,6 +30,8 @@ import {
   computeMaterialActionFencingTokenDigestV1,
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
+  computeCompletionEvidenceObservationPayloadDigestV1,
+  computeCompletionEvidenceObservationReceiptDigestV1,
   computeMaterialActionPayloadDigestV1,
   computeMaterialActionReceiptDigestV1,
   computeHostedAdmissionEnvelopeDigestV1,
@@ -90,8 +94,10 @@ import {
   verifyHostedClaimFencingTokenDigestV1,
   verifyHostedExecutorResultReceiptRefV1,
   verifyHostedLifecycleReceiptV1,
+  verifyCompletionEvidenceObservationReceiptDigestsV1,
   type CompletionContractRefReceiptEnvelopeV1,
   type CompletionAssessmentReceiptEnvelopeV1,
+  type CompletionEvidenceObservationReceiptEnvelopeV1,
   type CallbackAttemptObservationReceiptEnvelopeV1,
   type CallbackIntentObservationReceiptEnvelopeV1,
   type CallbackProviderObservationReceiptEnvelopeV1,
@@ -117,6 +123,10 @@ const GOVERNED_PROJECTION_VECTORS_PATH = new URL(
   import.meta.url,
 );
 const GOVERNED_PROJECTION_VECTORS_SHA256 = "4b14911bdba4fb8d2bdefebf6e5c974e14feff8ecec0be54dbe2a0b58d2b656f";
+const COMPLETION_EVIDENCE_VECTORS_PATH = new URL(
+  "./fixtures/control-v1-completion-evidence-vectors.json",
+  import.meta.url,
+);
 
 function assessmentReceipt(): CompletionAssessmentReceiptEnvelopeV1 {
   return {
@@ -191,6 +201,78 @@ function assessmentReceipt(): CompletionAssessmentReceiptEnvelopeV1 {
     payloadDigest: digest,
     receiptDigest: otherDigest,
   };
+}
+
+async function completionEvidenceReceipt(
+  payload: CompletionEvidenceObservationReceiptEnvelopeV1["payload"] = {
+    evidenceType: "verification_evidence",
+    evidenceId: "verification_1",
+    authorityDigest: digest,
+    evidenceKind: "github_check",
+    assurance: "verified",
+    subject: {
+      provider: "github",
+      resourceRef: "github:pull-request:42",
+      resourceVersion: "sha-abcdef1",
+    },
+    claim: {
+      predicate: "required_checks_passed",
+      outcome: "passed",
+      observationsDigest: otherDigest,
+    },
+    provenancePayloadDigest: otherDigest,
+    observedAt,
+    receivedAt: observedAt,
+  },
+): Promise<CompletionEvidenceObservationReceiptEnvelopeV1> {
+  const payloadDigest = await computeCompletionEvidenceObservationPayloadDigestV1(
+    payload,
+  );
+  const input = {
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    receiptKind: "completion_evidence_observation",
+    receiptId: "completion_evidence_receipt_1",
+    organizationId: "org_1",
+    operationId: "completion_evidence_operation_1",
+    requiredCapabilities: ["relay.completion-evidence.v1"],
+    producer: {
+      kind: "local_opentag",
+      id: "runner_1",
+      credentialId: "runtime_credential_1",
+      registrationGeneration: 1,
+    },
+    identity: {
+      namespace:
+        "opentag.control.receipt/completion-evidence-observation/v1",
+      parts: [
+        "org_1",
+        "wt_1",
+        "run_1",
+        payload.evidenceType,
+        payload.evidenceId,
+        payload.authorityDigest,
+      ],
+    },
+    runId: "run_1",
+    workThreadId: "wt_1",
+    attempt: {
+      attemptId: "attempt_1",
+      attemptNumber: 1,
+      epoch: 1,
+      fencingTokenDigest: otherDigest,
+    },
+    observedAt: payload.evidenceType === "completion_waiver"
+      ? payload.waivedAt
+      : payload.observedAt,
+    payloadDigest,
+    payload,
+  } as const;
+  return CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse({
+    ...input,
+    receiptDigest:
+      await computeCompletionEvidenceObservationReceiptDigestV1(input),
+  });
 }
 
 describe("OpenTag Control V1 version and capability negotiation", () => {
@@ -2828,6 +2910,175 @@ describe("ReceiptEnvelope V1", () => {
       ...receipt,
       payload: withoutRef,
     }).success).toBe(false);
+  });
+
+  it("binds a completion evidence observation to exact local authority and deterministic digests", async () => {
+    const receipt = await completionEvidenceReceipt();
+    expect(
+      CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(receipt),
+    ).toEqual(receipt);
+    await expect(
+      verifyCompletionEvidenceObservationReceiptDigestsV1(receipt),
+    ).resolves.toBe(true);
+    await expect(
+      verifyCompletionEvidenceObservationReceiptDigestsV1({
+        ...receipt,
+        payloadDigest: otherDigest,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      verifyCompletionEvidenceObservationReceiptDigestsV1({
+        ...receipt,
+        receiptDigest: otherDigest,
+      }),
+    ).resolves.toBe(false);
+
+    expect(
+      CompletionEvidenceObservationReceiptEnvelopeV1Schema.safeParse({
+        ...receipt,
+        identity: {
+          ...receipt.identity,
+          parts: [
+            receipt.organizationId,
+            receipt.runId,
+            receipt.workThreadId,
+            receipt.payload.evidenceType,
+            receipt.payload.evidenceId,
+            receipt.payload.authorityDigest,
+          ],
+        },
+      }).success,
+    ).toBe(false);
+    const differentSchemaValidAttempt = {
+      ...receipt,
+      attempt: { ...receipt.attempt, attemptNumber: 2, epoch: 2 },
+    };
+    expect(
+      CompletionEvidenceObservationReceiptEnvelopeV1Schema.safeParse(
+        differentSchemaValidAttempt,
+      ).success,
+    ).toBe(true);
+    await expect(
+      verifyCompletionEvidenceObservationReceiptDigestsV1(
+        differentSchemaValidAttempt,
+      ),
+    ).resolves.toBe(false);
+  });
+
+  it("publishes a deterministic completion evidence interop vector", async () => {
+    const fixture = JSON.parse(
+      readFileSync(COMPLETION_EVIDENCE_VECTORS_PATH, "utf8"),
+    ) as { schemaVersion: number; vectors: Array<{ name: string; envelope: unknown }> };
+    expect(fixture.schemaVersion).toBe(1);
+    expect(fixture.vectors.map((vector) => vector.name)).toEqual([
+      "verification-evidence",
+    ]);
+    const envelope = CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+      fixture.vectors[0]?.envelope,
+    );
+    expect(envelope.payloadDigest).toBe(
+      "sha256:132f1f69a572bea244f9bd938226f2489a849e733ef71016922dbf34b6218b4d",
+    );
+    expect(envelope.receiptDigest).toBe(
+      "sha256:f78d246d1951c2c4acc5067feb87858dc8b371b2b5a8314cfe828be9332d4dd4",
+    );
+    await expect(
+      verifyCompletionEvidenceObservationReceiptDigestsV1(envelope),
+    ).resolves.toBe(true);
+  });
+
+  it("accepts all metadata-only completion evidence variants and rejects custody fields", async () => {
+    const variants = [
+      {
+        evidenceType: "run_artifact",
+        evidenceId: "run_1:created-pull-request",
+        authorityDigest: digest,
+        artifactKind: "pull_request",
+        sourceRunId: "run_1",
+        target: {
+          provider: "github",
+          resourceRef: "github:pull-request:42",
+          resourceVersion: "sha-abcdef1",
+        },
+        observedAt,
+      },
+      {
+        evidenceType: "material_action",
+        evidenceId: "material_action_1",
+        authorityDigest: digest,
+        actionId: "action_1",
+        actionFamily: "source_control_write",
+        outcome: "succeeded",
+        observedAt,
+      },
+      {
+        evidenceType: "completion_waiver",
+        evidenceId: "waiver_1",
+        authorityDigest: digest,
+        contractId: "contract_1",
+        version: 1,
+        cycle: 1,
+        runId: "run_1",
+        gateIds: ["artifact", "checks"],
+        actorRef: "operator_1",
+        reasonDigest: otherDigest,
+        waivedAt: observedAt,
+        expiresAt: "2026-08-08T01:00:00.000Z",
+      },
+      {
+        evidenceType: "human_escalation",
+        evidenceId: "escalation_1",
+        authorityDigest: digest,
+        class: "human_acceptance_missing",
+        state: "open",
+        blocking: true,
+        reasonDigest: otherDigest,
+        observedAt,
+      },
+    ] as const;
+    for (const payload of variants) {
+      expect(
+        CompletionEvidenceObservationPayloadV1Schema.safeParse(payload).success,
+      ).toBe(true);
+      await expect(completionEvidenceReceipt(payload)).resolves.toMatchObject({
+        payload,
+      });
+    }
+
+    const verification = (await completionEvidenceReceipt()).payload;
+    expect(verification.evidenceType).toBe("verification_evidence");
+    for (const poison of [
+      { uri: "https://api.github.com/repos/acme/private" },
+      { body: "private callback body" },
+      { path: "/Users/alice/private/repo" },
+      { credential: "github_pat_abcdefghijklmnopqrstuvwxyz123456" },
+    ]) {
+      expect(
+        CompletionEvidenceObservationPayloadV1Schema.safeParse({
+          ...verification,
+          ...poison,
+        }).success,
+      ).toBe(false);
+    }
+    for (const unsafeRef of [
+      "https://example.test/resource",
+      "/tmp/resource",
+      "../resource",
+      "xgithub_pat_abcdefghijklmnopqrstuvwxyz123456",
+    ]) {
+      expect(
+        CompletionEvidenceObservationPayloadV1Schema.safeParse({
+          ...verification,
+          subject: { ...verification.subject, resourceRef: unsafeRef },
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      CompletionEvidenceObservationPayloadV1Schema.safeParse({
+        ...verification,
+        evidenceType: "execution_compat",
+      }).success,
+    ).toBe(false);
   });
 
   it("uses the Run-scoped attempt number as the receipt fencing epoch", () => {

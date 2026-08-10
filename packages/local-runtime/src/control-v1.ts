@@ -7,6 +7,7 @@ import type {
   ActionPermissionRequest,
   ActionPermissionResolution,
   CompletionAssessmentReceiptEnvelopeV1,
+  CompletionEvidenceObservationReceiptEnvelopeV1,
   CompletionContractRefReceiptEnvelopeV1,
   HostedClaimRequestV1,
   HostedClaimV1,
@@ -77,6 +78,7 @@ export type ControlPlaneProjectionEnvelope =
   | WorkThreadRefReceiptEnvelopeV1
   | CompletionContractRefReceiptEnvelopeV1
   | CompletionAssessmentReceiptEnvelopeV1
+  | CompletionEvidenceObservationReceiptEnvelopeV1
   | CallbackObservationReceiptEnvelopeV1;
 
 export type ControlPlaneProjectionOutboxEntry = {
@@ -113,6 +115,7 @@ export type ControlProjectionRepository = {
 export type ControlProjectionClient = Pick<OpenTagClient,
   "reportRunnerReadinessControlV1" | "projectWorkThreadRefControlV1" |
   "projectCompletionContractRefControlV1" | "projectCompletionAssessmentControlV1" |
+  "projectCompletionEvidenceControlV1" |
   "projectCallbackObservationControlV1">;
 
 export type HostedLifecycleOperationEntry = {
@@ -223,7 +226,9 @@ async function deliverProjection(client: ControlProjectionClient, envelope: Cont
         ? await client.projectCompletionContractRefControlV1(envelope)
         : envelope.receiptKind === "completion_assessment"
           ? await client.projectCompletionAssessmentControlV1(envelope)
-          : await client.projectCallbackObservationControlV1(envelope);
+          : envelope.receiptKind === "completion_evidence_observation"
+            ? await client.projectCompletionEvidenceControlV1(envelope)
+            : await client.projectCallbackObservationControlV1(envelope);
   return result.status;
 }
 

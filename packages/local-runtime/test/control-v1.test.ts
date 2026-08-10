@@ -53,6 +53,91 @@ function callbackEntry(): ControlPlaneProjectionOutboxEntry {
   };
 }
 
+function completionEvidenceEntry(): ControlPlaneProjectionOutboxEntry {
+  const authorityDigest = `sha256:${"a".repeat(64)}`;
+  const payloadDigest = `sha256:${"c".repeat(64)}`;
+  const receiptDigest = `sha256:${"d".repeat(64)}`;
+  return {
+    receiptId: "completion_evidence_receipt_1",
+    destinationId: "cloud",
+    organizationId: "org_1",
+    runId: "run_1",
+    workThreadId: "work_thread_1",
+    receiptKind: "completion_evidence_observation",
+    identity: {
+      namespace:
+        "opentag.control.receipt/completion-evidence-observation/v1",
+      parts: [
+        "org_1",
+        "work_thread_1",
+        "run_1",
+        "human_escalation",
+        "escalation_1",
+        authorityDigest,
+      ],
+      key: "identity",
+    },
+    operationId: "completion_evidence_operation_1",
+    payloadDigest,
+    receiptDigest,
+    envelope: {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      receiptKind: "completion_evidence_observation",
+      receiptId: "completion_evidence_receipt_1",
+      organizationId: "org_1",
+      operationId: "completion_evidence_operation_1",
+      requiredCapabilities: ["relay.completion-evidence.v1"],
+      producer: {
+        kind: "local_opentag",
+        id: "runner_1",
+        credentialId: "runtime_credential_1",
+        registrationGeneration: 1,
+      },
+      identity: {
+        namespace:
+          "opentag.control.receipt/completion-evidence-observation/v1",
+        parts: [
+          "org_1",
+          "work_thread_1",
+          "run_1",
+          "human_escalation",
+          "escalation_1",
+          authorityDigest,
+        ],
+      },
+      observedAt: now.toISOString(),
+      payloadDigest,
+      receiptDigest,
+      runId: "run_1",
+      workThreadId: "work_thread_1",
+      attempt: {
+        attemptId: "attempt_1",
+        attemptNumber: 1,
+        epoch: 1,
+        fencingTokenDigest: `sha256:${"b".repeat(64)}`,
+      },
+      payload: {
+        evidenceType: "human_escalation",
+        evidenceId: "escalation_1",
+        authorityDigest,
+        class: "human_acceptance_missing",
+        state: "open",
+        blocking: true,
+        reasonDigest: `sha256:${"b".repeat(64)}`,
+        observedAt: now.toISOString(),
+      },
+    },
+    state: "leased",
+    attemptCount: 1,
+    leaseOwner: "pump_1",
+    leaseToken: "lease_1",
+    leaseExpiresAt: "2026-08-09T00:01:30.000Z",
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+  };
+}
+
 function harness(entry: ControlPlaneProjectionOutboxEntry) {
   let current: ControlPlaneProjectionOutboxEntry | undefined = entry;
   const repo: ControlProjectionRepository = {
@@ -67,6 +152,7 @@ function harness(entry: ControlPlaneProjectionOutboxEntry) {
     projectWorkThreadRefControlV1: vi.fn(),
     projectCompletionContractRefControlV1: vi.fn(),
     projectCompletionAssessmentControlV1: vi.fn(),
+    projectCompletionEvidenceControlV1: vi.fn(async (receipt) => ({ status: 201 as const, replayed: false as const, outcome: "accepted" as const, receipt })),
     projectCallbackObservationControlV1: vi.fn(async (receipt) => ({ status: 201 as const, replayed: false as const, outcome: "accepted" as const, receipt })),
   } satisfies ControlProjectionClient;
   return { repo, client };
@@ -2264,6 +2350,20 @@ describe("Control V1 projection pump", () => {
     await expect(pumpControlPlaneProjections(input)).resolves.toEqual({ delivered: 0, retried: 0, attention: 0 });
     expect(client.projectCallbackObservationControlV1).toHaveBeenCalledTimes(1);
     expect(repo.acknowledgeControlPlaneProjection).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes completion evidence through its typed endpoint before callback fallback", async () => {
+    const { repo, client } = harness(completionEvidenceEntry());
+    await expect(pumpControlPlaneProjections({
+      repo,
+      client,
+      destinationId: "cloud",
+      organizationId: "org_1",
+      leaseOwner: "pump_1",
+      now,
+    })).resolves.toEqual({ delivered: 1, retried: 0, attention: 0 });
+    expect(client.projectCompletionEvidenceControlV1).toHaveBeenCalledTimes(1);
+    expect(client.projectCallbackObservationControlV1).not.toHaveBeenCalled();
   });
 
   it("retries transport failures with bounded backoff and leaves no false acknowledgement", async () => {

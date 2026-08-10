@@ -21,6 +21,7 @@ import {
   computePermissionRequestDigestV1,
   canonicalJsonStringify,
   CompletionAssessmentReceiptEnvelopeV1Schema,
+  CompletionEvidenceObservationReceiptEnvelopeV1Schema,
   CompletionContractRefReceiptEnvelopeV1Schema,
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
@@ -42,6 +43,7 @@ import {
   verifyHostedAdmissionEnvelopeDigestV1,
   verifyHostedClaimExpectedAuthorityV1,
   verifyHostedClaimFencingTokenDigestV1,
+  verifyCompletionEvidenceObservationReceiptDigestsV1,
   MaterialActionReconcileHttpResponseV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
   MaterialActionStableIdV1Schema,
@@ -121,6 +123,7 @@ import {
   type WorkThreadRefReceiptEnvelopeV1,
   type CompletionContractRefReceiptEnvelopeV1,
   type CompletionAssessmentReceiptEnvelopeV1,
+  type CompletionEvidenceObservationReceiptEnvelopeV1,
   type RunnerRegistrationConfig,
   type RunnerRegistrationInput,
   type RunEventImportance,
@@ -683,6 +686,7 @@ export type OpenTagClient = {
   projectWorkThreadRefControlV1(input: WorkThreadRefReceiptEnvelopeV1): Promise<ControlReceiptResult<WorkThreadRefReceiptEnvelopeV1>>;
   projectCompletionContractRefControlV1(input: CompletionContractRefReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionContractRefReceiptEnvelopeV1>>;
   projectCompletionAssessmentControlV1(input: CompletionAssessmentReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionAssessmentReceiptEnvelopeV1>>;
+  projectCompletionEvidenceControlV1(input: CompletionEvidenceObservationReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionEvidenceObservationReceiptEnvelopeV1>>;
   projectCallbackObservationControlV1(input: CallbackObservationReceiptEnvelopeV1): Promise<CallbackObservationControlReceiptResult>;
   getRunner(input: { runnerId: string }): Promise<{ runner: RunnerRegistration }>;
   listRunners(): Promise<{ runners: RunnerDirectoryEntry[] }>;
@@ -2170,6 +2174,40 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         CompletionAssessmentReceiptEnvelopeV1Schema,
         undefined
       ) as Promise<ControlReceiptResult<CompletionAssessmentReceiptEnvelopeV1>>;
+    },
+
+    async projectCompletionEvidenceControlV1(input) {
+      const request = CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+        input,
+      );
+      const action = "projectCompletionEvidenceControlV1";
+      if (!(await verifyCompletionEvidenceObservationReceiptDigestsV1(request))) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_completion_evidence_digest",
+        );
+      }
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runs/${encodeURIComponent(request.runId)}/receipts/completion-evidence`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        request,
+        CompletionEvidenceObservationReceiptEnvelopeV1Schema,
+        undefined,
+      ) as Promise<
+        ControlReceiptResult<CompletionEvidenceObservationReceiptEnvelopeV1>
+      >;
     },
 
     async projectCallbackObservationControlV1(input) {
