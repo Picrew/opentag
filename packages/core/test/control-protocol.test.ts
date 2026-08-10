@@ -187,7 +187,7 @@ function assessmentReceipt(): CompletionAssessmentReceiptEnvelopeV1 {
         resultDigest: otherDigest,
       },
       assessmentInputDigest: digest,
-      evidenceReceiptDigests: [digest, otherDigest],
+      evidenceReceiptDigests: [digest],
       gateResults: [
         {
           gateId: "checks",
@@ -2957,6 +2957,83 @@ describe("ReceiptEnvelope V1", () => {
       ...receipt,
       payload: withoutRef,
     }).success).toBe(false);
+  });
+
+  it("requires completion assessment evidence, reason, and conclusion consistency", () => {
+    const receipt = assessmentReceipt();
+    const payload = receipt.payload;
+    expect(
+      CompletionAssessmentPayloadV1Schema.safeParse({
+        ...payload,
+        evidenceReceiptDigests: [],
+        gateResults: payload.gateResults.map((gate) => ({
+          ...gate,
+          evidenceReceiptDigests: [],
+        })),
+      }).success,
+    ).toBe(false);
+    expect(
+      CompletionAssessmentPayloadV1Schema.safeParse({
+        ...payload,
+        evidenceReceiptDigests: [digest, otherDigest],
+      }).success,
+    ).toBe(false);
+    expect(
+      CompletionAssessmentPayloadV1Schema.safeParse({
+        ...payload,
+        gateResults: payload.gateResults.map((gate) => ({
+          ...gate,
+          state: "blocked",
+        })),
+        conclusion: "blocked",
+      }).success,
+    ).toBe(false);
+    expect(
+      CompletionAssessmentPayloadV1Schema.safeParse({
+        ...payload,
+        conclusion: "pending",
+      }).success,
+    ).toBe(false);
+    expect(
+      CompletionAssessmentPayloadV1Schema.safeParse({
+        ...payload,
+        gateResults: [],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts execution compatibility success without generic completion evidence", () => {
+    const payload = assessmentReceipt().payload;
+    expect(
+      CompletionAssessmentPayloadV1Schema.safeParse({
+        ...payload,
+        evidenceReceiptDigests: [],
+        gateResults: [{
+          gateId: "executor_run",
+          state: "satisfied",
+          reasonCode: "execution_succeeded",
+          evidenceReceiptDigests: [],
+        }],
+        conclusion: "satisfied",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("preserves evidence-backed synthetic human escalation gates", () => {
+    const payload = assessmentReceipt().payload;
+    expect(
+      CompletionAssessmentPayloadV1Schema.safeParse({
+        ...payload,
+        evidenceReceiptDigests: [digest],
+        gateResults: [{
+          gateId: "human_escalation:escalation_1",
+          state: "blocked",
+          reasonCode: "human_acceptance_missing",
+          evidenceReceiptDigests: [digest],
+        }],
+        conclusion: "blocked",
+      }).success,
+    ).toBe(true);
   });
 
   it("binds a completion evidence observation to exact local authority and deterministic digests", async () => {

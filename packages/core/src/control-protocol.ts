@@ -2634,6 +2634,60 @@ const ContractAssessmentRefV1Schema = z
   })
   .strict();
 
+const CompletionAssessmentGateStateV1Schema = z.enum([
+  "pending",
+  "satisfied",
+  "unsatisfied",
+  "blocked",
+  "waived",
+]);
+
+const COMPLETION_ASSESSMENT_REASON_STATES_V1 = {
+  artifact_requirement_satisfied: ["satisfied"],
+  artifact_missing: ["pending"],
+  artifact_ambiguous: ["blocked"],
+  verification_passed: ["satisfied"],
+  verification_failed: ["unsatisfied"],
+  verification_missing: ["pending"],
+  verification_assurance_insufficient: ["blocked"],
+  verification_subject_mismatch: ["blocked"],
+  verification_stale: ["pending"],
+  external_state_satisfied: ["satisfied"],
+  external_state_mismatch: ["unsatisfied"],
+  external_state_missing: ["pending"],
+  external_state_assurance_insufficient: ["blocked"],
+  external_state_subject_mismatch: ["blocked"],
+  external_state_stale: ["pending"],
+  material_action_succeeded: ["satisfied"],
+  material_action_failed: ["unsatisfied"],
+  material_action_unknown: ["blocked"],
+  material_action_missing: ["pending"],
+  human_acceptance_recorded: ["satisfied"],
+  human_acceptance_missing: ["pending", "blocked"],
+  gate_waived: ["waived"],
+  waiver_invalid: ["blocked"],
+  execution_succeeded: ["satisfied"],
+  execution_incomplete: ["unsatisfied"],
+  execution_not_succeeded: ["unsatisfied"],
+} as const;
+
+const COMPLETION_ASSESSMENT_EVIDENCE_REQUIRED_REASONS_V1 = new Set<string>([
+  "artifact_requirement_satisfied",
+  "verification_passed",
+  "verification_failed",
+  "verification_assurance_insufficient",
+  "verification_stale",
+  "external_state_satisfied",
+  "external_state_mismatch",
+  "external_state_assurance_insufficient",
+  "external_state_stale",
+  "material_action_succeeded",
+  "material_action_failed",
+  "material_action_unknown",
+  "human_acceptance_recorded",
+  "gate_waived",
+] as const);
+
 export const CompletionAssessmentPayloadV1Schema = z
   .object({
     assessmentId: GovernedProjectionStableReferenceV1Schema,
@@ -2654,13 +2708,13 @@ export const CompletionAssessmentPayloadV1Schema = z
       z
         .object({
           gateId: GovernedProjectionStableReferenceV1Schema,
-          state: z.enum(["pending", "satisfied", "unsatisfied", "blocked", "waived"]),
+          state: CompletionAssessmentGateStateV1Schema,
           reasonCode: CompletionReasonCodeSchema,
           evidenceReceiptDigests: DigestSetSchema,
         })
         .strict(),
-    ),
-    conclusion: z.enum(["pending", "satisfied", "unsatisfied", "blocked", "waived"]),
+    ).min(1),
+    conclusion: CompletionAssessmentGateStateV1Schema,
     assessedAt: ControlTimestampSchema,
     assessedBy: GovernedProjectionStableReferenceV1Schema,
     supersedesAssessmentId: GovernedProjectionStableReferenceV1Schema.optional(),
@@ -2675,6 +2729,61 @@ export const CompletionAssessmentPayloadV1Schema = z
   })
   .strict()
   .superRefine((assessment, ctx) => {
+    const evidenceUnion = [...new Set(
+      assessment.gateResults.flatMap((gate) => gate.evidenceReceiptDigests),
+    )].sort(compareUnicodeCodePoints);
+    if (
+      canonicalJsonStringify(assessment.evidenceReceiptDigests)
+      !== canonicalJsonStringify(evidenceUnion)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["evidenceReceiptDigests"],
+        message: "Assessment evidence must equal the sorted unique union of gate evidence.",
+      });
+    }
+    assessment.gateResults.forEach((gate, index) => {
+      const compatibleStates = COMPLETION_ASSESSMENT_REASON_STATES_V1[
+        gate.reasonCode
+      ] as readonly string[];
+      if (!compatibleStates.includes(gate.state)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["gateResults", index, "state"],
+          message: "Completion gate reason and state are incompatible.",
+        });
+      }
+      if (
+        COMPLETION_ASSESSMENT_EVIDENCE_REQUIRED_REASONS_V1.has(
+          gate.reasonCode,
+        )
+        && gate.evidenceReceiptDigests.length === 0
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["gateResults", index, "evidenceReceiptDigests"],
+          message: "This completion gate reason requires local evidence.",
+        });
+      }
+    });
+    const gateStates = assessment.gateResults.map((gate) => gate.state);
+    const conclusionConsistent = assessment.conclusion === "satisfied"
+      ? gateStates.every((state) => state === "satisfied")
+      : assessment.conclusion === "waived"
+        ? gateStates.some((state) => state === "waived")
+          && gateStates.every((state) => state === "satisfied" || state === "waived")
+        : assessment.conclusion === "blocked"
+          ? gateStates.some((state) => state === "blocked")
+          : assessment.conclusion === "unsatisfied"
+            ? gateStates.some((state) => state === "unsatisfied")
+            : gateStates.some((state) => state === "pending");
+    if (!conclusionConsistent) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["conclusion"],
+        message: "Assessment conclusion is inconsistent with its gate states.",
+      });
+    }
     if (assessment.conclusion === "waived" && assessment.waiver === undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["waiver"], message: "A human waiver reference is required." });
     }
