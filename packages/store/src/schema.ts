@@ -1101,7 +1101,7 @@ export const controlPlaneProjectionOutbox = sqliteTable(
     ),
     receiptKindCheck: check(
       "control_plane_projection_outbox_receipt_kind_check",
-      sql`${table.receiptKind} IN ('runner_readiness', 'work_thread_ref', 'completion_contract_ref', 'completion_assessment', 'callback_intent_observation', 'callback_attempt_observation', 'callback_provider_observation')`
+      sql`${table.receiptKind} IN ('runner_readiness', 'work_thread_ref', 'completion_contract_ref', 'completion_evidence_observation', 'completion_assessment', 'callback_intent_observation', 'callback_attempt_observation', 'callback_provider_observation')`
     ),
     jsonShapeCheck: check(
       "control_plane_projection_outbox_json_shape_check",
@@ -1463,7 +1463,7 @@ function migrateControlPlaneProjectionOutboxSchema(sqlite: Database.Database): v
         CONSTRAINT control_plane_projection_outbox_receipt_kind_check CHECK (
           receipt_kind IN (
             'runner_readiness', 'work_thread_ref', 'completion_contract_ref',
-            'completion_assessment', 'callback_intent_observation',
+            'completion_evidence_observation', 'completion_assessment', 'callback_intent_observation',
             'callback_attempt_observation', 'callback_provider_observation'
           )
         ),
@@ -2068,6 +2068,159 @@ function migrateControlPlaneProjectionDependenciesSchema(sqlite: Database.Databa
       migrationId,
       new Date().toISOString()
     );
+  })();
+}
+
+function migrateControlPlaneProjectionEvidenceKindSchema(
+  sqlite: Database.Database
+): void {
+  const migrationId = "2026-08-10-control-plane-projection-evidence-kind-v1";
+  const applied = sqlite.prepare(
+    "SELECT id FROM opentag_schema_migrations WHERE id = ?"
+  ).get(migrationId);
+  if (applied) return;
+
+  sqlite.transaction(() => {
+    const table = sqlite.prepare(`
+      SELECT sql
+      FROM sqlite_master
+      WHERE type = 'table' AND name = 'control_plane_projection_outbox'
+    `).get() as { sql: string } | undefined;
+    if (!table) {
+      throw new Error("control_plane_projection_outbox_missing");
+    }
+
+    if (!table.sql.includes("'completion_evidence_observation'")) {
+      const dependentSchema = sqlite.prepare(`
+        SELECT type, name, sql
+        FROM sqlite_master
+        WHERE tbl_name = 'control_plane_projection_outbox'
+          AND type IN ('index', 'trigger')
+          AND sql IS NOT NULL
+        ORDER BY CASE type WHEN 'index' THEN 0 ELSE 1 END, name
+      `).all() as Array<{
+        type: "index" | "trigger";
+        name: string;
+        sql: string;
+      }>;
+
+      for (const schema of dependentSchema) {
+        if (schema.type !== "trigger") continue;
+        const quotedName = schema.name.replaceAll('"', '""');
+        sqlite.exec(`DROP TRIGGER "${quotedName}"`);
+      }
+
+      sqlite.exec(`
+        ALTER TABLE control_plane_projection_outbox
+          RENAME TO control_plane_projection_outbox_legacy_evidence_kind;
+
+        CREATE TABLE control_plane_projection_outbox (
+          receipt_id TEXT NOT NULL,
+          destination_id TEXT NOT NULL,
+          organization_id TEXT NOT NULL,
+          runner_id TEXT,
+          run_id TEXT,
+          work_thread_id TEXT,
+          receipt_kind TEXT NOT NULL,
+          identity_namespace TEXT NOT NULL,
+          identity_parts_json TEXT NOT NULL,
+          identity_key TEXT NOT NULL,
+          operation_id TEXT NOT NULL,
+          depends_on_receipt_id TEXT,
+          requires_lifecycle_operation_id TEXT,
+          payload_digest TEXT NOT NULL,
+          receipt_digest TEXT NOT NULL,
+          envelope_json TEXT NOT NULL,
+          state TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL DEFAULT 0
+            CHECK (typeof(attempt_count) = 'integer' AND attempt_count >= 0),
+          next_attempt_at TEXT,
+          lease_owner TEXT,
+          lease_token TEXT,
+          lease_expires_at TEXT,
+          last_reason_code TEXT,
+          last_http_status INTEGER
+            CHECK (last_http_status IS NULL OR (
+              typeof(last_http_status) = 'integer'
+              AND last_http_status >= 100
+              AND last_http_status <= 599
+            )),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          acknowledged_at TEXT,
+          CONSTRAINT control_plane_projection_outbox_pk
+            PRIMARY KEY (destination_id, organization_id, receipt_id),
+          CONSTRAINT control_plane_projection_outbox_receipt_kind_check CHECK (
+            receipt_kind IN (
+              'runner_readiness', 'work_thread_ref', 'completion_contract_ref',
+              'completion_evidence_observation', 'completion_assessment',
+              'callback_intent_observation', 'callback_attempt_observation',
+              'callback_provider_observation'
+            )
+          ),
+          CONSTRAINT control_plane_projection_outbox_json_shape_check CHECK (
+            json_valid(identity_parts_json)
+            AND json_type(identity_parts_json) = 'array'
+            AND json_valid(envelope_json)
+            AND json_type(envelope_json) = 'object'
+          ),
+          CONSTRAINT control_plane_projection_outbox_digest_shape_check CHECK (
+            length(payload_digest) = 71
+            AND substr(payload_digest, 1, 7) = 'sha256:'
+            AND substr(payload_digest, 8) NOT GLOB '*[^0-9a-f]*'
+            AND length(receipt_digest) = 71
+            AND substr(receipt_digest, 1, 7) = 'sha256:'
+            AND substr(receipt_digest, 8) NOT GLOB '*[^0-9a-f]*'
+          ),
+          CONSTRAINT control_plane_projection_outbox_state_shape_check CHECK (
+            (state = 'pending' AND next_attempt_at IS NOT NULL
+              AND lease_owner IS NULL AND lease_token IS NULL
+              AND lease_expires_at IS NULL AND acknowledged_at IS NULL)
+            OR (state = 'leased' AND next_attempt_at IS NOT NULL
+              AND lease_owner IS NOT NULL AND lease_token IS NOT NULL
+              AND lease_expires_at IS NOT NULL AND acknowledged_at IS NULL)
+            OR (state = 'acknowledged' AND next_attempt_at IS NULL
+              AND lease_owner IS NULL AND lease_token IS NULL
+              AND lease_expires_at IS NULL AND acknowledged_at IS NOT NULL)
+            OR (state = 'attention' AND next_attempt_at IS NULL
+              AND lease_owner IS NULL AND lease_token IS NULL
+              AND lease_expires_at IS NULL AND acknowledged_at IS NULL
+              AND last_reason_code IS NOT NULL)
+          )
+        );
+
+        INSERT INTO control_plane_projection_outbox (
+          receipt_id, destination_id, organization_id, runner_id, run_id,
+          work_thread_id, receipt_kind, identity_namespace,
+          identity_parts_json, identity_key, operation_id,
+          depends_on_receipt_id, requires_lifecycle_operation_id,
+          payload_digest, receipt_digest, envelope_json, state, attempt_count,
+          next_attempt_at, lease_owner, lease_token, lease_expires_at,
+          last_reason_code, last_http_status, created_at, updated_at,
+          acknowledged_at
+        )
+        SELECT
+          receipt_id, destination_id, organization_id, runner_id, run_id,
+          work_thread_id, receipt_kind, identity_namespace,
+          identity_parts_json, identity_key, operation_id,
+          depends_on_receipt_id, requires_lifecycle_operation_id,
+          payload_digest, receipt_digest, envelope_json, state, attempt_count,
+          next_attempt_at, lease_owner, lease_token, lease_expires_at,
+          last_reason_code, last_http_status, created_at, updated_at,
+          acknowledged_at
+        FROM control_plane_projection_outbox_legacy_evidence_kind;
+
+        DROP TABLE control_plane_projection_outbox_legacy_evidence_kind;
+      `);
+
+      for (const schema of dependentSchema) {
+        sqlite.exec(schema.sql);
+      }
+    }
+
+    sqlite.prepare(
+      "INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)"
+    ).run(migrationId, new Date().toISOString());
   })();
 }
 
@@ -3082,6 +3235,7 @@ export function migrateSchema(sqlite: Database.Database): void {
   migrateReassessmentObligationSchema(sqlite);
   migrateControlPlaneProjectionOutboxSchema(sqlite);
   migrateControlPlaneProjectionDependenciesSchema(sqlite);
+  migrateControlPlaneProjectionEvidenceKindSchema(sqlite);
   migrateHostedRunImportSchema(sqlite);
   migrateHostedExecutionStartSchema(sqlite);
   migrateHostedClaimAuthorityShellSchema(sqlite);

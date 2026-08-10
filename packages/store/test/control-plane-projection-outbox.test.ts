@@ -21,6 +21,7 @@ import { migrateSchema } from "../src/schema.js";
 
 const DIGEST = `sha256:${"a".repeat(64)}`;
 const OTHER_DIGEST = `sha256:${"b".repeat(64)}`;
+const CONTRACT_RECEIPT_DIGEST = `sha256:${"c".repeat(64)}`;
 const NOW = new Date("2026-08-08T00:00:00.000Z");
 
 const LOCAL_PRODUCER = {
@@ -131,6 +132,55 @@ function callbackProviderReceipt(
   });
 }
 
+function completionEvidenceReceipt() {
+  return withProjectionDigests({
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    receiptKind: "completion_evidence_observation",
+    receiptId: "receipt_completion_evidence_1",
+    organizationId: "org_1",
+    operationId: "operation_completion_evidence_1",
+    requiredCapabilities: ["relay.completion-evidence.v1"],
+    producer: LOCAL_PRODUCER,
+    identity: {
+      namespace: "opentag.control.receipt/completion-evidence-observation/v1",
+      parts: [
+        "org_1",
+        "work_thread_1",
+        "run_1",
+        "verification_evidence",
+        "evidence_1",
+        DIGEST,
+        CONTRACT_RECEIPT_DIGEST,
+      ],
+    },
+    predecessorReceiptDigests: [CONTRACT_RECEIPT_DIGEST],
+    observedAt: NOW.toISOString(),
+    runId: "run_1",
+    workThreadId: "work_thread_1",
+    attempt: ATTEMPT_REF,
+    payload: {
+      evidenceType: "verification_evidence",
+      evidenceId: "evidence_1",
+      authorityDigest: DIGEST,
+      evidenceKind: "source_control.required_checks",
+      assurance: "verified",
+      subject: {
+        provider: "github",
+        resourceRef: "github:acme/demo:pull_request:7",
+        resourceVersion: "abc123",
+      },
+      claim: {
+        predicate: "checks",
+        outcome: "passed",
+      },
+      provenancePayloadDigest: OTHER_DIGEST,
+      observedAt: NOW.toISOString(),
+      receivedAt: NOW.toISOString(),
+    },
+  });
+}
+
 function allowedReceipts() {
   const governed = {
     schemaVersion: 1 as const,
@@ -177,7 +227,7 @@ function allowedReceipts() {
       requiredCapabilities: ["relay.completion-contract-ref.v1"],
       identity: {
         namespace: "opentag.control.receipt/completion-contract-ref/v1",
-        parts: ["org_1", "work_thread_1", "contract_1", "1", "1"]
+        parts: ["org_1", "run_1", "work_thread_1", "contract_1", "1", "1"]
       },
       payload: {
         contractId: "contract_1",
@@ -185,11 +235,12 @@ function allowedReceipts() {
         cycle: 1,
         mode: "governed",
         contentDigest: DIGEST,
-        resolvedTargetDigests: [DIGEST],
+        resolvedTargetDigests: [],
         requiredGateIds: ["checks"],
         createdAt: NOW.toISOString()
       }
     }),
+    completionEvidenceReceipt(),
     withProjectionDigests({
       ...governed,
       receiptKind: "completion_assessment",
@@ -418,7 +469,9 @@ describe("control_plane_projection_outbox", () => {
       now: new Date("2026-08-08T00:00:02.000Z")
     })).toMatchObject({ entries: [{ receiptId: child.receiptId }] });
 
-    const assessment = allowedReceipts()[3]!;
+    const assessment = allowedReceipts().find(
+      (receipt) => receipt.receiptKind === "completion_assessment"
+    )!;
     await repo.enqueueControlPlaneProjection({
       destinationId: "cloud",
       envelope: assessment,
@@ -607,15 +660,15 @@ describe("control_plane_projection_outbox", () => {
       }],
     });
   });
-  it("accepts exactly the seven current Control V1 projection receipt schemas", async () => {
+  it("accepts exactly the eight current Control V1 projection receipt schemas", async () => {
     const { sqlite, repo } = repository();
     const outcomes = [];
     for (const envelope of allowedReceipts()) {
       outcomes.push(await repo.enqueueControlPlaneProjection({ destinationId: "cloud", envelope, now: NOW }));
     }
-    expect(outcomes.map((outcome) => outcome.outcome)).toEqual(Array(7).fill("created"));
+    expect(outcomes.map((outcome) => outcome.outcome)).toEqual(Array(8).fill("created"));
     expect(sqlite.prepare("SELECT receipt_kind AS receiptKind FROM control_plane_projection_outbox ORDER BY receipt_kind")
-      .all()).toHaveLength(7);
+      .all()).toHaveLength(8);
     sqlite.close();
   });
 
@@ -638,6 +691,151 @@ describe("control_plane_projection_outbox", () => {
       "invalid", "cloud", "org", "work_thread_ref", "namespace", "[]", "key", "operation",
       DIGEST, DIGEST, "{}", NOW.toISOString(), NOW.toISOString()
     )).toThrow();
+    sqlite.close();
+  });
+
+  it("upgrades a populated legacy receipt-kind check without losing rows or guards", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await expect(repo.enqueueControlPlaneProjection({
+      destinationId: "cloud",
+      envelope: workThreadReceipt(),
+      dependsOnReceiptId: "receipt_parent_legacy",
+      requiresLifecycleOperationId: "operation_complete_legacy",
+      now: NOW,
+    })).resolves.toMatchObject({ outcome: "created" });
+    const before = sqlite.prepare(`
+      SELECT * FROM control_plane_projection_outbox
+      WHERE destination_id = 'cloud' AND organization_id = 'org_1'
+        AND receipt_id = 'receipt_work_thread_1'
+    `).get();
+
+    const tableSql = (sqlite.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'table' AND name = 'control_plane_projection_outbox'
+    `).get() as { sql: string }).sql;
+    const legacyTableSql = tableSql.replace(
+      /'completion_evidence_observation',\s*/u,
+      ""
+    );
+    expect(legacyTableSql).not.toBe(tableSql);
+    const dependentSchema = sqlite.prepare(`
+      SELECT type, name, sql FROM sqlite_master
+      WHERE tbl_name = 'control_plane_projection_outbox'
+        AND type IN ('index', 'trigger') AND sql IS NOT NULL
+      ORDER BY CASE type WHEN 'index' THEN 0 ELSE 1 END, name
+    `).all() as Array<{
+      type: "index" | "trigger";
+      name: string;
+      sql: string;
+    }>;
+    sqlite.transaction(() => {
+      for (const schema of dependentSchema) {
+        if (schema.type !== "trigger") continue;
+        sqlite.exec(`DROP TRIGGER "${schema.name.replaceAll('"', '""')}"`);
+      }
+      sqlite.exec(`
+        ALTER TABLE control_plane_projection_outbox
+          RENAME TO control_plane_projection_outbox_modern;
+        ${legacyTableSql};
+        INSERT INTO control_plane_projection_outbox (
+          receipt_id, destination_id, organization_id, runner_id, run_id,
+          work_thread_id, receipt_kind, identity_namespace,
+          identity_parts_json, identity_key, operation_id,
+          depends_on_receipt_id, requires_lifecycle_operation_id,
+          payload_digest, receipt_digest, envelope_json, state, attempt_count,
+          next_attempt_at, lease_owner, lease_token, lease_expires_at,
+          last_reason_code, last_http_status, created_at, updated_at,
+          acknowledged_at
+        )
+        SELECT
+          receipt_id, destination_id, organization_id, runner_id, run_id,
+          work_thread_id, receipt_kind, identity_namespace,
+          identity_parts_json, identity_key, operation_id,
+          depends_on_receipt_id, requires_lifecycle_operation_id,
+          payload_digest, receipt_digest, envelope_json, state, attempt_count,
+          next_attempt_at, lease_owner, lease_token, lease_expires_at,
+          last_reason_code, last_http_status, created_at, updated_at,
+          acknowledged_at
+        FROM control_plane_projection_outbox_modern;
+        DROP TABLE control_plane_projection_outbox_modern;
+      `);
+      for (const schema of dependentSchema) sqlite.exec(schema.sql);
+      sqlite.prepare(
+        "DELETE FROM opentag_schema_migrations WHERE id = ?"
+      ).run("2026-08-10-control-plane-projection-evidence-kind-v1");
+    })();
+
+    expect(() => sqlite.prepare(`
+      INSERT INTO control_plane_projection_outbox (
+        receipt_id, destination_id, organization_id, receipt_kind,
+        identity_namespace, identity_parts_json, identity_key, operation_id,
+        payload_digest, receipt_digest, envelope_json, state, attempt_count,
+        next_attempt_at, created_at, updated_at
+      ) VALUES (
+        'legacy_evidence', 'legacy', 'org_1',
+        'completion_evidence_observation', 'legacy', '[]', 'legacy',
+        'legacy_operation', ?, ?, '{}', 'pending', 0, ?, ?, ?
+      )
+    `).run(DIGEST, DIGEST, NOW.toISOString(), NOW.toISOString(), NOW.toISOString()))
+      .toThrow();
+
+    migrateSchema(sqlite);
+    migrateSchema(sqlite);
+    expect(sqlite.prepare(`
+      SELECT * FROM control_plane_projection_outbox
+      WHERE destination_id = 'cloud' AND organization_id = 'org_1'
+        AND receipt_id = 'receipt_work_thread_1'
+    `).get()).toEqual(before);
+    expect(sqlite.prepare(`
+      SELECT count(*) AS count FROM opentag_schema_migrations WHERE id = ?
+    `).get("2026-08-10-control-plane-projection-evidence-kind-v1"))
+      .toEqual({ count: 1 });
+    const indexNames = (sqlite.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'index' AND tbl_name = 'control_plane_projection_outbox'
+    `).all() as Array<{ name: string }>).map((row) => row.name);
+    expect(indexNames).toEqual(expect.arrayContaining([
+      "control_plane_projection_outbox_destination_identity_idx",
+      "control_plane_projection_outbox_destination_operation_idx",
+      "control_plane_projection_outbox_due_idx",
+      "control_plane_projection_outbox_tenant_idx",
+    ]));
+
+    const upgradedRepo = createOpenTagRepository(drizzle(sqlite));
+    await expect(upgradedRepo.enqueueControlPlaneProjection({
+      destinationId: "cloud",
+      envelope: completionEvidenceReceipt(),
+      now: NOW,
+    })).resolves.toMatchObject({ outcome: "created" });
+    expect(() => sqlite.prepare(`
+      INSERT INTO control_plane_projection_outbox (
+        receipt_id, destination_id, organization_id, receipt_kind,
+        identity_namespace, identity_parts_json, identity_key, operation_id,
+        payload_digest, receipt_digest, envelope_json, state, attempt_count,
+        next_attempt_at, created_at, updated_at
+      ) VALUES (
+        'unknown_receipt', 'unknown', 'org_1', 'unknown_kind',
+        'unknown', '[]', 'unknown', 'unknown_operation', ?, ?, '{}',
+        'pending', 0, ?, ?, ?
+      )
+    `).run(DIGEST, DIGEST, NOW.toISOString(), NOW.toISOString(), NOW.toISOString()))
+      .toThrow();
+    expect(() => sqlite.prepare(`
+      UPDATE control_plane_projection_outbox
+      SET receipt_digest = ? WHERE receipt_id = 'receipt_work_thread_1'
+    `).run(OTHER_DIGEST)).toThrow(/immutable/u);
+    expect(() => sqlite.prepare(`
+      UPDATE control_plane_projection_outbox
+      SET state = 'attention', next_attempt_at = NULL,
+        last_reason_code = 'operator_required'
+      WHERE receipt_id = 'receipt_work_thread_1'
+    `).run()).toThrow(/transition_invalid/u);
+    expect(() => sqlite.prepare(`
+      DELETE FROM control_plane_projection_outbox
+      WHERE receipt_id = 'receipt_work_thread_1'
+    `).run()).toThrow(/delete_forbidden/u);
     sqlite.close();
   });
 
@@ -1431,7 +1629,7 @@ describe("control_plane_projection_outbox", () => {
   it("rejects fresh-digest unsafe references across every governed projection before writing", async () => {
     const { sqlite, repo } = repository();
     const governed = allowedReceipts().filter((receipt) => receipt.receiptKind !== "runner_readiness");
-    expect(governed).toHaveLength(6);
+    expect(governed).toHaveLength(7);
 
     for (const receipt of governed) {
       for (const [field, unsafeValue] of [
@@ -1460,6 +1658,11 @@ describe("control_plane_projection_outbox", () => {
           return {
             ...receipt,
             payload: { ...payload, contractId: "contract_github_pat_abcdefghijklmnopqrstuvwxyz123456" },
+          };
+        case "completion_evidence_observation":
+          return {
+            ...receipt,
+            payload: { ...payload, evidenceId: "/tmp/evidence" },
           };
         case "completion_assessment":
           return {
