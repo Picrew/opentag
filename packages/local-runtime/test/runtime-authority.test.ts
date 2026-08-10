@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { OpenTagDaemonConfig } from "../src/index.js";
 import {
   createDaemonClient,
+  createDaemonRuntimeInput,
+  pullRequestOptionsFromConfig,
   serveDaemon,
 } from "../src/index.js";
 
@@ -41,6 +43,50 @@ const pairedConfig: OpenTagDaemonConfig = {
 };
 
 describe("local-runtime public authority boundary", () => {
+  it("accepts the non-persisted E2E GitHub origin only for the sentinel Hosted Control runtime", async () => {
+    const config = {
+      ...pairedConfig,
+      githubToken: "opentag_e2e_no_provider_credential_v1",
+    };
+    expect(pullRequestOptionsFromConfig(config)).toBeUndefined();
+    const runtime = createDaemonRuntimeInput(config, {
+      databasePath: ":memory:",
+      githubApiOrigin: "http://127.0.0.1:43123",
+    });
+    expect(runtime.mode).toBe("control-v1-sidecar");
+    if (runtime.mode === "control-v1-sidecar") {
+      await runtime.controlLoop.close();
+    }
+  });
+
+  it("rejects E2E GitHub origins outside Hosted Control without exposing values", () => {
+    const { controlRegistration: _registration, ...legacyConfig } = pairedConfig;
+    const apiOrigin = "http://127.0.0.1:43123";
+    expect(() => createDaemonRuntimeInput(legacyConfig, { githubApiOrigin: apiOrigin }))
+      .toThrow(/requires paired Hosted Control V1/u);
+    expect(() => createDaemonRuntimeInput({
+      ...pairedConfig,
+      githubToken: "opentag_e2e_no_provider_credential_v1",
+    }, {
+      databasePath: ":memory:",
+      githubApiOrigin: "",
+    })).toThrow("github_source_api_origin_invalid");
+
+    const token = "real_provider_secret";
+    try {
+      createDaemonRuntimeInput({ ...pairedConfig, githubToken: token }, {
+        databasePath: ":memory:",
+        githubApiOrigin: apiOrigin,
+      });
+      throw new Error("expected E2E origin rejection");
+    } catch (error) {
+      const loggable = error instanceof Error ? `${error.name}:${error.message}` : String(error);
+      expect(loggable).toContain("github_source_api_origin_invalid");
+      expect(loggable).not.toContain(token);
+      expect(loggable).not.toContain(apiOrigin);
+    }
+  });
+
   it("rejects a legacy claim-capable client for paired Control V1 config", () => {
     expect(() => createDaemonClient(pairedConfig)).toThrow(
       /does not expose a legacy claim-capable daemon client/iu

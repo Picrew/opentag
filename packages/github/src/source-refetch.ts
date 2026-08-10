@@ -9,6 +9,8 @@ import {
 import { normalizeGitHubIssueComment } from "./normalize.js";
 
 const GITHUB_API_ORIGIN = "https://api.github.com";
+export const OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1 =
+  "opentag_e2e_no_provider_credential_v1";
 
 export type GitHubIssueCommentRefetchReceipt = {
   provider: "github";
@@ -37,6 +39,7 @@ export class GitHubSourceRefetchError extends Error {
   constructor(readonly code:
     | "github_source_missing"
     | "github_source_refetch_failed"
+    | "github_source_api_origin_invalid"
     | "github_source_invalid"
     | "github_source_identity_mismatch"
     | "github_source_semantic_mismatch"
@@ -77,6 +80,24 @@ function requestHeaders(token: string): Record<string, string> {
     authorization: `Bearer ${token}`,
     "x-github-api-version": "2022-11-28",
   };
+}
+
+export function resolveGitHubSourceApiOrigin(input: {
+  token: string;
+  apiOrigin?: string;
+}): string {
+  if (input.apiOrigin === undefined) return GITHUB_API_ORIGIN;
+  if (input.token !== OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1) {
+    throw new GitHubSourceRefetchError("github_source_api_origin_invalid");
+  }
+  const match = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})$/u.exec(
+    input.apiOrigin,
+  );
+  const port = match ? Number(match[1]) : Number.NaN;
+  if (!Number.isSafeInteger(port) || port > 65_535) {
+    throw new GitHubSourceRefetchError("github_source_api_origin_invalid");
+  }
+  return input.apiOrigin;
 }
 
 async function fetchGitHubJson(input: {
@@ -121,6 +142,7 @@ function assertIdentity(condition: boolean): void {
 export async function refetchGitHubIssueCommentForHostedAdmission(input: {
   admission: HostedAdmissionEnvelopeV1;
   token: string;
+  apiOrigin?: string;
   fetchImpl?: typeof fetch;
   now?: () => Date;
 }): Promise<RefetchedGitHubIssueComment> {
@@ -141,10 +163,14 @@ export async function refetchGitHubIssueCommentForHostedAdmission(input: {
     throw new GitHubSourceRefetchError("github_source_refetch_failed");
   }
 
+  const apiOrigin = resolveGitHubSourceApiOrigin({
+    token: input.token,
+    ...(input.apiOrigin !== undefined ? { apiOrigin: input.apiOrigin } : {}),
+  });
   const fetchImpl = input.fetchImpl ?? fetch;
   const owner = admission.repository.owner;
   const repo = admission.repository.repo;
-  const repositoryUrl = `${GITHUB_API_ORIGIN}/repos/${encodePath(owner)}/${encodePath(repo)}`;
+  const repositoryUrl = `${apiOrigin}/repos/${encodePath(owner)}/${encodePath(repo)}`;
   const issueUrl = `${repositoryUrl}/issues/${admission.sourceThread.number}`;
   const commentUrl = `${repositoryUrl}/issues/comments/${encodePath(admission.sourceEvent.providerEventId)}`;
 

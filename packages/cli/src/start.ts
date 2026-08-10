@@ -10,7 +10,12 @@ import {
   type RepositoryBindingConfig
 } from "@opentag/client";
 import type { AdapterMutationMapping } from "@opentag/core";
-import { startGitHubIngress, type GitHubIngressConfig, type GitHubIngressHandle } from "@opentag/github";
+import {
+  resolveGitHubSourceApiOrigin,
+  startGitHubIngress,
+  type GitHubIngressConfig,
+  type GitHubIngressHandle
+} from "@opentag/github";
 import { startGitLabIngress, type GitLabIngressConfig, type GitLabIngressHandle } from "@opentag/gitlab";
 import { DEFAULT_AGENT_ID, startLarkIngress, type LarkIngressConfig, type LarkIngressHandle } from "@opentag/lark";
 import {
@@ -939,6 +944,32 @@ function defaultStartDependencies(dependencies: StartRuntimeDependencies = {}) {
   };
 }
 
+export function hostedE2EGitHubApiOriginFromEnv(
+  config: OpenTagCliConfig,
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  const marker = env.OPENTAG_E2E_HOSTED_CLAIM_V1;
+  const apiOrigin = env.OPENTAG_E2E_GITHUB_API_ORIGIN;
+  if (marker === undefined && apiOrigin === undefined) return undefined;
+  if (marker !== "1" || !apiOrigin) {
+    throw new Error(
+      "Hosted Control V1 E2E GitHub API origin markers are incomplete."
+    );
+  }
+  if (
+    config.daemon.controlRegistration?.kind !== "hosted_control_v1"
+    || config.daemon.controlRegistration.state !== "paired"
+  ) {
+    throw new Error(
+      "Hosted Control V1 E2E GitHub API origin requires a paired Hosted Control V1 runner."
+    );
+  }
+  return resolveGitHubSourceApiOrigin({
+    token: config.daemon.githubToken ?? "",
+    apiOrigin,
+  });
+}
+
 function addAbortHandlers(input: StartFromConfigInput, abortController: AbortController): {
   shutdownRequested(): boolean;
   dispose(): void;
@@ -1198,7 +1229,12 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
   }
 }
 
-async function startRelayMode(input: StartFromConfigInput, abortController: AbortController, shutdownRequested: () => boolean): Promise<void> {
+async function startRelayMode(
+  input: StartFromConfigInput,
+  abortController: AbortController,
+  shutdownRequested: () => boolean,
+  githubApiOrigin?: string,
+): Promise<void> {
   const dependencies = defaultStartDependencies(input.dependencies);
   const logger = dependencies.logger;
   const config = input.config;
@@ -1214,7 +1250,10 @@ async function startRelayMode(input: StartFromConfigInput, abortController: Abor
   let daemonPromise: Promise<void> | undefined;
   try {
     daemonPromise = dependencies.serveDaemon({
-      ...createDaemonRuntimeInput(config.daemon, { databasePath: config.state.databasePath }),
+      ...createDaemonRuntimeInput(config.daemon, {
+        databasePath: config.state.databasePath,
+        ...(githubApiOrigin !== undefined ? { githubApiOrigin } : {}),
+      }),
       signal: abortController.signal
     });
     abortOnSubsystemFailure(daemonPromise, abortController);
@@ -1262,6 +1301,10 @@ async function startRelayMode(input: StartFromConfigInput, abortController: Abor
 }
 
 export async function startFromConfig(input: StartFromConfigInput): Promise<void> {
+  const githubApiOrigin = hostedE2EGitHubApiOriginFromEnv(
+    input.config,
+    input.dependencies?.env ?? process.env,
+  );
   if (input.config.daemon.controlRegistration) {
     assertHostedRelayAuthorization({
       dispatcherUrl: input.config.daemon.dispatcherUrl,
@@ -1293,7 +1336,12 @@ export async function startFromConfig(input: StartFromConfigInput): Promise<void
   const abortHandlers = addAbortHandlers(input, abortController);
   try {
     if (runtimeModeFromConfig(input.config) === "relay") {
-      await startRelayMode(input, abortController, abortHandlers.shutdownRequested);
+      await startRelayMode(
+        input,
+        abortController,
+        abortHandlers.shutdownRequested,
+        githubApiOrigin,
+      );
       return;
     }
     await startLocalMode(input, abortController, abortHandlers.shutdownRequested);

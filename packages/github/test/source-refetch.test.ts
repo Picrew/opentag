@@ -8,14 +8,14 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 import {
   GitHubSourceRefetchError,
+  OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1,
   refetchGitHubIssueCommentForHostedAdmission,
+  resolveGitHubSourceApiOrigin,
 } from '../src/source-refetch.js';
 
 const TOKEN = 'github_pat_secret-value';
 const BODY = '@opentag fix this exact source';
 const REPOSITORY_URL = 'https://api.github.com/repos/acme/demo';
-const ISSUE_URL = `${REPOSITORY_URL}/issues/7`;
-const COMMENT_URL = `${REPOSITORY_URL}/issues/comments/789`;
 
 type ThreadKind = HostedAdmissionEnvelopeV1['sourceThread']['kind'];
 
@@ -105,11 +105,16 @@ async function admission(
 }
 
 function githubFetch(overrides?: {
+  apiOrigin?: string;
   repository?: Record<string, unknown>;
   thread?: Record<string, unknown>;
   comment?: Record<string, unknown>;
   commentStatus?: number;
 }) {
+  const apiOrigin = overrides?.apiOrigin ?? 'https://api.github.com';
+  const repositoryUrl = `${apiOrigin}/repos/acme/demo`;
+  const issueUrl = `${repositoryUrl}/issues/7`;
+  const commentUrl = `${repositoryUrl}/issues/comments/789`;
   const repository = {
     id: 123,
     name: 'demo',
@@ -121,14 +126,14 @@ function githubFetch(overrides?: {
   const thread = {
     id: 456,
     number: 7,
-    repository_url: REPOSITORY_URL,
+    repository_url: repositoryUrl,
     html_url: 'https://github.com/acme/demo/issues/7',
-    comments_url: `${ISSUE_URL}/comments`,
+    comments_url: `${issueUrl}/comments`,
     ...overrides?.thread,
   };
   const comment = {
     id: 789,
-    issue_url: ISSUE_URL,
+    issue_url: issueUrl,
     body: BODY,
     html_url: 'https://github.com/acme/demo/issues/7#issuecomment-789',
     created_at: '2026-08-09T23:59:00.000Z',
@@ -138,9 +143,9 @@ function githubFetch(overrides?: {
     ...overrides?.comment,
   };
   return vi.fn<typeof fetch>(async (url) => {
-    if (url === REPOSITORY_URL) return Response.json(repository);
-    if (url === ISSUE_URL) return Response.json(thread);
-    if (url === COMMENT_URL) {
+    if (url === repositoryUrl) return Response.json(repository);
+    if (url === issueUrl) return Response.json(thread);
+    if (url === commentUrl) {
       return Response.json(comment, { status: overrides?.commentStatus ?? 200 });
     }
     return new Response(null, { status: 404 });
@@ -159,6 +164,63 @@ async function expectCode(
 }
 
 describe('refetchGitHubIssueCommentForHostedAdmission', () => {
+  it('keeps the official GitHub API origin as the exact default', () => {
+    expect(resolveGitHubSourceApiOrigin({ token: TOKEN })).toBe(
+      'https://api.github.com',
+    );
+  });
+
+  it('allows only the public E2E sentinel with an exact IPv4 loopback origin', async () => {
+    const apiOrigin = 'http://127.0.0.1:43123';
+    const fetchImpl = githubFetch({ apiOrigin });
+    await expect(refetchGitHubIssueCommentForHostedAdmission({
+      admission: await admission(),
+      token: OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1,
+      apiOrigin,
+      fetchImpl,
+    })).resolves.toMatchObject({ event: { source: 'github' } });
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      `${apiOrigin}/repos/acme/demo`,
+      `${apiOrigin}/repos/acme/demo/issues/7`,
+      `${apiOrigin}/repos/acme/demo/issues/comments/789`,
+    ]);
+  });
+
+  it.each([
+    ['normal token', TOKEN, 'http://127.0.0.1:43123'],
+    ['localhost', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'http://localhost:43123'],
+    ['private IPv4', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'http://192.168.1.5:43123'],
+    ['public host', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'http://example.com:43123'],
+    ['evil suffix', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'http://127.0.0.1.evil.example:43123'],
+    ['userinfo', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'http://user@127.0.0.1:43123'],
+    ['path', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'http://127.0.0.1:43123/api'],
+    ['query', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'http://127.0.0.1:43123?x=1'],
+    ['fragment', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'http://127.0.0.1:43123#x'],
+    ['missing port', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'http://127.0.0.1'],
+    ['zero port', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'http://127.0.0.1:0'],
+    ['leading-zero port', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'http://127.0.0.1:043123'],
+    ['invalid port', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'http://127.0.0.1:65536'],
+    ['trailing slash', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'http://127.0.0.1:43123/'],
+    ['https loopback', OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1, 'https://127.0.0.1:43123'],
+  ])('rejects %s before fetch without exposing input values', async (_label, token, apiOrigin) => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const operation = refetchGitHubIssueCommentForHostedAdmission({
+      admission: await admission(),
+      token,
+      apiOrigin,
+      fetchImpl,
+    });
+    await expectCode(operation, 'github_source_api_origin_invalid');
+    expect(fetchImpl).not.toHaveBeenCalled();
+    try {
+      await operation;
+    } catch (error) {
+      const loggable = JSON.stringify(error, Object.getOwnPropertyNames(error));
+      expect(loggable).not.toContain(token);
+      expect(loggable).not.toContain(apiOrigin);
+    }
+  });
+
   it('refetches an exact issue comment with caller credentials and a redacted receipt', async () => {
     const fetchImpl = githubFetch();
     const result = await refetchGitHubIssueCommentForHostedAdmission({

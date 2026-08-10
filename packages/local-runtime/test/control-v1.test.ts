@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildHostedLifecycleRequestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, HostedCompleteRequestV1Schema, RunnerReadinessReceiptEnvelopeV1Schema, type HostedClaimRequestV1 } from "@opentag/core";
 import { serveDaemon, type DaemonClient } from "../src/daemon.js";
-import { assertHostedClaimCurrentAuthorityV1, assertRunnerControlContextRegistrationV1, buildHostedClaimRequestV1, buildHostedCompletionMetadataForControlV1, buildHostedProgressMetadataForControlV1, buildRunnerReadinessReceipt, createHostedControlLoop, isRunnerControlContextFreshV1, pumpControlPlaneProjections, pumpHostedLifecycleOperations, type ControlPlaneProjectionOutboxEntry, type ControlProjectionClient, type ControlProjectionRepository, type HostedLifecycleOperationEntry, type HostedLifecycleRepository } from "../src/control-v1.js";
+import { assertHostedClaimCurrentAuthorityV1, assertRunnerControlContextRegistrationV1, buildHostedClaimRequestV1, buildHostedCompletionMetadataForControlV1, buildHostedProgressMetadataForControlV1, buildRunnerReadinessReceipt, createHostedControlLoop, hasSameRunnerReadinessAuthorityV1, isRunnerControlContextFreshV1, pumpControlPlaneProjections, pumpHostedLifecycleOperations, runnerReadinessReuseWindowV1, type ControlPlaneProjectionOutboxEntry, type ControlProjectionClient, type ControlProjectionRepository, type HostedLifecycleOperationEntry, type HostedLifecycleRepository } from "../src/control-v1.js";
 
 const now = new Date("2026-08-09T00:00:00.000Z");
 
@@ -162,8 +162,88 @@ function harness(entry: ControlPlaneProjectionOutboxEntry) {
   return { repo, client };
 }
 
+function memoryProjectionRepository() {
+  const entries = new Map<string, ControlPlaneProjectionOutboxEntry>();
+  return {
+    enqueueControlPlaneProjection: vi.fn(async ({ envelope, now: enqueuedAt }) => {
+      const readiness = RunnerReadinessReceiptEnvelopeV1Schema.parse(envelope);
+      const existing = entries.get(readiness.receiptId);
+      if (existing) return { outcome: "replay" as const, entry: existing };
+      const at = (enqueuedAt ?? now).toISOString();
+      const entry: ControlPlaneProjectionOutboxEntry = {
+        receiptId: readiness.receiptId,
+        destinationId: "cloud",
+        organizationId: readiness.organizationId,
+        runnerId: readiness.payload.runnerId,
+        receiptKind: "runner_readiness",
+        identity: {
+          namespace: readiness.identity.namespace,
+          parts: [...readiness.identity.parts],
+          key: `key_${readiness.receiptId}`,
+        },
+        operationId: readiness.operationId,
+        payloadDigest: readiness.payloadDigest,
+        receiptDigest: readiness.receiptDigest,
+        envelope: readiness,
+        state: "pending",
+        attemptCount: 0,
+        nextAttemptAt: at,
+        createdAt: at,
+        updatedAt: at,
+      };
+      entries.set(entry.receiptId, entry);
+      return { outcome: "created" as const, entry };
+    }),
+    getControlPlaneProjection: vi.fn(async ({ receiptId }) =>
+      entries.get(receiptId) ?? null),
+    getLatestRunnerReadinessProjection: vi.fn(async () =>
+      [...entries.values()].sort((left, right) =>
+        right.envelope.payload.observedAt.localeCompare(
+          left.envelope.payload.observedAt,
+        )
+      )[0] ?? null),
+    recoverExpiredControlPlaneProjectionLeases: vi.fn(async () => ({
+      recovered: 0,
+      entries: [],
+    })),
+    claimDueControlPlaneProjections: vi.fn(async () => {
+      const entry = [...entries.values()].find(
+        (candidate) => candidate.state === "pending",
+      );
+      if (!entry) return { entries: [] };
+      Object.assign(entry, {
+        state: "leased" as const,
+        attemptCount: entry.attemptCount + 1,
+        leaseOwner: "runner_runner_1",
+        leaseToken: `lease_${entry.attemptCount + 1}`,
+        leaseExpiresAt: "2026-08-09T00:01:30.000Z",
+      });
+      return { entries: [entry] };
+    }),
+    acknowledgeControlPlaneProjection: vi.fn(async ({ receiptId }) => {
+      const entry = entries.get(receiptId);
+      if (!entry) return { outcome: "not_found" as const };
+      Object.assign(entry, { state: "acknowledged" as const });
+      return { outcome: "acknowledged" as const };
+    }),
+    retryControlPlaneProjection: vi.fn(async ({ receiptId }) => {
+      const entry = entries.get(receiptId);
+      if (!entry) return { outcome: "not_found" as const };
+      Object.assign(entry, { state: "pending" as const });
+      return { outcome: "retried" as const };
+    }),
+    markControlPlaneProjectionAttention: vi.fn(async ({ receiptId }) => {
+      const entry = entries.get(receiptId);
+      if (!entry) return { outcome: "not_found" as const };
+      Object.assign(entry, { state: "attention" as const });
+      return { outcome: "attention" as const };
+    }),
+  };
+}
+
 function emptyLifecycleRepository() {
   return {
+    ...memoryProjectionRepository(),
     getHostedPreImportAuthorityRecovery: vi.fn(async () => null),
     getHostedClaimOperationForRetry: vi.fn(async () => null),
     recoverExpiredHostedLifecycleOperations: vi.fn(async () => 0),
@@ -710,10 +790,7 @@ describe("Control V1 projection pump", () => {
     let acknowledgedRunning: HostedLifecycleOperationEntry | undefined;
     let nextAttemptAt = now.toISOString();
     let leaseCount = 0;
-    const projectionNoops = {
-      recoverExpiredControlPlaneProjectionLeases: vi.fn(async () => 0),
-      claimDueControlPlaneProjections: vi.fn(async () => ({ entries: [] })),
-    };
+    const projectionNoops = memoryProjectionRepository();
     const repo = {
       ...projectionNoops,
       getHostedPreImportAuthorityRecovery: vi.fn(async () => null),
@@ -926,8 +1003,9 @@ describe("Control V1 projection pump", () => {
     await restarted?.close();
   });
 
-  it("accepts fresh readiness before a strict hosted claim and treats 204 as no work", async () => {
+  it("replays an outcome-unknown claim exactly after readiness TTL expiry", async () => {
     const events: string[] = [];
+    let currentNow = now;
     const context = {
       schemaVersion: 1 as const,
       protocolVersion: "1.0" as const,
@@ -950,13 +1028,17 @@ describe("Control V1 projection pump", () => {
     const client = {
       getRunnerControlContextV1: vi.fn(async () => {
         events.push("context");
-        return context;
+        return { ...context, observedAt: currentNow.toISOString() };
       }),
       reportRunnerReadinessControlV1: vi.fn(async (receipt) => {
         events.push("readiness");
         return { status: 201 as const, replayed: false as const, outcome: "accepted" as const, receipt };
       }),
       claimHostedRunControlV1: vi.fn()
+        .mockImplementationOnce(async () => {
+          events.push("claim");
+          throw new Error("transport_outcome_unknown");
+        })
         .mockImplementationOnce(async () => {
           events.push("claim");
           throw new Error("transport_outcome_unknown");
@@ -1011,15 +1093,24 @@ describe("Control V1 projection pump", () => {
       } as never,
       databasePath: ":memory:",
       executors: {},
-      now: () => now,
+      now: () => currentNow,
       controlClient: client,
       governanceStore: { repo, close: vi.fn() },
       executeClaimedRunImpl: vi.fn() as never,
     });
     await expect(loop?.beforeIteration()).rejects.toThrow("transport_outcome_unknown");
     const firstRequest = (client.claimHostedRunControlV1 as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].request;
+    const exactReadsAfterFirst = repo.getControlPlaneProjection.mock.calls.length;
+    const latestReadsAfterFirst =
+      repo.getLatestRunnerReadinessProjection.mock.calls.length;
+    repo.getControlPlaneProjection.mockResolvedValue(null);
+    repo.getLatestRunnerReadinessProjection.mockResolvedValue(null);
+    currentNow = new Date(now.getTime() + 55_000);
+    await expect(loop?.beforeIteration()).rejects.toThrow("transport_outcome_unknown");
+    const finalWindowRequest = (client.claimHostedRunControlV1 as ReturnType<typeof vi.fn>).mock.calls[1]?.[0].request;
+    currentNow = new Date(now.getTime() + 60_001);
     await expect(loop?.beforeIteration()).resolves.toBe(false);
-    const secondRequest = (client.claimHostedRunControlV1 as ReturnType<typeof vi.fn>).mock.calls[1]?.[0].request;
+    const expiredRequest = (client.claimHostedRunControlV1 as ReturnType<typeof vi.fn>).mock.calls[2]?.[0].request;
     expect(events).toEqual([
       "context",
       "readiness",
@@ -1027,16 +1118,105 @@ describe("Control V1 projection pump", () => {
       "claim",
       "context",
       "claim",
+      "context",
+      "claim",
       "empty",
     ]);
-    expect(firstRequest).toEqual(secondRequest);
+    expect(finalWindowRequest).toEqual(firstRequest);
+    expect(expiredRequest).toEqual(firstRequest);
+    expect(repo.getControlPlaneProjection).toHaveBeenCalledTimes(
+      exactReadsAfterFirst,
+    );
+    expect(repo.getLatestRunnerReadinessProjection).toHaveBeenCalledTimes(
+      latestReadsAfterFirst,
+    );
     expect(client.reportRunnerReadinessControlV1).toHaveBeenCalledTimes(1);
     expect(repo.beginHostedClaimOperation).toHaveBeenCalledTimes(1);
     expect(repo.acknowledgeHostedClaimEmpty).toHaveBeenCalledTimes(1);
     await loop?.close();
   });
 
-  it("persists verified claim authority before admission failure and replays the exact rejection after restart", async () => {
+  it("rejects a claim when fresh readiness capabilities diverge from the current context", async () => {
+    const repository = {
+      provider: "github",
+      owner: "acme",
+      repo: "widget",
+      checkoutPath: process.cwd(),
+      defaultExecutor: "reviewer",
+      baseBranch: "main",
+      pushRemote: "origin",
+      keepWorktree: "on_failure" as const,
+    };
+    const executor = {
+      id: "reviewer",
+      displayName: "Review Agent",
+      capability: { id: "reviewer", protocol: "acp" },
+      canRun: vi.fn(async () => ({ ready: true })),
+    } as never;
+    const context = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const,
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      credentialId: "credential_1",
+      registrationGeneration: 1,
+      credentialGeneration: 1,
+      capabilities: [
+        "relay.claim-fence.v1",
+        "relay.hosted-admission.v1",
+        "relay.hosted-claim.v1",
+        "relay.lifecycle.v1",
+        "relay.readiness.v1",
+      ] as const,
+      targets: [{
+        projectTargetId: "target_1",
+        bindingDigest: `sha256:${"a".repeat(64)}`,
+        provider: "github",
+        owner: "acme",
+        repo: "widget",
+        defaultExecutor: "reviewer",
+        defaultBranch: "main",
+      }],
+      observedAt: now.toISOString(),
+    };
+    const readiness = await buildRunnerReadinessReceipt({
+      context,
+      executors: { reviewer: executor },
+      repositories: [repository],
+      now: () => now,
+    });
+    const request = buildHostedClaimRequestV1({
+      context,
+      readiness,
+      requestId: "request_capability_mismatch",
+      operationId: "operation_capability_mismatch",
+    });
+    const claim = await validHostedClaim({
+      request,
+      executorCapabilityDigest:
+        readiness.payload.executors[0]!.capabilityDigest,
+    });
+    const mismatchedReadiness = {
+      ...readiness,
+      payload: {
+        ...readiness.payload,
+        capabilities: readiness.payload.capabilities.filter(
+          (capability) => capability !== "relay.lifecycle.v1",
+        ),
+      },
+    };
+
+    await expect(assertHostedClaimCurrentAuthorityV1({
+      claim,
+      context,
+      readiness: mismatchedReadiness,
+      request,
+      now,
+    })).rejects.toThrow("hosted_claim_current_capability_mismatch");
+  });
+
+  it("persists an outcome-unknown claim before capability revocation and replays its exact rejection after restart", async () => {
     const repository = {
       provider: "github",
       owner: "acme",
@@ -1081,6 +1261,7 @@ describe("Control V1 projection pump", () => {
       }],
       observedAt: now.toISOString(),
     };
+    let currentContext = context;
     let claimOperation: {
       operationId: string;
       requestId: string;
@@ -1092,6 +1273,7 @@ describe("Control V1 projection pump", () => {
     const events: string[] = [];
     const importHostedAssignedRun = vi.fn();
     const refetchGitHubIssueCommentImpl = vi.fn();
+    const executeClaimedRunImpl = vi.fn();
     let persistCount = 0;
     const persistHostedClaimAuthorityShell = vi.fn(async () => {
       events.push("authority_shell");
@@ -1305,7 +1487,10 @@ describe("Control V1 projection pump", () => {
       };
     });
     const client = {
-      getRunnerControlContextV1: vi.fn(async () => context),
+      getRunnerControlContextV1: vi.fn(async () => ({
+        ...currentContext,
+        observedAt: currentNow.toISOString(),
+      })),
       reportRunnerReadinessControlV1: vi.fn(async (receipt) => ({
         status: 201,
         replayed: false,
@@ -1345,7 +1530,7 @@ describe("Control V1 projection pump", () => {
       now: () => currentNow,
       controlClient: client,
       governanceStore: { repo, close: vi.fn() },
-      executeClaimedRunImpl: vi.fn() as never,
+      executeClaimedRunImpl: executeClaimedRunImpl as never,
       refetchGitHubIssueCommentImpl: refetchGitHubIssueCommentImpl as never,
     });
 
@@ -1356,6 +1541,16 @@ describe("Control V1 projection pump", () => {
     const firstClaimRequest = claimHostedRunControlV1.mock.calls[0]?.[0].request;
     await first?.close();
 
+    currentContext = {
+      ...context,
+      capabilities: [
+        "relay.claim-fence.v1",
+        "relay.hosted-admission.v1",
+        "relay.hosted-claim.v1",
+        "relay.readiness.v1",
+      ],
+    };
+
     const restarted = createHostedControlLoop({
       config,
       databasePath: ":memory:",
@@ -1363,12 +1558,13 @@ describe("Control V1 projection pump", () => {
       now: () => currentNow,
       controlClient: client,
       governanceStore: { repo, close: vi.fn() },
-      executeClaimedRunImpl: vi.fn() as never,
+      executeClaimedRunImpl: executeClaimedRunImpl as never,
       refetchGitHubIssueCommentImpl: refetchGitHubIssueCommentImpl as never,
     });
     await expect(restarted?.beforeIteration()).rejects.toThrow(
-      "hosted_github_token_unavailable",
+      "hosted_claim_current_capability_mismatch",
     );
+    currentContext = context;
     expect(claimHostedRunControlV1.mock.calls[1]?.[0].request)
       .toEqual(firstClaimRequest);
     expect(repo.beginHostedClaimOperation).toHaveBeenCalledTimes(1);
@@ -1390,16 +1586,20 @@ describe("Control V1 projection pump", () => {
     expect(rejectHostedAttemptStartControlV1).toHaveBeenCalledTimes(1);
     expect(claimHostedRunControlV1).toHaveBeenCalledTimes(2);
     expect(repo.beginHostedClaimOperation).toHaveBeenCalledTimes(1);
+    expect(client.reportRunnerReadinessControlV1).toHaveBeenCalledTimes(1);
     expect(refetchGitHubIssueCommentImpl).not.toHaveBeenCalled();
     expect(importHostedAssignedRun).not.toHaveBeenCalled();
+    expect(executeClaimedRunImpl).not.toHaveBeenCalled();
 
     if (rejection) rejection = { ...rejection, state: "attention" };
     await expect(restarted?.beforeIteration()).resolves.toBe(false);
     expect(rejectHostedAttemptStartControlV1).toHaveBeenCalledTimes(1);
     expect(claimHostedRunControlV1).toHaveBeenCalledTimes(2);
     expect(repo.beginHostedClaimOperation).toHaveBeenCalledTimes(1);
+    expect(client.reportRunnerReadinessControlV1).toHaveBeenCalledTimes(1);
     expect(refetchGitHubIssueCommentImpl).not.toHaveBeenCalled();
     expect(importHostedAssignedRun).not.toHaveBeenCalled();
+    expect(executeClaimedRunImpl).not.toHaveBeenCalled();
 
     if (rejection) rejection = { ...rejection, state: "pending" };
     currentNow = new Date("2026-08-09T00:00:01.000Z");
@@ -1408,17 +1608,123 @@ describe("Control V1 projection pump", () => {
       .toEqual(firstRejectRequest);
     expect(claimHostedRunControlV1).toHaveBeenCalledTimes(2);
     expect(repo.beginHostedClaimOperation).toHaveBeenCalledTimes(1);
+    expect(client.reportRunnerReadinessControlV1).toHaveBeenCalledTimes(1);
     expect(refetchGitHubIssueCommentImpl).not.toHaveBeenCalled();
     expect(importHostedAssignedRun).not.toHaveBeenCalled();
+    expect(executeClaimedRunImpl).not.toHaveBeenCalled();
     expect(events).toContain("reject_ack");
-
-    await expect(restarted?.beforeIteration()).resolves.toBe(false);
-    expect(events.indexOf("reject_send_2")).toBeLessThan(
-      events.lastIndexOf("claim"),
-    );
-    expect(claimHostedRunControlV1).toHaveBeenCalledTimes(3);
-    expect(repo.beginHostedClaimOperation).toHaveBeenCalledTimes(2);
+    expect(claimHostedRunControlV1).toHaveBeenCalledTimes(2);
+    expect(repo.beginHostedClaimOperation).toHaveBeenCalledTimes(1);
+    expect(client.reportRunnerReadinessControlV1).toHaveBeenCalledTimes(1);
     await restarted?.close();
+  });
+
+  it("keeps a claimed authority shell fail-closed when Cloud rejects its exact replay", async () => {
+    const context = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const,
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      credentialId: "credential_1",
+      registrationGeneration: 1,
+      credentialGeneration: 1,
+      capabilities: [
+        "relay.claim-fence.v1",
+        "relay.hosted-admission.v1",
+        "relay.hosted-claim.v1",
+        "relay.lifecycle.v1",
+        "relay.readiness.v1",
+      ] as const,
+      targets: [],
+      observedAt: now.toISOString(),
+    };
+    const readiness = await buildRunnerReadinessReceipt({
+      context,
+      executors: {},
+      repositories: [],
+      now: () => now,
+    });
+    const request = buildHostedClaimRequestV1({
+      context,
+      readiness,
+      requestId: "request_claimed_409",
+      operationId: "operation_claimed_409",
+    });
+    const operation = {
+      operationId: request.operationId,
+      requestId: request.requestId,
+      request,
+      state: "claimed" as const,
+    };
+    const abandonHostedClaimOperation = vi.fn();
+    const beginHostedClaimOperation = vi.fn();
+    const repo = {
+      ...emptyLifecycleRepository(),
+      getHostedAssignedRunForRecovery: vi.fn(async () => null),
+      getHostedPreImportAuthorityRecovery: vi.fn(async () => ({
+        state: "claim_retry" as const,
+        operation,
+      })),
+      getHostedClaimOperationForRetry: vi.fn(async () => null),
+      beginHostedClaimOperation,
+      abandonHostedClaimOperation,
+    } as never;
+    const claimError = Object.assign(new Error("stale claimed authority"), {
+      status: 409,
+      code: "stale_control_authority",
+    });
+    const claimHostedRunControlV1 = vi.fn(async () => {
+      throw claimError;
+    });
+    const reportRunnerReadinessControlV1 = vi.fn();
+    const executeClaimedRunImpl = vi.fn();
+    const loop = createHostedControlLoop({
+      config: {
+        runnerId: "runner_1",
+        dispatcherUrl: "https://control.example",
+        runnerToken: "runtime_secret",
+        repositories: [],
+        agents: {},
+        controlRegistration: {
+          kind: "hosted_control_v1",
+          state: "paired",
+          operationId: "pair_1",
+          registration: {
+            schemaVersion: 1,
+            protocolVersion: "1.0",
+            organizationId: "org_1",
+            runnerId: "runner_1",
+            credentialId: "credential_1",
+            registrationGeneration: 1,
+            credentialGeneration: 1,
+            credentialPurpose: "runtime",
+            createdAt: now.toISOString(),
+          },
+        },
+      } as never,
+      databasePath: ":memory:",
+      executors: {},
+      now: () => now,
+      controlClient: {
+        getRunnerControlContextV1: vi.fn(async () => context),
+        reportRunnerReadinessControlV1,
+        claimHostedRunControlV1,
+      } as never,
+      governanceStore: { repo, close: vi.fn() },
+      executeClaimedRunImpl: executeClaimedRunImpl as never,
+    });
+
+    await expect(loop?.beforeIteration()).rejects.toBe(claimError);
+    expect(claimHostedRunControlV1).toHaveBeenCalledWith({
+      runnerId: "runner_1",
+      request,
+    });
+    expect(abandonHostedClaimOperation).not.toHaveBeenCalled();
+    expect(beginHostedClaimOperation).not.toHaveBeenCalled();
+    expect(reportRunnerReadinessControlV1).not.toHaveBeenCalled();
+    expect(executeClaimedRunImpl).not.toHaveBeenCalled();
+    await loop?.close();
   });
 
   it("does not start an executor until the local running operation is acknowledged", async () => {
@@ -2339,6 +2645,54 @@ describe("Control V1 projection pump", () => {
     });
   });
 
+  it("compares durable readiness by semantic authority and enforces the five-second safety window", async () => {
+    const context = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const,
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      credentialId: "credential_1",
+      registrationGeneration: 1,
+      credentialGeneration: 1,
+      capabilities: ["relay.readiness.v1"] as const,
+      targets: [],
+      observedAt: now.toISOString(),
+    };
+    const first = await buildRunnerReadinessReceipt({
+      context,
+      executors: {},
+      repositories: [],
+      now: () => now,
+    });
+    const secondObservedAt = new Date(now.getTime() + 1_000);
+    const second = await buildRunnerReadinessReceipt({
+      context: { ...context, observedAt: secondObservedAt.toISOString() },
+      executors: {},
+      repositories: [],
+      now: () => secondObservedAt,
+    });
+
+    expect(first.receiptId).not.toBe(second.receiptId);
+    expect(hasSameRunnerReadinessAuthorityV1(first, second)).toBe(true);
+    expect(hasSameRunnerReadinessAuthorityV1(first, {
+      ...second,
+      producer: { ...second.producer, credentialId: "credential_2" },
+    })).toBe(false);
+    expect(runnerReadinessReuseWindowV1(
+      first,
+      new Date(now.getTime() + 54_999),
+    )).toBe("reusable");
+    expect(runnerReadinessReuseWindowV1(
+      first,
+      new Date(now.getTime() + 55_000),
+    )).toBe("final_window");
+    expect(runnerReadinessReuseWindowV1(
+      first,
+      new Date(now.getTime() + 60_001),
+    )).toBe("expired");
+  });
+
   it("acks callback custody once and does not duplicate the provider observation on replay", async () => {
     const { repo, client } = harness(callbackEntry());
     const clock = vi.fn()
@@ -2404,6 +2758,26 @@ describe("Control V1 projection pump", () => {
     expect(repo.retryControlPlaneProjection).toHaveBeenCalledWith(
       expect.objectContaining({ reasonCode: "transport_failed" }),
     );
+  });
+
+  it("retries an outcome-unknown transport exception instead of requiring attention", async () => {
+    const { repo, client } = harness(callbackEntry());
+    client.projectCallbackObservationControlV1.mockRejectedValueOnce(
+      new TypeError("fetch failed after request dispatch"),
+    );
+    await expect(pumpControlPlaneProjections({
+      repo,
+      client,
+      destinationId: "cloud",
+      organizationId: "org_1",
+      leaseOwner: "pump_1",
+      limit: 1,
+      now: () => now,
+    })).resolves.toEqual({ delivered: 0, retried: 1, attention: 0 });
+    expect(repo.retryControlPlaneProjection).toHaveBeenCalledWith(
+      expect.objectContaining({ reasonCode: "transport_failed" }),
+    );
+    expect(repo.markControlPlaneProjectionAttention).not.toHaveBeenCalled();
   });
 
   it("honors Retry-After when it exceeds exponential backoff", async () => {
@@ -3122,6 +3496,7 @@ describe("Control V1 projection pump", () => {
       controlClient: client,
       governanceStore: { repo, close: closeStore },
       executeClaimedRunImpl: executeClaimedRunImpl as never,
+      githubApiOrigin: "http://127.0.0.1:43123",
       refetchGitHubIssueCommentImpl: refetchGitHubIssueCommentImpl as never,
       closeDrainTimeoutMs: 1,
     });
@@ -3129,6 +3504,12 @@ describe("Control V1 projection pump", () => {
     await vi.waitFor(() => {
       expect(refetchGitHubIssueCommentImpl).toHaveBeenCalledTimes(1);
     });
+    expect(refetchGitHubIssueCommentImpl).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiOrigin: "http://127.0.0.1:43123",
+        token: "github_secret",
+      }),
+    );
 
     await loop!.close();
     expect(closeStore).not.toHaveBeenCalled();
@@ -3331,6 +3712,7 @@ describe("Control V1 projection pump", () => {
     const acknowledge = vi.fn(async () => "acknowledged" as const);
     const closeStore = vi.fn();
     const repo = {
+      ...memoryProjectionRepository(),
       recoverExpiredHostedLifecycleOperations: vi.fn(async () => 0),
       claimDueHostedLifecycleOperations: vi.fn(async () => pending ? [pending] : []),
       acknowledgeHostedLifecycleOperation: acknowledge,

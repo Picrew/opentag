@@ -1,5 +1,9 @@
 import { createDispatcherClient } from "@opentag/client";
 import {
+  OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1,
+  resolveGitHubSourceApiOrigin
+} from "@opentag/github";
+import {
   createAcpAgentExecutor,
   createBuiltInAcpExecutors,
   createEchoExecutor,
@@ -129,12 +133,15 @@ export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
 }
 
 export function pullRequestOptionsFromConfig(config: OpenTagDaemonConfig): PullRequestOptions | undefined {
-  if (!config.githubToken && config.preparePullRequestBranch === undefined && config.allowAutoCreatePullRequest === undefined) {
+  const githubToken = config.githubToken === OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1
+    ? undefined
+    : config.githubToken;
+  if (!githubToken && config.preparePullRequestBranch === undefined && config.allowAutoCreatePullRequest === undefined) {
     return undefined;
   }
 
   return {
-    ...(config.githubToken ? { githubToken: config.githubToken } : {}),
+    ...(githubToken ? { githubToken } : {}),
     ...(config.preparePullRequestBranch !== undefined ? { preparePullRequestBranch: config.preparePullRequestBranch } : {}),
     ...(config.allowAutoCreatePullRequest !== undefined ? { allowAutoCreatePullRequest: config.allowAutoCreatePullRequest } : {})
   };
@@ -142,11 +149,16 @@ export function pullRequestOptionsFromConfig(config: OpenTagDaemonConfig): PullR
 
 export function createDaemonRuntimeInput(
   config: OpenTagDaemonConfig,
-  options: { databasePath?: string } = {},
+  options: { databasePath?: string; githubApiOrigin?: string } = {},
 ): DaemonRuntimeInput {
   const security = securityFromConfig(config);
   const pullRequestOptions = pullRequestOptionsFromConfig(config);
   const executors = executorsFromConfig(config);
+  if (options.githubApiOrigin !== undefined && !config.controlRegistration) {
+    throw new Error(
+      "Hosted Control V1 E2E GitHub API origin requires paired Hosted Control V1."
+    );
+  }
   if (config.controlRegistration) {
     if (!options.databasePath) {
       throw new Error(
@@ -159,12 +171,19 @@ export function createDaemonRuntimeInput(
     });
     const hostedAuthProblem = hostedRunnerAuthProblem(config);
     if (hostedAuthProblem) throw new Error(hostedAuthProblem);
+    const githubApiOrigin = options.githubApiOrigin !== undefined
+      ? resolveGitHubSourceApiOrigin({
+        token: config.githubToken ?? "",
+        apiOrigin: options.githubApiOrigin,
+      })
+      : undefined;
     const controlLoop = createHostedControlLoop({
       config,
       databasePath: options.databasePath,
       executors,
       ...(security ? { security } : {}),
       ...(pullRequestOptions ? { pullRequestOptions } : {}),
+      ...(githubApiOrigin !== undefined ? { githubApiOrigin } : {}),
     });
     if (!controlLoop) {
       throw new Error("Hosted Control V1 sidecar could not be created.");

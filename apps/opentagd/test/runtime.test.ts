@@ -340,7 +340,13 @@ describe("opentagd runtime helpers", () => {
             credentialId: "credential_runtime_1",
             registrationGeneration: 1,
             credentialGeneration: 1,
-            capabilities: ["relay.readiness.v1"],
+            capabilities: [
+              "relay.claim-fence.v1",
+              "relay.hosted-admission.v1",
+              "relay.hosted-claim.v1",
+              "relay.lifecycle.v1",
+              "relay.readiness.v1",
+            ],
             targets: [],
             observedAt: new Date().toISOString(),
           };
@@ -370,6 +376,7 @@ describe("opentagd runtime helpers", () => {
         "GET /v1/runners/runner_hosted/control-context",
         "POST /v1/runners/runner_hosted/readiness",
         "POST /v1/runners/runner_hosted/hosted-claims",
+        "POST /v1/runners/runner_hosted/runs/run_1/reject-start",
       ]);
     } finally {
       if (input.mode === "control-v1-sidecar") await input.controlLoop.close();

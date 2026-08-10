@@ -6459,6 +6459,27 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return row ? projectionOutboxEntryFromRow(row) : null;
     },
 
+    async getLatestRunnerReadinessProjection(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+    }): Promise<ControlPlaneProjectionOutboxEntry | null> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const runnerId = projectionDestination(input.runnerId);
+      const row = await db.select().from(controlPlaneProjectionOutbox).where(and(
+        eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+        eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+        eq(controlPlaneProjectionOutbox.runnerId, runnerId),
+        eq(controlPlaneProjectionOutbox.receiptKind, "runner_readiness")
+      )).orderBy(
+        desc(sql<string>`json_extract(${controlPlaneProjectionOutbox.envelopeJson}, '$.payload.observedAt')`),
+        desc(controlPlaneProjectionOutbox.createdAt),
+        desc(controlPlaneProjectionOutbox.receiptId)
+      ).limit(1).get();
+      return row ? projectionOutboxEntryFromRow(row) : null;
+    },
+
     async listControlPlaneProjections(input: {
       destinationId: string;
       organizationId: string;

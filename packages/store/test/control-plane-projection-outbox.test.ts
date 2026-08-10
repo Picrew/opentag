@@ -331,6 +331,96 @@ function repository(sqlite = new Database(":memory:")) {
 }
 
 describe("control_plane_projection_outbox", () => {
+  it("returns the newest runner readiness across every outbox state", async () => {
+    const { repo, sqlite } = repository();
+    const oldReadiness = RunnerReadinessReceiptEnvelopeV1Schema.parse(
+      allowedReceipts()[0],
+    );
+    const newerObservedAt = "2026-08-08T00:00:10.000Z";
+    const newerReadiness = RunnerReadinessReceiptEnvelopeV1Schema.parse(
+      refreshProjectionDigests({
+        ...oldReadiness,
+        receiptId: "receipt_readiness_newer",
+        operationId: "operation_readiness_newer",
+        observedAt: newerObservedAt,
+        identity: {
+          ...oldReadiness.identity,
+          parts: ["org_1", "runner_1", "1", "readiness_newer"],
+        },
+        payload: {
+          ...oldReadiness.payload,
+          readinessId: "readiness_newer",
+          observedAt: newerObservedAt,
+          expiresAt: "2026-08-08T00:01:10.000Z",
+        },
+      }),
+    );
+    await repo.enqueueControlPlaneProjection({
+      destinationId: "cloud",
+      envelope: oldReadiness,
+      now: NOW,
+    });
+    const oldClaim = await repo.claimDueControlPlaneProjections({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      leaseOwner: "pump",
+      leaseSeconds: 30,
+      now: NOW,
+    });
+    await repo.acknowledgeControlPlaneProjection({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      receiptId: oldReadiness.receiptId,
+      leaseToken: oldClaim.entries[0]!.leaseToken!,
+      now: new Date("2026-08-08T00:00:01.000Z"),
+    });
+    await repo.enqueueControlPlaneProjection({
+      destinationId: "cloud",
+      envelope: newerReadiness,
+      now: new Date("2026-08-08T00:00:10.000Z"),
+    });
+
+    await expect(repo.getLatestRunnerReadinessProjection({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      runnerId: "runner_1",
+    })).resolves.toMatchObject({
+      receiptId: newerReadiness.receiptId,
+      state: "pending",
+    });
+
+    const newerClaim = await repo.claimDueControlPlaneProjections({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      leaseOwner: "pump",
+      leaseSeconds: 30,
+      now: new Date("2026-08-08T00:00:10.000Z"),
+    });
+    await repo.markControlPlaneProjectionAttention({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      receiptId: newerReadiness.receiptId,
+      leaseToken: newerClaim.entries[0]!.leaseToken!,
+      reasonCode: "http_400",
+      httpStatus: 400,
+      now: new Date("2026-08-08T00:00:11.000Z"),
+    });
+    await expect(repo.getLatestRunnerReadinessProjection({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      runnerId: "runner_1",
+    })).resolves.toMatchObject({
+      receiptId: newerReadiness.receiptId,
+      state: "attention",
+    });
+    await expect(repo.getLatestRunnerReadinessProjection({
+      destinationId: "cloud",
+      organizationId: "org_1",
+      runnerId: "runner_other",
+    })).resolves.toBeNull();
+    sqlite.close();
+  });
+
   it("gates claims on acknowledged parent and lifecycle dependencies", async () => {
     const { repo, sqlite } = repository();
     const lifecycleRequest = await buildHostedLifecycleRequestV1({

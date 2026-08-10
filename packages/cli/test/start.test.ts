@@ -11,6 +11,7 @@ import {
   createLinearOAuthTokenProvider,
   dispatcherRuntimeInputFromCliConfig,
   githubIngressConfigFromCliConfig,
+  hostedE2EGitHubApiOriginFromEnv,
   gitlabIngressConfigFromCliConfig,
   linearIngressConfigFromCliConfig,
   larkIngressConfigFromCliConfig,
@@ -99,6 +100,41 @@ function githubConfig(port?: number) {
       port: port ?? 3050
     }
   });
+}
+
+function pairedHostedGithubConfig() {
+  const built = githubConfig();
+  built.runtime = {
+    mode: "relay",
+    relayUrl: "https://relay.example",
+    relayProvider: "custom"
+  };
+  built.daemon.dispatcherUrl = "https://relay.example";
+  built.daemon.runnerToken = "hosted_runtime_token";
+  built.daemon.trustedRelay = {
+    schemaVersion: 1,
+    origin: "https://relay.example",
+    authorizedAt: "2026-08-08T00:00:00.000Z",
+    authorizationMethod: "explicit_cli"
+  };
+  delete built.daemon.pairingToken;
+  built.daemon.controlRegistration = {
+    kind: "hosted_control_v1",
+    state: "paired",
+    operationId: "operation-1",
+    registration: {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      organizationId: "org_1",
+      runnerId: built.daemon.runnerId,
+      registrationGeneration: 1,
+      credentialGeneration: 1,
+      credentialId: "credential-1",
+      credentialPurpose: "runtime",
+      createdAt: "2026-08-08T00:00:00.000Z"
+    }
+  };
+  return built;
 }
 
 function gitlabConfig(port?: number) {
@@ -1253,6 +1289,77 @@ describe("OpenTag CLI start wiring", () => {
     });
 
     expect(calls).toEqual(["wait", "daemon"]);
+  });
+
+  it("passes the non-persisted E2E GitHub origin through a real Hosted Control daemon input", async () => {
+    const built = pairedHostedGithubConfig();
+    built.daemon.githubToken = "opentag_e2e_no_provider_credential_v1";
+    const calls: string[] = [];
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        env: {
+          OPENTAG_E2E_HOSTED_CLAIM_V1: "1",
+          OPENTAG_E2E_GITHUB_API_ORIGIN: "http://127.0.0.1:43123"
+        },
+        async waitForDispatcher() { calls.push("wait"); },
+        async serveDaemon() { calls.push("daemon"); },
+        logger: { log() {} }
+      }
+    });
+
+    expect(calls).toEqual(["wait", "daemon"]);
+  });
+
+  it("accepts E2E GitHub API markers only for paired Hosted Control with the public sentinel", () => {
+    const built = pairedHostedGithubConfig();
+    const apiOrigin = "http://127.0.0.1:43123";
+    built.daemon.githubToken = "opentag_e2e_no_provider_credential_v1";
+    expect(hostedE2EGitHubApiOriginFromEnv(built, {
+      OPENTAG_E2E_HOSTED_CLAIM_V1: "1",
+      OPENTAG_E2E_GITHUB_API_ORIGIN: apiOrigin
+    })).toBe(apiOrigin);
+
+    expect(() => hostedE2EGitHubApiOriginFromEnv(built, {
+      OPENTAG_E2E_HOSTED_CLAIM_V1: "1"
+    })).toThrow(/markers are incomplete/u);
+    expect(() => hostedE2EGitHubApiOriginFromEnv(built, {
+      OPENTAG_E2E_GITHUB_API_ORIGIN: apiOrigin
+    })).toThrow(/markers are incomplete/u);
+    expect(() => hostedE2EGitHubApiOriginFromEnv(built, {
+      OPENTAG_E2E_HOSTED_CLAIM_V1: "0",
+      OPENTAG_E2E_GITHUB_API_ORIGIN: apiOrigin
+    })).toThrow(/markers are incomplete/u);
+
+    const local = githubConfig();
+    local.daemon.githubToken = "opentag_e2e_no_provider_credential_v1";
+    expect(() => hostedE2EGitHubApiOriginFromEnv(local, {
+      OPENTAG_E2E_HOSTED_CLAIM_V1: "1",
+      OPENTAG_E2E_GITHUB_API_ORIGIN: apiOrigin
+    })).toThrow(/requires a paired Hosted Control V1 runner/u);
+  });
+
+  it("rejects unsafe E2E GitHub origin values without exposing the token or origin", () => {
+    const built = pairedHostedGithubConfig();
+    const token = "real_provider_secret";
+    const apiOrigin = "http://127.0.0.1.evil.example:43123/private?token=bad";
+    built.daemon.githubToken = token;
+    try {
+      hostedE2EGitHubApiOriginFromEnv(built, {
+        OPENTAG_E2E_HOSTED_CLAIM_V1: "1",
+        OPENTAG_E2E_GITHUB_API_ORIGIN: apiOrigin
+      });
+      throw new Error("expected E2E origin rejection");
+    } catch (error) {
+      const loggable = error instanceof Error ? `${error.name}:${error.message}` : String(error);
+      expect(loggable).toContain("github_source_api_origin_invalid");
+      expect(loggable).not.toContain(token);
+      expect(loggable).not.toContain(apiOrigin);
+    }
   });
 
   it("rejects invalid hosted auth before wait, bootstrap, or daemon startup", async () => {

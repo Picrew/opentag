@@ -301,7 +301,7 @@ export async function pumpControlPlaneProjections(input: {
       if (input.cancelled?.()) return summary;
       const status = httpStatus(error);
       const failureNow = clock();
-      if (retryable(status)) {
+      if (retryable(status) || transportFailure(error)) {
         const backoff = Math.min(input.retryMaxMs ?? 60_000, (input.retryBaseMs ?? 1_000) * 2 ** Math.max(0, entry.attemptCount - 1));
         const delay = Math.max(backoff, retryAfterMs(error));
         const outcome = await input.repo.retryControlPlaneProjection({ destinationId: input.destinationId, organizationId: input.organizationId, receiptId: entry.receiptId, leaseToken: entry.leaseToken, nextAttemptAt: new Date(failureNow.getTime() + delay).toISOString(), reasonCode: status ? `http_${status}` : "transport_failed", ...(status ? { httpStatus: status } : {}), now: failureNow });
@@ -470,6 +470,44 @@ export function isRunnerControlContextFreshV1(
   return ageMs >= 0 && ageMs <= maxAgeMs;
 }
 
+function canonicalReadinessAuthority(
+  readiness: RunnerReadinessReceiptEnvelopeV1,
+): unknown {
+  return {
+    organizationId: readiness.organizationId,
+    runnerId: readiness.payload.runnerId,
+    producer: {
+      kind: readiness.producer.kind,
+      id: readiness.producer.id,
+      credentialId: readiness.producer.credentialId,
+      registrationGeneration: readiness.producer.registrationGeneration,
+    },
+    registrationGeneration: readiness.payload.registrationGeneration,
+    capabilities: [...readiness.payload.capabilities].sort(),
+    executors: [...readiness.payload.executors]
+      .sort((left, right) => left.executorId.localeCompare(right.executorId)),
+    targets: [...readiness.payload.targets]
+      .sort((left, right) => left.projectTargetId.localeCompare(right.projectTargetId)),
+  };
+}
+
+export function hasSameRunnerReadinessAuthorityV1(
+  left: RunnerReadinessReceiptEnvelopeV1,
+  right: RunnerReadinessReceiptEnvelopeV1,
+): boolean {
+  return JSON.stringify(canonicalReadinessAuthority(left))
+    === JSON.stringify(canonicalReadinessAuthority(right));
+}
+
+export function runnerReadinessReuseWindowV1(
+  readiness: RunnerReadinessReceiptEnvelopeV1,
+  now: Date,
+): "reusable" | "final_window" | "expired" {
+  const remainingMs = Date.parse(readiness.payload.expiresAt) - now.getTime();
+  if (remainingMs > CONTROL_LEASE_SAFETY_MS) return "reusable";
+  return remainingMs >= 0 ? "final_window" : "expired";
+}
+
 export function assertRunnerControlContextRegistrationV1(input: {
   context: RunnerControlContextResponseV1;
   registration: OpenTagDaemonConfig["controlRegistration"];
@@ -531,9 +569,7 @@ export async function assertHostedClaimCurrentAuthorityV1(input: {
   now: Date;
 }): Promise<void> {
   const { claim, context, readiness, request } = input;
-  if (!(await verifyHostedAdmissionEnvelopeDigestV1(claim.hostedAdmission))) {
-    throw new Error("hosted_claim_admission_envelope_digest_mismatch");
-  }
+  await assertHostedClaimRequestBindingV1({ claim, request });
   if (
     claim.organizationId !== context.organizationId
     || claim.runnerId !== context.runnerId
@@ -543,13 +579,18 @@ export async function assertHostedClaimCurrentAuthorityV1(input: {
   ) {
     throw new Error("hosted_claim_current_context_mismatch");
   }
+  const contextCapabilities = [...new Set(context.capabilities)].sort();
+  const readinessCapabilities = [
+    ...new Set(readiness.payload.capabilities),
+  ].sort();
   if (
-    claim.authority.runnerReadinessReceiptId
-      !== request.expectedAuthority.runnerReadinessReceiptId
-    || claim.authority.runnerReadinessReceiptDigest
-      !== request.expectedAuthority.runnerReadinessReceiptDigest
+    request.requiredCapabilities.some(
+      (capability) => !contextCapabilities.includes(capability),
+    )
+    || JSON.stringify(readinessCapabilities)
+      !== JSON.stringify(contextCapabilities)
   ) {
-    throw new Error("hosted_claim_readiness_mismatch");
+    throw new Error("hosted_claim_current_capability_mismatch");
   }
   const target = context.targets.find(
     (candidate) => candidate.projectTargetId === claim.authority.projectTargetId,
@@ -584,6 +625,37 @@ export async function assertHostedClaimCurrentAuthorityV1(input: {
     || leaseExpiresAt <= input.now.getTime()
   ) {
     throw new Error("hosted_claim_lease_expired");
+  }
+}
+
+async function assertHostedClaimRequestBindingV1(input: {
+  claim: HostedClaimV1;
+  request: HostedClaimRequestV1;
+}): Promise<void> {
+  const { claim, request } = input;
+  if (!(await verifyHostedAdmissionEnvelopeDigestV1(claim.hostedAdmission))) {
+    throw new Error("hosted_claim_admission_envelope_digest_mismatch");
+  }
+  if (
+    claim.requestId !== request.requestId
+    || claim.operationId !== request.operationId
+    || claim.hostedAdmission.organizationId !== claim.organizationId
+    || claim.hostedAdmission.runnerId !== claim.runnerId
+    || claim.authority.credentialId !== request.expectedAuthority.credentialId
+    || claim.authority.registrationGeneration
+      !== request.expectedAuthority.registrationGeneration
+    || claim.authority.credentialGeneration
+      !== request.expectedAuthority.credentialGeneration
+  ) {
+    throw new Error("hosted_claim_request_authority_mismatch");
+  }
+  if (
+    claim.authority.runnerReadinessReceiptId
+      !== request.expectedAuthority.runnerReadinessReceiptId
+    || claim.authority.runnerReadinessReceiptDigest
+      !== request.expectedAuthority.runnerReadinessReceiptDigest
+  ) {
+    throw new Error("hosted_claim_readiness_mismatch");
   }
 }
 
@@ -784,11 +856,21 @@ type HostedExecutionRepository = Omit<
   ReturnType<typeof openDispatcherGovernanceStore>["repo"],
   "getHostedAssignedRunForRecovery" | "isHostedExecutionCurrent"
 > & {
+  getLatestRunnerReadinessProjection(input: {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+  }): Promise<ControlPlaneProjectionOutboxEntry | null>;
   getHostedClaimOperationForRetry(input: {
     destinationId: string;
     organizationId: string;
     runnerId: string;
-  }): Promise<{ operationId: string; requestId: string; request: HostedClaimRequestV1 } | null>;
+  }): Promise<{
+    operationId: string;
+    requestId: string;
+    request: HostedClaimRequestV1;
+    state: "pending" | "claimed" | "empty";
+  } | null>;
   beginHostedClaimOperation(input: {
     destinationId: string;
     organizationId: string;
@@ -796,7 +878,12 @@ type HostedExecutionRepository = Omit<
     request: HostedClaimRequestV1;
   }): Promise<{
     outcome: "created" | "replayed";
-    operation: { operationId: string; requestId: string; request: HostedClaimRequestV1 };
+    operation: {
+      operationId: string;
+      requestId: string;
+      request: HostedClaimRequestV1;
+      state: "pending" | "claimed" | "empty";
+    };
   }>;
   persistHostedClaimAuthorityShell(input: {
     destinationId: string;
@@ -815,6 +902,7 @@ type HostedExecutionRepository = Omit<
           operationId: string;
           requestId: string;
           request: HostedClaimRequestV1;
+          state: "pending" | "claimed" | "empty";
         };
       }
     | {
@@ -823,6 +911,7 @@ type HostedExecutionRepository = Omit<
           operationId: string;
           requestId: string;
           request: HostedClaimRequestV1;
+          state: "pending" | "claimed" | "empty";
         };
         lifecycleOperation: HostedLifecycleOperationEntry;
       }
@@ -1431,6 +1520,7 @@ export function createHostedControlLoop(input: {
   executors: Record<string, ExecutorAdapter>;
   pullRequestOptions?: PullRequestOptions;
   security?: RunnerSecurityPolicy;
+  githubApiOrigin?: string;
   now?: () => Date;
   fetchImpl?: typeof fetch;
   controlClient?: OpenTagClient;
@@ -1480,6 +1570,7 @@ export function createHostedControlLoop(input: {
       destinationId: "cloud",
       organizationId: context.organizationId,
       leaseOwner: `runner_${input.config.runnerId}`,
+      now: clock,
       cancelled: () => closed,
     });
   };
@@ -1654,20 +1745,92 @@ export function createHostedControlLoop(input: {
           return !closed;
         }
         let operation = existing;
-        if (!operation) {
-          // A new claim is forbidden until Cloud has synchronously accepted
-          // this exact readiness receipt. Projection retries are not acceptance.
-          const acceptedReadiness = await client.reportRunnerReadinessControlV1(
-            localReadiness,
-          );
+        let readinessValidation: RunnerReadinessReceiptEnvelopeV1;
+        if (operation) {
+          // Once an operation exists, Cloud owns reconciliation. This includes
+          // legacy operations whose accepted readiness predates the local
+          // projection outbox and requests whose first response was lost. The
+          // exact persisted request must be replayed regardless of local TTL.
+          // Its expectedAuthority remains the sole accepted-readiness
+          // reference; this fresh local receipt is used only to validate that
+          // the returned claim's target and executor are currently runnable.
+          readinessValidation = localReadiness;
+        } else {
+          const latest = await repo.getLatestRunnerReadinessProjection({
+            destinationId: "cloud",
+            organizationId: context.organizationId,
+            runnerId: context.runnerId,
+          });
+          let readinessEntry = latest;
+          if (
+            latest
+            && latest.receiptKind === "runner_readiness"
+            && hasSameRunnerReadinessAuthorityV1(
+              RunnerReadinessReceiptEnvelopeV1Schema.parse(latest.envelope),
+              localReadiness,
+            )
+          ) {
+            const window = runnerReadinessReuseWindowV1(
+              RunnerReadinessReceiptEnvelopeV1Schema.parse(latest.envelope),
+              clock(),
+            );
+            if (window === "final_window") return false;
+            if (window === "expired") readinessEntry = null;
+          } else {
+            readinessEntry = null;
+          }
+          if (!readinessEntry) {
+            const enqueued = await repo.enqueueControlPlaneProjection({
+              destinationId: "cloud",
+              envelope: localReadiness,
+              now: clock(),
+            });
+            if (enqueued.outcome === "conflict") {
+              throw new Error("runner_readiness_projection_conflict");
+            }
+            readinessEntry = enqueued.entry;
+          }
+          if (readinessEntry.state !== "acknowledged") {
+            await pumpControlPlaneProjections({
+              repo,
+              client,
+              destinationId: "cloud",
+              organizationId: context.organizationId,
+              leaseOwner: `runner_${input.config.runnerId}`,
+              now: clock,
+              cancelled: () => closed,
+            });
+          }
           if (closed) return false;
+          const exact = await repo.getControlPlaneProjection({
+            destinationId: "cloud",
+            organizationId: context.organizationId,
+            receiptId: readinessEntry.receiptId,
+          });
+          if (
+            !exact
+            || exact.receiptKind !== "runner_readiness"
+            || exact.state !== "acknowledged"
+            || exact.receiptDigest !== readinessEntry.receiptDigest
+          ) return false;
+          readinessValidation = RunnerReadinessReceiptEnvelopeV1Schema.parse(
+            exact.envelope,
+          );
+          if (
+            !hasSameRunnerReadinessAuthorityV1(
+              readinessValidation,
+              localReadiness,
+            )
+            || runnerReadinessReuseWindowV1(readinessValidation, clock())
+              !== "reusable"
+          ) return false;
           operation = (await repo.beginHostedClaimOperation({
             destinationId: "cloud",
             organizationId: context.organizationId,
             runnerId: context.runnerId,
             request: buildHostedClaimRequestV1({
               context,
-              readiness: acceptedReadiness.receipt,
+              readiness: readinessValidation,
               requestId: `request_${randomUUID()}`,
               operationId: `operation_${randomUUID()}`,
             }),
@@ -1687,6 +1850,7 @@ export function createHostedControlLoop(input: {
             controlError.status === 409
             && (controlError.code === "stale_control_authority"
               || controlError.code === "operation_digest_conflict")
+            && operation.state !== "claimed"
           ) {
             await repo.abandonHostedClaimOperation({
               operationId: operation.operationId,
@@ -1704,23 +1868,31 @@ export function createHostedControlLoop(input: {
           });
           return false;
         }
-        await assertHostedClaimCurrentAuthorityV1({
+        await assertHostedClaimRequestBindingV1({
           claim,
-          context,
-          readiness: localReadiness,
           request: operation.request,
-          now: clock(),
         });
         if (closed) return false;
         await repo.persistHostedClaimAuthorityShell({
           destinationId: "cloud",
-          credentialId: context.credentialId,
+          credentialId: claim.authority.credentialId,
           request: operation.request,
           claim,
         });
         if (closed) return false;
         let imported: Awaited<ReturnType<HostedExecutionRepository["importHostedAssignedRun"]>>;
         try {
+          // Persist first: any subsequent current-authority mismatch must be
+          // reconciled as a durable reject-start from the claimed shell, never
+          // through the pending-operation abandon transition.
+          await assertHostedClaimCurrentAuthorityV1({
+            claim,
+            context,
+            readiness: readinessValidation,
+            request: operation.request,
+            now: clock(),
+          });
+          if (closed) return false;
           if (!input.config.githubToken) {
             throw new Error("hosted_github_token_unavailable");
           }
@@ -1728,6 +1900,9 @@ export function createHostedControlLoop(input: {
             ?? refetchGitHubIssueCommentForHostedAdmission)({
             admission: claim.hostedAdmission,
             token: input.config.githubToken,
+            ...(input.githubApiOrigin !== undefined
+              ? { apiOrigin: input.githubApiOrigin }
+              : {}),
             ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
             now: clock,
           });
