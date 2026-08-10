@@ -9,6 +9,7 @@ import {
 import { normalizeGitHubIssueComment } from "./normalize.js";
 
 const GITHUB_API_ORIGIN = "https://api.github.com";
+const GITHUB_SOURCE_REFETCH_TIMEOUT_MS = 10_000;
 export const OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1 =
   "opentag_e2e_no_provider_credential_v1";
 
@@ -82,6 +83,30 @@ function requestHeaders(token: string): Record<string, string> {
   };
 }
 
+function createGitHubSourceDeadline(timeoutMs: number): {
+  signal: AbortSignal;
+  run: <T>(operation: Promise<T>) => Promise<T>;
+  clear: () => void;
+  didTimeout: () => boolean;
+} {
+  const controller = new AbortController();
+  let didTimeout = false;
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      didTimeout = true;
+      controller.abort();
+      reject(new Error("github_source_refetch_timeout"));
+    }, timeoutMs);
+  });
+  return {
+    signal: controller.signal,
+    run: <T>(operation: Promise<T>) => Promise.race([operation, timeout]),
+    clear: () => clearTimeout(timer),
+    didTimeout: () => didTimeout,
+  };
+}
+
 export function resolveGitHubSourceApiOrigin(input: {
   token: string;
   apiOrigin?: string;
@@ -105,31 +130,43 @@ async function fetchGitHubJson(input: {
   url: string;
   token: string;
 }): Promise<JsonRecord> {
+  const deadline = createGitHubSourceDeadline(
+    GITHUB_SOURCE_REFETCH_TIMEOUT_MS,
+  );
   let response: Response;
   try {
-    response = await input.fetchImpl(input.url, {
-      method: "GET",
-      headers: requestHeaders(input.token),
-      redirect: "manual",
-    });
-  } catch {
-    throw new GitHubSourceRefetchError("github_source_refetch_failed");
-  }
-  if (response.status === 404 || response.status === 410) {
-    throw new GitHubSourceRefetchError("github_source_missing");
-  }
-  if (!response.ok || (response.status >= 300 && response.status < 400)) {
-    throw new GitHubSourceRefetchError("github_source_refetch_failed");
-  }
-  try {
-    const body: unknown = await response.json();
-    if (!isRecord(body)) {
-      throw new GitHubSourceRefetchError("github_source_invalid");
+    try {
+      response = await deadline.run(input.fetchImpl(input.url, {
+        method: "GET",
+        headers: requestHeaders(input.token),
+        redirect: "manual",
+        signal: deadline.signal,
+      }));
+    } catch {
+      throw new GitHubSourceRefetchError("github_source_refetch_failed");
     }
-    return body;
-  } catch (error) {
-    if (error instanceof GitHubSourceRefetchError) throw error;
-    throw new GitHubSourceRefetchError("github_source_invalid");
+    if (response.status === 404 || response.status === 410) {
+      throw new GitHubSourceRefetchError("github_source_missing");
+    }
+    if (!response.ok || (response.status >= 300 && response.status < 400)) {
+      throw new GitHubSourceRefetchError("github_source_refetch_failed");
+    }
+    try {
+      const body: unknown = await deadline.run(response.json());
+      if (!isRecord(body)) {
+        throw new GitHubSourceRefetchError("github_source_invalid");
+      }
+      return body;
+    } catch (error) {
+      if (error instanceof GitHubSourceRefetchError) throw error;
+      throw new GitHubSourceRefetchError(
+        deadline.didTimeout()
+          ? "github_source_refetch_failed"
+          : "github_source_invalid",
+      );
+    }
+  } finally {
+    deadline.clear();
   }
 }
 

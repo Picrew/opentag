@@ -1315,6 +1315,21 @@ describe("OpenTag CLI start wiring", () => {
     expect(calls).toEqual(["wait", "daemon"]);
   });
 
+  it("checks hosted authorization before resolving the E2E GitHub origin", async () => {
+    const built = pairedHostedGithubConfig();
+    delete built.daemon.trustedRelay;
+
+    await expect(startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      listenForProcessSignals: false,
+      dependencies: {
+        env: { OPENTAG_E2E_HOSTED_CLAIM_V1: "1" },
+        logger: { log() {} }
+      }
+    })).rejects.toThrow(/explicit trustedRelay authorization before secrets or network access/u);
+  });
+
   it("accepts E2E GitHub API markers only for paired Hosted Control with the public sentinel", () => {
     const built = pairedHostedGithubConfig();
     const apiOrigin = "http://127.0.0.1:43123";

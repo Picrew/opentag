@@ -8,7 +8,10 @@ import {
   type CommandRunner,
   type ExecutorCapabilityContract
 } from "@opentag/runner";
-import type { RepositoryBindingConfig } from "./config.js";
+import {
+  canonicalRepositoryIdentity,
+  type RepositoryBindingConfig,
+} from "./config.js";
 
 export type PullRequestOptions = {
   githubToken?: string;
@@ -24,14 +27,25 @@ function hasPermission(event: OpenTagEvent, scope: string): boolean {
 
 function isGitHubRepositoryTarget(input: { event: OpenTagEvent; binding: RepositoryBindingConfig }): boolean {
   const repoProvider = input.event.metadata["repoProvider"];
-  return input.binding.provider === "github" && (repoProvider == null || repoProvider === "github");
+  return input.binding.provider.toLowerCase() === "github"
+    && (repoProvider == null
+      || (typeof repoProvider === "string" && repoProvider.toLowerCase() === "github"));
 }
 
 function repositoryTargetMatchesBinding(input: { event: OpenTagEvent; binding: RepositoryBindingConfig }): boolean {
   const owner = input.event.metadata["owner"];
   const repo = input.event.metadata["repo"];
   if (typeof owner !== "string" || typeof repo !== "string") return false;
-  return owner === input.binding.owner && repo === input.binding.repo;
+  const provider = input.event.metadata["repoProvider"];
+  const targetIdentity = canonicalRepositoryIdentity({
+    provider: typeof provider === "string" ? provider : input.binding.provider,
+    owner,
+    repo,
+  });
+  const bindingIdentity = canonicalRepositoryIdentity(input.binding);
+  return targetIdentity.provider === bindingIdentity.provider
+    && targetIdentity.owner === bindingIdentity.owner
+    && targetIdentity.repo === bindingIdentity.repo;
 }
 
 type CreatePullRequestIntent = {

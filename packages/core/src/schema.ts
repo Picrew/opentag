@@ -920,11 +920,9 @@ function isLeapYear(year: number): boolean {
 function parseRfc3339Instant(value: string): {
   epochSeconds: number;
   fractionalSeconds: string;
-} {
+} | undefined {
   const match = RFC3339_INSTANT_PATTERN.exec(value);
-  if (!match) {
-    throw new TypeError("RFC3339 timestamp comparison requires valid timestamps.");
-  }
+  if (!match) return undefined;
   const year = Number(match[1]);
   const month = Number(match[2]);
   const day = Number(match[3]);
@@ -958,7 +956,7 @@ function parseRfc3339Instant(value: string): {
     || offsetHour > 23
     || offsetMinute > 59
   ) {
-    throw new TypeError("RFC3339 timestamp comparison requires valid timestamps.");
+    return undefined;
   }
   const utc = new Date(0);
   utc.setUTCFullYear(year, month - 1, day);
@@ -971,9 +969,10 @@ function parseRfc3339Instant(value: string): {
   };
 }
 
-export function compareRfc3339Timestamps(left: string, right: string): number {
+function tryCompareRfc3339Timestamps(left: string, right: string): number | undefined {
   const leftInstant = parseRfc3339Instant(left);
   const rightInstant = parseRfc3339Instant(right);
+  if (!leftInstant || !rightInstant) return undefined;
   if (leftInstant.epochSeconds !== rightInstant.epochSeconds) {
     return leftInstant.epochSeconds < rightInstant.epochSeconds ? -1 : 1;
   }
@@ -989,6 +988,23 @@ export function compareRfc3339Timestamps(left: string, right: string): number {
   return 0;
 }
 
+export function compareRfc3339Timestamps(left: string, right: string): number {
+  const comparison = tryCompareRfc3339Timestamps(left, right);
+  if (comparison === undefined) {
+    throw new TypeError("RFC3339 timestamp comparison requires valid timestamps.");
+  }
+  return comparison;
+}
+
+const CompletionTimestampSchema = z.string().datetime().superRefine((value, ctx) => {
+  if (parseRfc3339Instant(value) === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Completion timestamps must be valid RFC3339 calendar instants."
+    });
+  }
+});
+
 export const CompletionGateResultSchema = z
   .object({
     gateId: CompletionGateIdSchema,
@@ -997,7 +1013,7 @@ export const CompletionGateResultSchema = z
     evidenceIds: z.array(z.string().min(1)),
     reasonCode: CompletionReasonCodeSchema,
     reason: z.string().min(1),
-    evaluatedAt: z.string().datetime()
+    evaluatedAt: CompletionTimestampSchema
   })
   .strict()
   .superRefine((result, ctx) => {
@@ -1029,8 +1045,8 @@ export const CompletionWaiverSchema = z
     scope: z.literal("selected_gates"),
     policyScope: PolicyScopeSchema,
     gateIds: z.array(CompletionGateIdSchema).min(1),
-    waivedAt: z.string().datetime(),
-    expiresAt: z.string().datetime().optional()
+    waivedAt: CompletionTimestampSchema,
+    expiresAt: CompletionTimestampSchema.optional()
   })
   .strict()
   .superRefine((waiver, ctx) => {
@@ -1045,15 +1061,18 @@ export const CompletionWaiverSchema = z
       }
       seen.add(gateId);
     });
-    if (
-      waiver.expiresAt
-      && compareRfc3339Timestamps(waiver.expiresAt, waiver.waivedAt) <= 0
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "A completion waiver must expire after it is granted.",
-        path: ["expiresAt"]
-      });
+    if (waiver.expiresAt) {
+      const expirationOrder = tryCompareRfc3339Timestamps(
+        waiver.expiresAt,
+        waiver.waivedAt
+      );
+      if (expirationOrder !== undefined && expirationOrder <= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "A completion waiver must expire after it is granted.",
+          path: ["expiresAt"]
+        });
+      }
     }
   });
 
@@ -1071,10 +1090,10 @@ export const CompletionAssessmentSchema = z
     state: CompletionStateSchema,
     evidenceBacked: z.boolean(),
     gateResults: z.array(CompletionGateResultSchema).min(1),
-    assessedAt: z.string().datetime(),
+    assessedAt: CompletionTimestampSchema,
     assessedBy: z.enum(["opentag", "human"]),
     supersedesAssessmentId: z.string().min(1).optional(),
-    acceptedAt: z.string().datetime().optional(),
+    acceptedAt: CompletionTimestampSchema.optional(),
     waiver: CompletionWaiverSchema.optional()
   })
   .strict()
@@ -1108,7 +1127,11 @@ export const CompletionAssessmentSchema = z
           path: ["gateResults", index, "gateId"]
         });
       }
-      if (compareRfc3339Timestamps(result.evaluatedAt, assessment.assessedAt) > 0) {
+      const evaluationOrder = tryCompareRfc3339Timestamps(
+        result.evaluatedAt,
+        assessment.assessedAt
+      );
+      if (evaluationOrder !== undefined && evaluationOrder > 0) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: "A gate cannot be evaluated after its completion assessment.",
@@ -1132,15 +1155,18 @@ export const CompletionAssessmentSchema = z
         path: ["acceptedAt"]
       });
     }
-    if (
-      assessment.acceptedAt
-      && compareRfc3339Timestamps(assessment.acceptedAt, assessment.assessedAt) > 0
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Completion acceptance cannot occur after its assessment.",
-        path: ["acceptedAt"]
-      });
+    if (assessment.acceptedAt) {
+      const acceptanceOrder = tryCompareRfc3339Timestamps(
+        assessment.acceptedAt,
+        assessment.assessedAt
+      );
+      if (acceptanceOrder !== undefined && acceptanceOrder > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Completion acceptance cannot occur after its assessment.",
+          path: ["acceptedAt"]
+        });
+      }
     }
     const hasWaivedGate = assessment.gateResults.some((result) => result.state === "waived");
     if (hasWaivedGate && !assessment.waiver) {
@@ -1182,28 +1208,31 @@ export const CompletionAssessmentSchema = z
         path: ["waiver"]
       });
     }
-    if (
-      assessment.waiver
-      && compareRfc3339Timestamps(assessment.waiver.waivedAt, assessment.assessedAt) > 0
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "A completion waiver cannot be applied before it is granted.",
-        path: ["waiver", "waivedAt"]
-      });
+    if (assessment.waiver) {
+      const waiverOrder = tryCompareRfc3339Timestamps(
+        assessment.waiver.waivedAt,
+        assessment.assessedAt
+      );
+      if (waiverOrder !== undefined && waiverOrder > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "A completion waiver cannot be applied before it is granted.",
+          path: ["waiver", "waivedAt"]
+        });
+      }
     }
-    if (
-      assessment.waiver?.expiresAt
-      && compareRfc3339Timestamps(
+    if (assessment.waiver?.expiresAt) {
+      const expirationOrder = tryCompareRfc3339Timestamps(
         assessment.waiver.expiresAt,
-        assessment.assessedAt,
-      ) <= 0
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "An expired completion waiver cannot be applied to an assessment.",
-        path: ["waiver", "expiresAt"]
-      });
+        assessment.assessedAt
+      );
+      if (expirationOrder !== undefined && expirationOrder <= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "An expired completion waiver cannot be applied to an assessment.",
+          path: ["waiver", "expiresAt"]
+        });
+      }
     }
     if (assessment.waiver) {
       const waivedGateIds = assessment.gateResults

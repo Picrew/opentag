@@ -151,6 +151,33 @@ describe("local-runtime public authority boundary", () => {
     expect(events).toEqual(["before", "abort", "after", "close"]);
   });
 
+  it("immediately continues the Control V1 sidecar after useful work", async () => {
+    const abort = new AbortController();
+    let iterations = 0;
+    const safetyAbort = setTimeout(() => abort.abort(), 100);
+    try {
+      await serveDaemon({
+        mode: "control-v1-sidecar",
+        pollIntervalMs: 60_000,
+        signal: abort.signal,
+        controlLoop: {
+          async beforeIteration() {
+            iterations += 1;
+            if (iterations === 2) abort.abort();
+            return true;
+          },
+          async afterIteration() {},
+          abort() {},
+          async close() {},
+        },
+      });
+    } finally {
+      clearTimeout(safetyAbort);
+    }
+
+    expect(iterations).toBe(2);
+  });
+
   it("keeps the valid legacy claim loop unchanged", async () => {
     const abort = new AbortController();
     const claim = vi.fn(async () => {

@@ -1301,10 +1301,6 @@ async function startRelayMode(
 }
 
 export async function startFromConfig(input: StartFromConfigInput): Promise<void> {
-  const githubApiOrigin = hostedE2EGitHubApiOriginFromEnv(
-    input.config,
-    input.dependencies?.env ?? process.env,
-  );
   if (input.config.daemon.controlRegistration) {
     assertHostedRelayAuthorization({
       dispatcherUrl: input.config.daemon.dispatcherUrl,
@@ -1323,6 +1319,10 @@ export async function startFromConfig(input: StartFromConfigInput): Promise<void
   }
   const hostedAuthProblem = hostedRunnerAuthProblem(input.config.daemon);
   if (hostedAuthProblem) throw new Error(hostedAuthProblem);
+  const githubApiOrigin = hostedE2EGitHubApiOriginFromEnv(
+    input.config,
+    input.dependencies?.env ?? process.env,
+  );
 
   ensurePrivateDirectory(input.config.state.directory);
   ensurePrivateDirectory(input.config.state.worktreeRoot);

@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import {
   CLI_CONFIG_FILESYSTEM_OPS,
   CLI_CONFIG_DIRECTORY_DURABILITY,
@@ -340,6 +340,7 @@ describe("OpenTag CLI config", () => {
   });
 
   it("does not follow a symbolic-link config lock for diagnostics", () => {
+    if (process.platform === "win32") return;
     const directory = tempDir();
     const path = join(directory, "config.json");
     writeCliConfigAtomic(path, config());
@@ -856,7 +857,15 @@ describe("OpenTag CLI config", () => {
       daemon: Record<string, unknown>;
       platforms: { lark: { appSecret: unknown } };
     };
+    const previousUnavailable = process.env.OPENTAG_TEST_UNAVAILABLE_SECRET;
     delete process.env.OPENTAG_TEST_UNAVAILABLE_SECRET;
+    onTestFinished(() => {
+      if (previousUnavailable === undefined) {
+        delete process.env.OPENTAG_TEST_UNAVAILABLE_SECRET;
+      } else {
+        process.env.OPENTAG_TEST_UNAVAILABLE_SECRET = previousUnavailable;
+      }
+    });
     raw.platforms.lark.appSecret = {
       kind: "keychain",
       service: "opentag-test-unavailable",
@@ -892,6 +901,27 @@ describe("OpenTag CLI config", () => {
     expect(persisted.platforms.lark.appSecret).toEqual(raw.platforms.lark.appSecret);
     expect(persisted.daemon.pairingToken).toEqual(raw.daemon.pairingToken);
     expect(persisted.daemon.runnerTokens).toEqual(raw.daemon.runnerTokens);
+  });
+
+  it("preserves an existing hosted runner SecretRef during a raw patch", () => {
+    const path = join(tempDir(), "config.json");
+    const raw = JSON.parse(JSON.stringify(config())) as {
+      daemon: Record<string, unknown>;
+    };
+    const runnerToken = {
+      kind: "env",
+      name: "OPENTAG_RUNNER_TOKEN"
+    };
+    raw.daemon.runnerToken = runnerToken;
+    writeFileSync(path, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+
+    writeHostedControlConfigAtomic(path, {
+      ...hostedPatch(),
+      runnerToken: undefined
+    });
+
+    const persisted = JSON.parse(readFileSync(path, "utf8")) as typeof raw;
+    expect(persisted.daemon.runnerToken).toEqual(runnerToken);
   });
 
   it("rejects non-inline hosted runner credentials before replacing the destination", () => {

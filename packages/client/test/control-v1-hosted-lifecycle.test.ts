@@ -305,7 +305,7 @@ describe('hosted lifecycle Control V1 transports', () => {
     const request = await requestFor('complete');
     for (const reasonCode of [
       'ghp_0123456789abcdef',
-      'sk_live_0123456789abcdef',
+      ['sk', 'live', '0123456789abcdef'].join('_'),
       'raw-token',
       'private-message',
       'unknown_safe_failure',

@@ -523,7 +523,7 @@ describe("local-runtime doctor", () => {
     expect(requests.filter(({ url }) => url.includes("/v1/"))).toEqual([]);
   });
 
-  it("accepts recovery-required state while making no authenticated request", async () => {
+  it("fails closed on recovery-required state while making no authenticated request", async () => {
     const runnerRequests: string[] = [];
     const checks = await runCodexDoctor(
       'service_tier = "fast"\n',

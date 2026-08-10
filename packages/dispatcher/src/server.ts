@@ -2711,75 +2711,94 @@ async function deliverCallbackDelivery(input: {
   delivery: import("@opentag/store").CallbackDelivery;
   retry?: CallbackRetryOptions;
 }): Promise<boolean> {
-  try {
-    const externalMessageId =
-      input.delivery.externalMessageId ??
-      (input.delivery.statusMessageKey
-        ? await input.repo.findCallbackExternalMessageId({
-            runId: input.delivery.runId,
-            provider: input.delivery.provider,
-            ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
-            statusMessageKey: input.delivery.statusMessageKey
-          })
-        : undefined);
-    const deliveryResult = await input.sink.deliver({
-      runId: input.delivery.runId,
-      kind: input.delivery.kind,
-      provider: input.delivery.provider,
-      uri: input.delivery.uri,
-      body: input.delivery.body,
-      ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
-      ...(input.delivery.agentId ? { agentId: input.delivery.agentId } : {}),
-      ...(input.delivery.statusMessageKey ? { statusMessageKey: input.delivery.statusMessageKey } : {}),
-      ...(externalMessageId ? { externalMessageId } : {}),
-      ...(input.delivery.blocks ? { blocks: input.delivery.blocks as SlackBlock[] } : {}),
-      ...(input.delivery.rich ? { rich: input.delivery.rich as NonNullable<CallbackMessage["rich"]> } : {})
-    });
-    if (!deliveryResult.handled) {
-      throw new Error(`No callback sink handled provider ${input.delivery.provider}.`);
-    }
-    if (deliveryResult.outcome === "rejected") {
-      await input.repo.markCallbackAttention({
-        deliveryId: input.delivery.id,
-        reasonCode: deliveryResult.reasonCode,
-        nextAction: "inspect-provider-rejection"
+  const classification = await (async () => {
+    try {
+      const externalMessageId =
+        input.delivery.externalMessageId ??
+        (input.delivery.statusMessageKey
+          ? await input.repo.findCallbackExternalMessageId({
+              runId: input.delivery.runId,
+              provider: input.delivery.provider,
+              ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
+              statusMessageKey: input.delivery.statusMessageKey
+            })
+          : undefined);
+      const deliveryResult = await input.sink.deliver({
+        runId: input.delivery.runId,
+        kind: input.delivery.kind,
+        provider: input.delivery.provider,
+        uri: input.delivery.uri,
+        body: input.delivery.body,
+        ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
+        ...(input.delivery.agentId ? { agentId: input.delivery.agentId } : {}),
+        ...(input.delivery.statusMessageKey ? { statusMessageKey: input.delivery.statusMessageKey } : {}),
+        ...(externalMessageId ? { externalMessageId } : {}),
+        ...(input.delivery.blocks ? { blocks: input.delivery.blocks as SlackBlock[] } : {}),
+        ...(input.delivery.rich ? { rich: input.delivery.rich as NonNullable<CallbackMessage["rich"]> } : {})
       });
-      return false;
+      if (!deliveryResult.handled) {
+        throw new Error(`No callback sink handled provider ${input.delivery.provider}.`);
+      }
+      if (deliveryResult.outcome === "rejected") {
+        return {
+          outcome: "attention" as const,
+          reasonCode: deliveryResult.reasonCode,
+          nextAction: "inspect-provider-rejection"
+        };
+      }
+      if (deliveryResult.outcome === "outcome_unknown") {
+        return {
+          outcome: "attention" as const,
+          reasonCode: deliveryResult.reasonCode,
+          nextAction: deliveryResult.nextAction,
+          owner: deliveryResult.owner
+        };
+      }
+      return {
+        outcome: "accepted" as const,
+        externalMessageId: deliveryResult.externalMessageId ?? externalMessageId
+      };
+    } catch (error) {
+      if (error instanceof CallbackProviderOutcomeUnknownError) {
+        return {
+          outcome: "attention" as const,
+          reasonCode: error.classification.reasonCode,
+          nextAction: error.classification.nextAction
+        };
+      }
+      return { outcome: "failed" as const, error };
     }
-    if (deliveryResult.outcome === "outcome_unknown") {
-      await input.repo.markCallbackAttention({
-        deliveryId: input.delivery.id,
-        reasonCode: deliveryResult.reasonCode,
-        nextAction: deliveryResult.nextAction,
-        owner: deliveryResult.owner
-      });
-      return false;
-    }
-    const deliveredExternalMessageId = deliveryResult.externalMessageId ?? externalMessageId;
-    await input.repo.markCallbackDelivered({
+  })();
+
+  if (classification.outcome === "attention") {
+    await input.repo.markCallbackAttention({
       deliveryId: input.delivery.id,
-      ...(deliveredExternalMessageId ? { externalMessageId: deliveredExternalMessageId } : {})
+      reasonCode: classification.reasonCode,
+      nextAction: classification.nextAction,
+      ...("owner" in classification ? { owner: classification.owner } : {})
     });
-    return true;
-  } catch (error) {
-    if (error instanceof CallbackProviderOutcomeUnknownError) {
-      await input.repo.markCallbackAttention({
-        deliveryId: input.delivery.id,
-        reasonCode: error.classification.reasonCode,
-        nextAction: error.classification.nextAction
-      });
-      return false;
-    }
+    return false;
+  }
+  if (classification.outcome === "failed") {
     const maxAttempts = input.retry?.maxAttempts ?? 5;
     const nextAttemptAt = nextCallbackAttemptAt({ attempts: input.delivery.attempts, ...(input.retry ?? {}) });
     await input.repo.markCallbackFailed({
       deliveryId: input.delivery.id,
-      error: error instanceof Error ? error.message : String(error),
+      error: classification.error instanceof Error
+        ? classification.error.message
+        : String(classification.error),
       maxAttempts,
       ...(nextAttemptAt ? { nextAttemptAt } : {})
     });
     return false;
   }
+  await input.repo.markCallbackDelivered({
+    deliveryId: input.delivery.id,
+    ...(classification.externalMessageId
+      ? { externalMessageId: classification.externalMessageId }
+      : {})
+  });
+  return true;
 }
 
 export async function processPendingCallbacks(input: {
@@ -3157,12 +3176,22 @@ export function createDispatcherApp(input: {
 
   async function deliverCallbackWithCompletionAuthority(inputValue: {
     message: CallbackMessage;
-    assessmentId: string;
+    assessmentId?: string;
     transitionKey: string;
     workThreadId?: string;
     legacyFallback?: boolean;
     deferOnGovernedFailure?: boolean;
   }): Promise<"governed" | "legacy" | "deferred" | "skipped"> {
+    if (!inputValue.assessmentId) {
+      if (inputValue.legacyFallback === false) return "skipped";
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        retry: callbackRetry,
+        message: inputValue.message
+      });
+      return "legacy";
+    }
     let governedContext: Awaited<ReturnType<typeof repo.getGovernedCallbackEnqueueContext>>;
     try {
       governedContext = await repo.getGovernedCallbackEnqueueContext({
@@ -7046,8 +7075,7 @@ export function createDispatcherApp(input: {
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     const completedResult = OpenTagRunResultSchema.parse(stored.run.result);
     const completionResult = await completionGovernance.ingestRunResult(runId);
-    const completionAssessmentId = completionResult?.assessment.id
-      ?? "missing_completion_assessment";
+    const completionAssessmentId = completionResult?.assessment.id;
     const completionWorkThreadId = stored.run.thread?.id;
     cancelPendingDelayedLarkStatusCard(runId);
     const linearApply = await linearApplyOptionsForEvent(stored.event);
@@ -7081,6 +7109,9 @@ export function createDispatcherApp(input: {
         ...larkRenderLocaleRenderOption(stored.event),
         presentation: waitingPresentation
       });
+      const transitionKey = completionAssessmentId
+        ? `run-terminal-waiting:${completionAssessmentId}`
+        : `run-terminal-waiting:${runId}`;
       await deliverCallbackWithCompletionAuthority({
         message: {
           runId,
@@ -7093,10 +7124,10 @@ export function createDispatcherApp(input: {
           ...(waiting.blocks?.length ? { blocks: waiting.blocks } : {}),
           ...(waiting.rich ? { rich: waiting.rich } : {}),
           statusMessageKey: `${runId}:status`,
-          idempotencyKey: `run-terminal-waiting:${completionAssessmentId}`
+          idempotencyKey: transitionKey
         },
-        assessmentId: completionAssessmentId,
-        transitionKey: `run-terminal-waiting:${completionAssessmentId}`,
+        ...(completionAssessmentId ? { assessmentId: completionAssessmentId } : {}),
+        transitionKey,
         ...(completionWorkThreadId ? { workThreadId: completionWorkThreadId } : {}),
         deferOnGovernedFailure: true
       });
@@ -7145,6 +7176,9 @@ export function createDispatcherApp(input: {
       presentation: finalPresentation
     });
     const statusMessageKey = lifecycleStatusMessageKey({ provider: stored.event.callback.provider, runId });
+    const transitionKey = completionAssessmentId
+      ? `run-terminal:${completionAssessmentId}:${completedResult.conclusion}`
+      : `run-terminal:${runId}:${completedResult.conclusion}`;
     await deliverCallbackWithCompletionAuthority({
       message: {
         runId,
@@ -7157,10 +7191,10 @@ export function createDispatcherApp(input: {
         ...(statusMessageKey ? { statusMessageKey } : {}),
         ...(finalCallback.blocks?.length ? { blocks: finalCallback.blocks } : {}),
         ...(finalCallback.rich ? { rich: finalCallback.rich } : {}),
-        idempotencyKey: `run-terminal:${completionAssessmentId}:${completedResult.conclusion}`
+        idempotencyKey: transitionKey
       },
-      assessmentId: completionAssessmentId,
-      transitionKey: `run-terminal:${completionAssessmentId}:${completedResult.conclusion}`,
+      ...(completionAssessmentId ? { assessmentId: completionAssessmentId } : {}),
+      transitionKey,
       ...(completionWorkThreadId ? { workThreadId: completionWorkThreadId } : {}),
       deferOnGovernedFailure: true
     });

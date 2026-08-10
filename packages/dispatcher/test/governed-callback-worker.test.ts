@@ -91,8 +91,12 @@ function setup(result: unknown, options: {
   setTimeout?: typeof globalThis.setTimeout;
   clearTimeout?: typeof globalThis.clearTimeout;
   enforceDistinctReceiptOperations?: boolean;
+  claimWithoutIntentLeaseToken?: boolean;
 } = {}) {
   const entry = claimed();
+  if (options.claimWithoutIntentLeaseToken) {
+    delete (entry.intent as { leaseToken?: string }).leaseToken;
+  }
   const persisted = { state: 'leased' as 'leased' | 'sending' | 'accepted' };
   const repo = {
     recoverExpiredGovernedCallbacks: vi.fn(async () => ({
@@ -276,6 +280,33 @@ describe('createGovernedCallbackWorker', () => {
     expect(repo.beginGovernedCallbackSending).toHaveBeenCalledTimes(1);
   });
 
+  it('reports and quarantines a claimed callback missing its intent lease token', async () => {
+    const onError = vi.fn();
+    const { worker, repo, sink } = setup({ handled: false }, {
+      claimWithoutIntentLeaseToken: true,
+      onError,
+    });
+
+    await worker.drain();
+
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'governed_callback_worker_claim_missing_lease_token',
+    }));
+    expect(repo.quarantineGovernedCallbackAttempt).toHaveBeenCalledTimes(1);
+    expect(repo.quarantineGovernedCallbackAttempt.mock.calls[0]![0])
+      .toMatchObject({
+        leaseToken: 'lease_1',
+        attemptReceipt: {
+          payload: {
+            outcome: 'attention',
+            reasonCode: 'callback_local_error',
+          },
+        },
+      });
+    expect(repo.beginGovernedCallbackSending).not.toHaveBeenCalled();
+    expect(sink.deliver).not.toHaveBeenCalled();
+  });
+
   it('quarantines preflight failure before sending or provider I/O', async () => {
     const { worker, repo, sink } = setup({ handled: false }, {
       preflight: { handled: false, reasonCode: 'callback_target_invalid' },
@@ -348,7 +379,7 @@ describe('createGovernedCallbackWorker', () => {
     expect(finalized.providerReceipt).toBeUndefined();
   });
 
-  it('quarantines malformed terminal GitHub evidence as a local error', async () => {
+  it('classifies malformed accepted GitHub evidence as provider uncertainty', async () => {
     const { worker, repo } = setup({
       handled: true,
       outcome: 'accepted',
@@ -360,13 +391,15 @@ describe('createGovernedCallbackWorker', () => {
 
     const finalized = repo.finalizeGovernedCallbackAttempt.mock.calls[0]![0];
     expect(finalized.attemptReceipt.payload).toMatchObject({
-      outcome: 'attention',
-      reasonCode: 'callback_local_error',
+      outcome: 'outcome_unknown',
+      reasonCode: 'provider_receipt_missing',
+      nextAction: 'reconcile-provider',
+      owner: 'runner_1',
     });
     expect(finalized.providerReceipt).toBeUndefined();
   });
 
-  it('rejects accepted GitHub evidence from a different repository', async () => {
+  it('classifies cross-repository accepted evidence as provider uncertainty', async () => {
     const { worker, repo } = setup({
       handled: true,
       outcome: 'accepted',
@@ -378,8 +411,10 @@ describe('createGovernedCallbackWorker', () => {
 
     const finalized = repo.finalizeGovernedCallbackAttempt.mock.calls[0]![0];
     expect(finalized.attemptReceipt.payload).toMatchObject({
-      outcome: 'attention',
-      reasonCode: 'callback_local_error',
+      outcome: 'outcome_unknown',
+      reasonCode: 'provider_receipt_missing',
+      nextAction: 'reconcile-provider',
+      owner: 'runner_1',
     });
     expect(finalized.providerReceipt).toBeUndefined();
     expect(repo.reconcileGovernedCallbackOutcome).not.toHaveBeenCalled();

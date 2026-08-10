@@ -420,8 +420,17 @@ export function createGovernedCallbackWorker(
   };
 
   const processClaim = async (claimed: ClaimedGovernedCallback) => {
-    const leaseToken = claimed.intent.leaseToken;
-    if (!leaseToken) return;
+    const leaseInvariantError = !claimed.intent.leaseToken
+      || !claimed.attempt.leaseToken
+      ? new Error('governed_callback_worker_claim_missing_lease_token')
+      : claimed.intent.leaseToken !== claimed.attempt.leaseToken
+        ? new Error('governed_callback_worker_claim_mismatched_lease_token')
+        : undefined;
+    const leaseToken = claimed.intent.leaseToken ?? claimed.attempt.leaseToken;
+    if (!leaseToken) {
+      await reportError(leaseInvariantError);
+      return;
+    }
     const observedNow = () => now().toISOString();
     const quarantine = async (
       reasonCode: 'callback_sink_unhandled' | 'callback_target_invalid' | 'callback_local_error',
@@ -448,6 +457,12 @@ export function createGovernedCallbackWorker(
         ['quarantined', 'replayed'],
       );
     };
+
+    if (leaseInvariantError) {
+      await reportError(leaseInvariantError);
+      await quarantine('callback_local_error');
+      return;
+    }
 
     const finalizeAttention = async (
       receipt: CallbackAttemptObservationReceiptEnvelopeV1,
@@ -571,16 +586,32 @@ export function createGovernedCallbackWorker(
             : observedAt,
       });
     } catch {
-      const receipt = await attentionObservation({
-        claimed,
-        attemptedAt: began.attemptedAt,
-        observedAt: Date.parse(observedAt) < Date.parse(began.attemptedAt)
-          ? began.attemptedAt
-          : observedAt,
-        reasonCode: 'callback_local_error',
-      });
-      await finalizeAttention(receipt);
-      return;
+      const boundedObservedAt = Date.parse(observedAt) < Date.parse(began.attemptedAt)
+        ? began.attemptedAt
+        : observedAt;
+      if (result.outcome !== 'rejected') {
+        observation = await observationFor({
+          claimed,
+          result: {
+            handled: true,
+            outcome: 'outcome_unknown',
+            reasonCode: 'provider_receipt_missing',
+            nextAction: 'reconcile-provider',
+            owner: claimed.producer.id,
+          },
+          attemptedAt: began.attemptedAt,
+          observedAt: boundedObservedAt,
+        });
+      } else {
+        const receipt = await attentionObservation({
+          claimed,
+          attemptedAt: began.attemptedAt,
+          observedAt: boundedObservedAt,
+          reasonCode: 'callback_local_error',
+        });
+        await finalizeAttention(receipt);
+        return;
+      }
     }
     const finalized = await input.repo.finalizeGovernedCallbackAttempt({
       destinationId: input.destinationId,

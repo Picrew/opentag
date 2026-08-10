@@ -257,6 +257,7 @@ function emptyLifecycleRepository() {
 async function validHostedClaim(input: {
   request: HostedClaimRequestV1;
   executorCapabilityDigest: string;
+  repository?: { owner: string; repo: string };
 }) {
   const admissionBase = {
     kind: "hosted_admission" as const,
@@ -276,8 +277,8 @@ async function validHostedClaim(input: {
     action: "created" as const,
     repository: {
       providerRepositoryId: "123",
-      owner: "acme",
-      repo: "widget",
+      owner: input.repository?.owner ?? "acme",
+      repo: input.repository?.repo ?? "widget",
     },
     sourceThread: {
       kind: "issue" as const,
@@ -1214,6 +1215,20 @@ describe("Control V1 projection pump", () => {
       request,
       now,
     })).rejects.toThrow("hosted_claim_current_capability_mismatch");
+
+    const mixedCaseClaim = await validHostedClaim({
+      request,
+      executorCapabilityDigest:
+        readiness.payload.executors[0]!.capabilityDigest,
+      repository: { owner: "AcMe", repo: "WiDgEt" },
+    });
+    await expect(assertHostedClaimCurrentAuthorityV1({
+      claim: mixedCaseClaim,
+      context,
+      readiness,
+      request,
+      now,
+    })).resolves.toBeUndefined();
   });
 
   it("persists an outcome-unknown claim before capability revocation and replays its exact rejection after restart", async () => {

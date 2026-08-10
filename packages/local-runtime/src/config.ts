@@ -358,7 +358,12 @@ export function assertHostedRelayAuthorization(input: {
 }
 
 export function hostedCredentialMutationRequestDigest(requestValue: HostedCredentialMutationRequest): string {
-  const request = RunnerCredentialRotationRequestV1Schema.parse(requestValue);
+  const request = z
+    .union([
+      RunnerCredentialRotationRequestV1Schema,
+      RunnerCredentialRevocationRequestV1Schema,
+    ])
+    .parse(requestValue);
   return `sha256:${createHash("sha256").update(canonicalJsonStringify(request)).digest("hex")}`;
 }
 

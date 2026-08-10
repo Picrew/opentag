@@ -1144,7 +1144,7 @@ function validateHostedControlRawConfig(value: unknown): void {
     trustedRelay: TrustedRelayAuthorizationV1Schema.parse(daemon.trustedRelay)
   });
   if (daemon.runnerToken !== undefined) {
-    z.string().min(1).parse(daemon.runnerToken);
+    RawSecretValueSchema.parse(daemon.runnerToken);
   }
   if (daemon.pairingToken !== undefined) {
     RawSecretValueSchema.parse(daemon.pairingToken);
@@ -1168,7 +1168,9 @@ export function writeHostedControlConfigAtomic(
     };
     if (patch.removePairingToken) delete patchedDaemon.pairingToken;
     if (patch.runnerToken === null) delete patchedDaemon.runnerToken;
-    else if (patch.runnerToken !== undefined) patchedDaemon.runnerToken = patch.runnerToken;
+    else if (patch.runnerToken !== undefined) {
+      patchedDaemon.runnerToken = z.string().min(1).parse(patch.runnerToken);
+    }
 
     const patched: Record<string, unknown> = {
       ...raw,

@@ -776,6 +776,29 @@ describe("Completion governance schemas", () => {
 
     expect(assessment.state).toBe("pending");
     expect(assessment.triggeredByRunId).toBe("run_1");
+    const invalidAssessedAt = CompletionAssessmentSchema.safeParse({
+      ...assessment,
+      assessedAt: "2026-02-30T00:00:00Z"
+    });
+    expect(invalidAssessedAt.success).toBe(false);
+    if (!invalidAssessedAt.success) {
+      expect(invalidAssessedAt.error.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: ["assessedAt"] })
+      ]));
+    }
+    const invalidEvaluatedAt = CompletionAssessmentSchema.safeParse({
+      ...assessment,
+      gateResults: [{
+        ...assessment.gateResults[0],
+        evaluatedAt: "2026-02-30T00:00:00Z"
+      }]
+    });
+    expect(invalidEvaluatedAt.success).toBe(false);
+    if (!invalidEvaluatedAt.success) {
+      expect(invalidEvaluatedAt.error.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: ["gateResults", 0, "evaluatedAt"] })
+      ]));
+    }
     expect(() => CompletionAssessmentSchema.parse({ ...assessment, state: "waived" })).toThrow(/deterministic gate reduction/u);
     expect(() => CompletionAssessmentSchema.parse({
       ...assessment,
@@ -814,6 +837,15 @@ describe("Completion governance schemas", () => {
     });
 
     expect(waived.waiver?.gateIds).toEqual(["checks"]);
+    for (const timestampPatch of [
+      { waivedAt: "2026-02-30T00:00:00Z" },
+      { expiresAt: "2026-02-30T00:00:00Z" }
+    ]) {
+      expect(CompletionWaiverSchema.safeParse({
+        ...waived.waiver!,
+        ...timestampPatch
+      }).success).toBe(false);
+    }
     expect(() => CompletionAssessmentSchema.parse({
       ...waived,
       acceptedAt: "2026-07-21T00:00:01.000Z"

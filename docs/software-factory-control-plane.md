@@ -575,9 +575,25 @@ not authority to mutate a work item directly.
 ### Gate and assessment result
 
 ```ts
+type CompletionGateResultState =
+  | "passed"
+  | "failed"
+  | "missing"
+  | "unknown"
+  | "waived";
+
+type CompletionAssessmentState =
+  | "pending"
+  | "satisfied"
+  | "unsatisfied"
+  | "blocked"
+  | "waived";
+
+type HostedCompletionGateResultState = CompletionAssessmentState;
+
 type CompletionGateResult = {
   gateId: string;
-  state: "passed" | "failed" | "missing" | "unknown" | "waived";
+  state: CompletionGateResultState;
   evidenceIds: string[];
   reasonCode: string;
   reason: string;
@@ -592,13 +608,32 @@ type CompletionAssessment = {
   contractVersion: number;
   cycle: number;
   sequence: number;
-  state: "pending" | "satisfied" | "unsatisfied" | "blocked" | "waived";
+  state: CompletionAssessmentState;
   gateResults: CompletionGateResult[];
   assessedAt: string;
   assessedBy: "opentag" | "human";
   supersedesAssessmentId?: string;
 };
 ```
+
+Within the local domain, `CompletionGateResult` is the single representation
+for both configured contract gates and synthetic effective gates. Assessment
+states never appear inside a local assessment's `gateResults`. The Control V1
+hosted receipt projects each result into `HostedCompletionGateResultState` by
+the following total mapping while preserving its gate ID, reason code, and
+evidence attribution:
+
+| Local effective gate-result state | Hosted gate-result state | Assessment state |
+| --- | --- | --- |
+| `unknown` | `blocked` | `blocked` |
+| `failed` | `unsatisfied` | `unsatisfied` |
+| `missing` | `pending` | `pending` |
+| `waived` | `waived` | `waived` when no higher-precedence state remains |
+| `passed` | `satisfied` | `satisfied` when every effective gate passed |
+
+Local reducers consume only `CompletionGateResultState`; hosted receipt
+validators consume only `HostedCompletionGateResultState`. Implementations must
+not mix the two vocabularies within one assessment or receipt.
 
 Assessments are immutable. New evidence creates a new assessment that
 supersedes the previous one. This preserves an explainable history. A governed
@@ -619,19 +654,22 @@ and cycle.
 | Mode | Contract and gate rule | Role of the executor result |
 | --- | --- | --- |
 | `governed` | The contract contains the configured delivery gates. Each gate is evaluated from its own attributable durable facts and receipts. | It is a linked execution receipt and may explain why more work is needed, but it is not a gate and does not participate in completion aggregation. |
-| `execution_compat` | The contract has exactly one `executor_run` gate, preserving the pre-governance completion behavior. Without a waiver its normal states are `pending`, `satisfied`, or `unsatisfied`; a valid scoped waiver may make it `waived`. Any blocking human escalation is an additional synthetic effective gate, not a contract gate. | A terminal successful result satisfies the executor gate; a terminal non-success result makes it unsatisfied; no terminal result leaves it pending. |
+| `execution_compat` | The contract has exactly one `executor_run` gate, preserving the pre-governance completion behavior. Without a waiver its gate-result states are `missing`, `passed`, or `failed`; a valid scoped waiver may make it `waived`. Any blocking human escalation adds a synthetic effective gate result with state `unknown`, not a contract gate. | A terminal successful result makes the executor gate `passed`; a terminal non-success result makes it `failed`; no terminal result leaves it `missing`. |
 
-The overall assessment is the deterministic reduction of its effective gate
-states, in this strict precedence order:
+The overall assessment is the deterministic reduction of its effective
+`CompletionGateResult` states. The gate-result precedence and corresponding
+assessment precedence are:
 
 ```text
+unknown > failed > missing > waived > passed
 blocked > unsatisfied > pending > waived > satisfied
 ```
 
-`blocked` covers an unresolved authoritative blocker such as a required human
-decision or an ambiguous/unknown fact. It is not an executor-result alias. The
-reducer gives every replica the same answer and prevents a successful executor
-exit from overriding a failed, missing, or blocked governed requirement.
+An `unknown` effective gate result reduces to `blocked` for an unresolved
+authoritative blocker such as a required human decision or an ambiguous fact.
+It is not an executor-result alias. The reducer gives every replica the same
+answer and prevents a successful executor exit from overriding a failed,
+missing, or unknown governed requirement.
 
 Every gate result is ordered by gate ID and carries its exact evidence receipt
 digests. The assessment-level evidence list is exactly the sorted, deduplicated
@@ -681,7 +719,7 @@ Examples:
 | `needs_human` | `blocked` | A durable, unresolved blocker is present; this is an explicit blocker condition, not the executor result itself acting as a gate |
 | `failed` | `pending` | One or more governed gates still lack current evidence; policy may allow a bounded repair run |
 | `failed` | `unsatisfied` | One or more governed gates have authoritative failing evidence; the failed executor result itself did not choose this state |
-| any | `waived` | An authorized human accepted scoped gates and every other effective gate is satisfied or waived; otherwise the reducer returns the dominant `blocked`, `unsatisfied`, or `pending` state while retaining the waiver |
+| any | `waived` | An authorized human accepted scoped gates and every other effective gate result is `passed` or `waived`; otherwise the reducer returns the dominant `blocked`, `unsatisfied`, or `pending` assessment state while retaining the waiver |
 
 Existing run statuses must not be renamed to completion statuses. Completion is
 a separate aggregate and projection.
@@ -701,18 +739,19 @@ summary.
 ### Default compatibility contract
 
 Repositories without explicit completion configuration use
-`execution_compat` mode with one executor gate. Its three states are
-deterministic before waiver or blocking-escalation overrides:
+`execution_compat` mode with one executor gate. Its gate-result and assessment
+states are deterministic before waiver or blocking-escalation overrides:
 
 ```text
-no terminal executor result   -> pending
-terminal executor success     -> satisfied
-terminal executor non-success -> unsatisfied
+no terminal executor result   -> missing -> pending
+terminal executor success     -> passed  -> satisfied
+terminal executor non-success -> failed  -> unsatisfied
 ```
 
 A valid waiver scoped to that executor gate changes it to `waived`. An active
-blocking human escalation adds a synthetic `blocked` gate and therefore wins
-the overall reducer while retaining any waiver attribution.
+blocking human escalation adds a synthetic `CompletionGateResult` with state
+`unknown`, which reduces the assessment to `blocked` while retaining any waiver
+attribution.
 
 This preserves current behavior without pretending that an executor self-report
 is governed delivery evidence. The first recommended `governed` profile adds

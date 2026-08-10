@@ -74,13 +74,19 @@ const hostedCredentialMutationRequest = {
   expectedCredentialId: "credential_runtime_1"
 };
 
+const hostedCredentialRevocationRequest = {
+  ...hostedCredentialMutationRequest,
+  requestId: "request_revoke_1",
+  operationId: "operation_revoke_1",
+};
+
 const hostedCredentialMutationDigest = hostedCredentialMutationRequestDigest(hostedCredentialMutationRequest);
 
 function rotationInput(request = hostedCredentialMutationRequest) {
   return { request, canonicalRequestDigest: hostedCredentialMutationRequestDigest(request) };
 }
 
-function revocationInput(request = hostedCredentialMutationRequest) {
+function revocationInput(request = hostedCredentialRevocationRequest) {
   return { request, canonicalRequestDigest: hostedCredentialMutationRequestDigest(request) };
 }
 
@@ -949,7 +955,7 @@ describe("Hosted Control V1 credential state", () => {
     })).toThrow(/authoritative rotation outcome-unknown/iu);
     const directlyRevoked = confirmHostedCredentialRevocation(
       revocationUnknown,
-      { ...hostedRevocation("operation_rotate_1"), replayed: true }
+      { ...hostedRevocation("operation_revoke_1"), replayed: true }
     );
     expect(directlyRevoked.controlRegistration?.state).toBe("revoked");
   });
@@ -1309,7 +1315,7 @@ describe("Hosted Control V1 credential state", () => {
         }),
         revocationInput()
       ),
-      hostedRevocation("operation_rotate_1")
+      hostedRevocation("operation_revoke_1")
     );
     const control = revoked.controlRegistration;
     if (!control || control.state !== "revoked") throw new Error("Expected revoked fixture.");
@@ -1339,7 +1345,7 @@ describe("Hosted Control V1 credential state", () => {
           controlRegistration: paired
         }),
         revocationInput({
-          ...hostedCredentialMutationRequest,
+          ...hostedCredentialRevocationRequest,
           operationId: "operation_revoke_1"
         })
       ),
@@ -1404,7 +1410,7 @@ describe("Hosted Control V1 credential state", () => {
         }),
         revocationInput()
       ),
-      hostedRevocation("operation_rotate_1", 2)
+      hostedRevocation("operation_revoke_1", 2)
     )).toThrow(/advance only the credential generation/iu);
   });
 });

@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OpenTagEvent, OpenTagRun, OpenTagRunResult } from "@opentag/core";
 import type { ExecutorAdapter } from "@opentag/runner";
-import { runOneDaemonIteration, type DaemonClient } from "../src/daemon.js";
+import {
+  resolveRepositoryBinding,
+  runOneDaemonIteration,
+  type DaemonClient,
+} from "../src/daemon.js";
 
 function event(metadata: Record<string, unknown>, source = "github"): OpenTagEvent {
   return {
@@ -59,6 +63,24 @@ function runForEvent(input: { event: OpenTagEvent; executor?: ExecutorAdapter })
 }
 
 describe("daemon Project Target allowlist", () => {
+  it("matches mixed-case GitHub targets against the canonical local binding", () => {
+    const binding = {
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      checkoutPath: "/tmp/demo",
+      defaultExecutor: "echo",
+      baseBranch: "main",
+      pushRemote: "origin",
+      keepWorktree: "on_failure" as const,
+    };
+
+    expect(resolveRepositoryBinding(
+      event({ repoProvider: "GitHub", owner: "AcMe", repo: "DeMo" }),
+      [binding],
+    )).toBe(binding);
+  });
+
   it("refuses runs that target a repository outside the local allowlist", async () => {
     const executor: ExecutorAdapter = {
       id: "echo",

@@ -79,8 +79,8 @@ function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant
   return permissions;
 }
 
-function permissionsForPullRequestReviewCommentIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
-  const permissions = permissionsForIntent(intent);
+function permissionsForPullRequestIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
+  const permissions = permissionsForIntent(intent).filter((permission) => permission.scope !== "pr:create");
   if (intent === "review") {
     permissions.push({
       scope: "pr:update",
@@ -206,7 +206,9 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
       number: input.issueNumber,
       uri: input.issueUrl
     }),
-    permissions: permissionsForIntent(mention.intent),
+    permissions: threadKind === "issue"
+      ? permissionsForIntent(mention.intent)
+      : permissionsForPullRequestIntent(mention.intent),
     callback: {
       provider: "github",
       uri: input.apiCommentsUrl,
@@ -280,7 +282,7 @@ export function normalizeGitHubPullRequestReviewComment(input: GitHubPullRequest
       number: input.pullRequestNumber,
       uri: input.pullRequestUrl
     }),
-    permissions: permissionsForPullRequestReviewCommentIntent(mention.intent),
+    permissions: permissionsForPullRequestIntent(mention.intent),
     callback: {
       provider: "github",
       uri: input.apiCommentsUrl,

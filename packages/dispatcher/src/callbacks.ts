@@ -572,7 +572,8 @@ export function createGitLabCallbackSink(input: {
               "PRIVATE-TOKEN": token,
               "content-type": "application/json"
             },
-            body: JSON.stringify({ body: message.body })
+            body: JSON.stringify({ body: message.body }),
+            signal: AbortSignal.timeout(10_000)
           });
         } catch {
           return callbackOutcomeUnknown({ producerId, reasonCode: "provider_timeout" });
@@ -1042,7 +1043,8 @@ export function createSlackCallbackSink(input: {
                       threadTs: thread.threadTs,
                       ...(message.blocks?.length ? { blocks: message.blocks } : {})
                     })
-              )
+              ),
+              signal: AbortSignal.timeout(10_000)
             });
           } catch {
             return callbackOutcomeUnknown({ producerId, reasonCode: "provider_timeout" });
@@ -1074,6 +1076,9 @@ export function createSlackCallbackSink(input: {
             statusMessageTsByKey.set(message.statusMessageKey, providerReceiptId);
           }
           if (message.kind === "final") {
+            if (message.statusMessageKey) {
+              statusMessageTsByKey.delete(message.statusMessageKey);
+            }
             for (const key of statusMessageTsByKey.keys()) {
               if (key.startsWith(`${message.runId}:`)) {
                 statusMessageTsByKey.delete(key);
@@ -1366,7 +1371,8 @@ export function createTelegramCallbackSink(input: {
                       ...(rich ? { rich } : {}),
                       ...(thread.messageThreadId ? { messageThreadId: thread.messageThreadId } : {})
                     })
-              )
+              ),
+              signal: AbortSignal.timeout(10_000)
             });
           } catch {
             return callbackOutcomeUnknown({ producerId, reasonCode: "provider_timeout" });

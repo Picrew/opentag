@@ -155,6 +155,8 @@ describe("normalizeGitHubIssueComment", () => {
       pullRequestNumber: 7,
     });
     expect(event?.metadata).not.toHaveProperty("issueNumber");
+    expect(event?.callback.threadKey).toBe("acme/demo#7");
+    expect(event?.permissions.map((permission) => permission.scope)).not.toContain("pr:create");
   });
 
   it("normalizes an @opentag pull request review comment", () => {

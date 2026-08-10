@@ -236,6 +236,7 @@ describe('refetchGitHubIssueCommentForHostedAdmission', () => {
         method: 'GET',
         redirect: 'manual',
         headers: { authorization: `Bearer ${TOKEN}` },
+        signal: expect.any(AbortSignal),
       });
     }
     expect(result.event).toMatchObject({
@@ -323,6 +324,83 @@ describe('refetchGitHubIssueCommentForHostedAdmission', () => {
         fetchImpl: githubFetch({ commentStatus: 404 }),
       }),
       'github_source_missing',
+    );
+  });
+
+  it('bounds stalled provider requests and classifies them as refetch failures', async () => {
+    const sourceAdmission = await admission();
+    let requestSignal: AbortSignal | null | undefined;
+    let resolveFetchCalled!: () => void;
+    const fetchCalled = new Promise<void>((resolve) => {
+      resolveFetchCalled = resolve;
+    });
+    const fetchImpl = vi.fn<typeof fetch>((_url, init) => {
+      requestSignal = init?.signal;
+      resolveFetchCalled();
+      return new Promise<Response>(() => {});
+    });
+    vi.useFakeTimers();
+    try {
+      const assertion = expectCode(
+        refetchGitHubIssueCommentForHostedAdmission({
+          admission: sourceAdmission,
+          token: TOKEN,
+          fetchImpl,
+        }),
+        'github_source_refetch_failed',
+      );
+      await fetchCalled;
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await assertion;
+      expect(requestSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds stalled provider response bodies and preserves invalid-body classification', async () => {
+    const sourceAdmission = await admission();
+    let requestSignal: AbortSignal | null | undefined;
+    let resolveFetchCalled!: () => void;
+    const fetchCalled = new Promise<void>((resolve) => {
+      resolveFetchCalled = resolve;
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+      requestSignal = init?.signal;
+      resolveFetchCalled();
+      return {
+        ok: true,
+        status: 200,
+        json: () => new Promise<never>(() => {}),
+      } as Response;
+    });
+    vi.useFakeTimers();
+    try {
+      const assertion = expectCode(
+        refetchGitHubIssueCommentForHostedAdmission({
+          admission: sourceAdmission,
+          token: TOKEN,
+          fetchImpl,
+        }),
+        'github_source_refetch_failed',
+      );
+      await fetchCalled;
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await assertion;
+      expect(requestSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    await expectCode(
+      refetchGitHubIssueCommentForHostedAdmission({
+        admission: sourceAdmission,
+        token: TOKEN,
+        fetchImpl: vi.fn<typeof fetch>(async () => new Response('{')),
+      }),
+      'github_source_invalid',
     );
   });
 

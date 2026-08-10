@@ -595,12 +595,21 @@ export async function assertHostedClaimCurrentAuthorityV1(input: {
   const target = context.targets.find(
     (candidate) => candidate.projectTargetId === claim.authority.projectTargetId,
   );
+  const targetIdentity = target
+    ? canonicalRepositoryIdentity(target)
+    : null;
+  const admissionIdentity = canonicalRepositoryIdentity({
+    provider: claim.hostedAdmission.provider,
+    owner: claim.hostedAdmission.repository.owner,
+    repo: claim.hostedAdmission.repository.repo,
+  });
   if (
     !target
+    || !targetIdentity
     || target.bindingDigest !== claim.authority.targetBindingDigest
-    || target.provider !== claim.hostedAdmission.provider
-    || target.owner !== claim.hostedAdmission.repository.owner
-    || target.repo !== claim.hostedAdmission.repository.repo
+    || targetIdentity.provider !== admissionIdentity.provider
+    || targetIdentity.owner !== admissionIdentity.owner
+    || targetIdentity.repo !== admissionIdentity.repo
     || target.defaultExecutor !== claim.executorId
   ) {
     throw new Error("hosted_claim_target_mismatch");

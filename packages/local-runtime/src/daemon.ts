@@ -28,7 +28,11 @@ import {
   type RunnerSecurityPolicy,
   executionPathForAttempt
 } from "@opentag/runner";
-import type { AgentSessionProfileConfig, RepositoryBindingConfig } from "./config.js";
+import {
+  canonicalRepositoryIdentity,
+  type AgentSessionProfileConfig,
+  type RepositoryBindingConfig,
+} from "./config.js";
 import type { HostedControlLoop } from "./control-v1.js";
 import { maybeCreatePullRequest, type PullRequestOptions } from "./pr.js";
 
@@ -69,14 +73,15 @@ export type TrustedMaterialActionReceiptProvider = (input: {
 export function resolveRepositoryBinding(event: OpenTagEvent, repositories: RepositoryBindingConfig[]): RepositoryBindingConfig | null {
   const projectTargetRef = projectTargetRefFromEvent(event);
   if (!projectTargetRef) return null;
+  const targetIdentity = canonicalRepositoryIdentity(projectTargetRef);
 
   return (
-    repositories.find(
-      (candidate) =>
-        candidate.provider === projectTargetRef.provider &&
-        candidate.owner === projectTargetRef.owner &&
-        candidate.repo === projectTargetRef.repo
-    ) ?? null
+    repositories.find((candidate) => {
+      const candidateIdentity = canonicalRepositoryIdentity(candidate);
+      return candidateIdentity.provider === targetIdentity.provider
+        && candidateIdentity.owner === targetIdentity.owner
+        && candidateIdentity.repo === targetIdentity.repo;
+    }) ?? null
   );
 }
 
@@ -108,12 +113,13 @@ function claimedProjectTargetFailure(input: {
     };
   }
 
-  const allowed = input.repositories.some(
-    (repository) =>
-      repository.provider === input.projectTargetRef?.provider &&
-      repository.owner === input.projectTargetRef.owner &&
-      repository.repo === input.projectTargetRef.repo
-  );
+  const targetIdentity = canonicalRepositoryIdentity(input.projectTargetRef);
+  const allowed = input.repositories.some((repository) => {
+    const repositoryIdentity = canonicalRepositoryIdentity(repository);
+    return repositoryIdentity.provider === targetIdentity.provider
+      && repositoryIdentity.owner === targetIdentity.owner
+      && repositoryIdentity.repo === targetIdentity.repo;
+  });
   if (!allowed) {
     return {
       conclusion: "needs_human",
@@ -939,9 +945,11 @@ export async function serveDaemon(input: DaemonRuntimeInput): Promise<void> {
     try {
       while (!input.signal?.aborted) {
         try {
-          await input.controlLoop.beforeIteration();
+          const didWork = await input.controlLoop.beforeIteration();
           await input.controlLoop.afterIteration();
-          await sleep(pollIntervalMs, input.signal);
+          if (!didWork) {
+            await sleep(pollIntervalMs, input.signal);
+          }
         } catch (error) {
           if (input.signal?.aborted) break;
           console.warn("OpenTag Control V1 sidecar iteration failed; retrying:", error);

@@ -6531,6 +6531,100 @@ describe("dispatcher API", () => {
     await expect(claim.json()).resolves.toMatchObject({ run: { id: "run_scratch_dispatcher" } });
   });
 
+  it("uses legacy terminal callback delivery for a hosted run without a completion assessment", async () => {
+    const sqlite = new Database(":memory:");
+    const delivered: CallbackMessage[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      sqlite,
+      callbackSink: {
+        async deliver(message) {
+          delivered.push(message);
+          return { handled: true, outcome: "accepted" } as const;
+        }
+      }
+    });
+    onTestFinished(async () => {
+      await app.stopBackgroundWorkers();
+      sqlite.close();
+    });
+    const runnerId = "runner_hosted_scratch";
+    const runId = "run_hosted_scratch";
+    const event = {
+      id: "evt_hosted_scratch",
+      source: "slack",
+      sourceEventId: "message_hosted_scratch",
+      receivedAt: "2026-07-12T00:00:00.000Z",
+      actor: { provider: "slack", providerUserId: "U123", handle: "alice" },
+      target: { mention: "@opentag", agentId: "opentag", executorHint: "custom" },
+      command: { rawText: "summarize this thread", intent: "run", args: {} },
+      context: [],
+      permissions: [],
+      callback: { provider: "slack", uri: "https://example.com/callback" },
+      metadata: { teamId: "T123", channelId: "C456" }
+    };
+    expect((await app.request("/v1/runners", jsonRequest({
+      runnerId,
+      name: "Hosted Scratch Runner"
+    }))).status).toBe(201);
+    await bindSourceChannel(app, event);
+    expect((await app.request("/v1/runs", jsonRequest({ runId, event }))).status)
+      .toBe(201);
+    const claimResponse = await app.request(`/v1/runners/${runnerId}/claim`, {
+      method: "POST"
+    });
+    expect(claimResponse.status).toBe(200);
+    const claim = await claimResponse.json() as {
+      attemptId: string;
+      fencingToken: string;
+    };
+    const importedAt = new Date().toISOString();
+    sqlite.prepare(`INSERT INTO hosted_run_imports (
+      run_id, admission_id, admission_operation_id, claim_operation_id,
+      attempt_id, fencing_token_digest, source_identity_digest,
+      delivery_payload_digest, admission_envelope_digest, policy_receipt_id,
+      policy_payload_digest, policy_receipt_digest, event_digest,
+      context_packet_digest, claim_digest, authority_digest, authority_json,
+      imported_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)`)
+      .run(
+        runId,
+        "admission_hosted_scratch",
+        "admission_operation_hosted_scratch",
+        "claim_operation_hosted_scratch",
+        claim.attemptId,
+        `sha256:${"1".repeat(64)}`,
+        `sha256:${"2".repeat(64)}`,
+        `sha256:${"3".repeat(64)}`,
+        `sha256:${"4".repeat(64)}`,
+        "policy_receipt_hosted_scratch",
+        `sha256:${"5".repeat(64)}`,
+        `sha256:${"6".repeat(64)}`,
+        `sha256:${"7".repeat(64)}`,
+        `sha256:${"8".repeat(64)}`,
+        `sha256:${"9".repeat(64)}`,
+        `sha256:${"a".repeat(64)}`,
+        importedAt
+      );
+    delivered.length = 0;
+
+    const complete = await app.request(
+      `/v1/runners/${runnerId}/runs/${runId}/complete`,
+      jsonRequest({ result: { conclusion: "success", summary: "Scratch run completed." } })
+    );
+
+    expect(complete.status).toBe(200);
+    expect(delivered).toEqual([
+      expect.objectContaining({
+        runId,
+        kind: "final"
+      })
+    ]);
+    expect(sqlite.prepare(`SELECT dispatch_mode AS dispatchMode, status
+      FROM callback_deliveries WHERE run_id = ? AND kind = 'final'`).get(runId))
+      .toEqual({ dispatchMode: "legacy", status: "delivered" });
+  });
+
   it("deletes generic channel bindings", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
 

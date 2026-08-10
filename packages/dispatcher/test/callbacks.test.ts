@@ -343,6 +343,37 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
+  it("bounds GitLab callback requests with a provider timeout", async () => {
+    let requestSignal: AbortSignal | null | undefined;
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const sink = createGitLabCallbackSink({
+      token: "glpat_test",
+      producerId: "runner_local_1",
+      fetchImpl: (async (_url, init) => {
+        requestSignal = init?.signal;
+        throw new DOMException("request timed out", "AbortError");
+      }) as typeof fetch
+    });
+
+    try {
+      await expect(sink.deliver({
+        runId: "run_gitlab_timeout",
+        kind: "final",
+        provider: "gitlab",
+        uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        body: "done"
+      })).resolves.toMatchObject({
+        handled: true,
+        outcome: "outcome_unknown",
+        reasonCode: "provider_timeout"
+      });
+      expect(timeout).toHaveBeenCalledWith(10_000);
+      expect(requestSignal).toBeInstanceOf(AbortSignal);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
   it("posts Linear callback messages as new issue comments", async () => {
     const requests: { url: string; method: string; body: unknown; authorization: string | null }[] = [];
     const sink = createLinearCallbackSink({
@@ -1339,6 +1370,38 @@ describe("createGitHubCallbackSink", () => {
     });
   });
 
+  it("bounds Telegram callback requests with a provider timeout", async () => {
+    let requestSignal: AbortSignal | null | undefined;
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const sink = createTelegramCallbackSink({
+      botToken: "telegram-token",
+      producerId: "runner_local_1",
+      fetchImpl: (async (_url, init) => {
+        requestSignal = init?.signal;
+        throw new DOMException("request timed out", "AbortError");
+      }) as typeof fetch
+    });
+
+    try {
+      await expect(sink.deliver({
+        runId: "run_telegram_timeout",
+        kind: "final",
+        provider: "telegram",
+        uri: "https://api.telegram.org/sendMessage",
+        threadKey: "bot_123|-1001|789|42",
+        body: "done"
+      })).resolves.toMatchObject({
+        handled: true,
+        outcome: "outcome_unknown",
+        reasonCode: "provider_timeout"
+      });
+      expect(timeout).toHaveBeenCalledWith(10_000);
+      expect(requestSignal).toBeInstanceOf(AbortSignal);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
   it("edits a Telegram status card with editMessageText after the acknowledgement", async () => {
     const requests: { url: string; body: unknown }[] = [];
     const sink = createTelegramCallbackSink({
@@ -1505,6 +1568,38 @@ describe("createGitHubCallbackSink", () => {
         authorization: "Bearer xoxb-deepseek"
       }
     ]);
+  });
+
+  it("bounds Slack callback requests with a provider timeout", async () => {
+    let requestSignal: AbortSignal | null | undefined;
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const sink = createSlackCallbackSink({
+      botToken: "xoxb-test",
+      producerId: "runner_local_1",
+      fetchImpl: (async (_url, init) => {
+        requestSignal = init?.signal;
+        throw new DOMException("request timed out", "AbortError");
+      }) as typeof fetch
+    });
+
+    try {
+      await expect(sink.deliver({
+        runId: "run_slack_timeout",
+        kind: "final",
+        provider: "slack",
+        uri: "https://slack.com/api/chat.postMessage",
+        threadKey: "T123|C123|1710000000.000100",
+        body: "done"
+      })).resolves.toMatchObject({
+        handled: true,
+        outcome: "outcome_unknown",
+        reasonCode: "provider_timeout"
+      });
+      expect(timeout).toHaveBeenCalledWith(10_000);
+      expect(requestSignal).toBeInstanceOf(AbortSignal);
+    } finally {
+      timeout.mockRestore();
+    }
   });
 
   it("edits an existing Slack status message when statusMessageKey repeats", async () => {
@@ -1792,6 +1887,49 @@ describe("createGitHubCallbackSink", () => {
     expect(requests.map((request) => request.url)).toEqual([
       "https://slack.com/api/chat.postMessage",
       "https://slack.com/api/chat.postMessage",
+      "https://slack.com/api/chat.postMessage"
+    ]);
+  });
+
+  it("cleans up an exact custom Slack status key after final delivery", async () => {
+    const urls: string[] = [];
+    const sink = createSlackCallbackSink({
+      botToken: "xoxb-test",
+      fetchImpl: (async (url, init) => {
+        urls.push(String(url));
+        const body = JSON.parse(String(init?.body)) as { ts?: string };
+        return Response.json({ ok: true, ts: body.ts ?? `posted-${urls.length}` });
+      }) as typeof fetch
+    });
+    const callback = {
+      provider: "slack",
+      uri: "https://slack.com/api/chat.postMessage",
+      threadKey: "T123|C123|1710000000.000100",
+      statusMessageKey: "custom-status"
+    } as const;
+
+    await sink.deliver({
+      ...callback,
+      runId: "run_custom_1",
+      kind: "progress",
+      body: "Starting"
+    });
+    await sink.deliver({
+      ...callback,
+      runId: "run_custom_1",
+      kind: "final",
+      body: "Done"
+    });
+    await sink.deliver({
+      ...callback,
+      runId: "run_custom_2",
+      kind: "progress",
+      body: "Starting again"
+    });
+
+    expect(urls).toEqual([
+      "https://slack.com/api/chat.postMessage",
+      "https://slack.com/api/chat.update",
       "https://slack.com/api/chat.postMessage"
     ]);
   });
@@ -2671,6 +2809,41 @@ describe("createGitHubCallbackSink", () => {
       nextAction: "reconcile-provider",
       owner: "runner_local_1"
     });
+  });
+
+  it("does not schedule a provider retry when durable attention persistence fails", async () => {
+    const markCallbackFailed = vi.fn();
+    const providerDelivery = vi.fn(async () => ({
+      handled: true,
+      outcome: "outcome_unknown",
+      reasonCode: "provider_timeout",
+      nextAction: "reconcile-provider",
+      owner: "runner_local_1"
+    } as const));
+    const repo = {
+      claimPendingCallbackDeliveries: vi.fn(async () => [{
+        id: "delivery_attention_write_failed",
+        runId: "run_attention_write_failed",
+        kind: "final",
+        provider: "slack",
+        uri: "https://slack.com/api/chat.postMessage",
+        body: "final",
+        attempts: 0
+      }]),
+      findCallbackExternalMessageId: vi.fn(async () => undefined),
+      markCallbackDelivered: vi.fn(),
+      markCallbackFailed,
+      markCallbackAttention: vi.fn(async () => {
+        throw new Error("attention ledger busy");
+      })
+    };
+
+    await expect(processPendingCallbacks({
+      repo: repo as never,
+      sink: { deliver: providerDelivery }
+    })).rejects.toThrow("attention ledger busy");
+    expect(providerDelivery).toHaveBeenCalledTimes(1);
+    expect(markCallbackFailed).not.toHaveBeenCalled();
   });
 
   it("keeps an ownerless typed legacy outcome unknown in durable attention across restart", async () => {
