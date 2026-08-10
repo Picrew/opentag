@@ -2,6 +2,8 @@ import type Database from "better-sqlite3";
 import { sql } from "drizzle-orm";
 import { check, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
+import { canonicalSha256Json } from "./canonical-json.js";
+
 export const runs = sqliteTable(
   "runs",
   {
@@ -718,6 +720,7 @@ export const governedCallbackIntents = sqliteTable(
     intentReceiptId: text("intent_receipt_id").notNull(),
     intentReceiptDigest: text("intent_receipt_digest").notNull(),
     intentReceiptJson: text("intent_receipt_json").notNull(),
+    targetIdentityDigest: text("target_identity_digest").notNull(),
     state: text("state").notNull(),
     currentAttemptId: text("current_attempt_id"),
     currentAttemptNumber: integer("current_attempt_number").notNull().default(0),
@@ -2068,6 +2071,96 @@ function migrateControlPlaneProjectionDependenciesSchema(sqlite: Database.Databa
   })();
 }
 
+type LegacyGovernedCallbackTargetRow = {
+  localIntentId: string;
+  deliveryTarget: string | null;
+  eventJson: string | null;
+  eventDigest: string | null;
+};
+
+function deriveLegacyGovernedCallbackTargetDigest(
+  row: LegacyGovernedCallbackTargetRow
+): string | null {
+  try {
+    if (!row.eventJson || !row.eventDigest || !row.deliveryTarget) return null;
+    const event = JSON.parse(row.eventJson) as {
+      metadata?: {
+        owner?: unknown;
+        repo?: unknown;
+        issueNumber?: unknown;
+        pullRequestNumber?: unknown;
+      };
+    };
+    if (canonicalSha256Json(event) !== row.eventDigest) return null;
+    const owner = event.metadata?.owner;
+    const repo = event.metadata?.repo;
+    const issueNumber = event.metadata?.issueNumber
+      ?? event.metadata?.pullRequestNumber;
+    if (
+      typeof owner !== "string"
+      || typeof repo !== "string"
+      || !Number.isSafeInteger(issueNumber)
+      || (issueNumber as number) <= 0
+    ) return null;
+    const match = /^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)\/issues\/([1-9][0-9]*)\/comments$/u
+      .exec(row.deliveryTarget);
+    if (
+      !match
+      || match[1]!.toLowerCase() !== owner.toLowerCase()
+      || match[2]!.toLowerCase() !== repo.toLowerCase()
+      || Number(match[3]) !== issueNumber
+    ) return null;
+    return canonicalSha256Json({
+      provider: "github",
+      owner: owner.toLowerCase(),
+      repo: repo.toLowerCase(),
+      issueNumber
+    });
+  } catch {
+    return null;
+  }
+}
+
+function backfillLegacyGovernedCallbackTargetDigests(
+  sqlite: Database.Database
+): void {
+  const hostedImportsTable = sqlite.prepare(`SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name = 'hosted_run_imports'`).get();
+  const nullCount = sqlite.prepare(`SELECT count(*) AS count
+    FROM governed_callback_intents
+    WHERE target_identity_digest IS NULL`).get() as { count: number };
+  if (nullCount.count === 0) return;
+  if (!hostedImportsTable) {
+    throw new Error("governed_callback_target_backfill_requires_hosted_imports");
+  }
+  const rows = sqlite.prepare(`
+    SELECT
+      i.local_intent_id AS localIntentId,
+      d.uri AS deliveryTarget,
+      r.event_json AS eventJson,
+      h.event_digest AS eventDigest
+    FROM governed_callback_intents i
+    LEFT JOIN callback_deliveries d ON d.id = i.local_delivery_id
+    LEFT JOIN runs r ON r.id = i.run_id
+    LEFT JOIN hosted_run_imports h ON h.run_id = i.run_id
+    WHERE i.target_identity_digest IS NULL
+  `).all() as LegacyGovernedCallbackTargetRow[];
+  const derived = rows.map((row) => ({
+    row,
+    digest: deriveLegacyGovernedCallbackTargetDigest(row)
+  }));
+  if (derived.some((entry) => entry.digest === null)) {
+    throw new Error("governed_callback_target_backfill_attention_required");
+  }
+  const update = sqlite.prepare(`UPDATE governed_callback_intents
+    SET target_identity_digest = ? WHERE local_intent_id = ?`);
+  sqlite.transaction(() => {
+    for (const entry of derived) {
+      update.run(entry.digest, entry.row.localIntentId);
+    }
+  })();
+}
+
 export function migrateSchema(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS runs (
@@ -2346,6 +2439,7 @@ export function migrateSchema(sqlite: Database.Database): void {
       intent_receipt_id TEXT NOT NULL,
       intent_receipt_digest TEXT NOT NULL,
       intent_receipt_json TEXT NOT NULL,
+      target_identity_digest TEXT,
       state TEXT NOT NULL CHECK (state IN ('pending', 'leased', 'sending', 'accepted', 'rejected', 'outcome_unknown', 'attention')),
       current_attempt_id TEXT,
       current_attempt_number INTEGER NOT NULL DEFAULT 0 CHECK (current_attempt_number >= 0),
@@ -2449,6 +2543,10 @@ export function migrateSchema(sqlite: Database.Database): void {
   if (!governedIntentColumnNames.has("local_delivery_id")) {
     sqlite.exec("ALTER TABLE governed_callback_intents ADD COLUMN local_delivery_id INTEGER");
   }
+  if (!governedIntentColumnNames.has("target_identity_digest")) {
+    sqlite.exec("ALTER TABLE governed_callback_intents ADD COLUMN target_identity_digest TEXT");
+  }
+  backfillLegacyGovernedCallbackTargetDigests(sqlite);
   const governedReconciliationColumns = sqlite.prepare(
     "PRAGMA table_info(governed_callback_reconciliations)"
   ).all() as { name: string }[];
@@ -2460,6 +2558,15 @@ export function migrateSchema(sqlite: Database.Database): void {
       ON governed_callback_intents(local_delivery_id);
     CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_reconciliations_attempt_idx
       ON governed_callback_reconciliations(local_attempt_id);
+    DROP TRIGGER IF EXISTS governed_callback_intents_target_digest_guard;
+    CREATE TRIGGER governed_callback_intents_target_digest_guard
+    BEFORE INSERT ON governed_callback_intents
+    WHEN NEW.target_identity_digest IS NULL
+      OR NEW.target_identity_digest NOT GLOB 'sha256:[0-9a-f]*'
+      OR length(NEW.target_identity_digest) <> 71
+    BEGIN
+      SELECT RAISE(ABORT, 'governed callback target digest required');
+    END;
     DROP TRIGGER IF EXISTS governed_callback_reconciliations_immutable_guard;
     CREATE TRIGGER governed_callback_reconciliations_immutable_guard
     BEFORE UPDATE OF reconciliation_id, local_intent_id, local_attempt_id,
@@ -2497,19 +2604,22 @@ export function migrateSchema(sqlite: Database.Database): void {
     BEGIN
       SELECT RAISE(ABORT, 'governed_callback_attempt_authority_immutable');
     END;
-    CREATE TRIGGER IF NOT EXISTS governed_callback_attempts_state_transition_guard
+    DROP TRIGGER IF EXISTS governed_callback_attempts_state_transition_guard;
+    CREATE TRIGGER governed_callback_attempts_state_transition_guard
     BEFORE UPDATE OF state ON governed_callback_attempts
     WHEN NEW.state <> OLD.state AND NOT (
       (OLD.state = 'pending' AND NEW.state IN ('leased', 'attention'))
       OR (OLD.state = 'leased' AND NEW.state IN ('pending', 'sending', 'attention'))
-      OR (OLD.state = 'sending' AND NEW.state IN ('accepted', 'rejected', 'outcome_unknown'))
+      OR (OLD.state = 'sending' AND NEW.state IN
+        ('accepted', 'rejected', 'outcome_unknown', 'attention'))
     )
     BEGIN
       SELECT RAISE(ABORT, 'invalid governed callback attempt state transition');
     END;
-    CREATE TRIGGER IF NOT EXISTS governed_callback_attempts_terminal_receipt_guard
+    DROP TRIGGER IF EXISTS governed_callback_attempts_terminal_receipt_guard;
+    CREATE TRIGGER governed_callback_attempts_terminal_receipt_guard
     BEFORE UPDATE OF state ON governed_callback_attempts
-    WHEN OLD.state = 'sending' AND (
+    WHEN (OLD.state = 'sending' OR (OLD.state = 'leased' AND NEW.state = 'attention')) AND (
       (NEW.state IN ('accepted', 'rejected') AND (
         NEW.attempt_receipt_id IS NULL OR NEW.attempt_receipt_digest IS NULL
         OR NEW.attempt_receipt_json IS NULL OR NEW.provider_receipt_id IS NULL
@@ -2519,33 +2629,40 @@ export function migrateSchema(sqlite: Database.Database): void {
       OR (NEW.state = 'outcome_unknown' AND (
         NEW.attempt_receipt_id IS NULL OR NEW.attempt_receipt_digest IS NULL
         OR NEW.attempt_receipt_json IS NULL
-        OR NOT (
-          (NEW.provider_receipt_id IS NULL AND NEW.resource_identity IS NULL
-            AND NEW.provider_receipt_digest IS NULL AND NEW.provider_receipt_json IS NULL)
-          OR (NEW.provider_receipt_id IS NOT NULL AND NEW.resource_identity IS NOT NULL
-            AND NEW.provider_receipt_digest IS NOT NULL AND NEW.provider_receipt_json IS NOT NULL)
-        )
+        OR NEW.provider_receipt_id IS NOT NULL OR NEW.resource_identity IS NOT NULL
+        OR NEW.provider_receipt_digest IS NOT NULL OR NEW.provider_receipt_json IS NOT NULL
+      ))
+      OR (NEW.state = 'attention' AND (
+        NEW.attempt_receipt_id IS NULL OR NEW.attempt_receipt_digest IS NULL
+        OR NEW.attempt_receipt_json IS NULL OR NEW.provider_receipt_id IS NOT NULL
+        OR NEW.resource_identity IS NOT NULL OR NEW.provider_receipt_digest IS NOT NULL
+        OR NEW.provider_receipt_json IS NOT NULL
       ))
     )
     BEGIN
       SELECT RAISE(ABORT, 'incomplete governed callback terminal receipt tuple');
     END;
-    CREATE TRIGGER IF NOT EXISTS governed_callback_attempts_receipt_write_guard
+    DROP TRIGGER IF EXISTS governed_callback_attempts_receipt_write_guard;
+    CREATE TRIGGER governed_callback_attempts_receipt_write_guard
     BEFORE UPDATE OF attempt_receipt_id, attempt_receipt_digest, attempt_receipt_json,
       provider_receipt_id, resource_identity, provider_receipt_digest, provider_receipt_json
     ON governed_callback_attempts
-    WHEN NEW.state = OLD.state OR OLD.state <> 'sending'
+    WHEN NEW.state = OLD.state OR NOT (
+      OLD.state = 'sending'
+      OR (OLD.state = 'leased' AND NEW.state = 'attention')
+    )
     BEGIN
       SELECT RAISE(ABORT, 'governed callback receipts require sending terminal transition');
     END;
-    CREATE TRIGGER IF NOT EXISTS governed_callback_intents_authority_immutable_guard
+    DROP TRIGGER IF EXISTS governed_callback_intents_authority_immutable_guard;
+    CREATE TRIGGER governed_callback_intents_authority_immutable_guard
     BEFORE UPDATE OF destination_id, organization_id, runner_id, producer_id,
       credential_id, registration_generation, run_id, work_thread_id,
       run_attempt_id, run_attempt_number, fencing_token_digest, admission_id,
       admission_operation_id, claim_operation_id, completion_operation_id,
       assessment_receipt_id, assessment_receipt_digest, local_delivery_id,
       provider, operation_id, payload_digest, intent_receipt_id,
-      intent_receipt_digest, intent_receipt_json
+      intent_receipt_digest, intent_receipt_json, target_identity_digest
     ON governed_callback_intents
     BEGIN
       SELECT RAISE(ABORT, 'governed_callback_intent_authority_immutable');

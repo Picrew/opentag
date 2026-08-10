@@ -36,6 +36,7 @@ import {
   defaultRunEventMetadata,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
+  parseGitHubIssueCommentsTargetV1,
   ReassessmentObligationReasonCodeSchema,
   ReassessmentObligationSchema,
   ReassessmentObligationSourceKindSchema,
@@ -575,7 +576,12 @@ export type AgentWorkLedger = {
 
 export type CallbackDeliveryKind = "acknowledgement" | "progress" | "final";
 export type CallbackDeliveryProvider = string;
-export type CallbackDeliveryStatus = "pending" | "delivering" | "delivered" | "failed";
+export type CallbackDeliveryStatus =
+  | "pending"
+  | "delivering"
+  | "delivered"
+  | "failed"
+  | "attention";
 
 export type CallbackDelivery = {
   id: number;
@@ -625,6 +631,7 @@ export type GovernedCallbackIntent = {
   provider: "github";
   operationId: string;
   payloadDigest: string;
+  targetIdentityDigest: string;
   state: GovernedCallbackState;
   currentAttemptId?: string;
   currentAttemptNumber: number;
@@ -671,6 +678,7 @@ export type ClaimedGovernedCallback = {
     registrationGeneration: number;
   };
   intentReceiptDigest: string;
+  targetIdentityDigest: string;
   authority: {
     attemptId: string;
     attemptNumber: number;
@@ -719,6 +727,16 @@ export type GovernedCallbackScope = {
 
 export type GovernedCallbackReconciliationEvidence =
   typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+
+export type PriorAcceptedGovernedGitHubResource =
+  | { outcome: "not_found" }
+  | { outcome: "conflict" }
+  | {
+      outcome: "found";
+      providerReceiptId: string;
+      resourceIdentity: string;
+      targetIdentityDigest: string;
+    };
 
 export type RepoBinding = {
   provider: string;
@@ -2250,6 +2268,7 @@ function governedCallbackIntentFromRow(
     provider: "github",
     operationId: row.operationId,
     payloadDigest: row.payloadDigest,
+    targetIdentityDigest: row.targetIdentityDigest,
     state: row.state as GovernedCallbackState,
     currentAttemptNumber: row.currentAttemptNumber,
     ...(row.currentAttemptId ? { currentAttemptId: row.currentAttemptId } : {}),
@@ -2262,6 +2281,54 @@ function governedCallbackIntentFromRow(
     updatedAt: row.updatedAt,
     ...(row.terminalAt ? { terminalAt: row.terminalAt } : {})
   };
+}
+
+function governedCallbackEventTarget(input: {
+  eventJson: string;
+  eventDigest: string;
+  deliveryTarget: string;
+  targetIdentityDigest: string;
+}): { issueNumber: number; resourceIdentity: string } {
+  const event = OpenTagEventSchema.parse(JSON.parse(input.eventJson));
+  if (canonicalSha256Json(event) !== input.eventDigest) {
+    throw new Error("governed callback event digest mismatch");
+  }
+  const project = projectTargetRefFromEvent(event);
+  const issueNumber = event.metadata?.["issueNumber"]
+    ?? event.metadata?.["pullRequestNumber"];
+  const match = /^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)\/issues\/([1-9][0-9]*)\/comments$/u
+    .exec(input.deliveryTarget);
+  if (
+    !project || project.provider !== "github" || !match
+    || project.owner.toLowerCase() !== match[1]!.toLowerCase()
+    || project.repo.toLowerCase() !== match[2]!.toLowerCase()
+    || typeof issueNumber !== "number" || !Number.isSafeInteger(issueNumber)
+    || issueNumber !== Number(match[3])
+  ) throw new Error("governed callback target lineage mismatch");
+  const targetIdentityDigest = canonicalSha256Json({
+    provider: "github",
+    owner: match[1]!.toLowerCase(),
+    repo: match[2]!.toLowerCase(),
+    issueNumber
+  });
+  if (targetIdentityDigest !== input.targetIdentityDigest) {
+    throw new Error("governed callback target digest mismatch");
+  }
+  return { issueNumber, resourceIdentity: `github:issue:${issueNumber}` };
+}
+
+function governedProviderIdentityMatches(input: {
+  receipt: typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+  targetIdentityDigest: string;
+  issueNumber: number;
+}): boolean {
+  const payload = input.receipt.payload;
+  if (payload.targetIdentityDigest !== input.targetIdentityDigest) return false;
+  if (payload.outcome === "failed") {
+    return payload.resourceIdentity === `github:issue:${input.issueNumber}`;
+  }
+  const match = /^comment_([1-9][0-9]*)$/u.exec(payload.providerReceiptId);
+  return !!match && payload.resourceIdentity === `github:comment:${match[1]}`;
 }
 
 function governedCallbackAttemptFromRow(
@@ -4022,6 +4089,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       || intent.assessmentReceiptId === null
       || intent.assessmentReceiptDigest === null
       || intent.localDeliveryId === null
+      || intent.targetIdentityDigest === null
     ) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
     let intentEnvelope: typeof CallbackIntentObservationReceiptEnvelopeV1Schema._output;
     try {
@@ -4082,6 +4150,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       eq(callbackDeliveries.provider, "github"),
       eq(callbackDeliveries.dispatchMode, "governed")
     )).limit(1).get();
+    const run = tx.select().from(runs).where(eq(runs.id, intent.runId)).limit(1).get();
     const thread = tx.select().from(workThreads)
       .where(eq(workThreads.id, intent.workThreadId)).limit(1).get();
     const assessmentRow = tx.select().from(completionAssessments).where(and(
@@ -4096,7 +4165,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       eq(controlPlaneProjectionOutbox.receiptKind, "completion_assessment")
     )).limit(1).get();
     try {
-      if (!importedRun || !importedAttempt || !claim || !completion || !delivery
+      if (!importedRun || !importedAttempt || !claim || !completion || !delivery || !run
         || !thread || !assessmentRow || !assessmentProjection
         || importedRun.authorityDigest !== importedAttempt.authorityDigest
         || importedRun.authorityDigest !== claim.authorityDigest
@@ -4112,6 +4181,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         || assessmentProjection.requiresLifecycleOperationId
           !== intent.completionOperationId
       ) throw new Error("invalid frozen lineage");
+      governedCallbackEventTarget({
+        eventJson: run.eventJson,
+        eventDigest: importedRun.eventDigest,
+        deliveryTarget: delivery.uri,
+        targetIdentityDigest: intent.targetIdentityDigest
+      });
       const authority = hostedClaimAuthoritySnapshotFromJson(importedAttempt.authorityJson);
       if (
         !authority || typeof authority !== "object"
@@ -4243,6 +4318,59 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       nextAction: "reconcile-provider" as const,
       owner: intent.producerId,
       attemptedAt: attempt.attemptedAt,
+      observedAt
+    };
+    const base = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      receiptKind: "callback_attempt_observation" as const,
+      receiptId: `receipt_${attempt.localAttemptId}`,
+      organizationId: intent.organizationId,
+      operationId: `operation_${attempt.localAttemptId}`,
+      requiredCapabilities: ["relay.callback-observation.v1"] as const,
+      producer: {
+        kind: "local_opentag" as const,
+        id: intent.producerId,
+        credentialId: intent.credentialId,
+        registrationGeneration: intent.registrationGeneration
+      },
+      identity: {
+        namespace: "opentag.control.receipt/callback-attempt-observation/v1" as const,
+        parts: [
+          intent.organizationId,
+          intent.workThreadId,
+          intent.localIntentId,
+          attempt.localAttemptId
+        ]
+      },
+      observedAt,
+      runId: intent.runId,
+      workThreadId: intent.workThreadId,
+      predecessorReceiptDigests: [intent.intentReceiptDigest],
+      payload,
+      payloadDigest: canonicalSha256Json(payload)
+    };
+    return validateCallbackProjectionEnvelope(
+      CallbackAttemptObservationReceiptEnvelopeV1Schema,
+      { ...base, receiptDigest: canonicalSha256Json(base) }
+    );
+  }
+
+  function buildLocalAttentionAttemptObservation(
+    intent: typeof governedCallbackIntents.$inferSelect,
+    attempt: typeof governedCallbackAttempts.$inferSelect,
+    observedAt: string
+  ): typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output {
+    const payload = {
+      localIntentId: intent.localIntentId,
+      localAttemptId: attempt.localAttemptId,
+      attemptNumber: attempt.attemptNumber,
+      requestDigest: attempt.requestDigest,
+      outcome: "attention" as const,
+      reasonCode: "callback_local_error" as const,
+      nextAction: "repair-local-callback" as const,
+      owner: intent.producerId,
+      attemptedAt: attempt.attemptedAt ?? observedAt,
       observedAt
     };
     const base = {
@@ -12659,6 +12787,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         || input.delivery.provider !== "github"
         || receipt.payload.provider !== "github"
       ) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
+      let githubTarget: Awaited<ReturnType<typeof parseGitHubIssueCommentsTargetV1>>;
+      try {
+        githubTarget = await parseGitHubIssueCommentsTargetV1(
+          input.delivery.target,
+          input.delivery.threadKey
+        );
+      } catch {
+        throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
+      }
       const safeDelivery = sanitizeCredentialLikeValue({
         target: input.delivery.target,
         body: input.delivery.body,
@@ -12782,6 +12919,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             && existing.assessmentReceiptDigest === assessmentEnvelope.receiptDigest
             && existing.localDeliveryId === governedDelivery.id
             && existing.payloadDigest === receipt.payload.payloadDigest
+            && existing.targetIdentityDigest === githubTarget.targetIdentityDigest
             && existing.intentReceiptDigest === receipt.receiptDigest
             && existing.intentReceiptJson === receiptJson;
           if (!exact) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_CONFLICT");
@@ -12814,6 +12952,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           intentReceiptId: receipt.receiptId,
           intentReceiptDigest: receipt.receiptDigest,
           intentReceiptJson: receiptJson,
+          targetIdentityDigest: githubTarget.targetIdentityDigest,
           state: "pending",
           currentAttemptId: `callback_attempt_${canonicalSha256Json({
             localIntentId: receipt.payload.localIntentId,
@@ -13018,6 +13157,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               registrationGeneration: row.registrationGeneration
             },
             intentReceiptDigest: row.intentReceiptDigest,
+            targetIdentityDigest: row.targetIdentityDigest,
             authority: {
               attemptId: row.runAttemptId,
               attemptNumber: row.runAttemptNumber,
@@ -13096,6 +13236,123 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       }, { behavior: "immediate" });
     },
 
+    async quarantineGovernedCallbackAttempt(input: {
+      destinationId: string;
+      organizationId: string;
+      localIntentId: string;
+      localAttemptId: string;
+      leaseToken: string;
+      attemptReceipt: typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output;
+      now?: Date;
+    }): Promise<"quarantined" | "replayed" | "stale_lease" | "not_found"> {
+      const receipt = validateCallbackProjectionEnvelope(
+        CallbackAttemptObservationReceiptEnvelopeV1Schema,
+        input.attemptReceipt
+      );
+      if (receipt.payload.outcome !== "attention") return "stale_lease";
+      const receiptJson = canonicalJsonStringify(receipt);
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const intent = tx.select().from(governedCallbackIntents).where(and(
+          eq(governedCallbackIntents.localIntentId, input.localIntentId),
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId)
+        )).limit(1).get();
+        const attempt = tx.select().from(governedCallbackAttempts).where(and(
+          eq(governedCallbackAttempts.localAttemptId, input.localAttemptId),
+          eq(governedCallbackAttempts.localIntentId, input.localIntentId)
+        )).limit(1).get();
+        if (!intent || !attempt) return "not_found" as const;
+        if (attempt.state === "attention") {
+          return attempt.attemptReceiptDigest === receipt.receiptDigest
+            && attempt.attemptReceiptJson === receiptJson
+            ? "replayed" as const
+            : "stale_lease" as const;
+        }
+        assertGovernedCallbackAuthorityTx(tx, intent, { requireCurrentAssessment: false });
+        if (
+          intent.state !== "leased" || attempt.state !== "leased"
+          || intent.currentAttemptId !== attempt.localAttemptId
+          || intent.leaseToken !== input.leaseToken || attempt.leaseToken !== input.leaseToken
+          || !intent.leaseExpiresAt || intent.leaseExpiresAt <= at
+          || receipt.organizationId !== intent.organizationId
+          || receipt.runId !== intent.runId
+          || receipt.workThreadId !== intent.workThreadId
+          || receipt.producer.id !== intent.producerId
+          || receipt.producer.credentialId !== intent.credentialId
+          || receipt.producer.registrationGeneration !== intent.registrationGeneration
+          || receipt.payload.localIntentId !== intent.localIntentId
+          || receipt.payload.localAttemptId !== attempt.localAttemptId
+          || receipt.payload.attemptNumber !== attempt.attemptNumber
+          || receipt.payload.requestDigest !== attempt.requestDigest
+          || !receipt.predecessorReceiptDigests?.includes(intent.intentReceiptDigest)
+        ) return "stale_lease" as const;
+        const attemptUpdated = tx.update(governedCallbackAttempts).set({
+          state: "attention",
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          attemptedAt: receipt.payload.attemptedAt,
+          observedAt: receipt.payload.observedAt,
+          reasonCode: receipt.payload.reasonCode,
+          nextAction: receipt.payload.nextAction!,
+          owner: receipt.payload.owner!,
+          attemptReceiptId: receipt.receiptId,
+          attemptReceiptDigest: receipt.receiptDigest,
+          attemptReceiptJson: receiptJson,
+          updatedAt: at
+        }).where(and(
+          eq(governedCallbackAttempts.localAttemptId, attempt.localAttemptId),
+          eq(governedCallbackAttempts.state, "leased"),
+          eq(governedCallbackAttempts.leaseToken, input.leaseToken)
+        )).run();
+        const intentUpdated = tx.update(governedCallbackIntents).set({
+          state: "attention",
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          nextAttemptAt: null,
+          lastReasonCode: receipt.payload.reasonCode,
+          updatedAt: at,
+          terminalAt: at
+        }).where(and(
+          eq(governedCallbackIntents.localIntentId, intent.localIntentId),
+          eq(governedCallbackIntents.state, "leased"),
+          eq(governedCallbackIntents.leaseToken, input.leaseToken)
+        )).run();
+        if (attemptUpdated.changes !== 1 || intentUpdated.changes !== 1) {
+          throw new Error("governed_callback_quarantine_update_lost");
+        }
+        updateGovernedDeliveryStateTx(tx, {
+          deliveryId: intent.localDeliveryId!,
+          from: "leased",
+          to: "attention",
+          updatedAt: at
+        });
+        assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+          destinationId: intent.destinationId,
+          envelope: receipt,
+          dependsOnReceiptId: intent.intentReceiptId,
+          ...(input.now ? { now: input.now } : {})
+        }));
+        tx.insert(runEvents).values(runEventValues({
+          runId: intent.runId,
+          type: "callback.governed.attention",
+          payload: {
+            localIntentId: intent.localIntentId,
+            localAttemptId: attempt.localAttemptId,
+            reasonCode: receipt.payload.reasonCode,
+            nextAction: receipt.payload.nextAction,
+            owner: receipt.payload.owner
+          },
+          visibility: "audit",
+          importance: "high",
+          createdAt: at
+        })).run();
+        return "quarantined" as const;
+      }, { behavior: "immediate" });
+    },
+
     async recoverExpiredGovernedCallbacks(input: {
       destinationId: string;
       organizationId: string;
@@ -13125,29 +13382,66 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             frozenAuthorityValid = false;
           }
           if (!frozenAuthorityValid && intent.state === "leased" && attempt.state === "leased") {
-            tx.update(governedCallbackAttempts).set({
+            const observation = buildLocalAttentionAttemptObservation(intent, attempt, at);
+            const attemptUpdated = tx.update(governedCallbackAttempts).set({
               state: "attention",
               leaseOwner: null,
               leaseToken: null,
               leaseExpiresAt: null,
-              reasonCode: "authority_conflict",
+              attemptedAt: observation.payload.attemptedAt,
+              observedAt: observation.payload.observedAt,
+              reasonCode: observation.payload.reasonCode,
+              nextAction: observation.payload.nextAction,
+              owner: observation.payload.owner,
+              attemptReceiptId: observation.receiptId,
+              attemptReceiptDigest: observation.receiptDigest,
+              attemptReceiptJson: canonicalJsonStringify(observation),
               updatedAt: at
-            }).where(eq(governedCallbackAttempts.localAttemptId, attempt.localAttemptId)).run();
-            tx.update(governedCallbackIntents).set({
+            }).where(and(
+              eq(governedCallbackAttempts.localAttemptId, attempt.localAttemptId),
+              eq(governedCallbackAttempts.state, "leased"),
+              eq(governedCallbackAttempts.leaseToken, attempt.leaseToken!)
+            )).run();
+            const intentUpdated = tx.update(governedCallbackIntents).set({
               state: "attention",
               leaseOwner: null,
               leaseToken: null,
               leaseExpiresAt: null,
-              lastReasonCode: "authority_conflict",
+              lastReasonCode: observation.payload.reasonCode,
               updatedAt: at,
               terminalAt: at
-            }).where(eq(governedCallbackIntents.localIntentId, intent.localIntentId)).run();
-            tx.update(callbackDeliveries).set({ governedState: "attention", updatedAt: at })
+            }).where(and(
+              eq(governedCallbackIntents.localIntentId, intent.localIntentId),
+              eq(governedCallbackIntents.state, "leased"),
+              eq(governedCallbackIntents.leaseToken, attempt.leaseToken!)
+            )).run();
+            const deliveryUpdated = tx.update(callbackDeliveries)
+              .set({ governedState: "attention", updatedAt: at })
               .where(and(
                 eq(callbackDeliveries.id, intent.localDeliveryId!),
                 eq(callbackDeliveries.dispatchMode, "governed"),
                 eq(callbackDeliveries.governedState, "leased")
               )).run();
+            if (
+              attemptUpdated.changes !== 1
+              || intentUpdated.changes !== 1
+              || deliveryUpdated.changes !== 1
+            ) throw new Error("governed_callback_authority_quarantine_update_lost");
+            tx.insert(runEvents).values(runEventValues({
+              runId: intent.runId,
+              type: "callback.governed.attention",
+              payload: {
+                localIntentId: intent.localIntentId,
+                localAttemptId: attempt.localAttemptId,
+                reasonCode: observation.payload.reasonCode,
+                nextAction: observation.payload.nextAction,
+                owner: observation.payload.owner,
+                detail: "authority_conflict"
+              },
+              visibility: "audit",
+              importance: "high",
+              createdAt: at
+            })).run();
             continue;
           }
           if (intent.state === "leased" && attempt.state === "leased") {
@@ -13268,7 +13562,17 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       attemptReceipt: typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output;
       providerReceipt?: typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
       now?: Date;
-    }): Promise<"finalized" | "replayed" | "stale_lease" | "not_found"> {
+    }): Promise<
+      | "finalized"
+      | "replayed"
+      | "stale_lease"
+      | "not_found"
+      | {
+          outcome: "reconciliation_required";
+          attemptReceiptId: string;
+          attemptReceiptDigest: string;
+        }
+    > {
       const attemptReceipt = validateCallbackProjectionEnvelope(
         CallbackAttemptObservationReceiptEnvelopeV1Schema,
         input.attemptReceipt
@@ -13293,7 +13597,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         if (!intent || !attempt) return "not_found" as const;
         const attemptJson = canonicalJsonStringify(attemptReceipt);
         const providerJson = providerReceipt ? canonicalJsonStringify(providerReceipt) : null;
-        if (["accepted", "rejected", "outcome_unknown"].includes(attempt.state)) {
+        if (["accepted", "rejected", "attention"].includes(attempt.state)) {
           return attempt.attemptReceiptDigest === attemptReceipt.receiptDigest
             && attempt.attemptReceiptJson === attemptJson
             && attempt.providerReceiptDigest === (providerReceipt?.receiptDigest ?? null)
@@ -13305,9 +13609,63 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const outcome = attemptReceipt.payload.outcome;
         const expectedProviderOutcome = outcome === "accepted"
           ? "succeeded"
-          : outcome === "rejected" ? "failed" : "outcome_unknown";
+          : outcome === "rejected" ? "failed" : null;
+        const delivery = tx.select().from(callbackDeliveries)
+          .where(eq(callbackDeliveries.id, intent.localDeliveryId!)).limit(1).get();
+        const importedRun = tx.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, intent.runId)).limit(1).get();
+        const run = tx.select().from(runs).where(eq(runs.id, intent.runId)).limit(1).get();
+        if (!delivery || !importedRun || !run) return "stale_lease" as const;
+        let target: { issueNumber: number; resourceIdentity: string };
+        try {
+          target = governedCallbackEventTarget({
+            eventJson: run.eventJson,
+            eventDigest: importedRun.eventDigest,
+            deliveryTarget: delivery.uri,
+            targetIdentityDigest: intent.targetIdentityDigest
+          });
+        } catch {
+          return "stale_lease" as const;
+        }
+        if (attempt.state === "outcome_unknown") {
+          if (
+            attemptReceipt.payload.outcome !== "outcome_unknown"
+            && providerReceipt
+            && attempt.attemptReceiptId
+            && attempt.attemptReceiptDigest
+            && providerReceipt.organizationId === intent.organizationId
+            && providerReceipt.runId === intent.runId
+            && providerReceipt.workThreadId === intent.workThreadId
+            && providerReceipt.producer.id === intent.producerId
+            && providerReceipt.producer.credentialId === intent.credentialId
+            && providerReceipt.producer.registrationGeneration === intent.registrationGeneration
+            && providerReceipt.payload.localIntentId === intent.localIntentId
+            && providerReceipt.payload.localAttemptId === attempt.localAttemptId
+            && governedProviderIdentityMatches({
+              receipt: providerReceipt,
+              targetIdentityDigest: intent.targetIdentityDigest,
+              issueNumber: target.issueNumber
+            })
+            && Date.parse(providerReceipt.payload.observedAt)
+              >= Date.parse(attempt.attemptedAt!)
+          ) {
+            return {
+              outcome: "reconciliation_required" as const,
+              attemptReceiptId: attempt.attemptReceiptId,
+              attemptReceiptDigest: attempt.attemptReceiptDigest
+            };
+          }
+          return attempt.attemptReceiptDigest === attemptReceipt.receiptDigest
+            && attempt.attemptReceiptJson === attemptJson
+            && !providerReceipt
+            && attempt.providerReceiptDigest === null
+            && attempt.providerReceiptJson === null
+            ? "replayed" as const
+            : "stale_lease" as const;
+        }
         if (
-          (outcome !== "outcome_unknown" && !providerReceipt)
+          ((outcome === "accepted" || outcome === "rejected") && !providerReceipt)
+          || ((outcome === "outcome_unknown" || outcome === "attention") && !!providerReceipt)
           || intent.state !== "sending" || attempt.state !== "sending"
           || intent.currentAttemptId !== attempt.localAttemptId
           || intent.leaseToken !== input.leaseToken || attempt.leaseToken !== input.leaseToken
@@ -13335,11 +13693,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             || providerReceipt.payload.localIntentId !== intent.localIntentId
             || providerReceipt.payload.localAttemptId !== attempt.localAttemptId
             || providerReceipt.payload.outcome !== expectedProviderOutcome
+            || !governedProviderIdentityMatches({
+              receipt: providerReceipt,
+              targetIdentityDigest: intent.targetIdentityDigest,
+              issueNumber: target.issueNumber
+            })
             || providerReceipt.payload.reasonCode !== attemptReceipt.payload.reasonCode
             || Date.parse(providerReceipt.payload.observedAt)
               < Date.parse(attempt.attemptedAt!)
-            || Date.parse(providerReceipt.payload.observedAt)
-              < Date.parse(attemptReceipt.payload.observedAt)
             || !providerReceipt.predecessorReceiptDigests?.includes(
               attemptReceipt.receiptDigest
             )
@@ -13367,7 +13728,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           eq(governedCallbackAttempts.state, "sending"),
           eq(governedCallbackAttempts.leaseToken, input.leaseToken)
         )).run();
-        const intentState = outcome === "outcome_unknown" ? "outcome_unknown" : outcome;
+        const intentState = outcome === "outcome_unknown" || outcome === "attention"
+          ? "attention"
+          : outcome;
         const intentUpdated = tx.update(governedCallbackIntents).set({
           state: intentState,
           leaseOwner: null,
@@ -13479,21 +13842,52 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         if (!intent || !attempt || !["outcome_unknown", "attention"].includes(intent.state)) {
           throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_RECONCILIATION_REQUIRED");
         }
-        let originalProviderReceipt: typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+        let unknownAttemptReceipt: typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output;
         try {
-          if (!attempt.providerReceiptJson || !attempt.providerReceiptDigest) throw new Error();
-          originalProviderReceipt = CallbackProviderObservationReceiptEnvelopeV1Schema.parse(
-            JSON.parse(attempt.providerReceiptJson)
+          if (!attempt.attemptReceiptJson || !attempt.attemptReceiptDigest) throw new Error();
+          unknownAttemptReceipt = CallbackAttemptObservationReceiptEnvelopeV1Schema.parse(
+            JSON.parse(attempt.attemptReceiptJson)
           );
         } catch {
           throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_RECONCILIATION_REQUIRED");
         }
         assertGovernedCallbackAuthorityTx(tx, intent, { requireCurrentAssessment: false });
+        const delivery = tx.select().from(callbackDeliveries)
+          .where(eq(callbackDeliveries.id, intent.localDeliveryId!)).limit(1).get();
+        const importedRun = tx.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, intent.runId)).limit(1).get();
+        const run = tx.select().from(runs).where(eq(runs.id, intent.runId)).limit(1).get();
+        let target: { issueNumber: number; resourceIdentity: string } | undefined;
+        try {
+          if (!delivery || !importedRun || !run) throw new Error();
+          target = governedCallbackEventTarget({
+            eventJson: run.eventJson,
+            eventDigest: importedRun.eventDigest,
+            deliveryTarget: delivery.uri,
+            targetIdentityDigest: intent.targetIdentityDigest
+          });
+        } catch {
+          throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+        }
         if (
-          originalProviderReceipt.payload.outcome !== "outcome_unknown"
-          || originalProviderReceipt.receiptDigest !== attempt.providerReceiptDigest
-          || evidence.receiptId === originalProviderReceipt.receiptId
-          || evidence.receiptDigest === originalProviderReceipt.receiptDigest
+          unknownAttemptReceipt.payload.outcome !== "outcome_unknown"
+          || unknownAttemptReceipt.receiptDigest !== attempt.attemptReceiptDigest
+          || unknownAttemptReceipt.receiptId !== attempt.attemptReceiptId
+          || unknownAttemptReceipt.organizationId !== intent.organizationId
+          || unknownAttemptReceipt.runId !== intent.runId
+          || unknownAttemptReceipt.workThreadId !== intent.workThreadId
+          || unknownAttemptReceipt.producer.id !== intent.producerId
+          || unknownAttemptReceipt.producer.credentialId !== intent.credentialId
+          || unknownAttemptReceipt.producer.registrationGeneration
+            !== intent.registrationGeneration
+          || unknownAttemptReceipt.payload.localIntentId !== intent.localIntentId
+          || unknownAttemptReceipt.payload.localAttemptId !== attempt.localAttemptId
+          || unknownAttemptReceipt.payload.attemptNumber !== attempt.attemptNumber
+          || unknownAttemptReceipt.payload.requestDigest !== attempt.requestDigest
+          || unknownAttemptReceipt.payload.attemptedAt !== attempt.attemptedAt
+          || !unknownAttemptReceipt.predecessorReceiptDigests?.includes(
+            intent.intentReceiptDigest
+          )
           || evidence.organizationId !== intent.organizationId
           || evidence.runId !== intent.runId
           || evidence.workThreadId !== intent.workThreadId
@@ -13502,14 +13896,13 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || evidence.producer.registrationGeneration !== intent.registrationGeneration
           || evidence.payload.localIntentId !== intent.localIntentId
           || evidence.payload.localAttemptId !== attempt.localAttemptId
-          || evidence.payload.resourceIdentity !== originalProviderReceipt.payload.resourceIdentity
-          || evidence.payload.resourceIdentity !== attempt.resourceIdentity
-          || !evidence.payload.resourceIdentity.startsWith("github:")
-          || !evidence.predecessorReceiptDigests?.includes(originalProviderReceipt.receiptDigest)
+          || !governedProviderIdentityMatches({
+            receipt: evidence,
+            targetIdentityDigest: intent.targetIdentityDigest,
+            issueNumber: target.issueNumber
+          })
+          || !evidence.predecessorReceiptDigests?.includes(attempt.attemptReceiptDigest)
           || Date.parse(evidence.payload.observedAt) < Date.parse(attempt.attemptedAt!)
-          || Date.parse(evidence.payload.observedAt) < Date.parse(attempt.observedAt!)
-          || Date.parse(evidence.payload.observedAt)
-            < Date.parse(originalProviderReceipt.payload.observedAt)
           || (resolution === "accepted" && evidence.payload.reasonCode !== "provider_accepted")
           || (resolution === "rejected" && evidence.payload.reasonCode !== "provider_rejected")
         ) {
@@ -13562,11 +13955,123 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
           destinationId: intent.destinationId,
           envelope: evidence,
-          dependsOnReceiptId: originalProviderReceipt.receiptId,
+          dependsOnReceiptId: attempt.attemptReceiptId!,
           ...(input.now ? { now: input.now } : {})
         }));
         return { outcome: "recorded" as const };
       }, { behavior: "immediate" });
+    },
+
+    async getPriorAcceptedGovernedGitHubResource(input: {
+      destinationId: string;
+      organizationId: string;
+      runId: string;
+      workThreadId: string;
+      statusMessageKey: string;
+      targetIdentityDigest: string;
+    }): Promise<PriorAcceptedGovernedGitHubResource> {
+      const rows = await db.select({
+        intent: governedCallbackIntents,
+        attempt: governedCallbackAttempts,
+        delivery: callbackDeliveries
+      }).from(governedCallbackIntents)
+        .innerJoin(governedCallbackAttempts, and(
+          eq(governedCallbackAttempts.localIntentId, governedCallbackIntents.localIntentId),
+          eq(governedCallbackAttempts.localAttemptId, governedCallbackIntents.currentAttemptId)
+        ))
+        .innerJoin(callbackDeliveries,
+          eq(callbackDeliveries.id, governedCallbackIntents.localDeliveryId))
+        .where(and(
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId),
+          eq(governedCallbackIntents.runId, input.runId),
+          eq(governedCallbackIntents.workThreadId, input.workThreadId),
+          eq(governedCallbackIntents.targetIdentityDigest, input.targetIdentityDigest),
+          eq(governedCallbackIntents.state, "accepted")
+        ));
+      const candidates: Array<{
+        providerReceiptId: string;
+        resourceIdentity: string;
+        targetIdentityDigest: string;
+      }> = [];
+      for (const row of rows) {
+        const metadata = callbackDeliveryMetadataFromJson(row.delivery.metadataJson);
+        if (metadata?.statusMessageKey !== input.statusMessageKey) continue;
+        const importedRun = await db.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, row.intent.runId)).limit(1).get();
+        const run = await db.select().from(runs)
+          .where(eq(runs.id, row.intent.runId)).limit(1).get();
+        let target: { issueNumber: number; resourceIdentity: string };
+        try {
+          if (!importedRun || !run) throw new Error();
+          target = governedCallbackEventTarget({
+            eventJson: run.eventJson,
+            eventDigest: importedRun.eventDigest,
+            deliveryTarget: row.delivery.uri,
+            targetIdentityDigest: row.intent.targetIdentityDigest
+          });
+        } catch {
+          return { outcome: "conflict" };
+        }
+        let receiptJson = row.attempt.state === "accepted"
+          ? row.attempt.providerReceiptJson
+          : null;
+        let expectedReceiptDigest = row.attempt.state === "accepted"
+          ? row.attempt.providerReceiptDigest
+          : null;
+        if (row.attempt.state === "outcome_unknown") {
+          const reconciliations = await db.select().from(governedCallbackReconciliations)
+            .where(and(
+              eq(governedCallbackReconciliations.localIntentId, row.intent.localIntentId),
+              eq(governedCallbackReconciliations.localAttemptId, row.attempt.localAttemptId),
+              eq(governedCallbackReconciliations.resolution, "accepted")
+            ));
+          if (reconciliations.length !== 1) return { outcome: "conflict" };
+          receiptJson = reconciliations[0]!.evidenceJson;
+          expectedReceiptDigest = reconciliations[0]!.evidenceDigest;
+        }
+        let receipt: typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+        try {
+          if (!receiptJson) throw new Error();
+          receipt = CallbackProviderObservationReceiptEnvelopeV1Schema.parse(
+            JSON.parse(receiptJson)
+          );
+        } catch {
+          return { outcome: "conflict" };
+        }
+        if (
+          receipt.payload.outcome !== "succeeded"
+          || receipt.receiptDigest !== expectedReceiptDigest
+          || receipt.organizationId !== row.intent.organizationId
+          || receipt.runId !== row.intent.runId
+          || receipt.workThreadId !== row.intent.workThreadId
+          || receipt.producer.id !== row.intent.producerId
+          || receipt.producer.credentialId !== row.intent.credentialId
+          || receipt.producer.registrationGeneration !== row.intent.registrationGeneration
+          || receipt.payload.localIntentId !== row.intent.localIntentId
+          || receipt.payload.localAttemptId !== row.attempt.localAttemptId
+          || !receipt.predecessorReceiptDigests?.includes(
+            row.attempt.attemptReceiptDigest!
+          )
+          || !governedProviderIdentityMatches({
+            receipt,
+            targetIdentityDigest: row.intent.targetIdentityDigest,
+            issueNumber: target.issueNumber
+          })
+        ) return { outcome: "conflict" };
+        candidates.push({
+          providerReceiptId: receipt.payload.providerReceiptId,
+          resourceIdentity: receipt.payload.resourceIdentity,
+          targetIdentityDigest: receipt.payload.targetIdentityDigest
+        });
+      }
+      if (candidates.length === 0) return { outcome: "not_found" };
+      const resources = new Map(candidates.map((candidate) => [
+        `${candidate.providerReceiptId}\u0000${candidate.resourceIdentity}`,
+        candidate
+      ]));
+      if (resources.size !== 1) return { outcome: "conflict" };
+      return { outcome: "found", ...resources.values().next().value! };
     },
 
     async enqueueCallbackDelivery(input: {
@@ -13761,6 +14266,55 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           createdAt: updatedAt
         });
       }
+    },
+
+    async markCallbackAttention(input: {
+      deliveryId: number;
+      reasonCode: string;
+      nextAction: string;
+      owner?: string;
+    }): Promise<void> {
+      const updatedAt = nowIso();
+      const row = await db.select().from(callbackDeliveries).where(and(
+        eq(callbackDeliveries.id, input.deliveryId),
+        eq(callbackDeliveries.dispatchMode, "legacy"),
+        inArray(callbackDeliveries.status, ["pending", "delivering", "failed"])
+      )).limit(1).get();
+      if (!row) return;
+      const safe = sanitizeCredentialLikeValue({
+        reasonCode: input.reasonCode.slice(0, 128),
+        nextAction: input.nextAction.slice(0, 256),
+        ...(input.owner ? { owner: input.owner.slice(0, 128) } : {})
+      }, { secrets: await attemptFencingTokensForRun(row.runId) });
+      const attempts = row.attempts + 1;
+      const updated = await db.update(callbackDeliveries).set({
+        status: "attention",
+        attempts,
+        lastError: safe.reasonCode,
+        nextAttemptAt: null,
+        updatedAt
+      }).where(and(
+        eq(callbackDeliveries.id, input.deliveryId),
+        eq(callbackDeliveries.dispatchMode, "legacy"),
+        inArray(callbackDeliveries.status, ["pending", "delivering", "failed"])
+      ));
+      if (updated.changes !== 1) return;
+      await appendRunEvent({
+        runId: row.runId,
+        type: `callback.${row.kind}.attention`,
+        payload: {
+          ...callbackDeliveryFromRow(row),
+          status: "attention",
+          attempts,
+          reasonCode: safe.reasonCode,
+          nextAction: safe.nextAction,
+          ...(safe.owner ? { owner: safe.owner } : {}),
+          updatedAt
+        },
+        visibility: "audit",
+        importance: "high",
+        createdAt: updatedAt
+      });
     },
 
     async listPendingCallbackDeliveries(input: { limit: number; now?: Date; maxAttempts?: number }): Promise<CallbackDelivery[]> {

@@ -112,7 +112,7 @@ function callbackProviderReceipt(
     producer: LOCAL_PRODUCER,
     identity: {
       namespace: "opentag.control.receipt/callback-provider-observation/v1",
-      parts: ["org_1", "work_thread_1", "intent_1", "callback_attempt_1", "provider_receipt_1"]
+      parts: ["org_1", "work_thread_1", "intent_1", "callback_attempt_1", "comment_123"]
     },
     observedAt: NOW.toISOString(),
     runId: "run_1",
@@ -120,10 +120,12 @@ function callbackProviderReceipt(
     payload: {
       localIntentId: "intent_1",
       localAttemptId: "callback_attempt_1",
-      providerReceiptId: "provider_receipt_1",
+      providerReceiptId: "comment_123",
       resourceIdentity,
+      targetIdentityDigest: DIGEST,
       outcome: "succeeded",
-      observedAt: NOW.toISOString()
+      observedAt: NOW.toISOString(),
+      reasonCode: "provider_accepted"
     },
     ...overrides,
   });

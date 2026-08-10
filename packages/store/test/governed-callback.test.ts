@@ -11,6 +11,7 @@ import {
   CompletionAssessmentReceiptEnvelopeV1Schema,
   HostedCompleteRequestV1Schema,
   HostedLifecycleReceiptEnvelopeV1Schema,
+  OpenTagEventSchema,
   canonicalJsonStringify
 } from "@opentag/core";
 import { describe, expect, it } from "vitest";
@@ -24,7 +25,13 @@ import { migrateSchema } from "../src/schema.js";
 const NOW = new Date("2026-08-10T00:00:00.000Z");
 const SOURCE_DIGEST = `sha256:${"1".repeat(64)}`;
 const FENCE_DIGEST = `sha256:${createHash("sha256").update("raw-fence").digest("hex")}`;
-const DELIVERY_TARGET = "https://example.test/callback";
+const DELIVERY_TARGET = "https://api.github.com/repos/acme/demo/issues/1/comments";
+const TARGET_IDENTITY_DIGEST = canonicalSha256Json({
+  provider: "github",
+  owner: "acme",
+  repo: "demo",
+  issueNumber: 1
+});
 const DELIVERY_BODY = "governed callback";
 const PAYLOAD_DIGEST = canonicalSha256Json({
   method: "POST",
@@ -240,7 +247,7 @@ function seedAuthority(sqlite: Database.Database): void {
   const authorityJson = canonicalJsonStringify(CLAIM_AUTHORITY);
   const authorityDigest = canonicalSha256Json(CLAIM_AUTHORITY);
   const claimDigest = `sha256:${"d".repeat(64)}`;
-  const eventJson = JSON.stringify({
+  const event = OpenTagEventSchema.parse({
     id: "event_1",
     source: "github",
     sourceEventId: "comment_1",
@@ -253,6 +260,7 @@ function seedAuthority(sqlite: Database.Database): void {
     callback: { provider: "github", uri: DELIVERY_TARGET },
     metadata: { owner: "acme", repo: "demo", issueNumber: 1 }
   });
+  const eventJson = JSON.stringify(event);
   sqlite.prepare(`INSERT INTO runs (
     id, event_id, status, event_json, assigned_runner_id, repo_provider, work_thread_id,
     current_attempt_id,
@@ -321,7 +329,7 @@ function seedAuthority(sqlite: Database.Database): void {
       `sha256:${"8".repeat(64)}`,
       `sha256:${"9".repeat(64)}`,
       `sha256:${"a".repeat(64)}`,
-      `sha256:${"b".repeat(64)}`,
+      canonicalSha256Json(event),
       `sha256:${"c".repeat(64)}`,
       WORK_THREAD_ID,
       claimDigest,
@@ -567,7 +575,7 @@ async function setupTerminalResult(result: TerminalResult) {
     credentialId: PRODUCER.credentialId,
     request: fixtures.request
   });
-  const claimedAt = new Date(NOW.getTime() + 1_000);
+  const claimedAt = new Date(Math.max(Date.now(), NOW.getTime()) + 1_000);
   const [operation] = await repo.claimDueHostedLifecycleOperations({
     destinationId: "cloud_1",
     organizationId: "org_1",
@@ -710,12 +718,14 @@ function attemptReceipt(input: {
   requestDigest: string;
   intentReceiptDigest: string;
   attemptedAt: string;
-  outcome: "accepted" | "rejected" | "outcome_unknown";
+  outcome: "accepted" | "rejected" | "outcome_unknown" | "attention";
 }) {
   const observedAt = new Date(Date.parse(input.attemptedAt) + 1_000).toISOString();
   const reasonCode = input.outcome === "accepted"
     ? "provider_accepted"
-    : input.outcome === "rejected" ? "provider_rejected" : "provider_timeout";
+    : input.outcome === "rejected"
+      ? "provider_rejected"
+      : input.outcome === "attention" ? "callback_sink_unhandled" : "provider_timeout";
   return CallbackAttemptObservationReceiptEnvelopeV1Schema.parse(withDigests({
     schemaVersion: 1,
     protocolVersion: "1.0",
@@ -740,8 +750,13 @@ function attemptReceipt(input: {
       requestDigest: input.requestDigest,
       outcome: input.outcome,
       reasonCode,
-      ...(input.outcome === "outcome_unknown"
-        ? { nextAction: "reconcile-provider", owner: PRODUCER.id }
+      ...(input.outcome === "outcome_unknown" || input.outcome === "attention"
+        ? {
+            nextAction: input.outcome === "attention"
+              ? "repair-local-callback"
+              : "reconcile-provider",
+            owner: PRODUCER.id
+          }
         : {}),
       attemptedAt: input.attemptedAt,
       observedAt
@@ -752,28 +767,33 @@ function attemptReceipt(input: {
 function providerReceipt(input: {
   localIntentId: string;
   localAttemptId: string;
-  outcome: "accepted" | "rejected" | "outcome_unknown";
+  outcome: "accepted" | "rejected";
   observedAt: string;
   attemptReceiptDigest: string;
   predecessorReceiptDigest?: string;
   resourceIdentity?: string;
   producer?: typeof PRODUCER;
   providerReceiptId?: string;
+  targetIdentityDigest?: string;
 }) {
-  const providerOutcome = input.outcome === "accepted"
-    ? "succeeded"
-    : input.outcome === "rejected" ? "failed" : "outcome_unknown";
+  const providerOutcome = input.outcome === "accepted" ? "succeeded" : "failed";
   const reasonCode = input.outcome === "accepted"
     ? "provider_accepted"
-    : input.outcome === "rejected" ? "provider_rejected" : "provider_timeout";
-  const providerReceiptId = input.providerReceiptId ?? `provider_receipt_${input.localAttemptId}`;
+    : "provider_rejected";
+  const providerReceiptId = input.providerReceiptId
+    ?? (input.outcome === "accepted" ? "comment_123" : `provider_receipt_${input.localAttemptId}`);
+  const acceptedCommentId = /^comment_([1-9][0-9]*)$/u.exec(providerReceiptId)?.[1];
+  const envelopeId = canonicalSha256Json({
+    providerReceiptId,
+    localAttemptId: input.localAttemptId
+  }).slice("sha256:".length, "sha256:".length + 32);
   return CallbackProviderObservationReceiptEnvelopeV1Schema.parse(withDigests({
     schemaVersion: 1,
     protocolVersion: "1.0",
     receiptKind: "callback_provider_observation",
-    receiptId: `receipt_${providerReceiptId}`,
+    receiptId: `receipt_provider_${envelopeId}`,
     organizationId: "org_1",
-    operationId: `operation_${providerReceiptId}`,
+    operationId: `operation_provider_${envelopeId}`,
     requiredCapabilities: ["relay.callback-observation.v1"],
     producer: input.producer ?? PRODUCER,
     identity: {
@@ -790,12 +810,13 @@ function providerReceipt(input: {
       localIntentId: input.localIntentId,
       localAttemptId: input.localAttemptId,
       providerReceiptId,
-      resourceIdentity: input.resourceIdentity ?? "github:comment:123",
+      resourceIdentity: input.resourceIdentity
+        ?? (input.outcome === "accepted"
+          ? `github:comment:${acceptedCommentId ?? "123"}`
+          : "github:issue:1"),
+      targetIdentityDigest: input.targetIdentityDigest ?? TARGET_IDENTITY_DIGEST,
       outcome: providerOutcome,
       reasonCode,
-      ...(input.outcome === "outcome_unknown"
-        ? { nextAction: "reconcile-provider", owner: PRODUCER.id }
-        : {}),
       observedAt: input.observedAt
     }
   }));
@@ -827,6 +848,178 @@ async function enqueueAndClaim(
 }
 
 describe("governed callback ledger", () => {
+  it("replaces old callback triggers after adding target digest authority", async () => {
+    const { sqlite, repo } = await setup();
+    sqlite.exec(`
+      DROP TRIGGER governed_callback_intents_target_digest_guard;
+      DROP TRIGGER governed_callback_intents_authority_immutable_guard;
+      DROP TRIGGER governed_callback_attempts_state_transition_guard;
+      DROP TRIGGER governed_callback_attempts_terminal_receipt_guard;
+      DROP TRIGGER governed_callback_attempts_receipt_write_guard;
+      ALTER TABLE governed_callback_intents DROP COLUMN target_identity_digest;
+      CREATE TRIGGER governed_callback_intents_authority_immutable_guard
+      BEFORE UPDATE OF destination_id, organization_id, runner_id, producer_id,
+        credential_id, registration_generation, run_id, work_thread_id,
+        run_attempt_id, run_attempt_number, fencing_token_digest, admission_id,
+        admission_operation_id, claim_operation_id, completion_operation_id,
+        assessment_receipt_id, assessment_receipt_digest, local_delivery_id,
+        provider, operation_id, payload_digest, intent_receipt_id,
+        intent_receipt_digest, intent_receipt_json
+      ON governed_callback_intents
+      BEGIN SELECT RAISE(ABORT, 'old intent authority'); END;
+      CREATE TRIGGER governed_callback_attempts_state_transition_guard
+      BEFORE UPDATE OF state ON governed_callback_attempts
+      WHEN NEW.state <> OLD.state AND NOT (
+        (OLD.state = 'pending' AND NEW.state IN ('leased', 'attention'))
+        OR (OLD.state = 'leased' AND NEW.state IN ('pending', 'sending', 'attention'))
+        OR (OLD.state = 'sending' AND NEW.state IN
+          ('accepted', 'rejected', 'outcome_unknown'))
+      ) BEGIN SELECT RAISE(ABORT, 'old attempt transition'); END;
+      CREATE TRIGGER governed_callback_attempts_terminal_receipt_guard
+      BEFORE UPDATE OF state ON governed_callback_attempts
+      WHEN OLD.state = 'sending' AND NEW.state IN ('accepted', 'rejected')
+        AND NEW.provider_receipt_json IS NULL
+      BEGIN SELECT RAISE(ABORT, 'old terminal tuple'); END;
+      CREATE TRIGGER governed_callback_attempts_receipt_write_guard
+      BEFORE UPDATE OF attempt_receipt_id, attempt_receipt_digest,
+        attempt_receipt_json, provider_receipt_id, resource_identity,
+        provider_receipt_digest, provider_receipt_json
+      ON governed_callback_attempts
+      WHEN NEW.state = OLD.state OR OLD.state <> 'sending'
+      BEGIN SELECT RAISE(ABORT, 'old receipt write'); END;
+    `);
+    expect(() => migrateSchema(sqlite)).not.toThrow();
+    const columns = sqlite.prepare("PRAGMA table_info(governed_callback_intents)").all() as Array<{ name: string }>;
+    expect(columns.some((column) => column.name === "target_identity_digest")).toBe(true);
+
+    const leased = await enqueueAndClaim(repo, "intent_upgrade_leased_attention");
+    const leasedAttention = attemptReceipt({
+      localIntentId: leased.claimed.intent.localIntentId,
+      localAttemptId: leased.claimed.attempt.localAttemptId,
+      attemptNumber: leased.claimed.attempt.attemptNumber,
+      requestDigest: leased.claimed.attempt.requestDigest,
+      intentReceiptDigest: leased.claimed.intentReceiptDigest,
+      attemptedAt: new Date(NOW.getTime() + 1_000).toISOString(),
+      outcome: "attention"
+    });
+    await expect(repo.quarantineGovernedCallbackAttempt({
+      destinationId: "cloud_1", organizationId: "org_1",
+      localIntentId: leased.claimed.intent.localIntentId,
+      localAttemptId: leased.claimed.attempt.localAttemptId,
+      leaseToken: leased.claimed.attempt.leaseToken!,
+      attemptReceipt: leasedAttention,
+      now: new Date(NOW.getTime() + 2_000)
+    })).resolves.toBe("quarantined");
+
+    const sending = await enqueueAndClaim(repo, "intent_upgrade_sending_attention");
+    const sendingAt = new Date(NOW.getTime() + 3_000);
+    await repo.beginGovernedCallbackSending({
+      destinationId: "cloud_1", organizationId: "org_1",
+      localIntentId: sending.claimed.intent.localIntentId,
+      localAttemptId: sending.claimed.attempt.localAttemptId,
+      leaseToken: sending.claimed.attempt.leaseToken!, now: sendingAt
+    });
+    await expect(repo.finalizeGovernedCallbackAttempt({
+      destinationId: "cloud_1", organizationId: "org_1",
+      localIntentId: sending.claimed.intent.localIntentId,
+      localAttemptId: sending.claimed.attempt.localAttemptId,
+      leaseToken: sending.claimed.attempt.leaseToken!,
+      attemptReceipt: attemptReceipt({
+        localIntentId: sending.claimed.intent.localIntentId,
+        localAttemptId: sending.claimed.attempt.localAttemptId,
+        attemptNumber: sending.claimed.attempt.attemptNumber,
+        requestDigest: sending.claimed.attempt.requestDigest,
+        intentReceiptDigest: sending.claimed.intentReceiptDigest,
+        attemptedAt: sendingAt.toISOString(), outcome: "attention"
+      }),
+      now: new Date(NOW.getTime() + 4_000)
+    })).resolves.toBe("finalized");
+    expect(() => sqlite.prepare(`UPDATE governed_callback_intents
+      SET target_identity_digest = NULL WHERE local_intent_id = ?`)
+      .run(sending.claimed.intent.localIntentId))
+      .toThrow("governed_callback_intent_authority_immutable");
+  });
+
+  it("backfills old pending, leased, sending, and accepted target identities", async () => {
+    const { sqlite, repo } = await setup();
+    const states = ["pending", "leased", "sending", "accepted"] as const;
+    for (const state of states) {
+      const localIntentId = `intent_upgrade_backfill_${state}`;
+      await repo.enqueueGovernedCallbackIntent({
+        destinationId: "cloud_1",
+        runnerId: "runner_1",
+        idempotencyKey: `idempotency_${localIntentId}`,
+        delivery: governedDelivery(),
+        completionOperationId: COMPLETION_OPERATION_ID,
+        authority: AUTHORITY,
+        receipt: intentReceipt(localIntentId),
+        now: NOW
+      });
+    }
+    sqlite.exec(`
+      DROP TRIGGER governed_callback_intents_target_digest_guard;
+      DROP TRIGGER governed_callback_intents_authority_immutable_guard;
+      DROP TRIGGER governed_callback_intents_state_transition_guard;
+      DROP TRIGGER governed_callback_attempts_state_transition_guard;
+      DROP TRIGGER callback_deliveries_governed_state_transition_guard;
+      ALTER TABLE governed_callback_intents DROP COLUMN target_identity_digest;
+    `);
+    for (const state of states) {
+      const localIntentId = `intent_upgrade_backfill_${state}`;
+      sqlite.prepare(`UPDATE governed_callback_intents SET state = ?
+        WHERE local_intent_id = ?`).run(state, localIntentId);
+      sqlite.prepare(`UPDATE governed_callback_attempts SET state = ?
+        WHERE local_intent_id = ?`).run(state, localIntentId);
+      sqlite.prepare(`UPDATE callback_deliveries SET governed_state = ? WHERE id = (
+        SELECT local_delivery_id FROM governed_callback_intents
+        WHERE local_intent_id = ?
+      )`).run(state, localIntentId);
+    }
+
+    expect(() => migrateSchema(sqlite)).not.toThrow();
+    expect(sqlite.prepare(`SELECT state, target_identity_digest AS targetIdentityDigest
+      FROM governed_callback_intents
+      WHERE local_intent_id LIKE 'intent_upgrade_backfill_%'
+      ORDER BY local_intent_id`).all()).toEqual([
+      { state: "accepted", targetIdentityDigest: TARGET_IDENTITY_DIGEST },
+      { state: "leased", targetIdentityDigest: TARGET_IDENTITY_DIGEST },
+      { state: "pending", targetIdentityDigest: TARGET_IDENTITY_DIGEST },
+      { state: "sending", targetIdentityDigest: TARGET_IDENTITY_DIGEST }
+    ]);
+  });
+
+  it("fails closed when an old target identity cannot be proven", async () => {
+    const { sqlite, repo } = await setup();
+    const localIntentId = "intent_upgrade_unverifiable";
+    await repo.enqueueGovernedCallbackIntent({
+      destinationId: "cloud_1",
+      runnerId: "runner_1",
+      idempotencyKey: `idempotency_${localIntentId}`,
+      delivery: governedDelivery(),
+      completionOperationId: COMPLETION_OPERATION_ID,
+      authority: AUTHORITY,
+      receipt: intentReceipt(localIntentId),
+      now: NOW
+    });
+    sqlite.exec(`
+      DROP TRIGGER governed_callback_intents_target_digest_guard;
+      DROP TRIGGER governed_callback_intents_authority_immutable_guard;
+      DROP TRIGGER callback_deliveries_governed_immutable_guard;
+      ALTER TABLE governed_callback_intents DROP COLUMN target_identity_digest;
+    `);
+    sqlite.prepare(`UPDATE callback_deliveries
+      SET uri = 'https://api.github.com/repos/other/demo/issues/1/comments'
+      WHERE id = (SELECT local_delivery_id FROM governed_callback_intents
+        WHERE local_intent_id = ?)`)
+      .run(localIntentId);
+
+    expect(() => migrateSchema(sqlite))
+      .toThrow("governed_callback_target_backfill_attention_required");
+    expect(sqlite.prepare(`SELECT target_identity_digest AS targetIdentityDigest
+      FROM governed_callback_intents WHERE local_intent_id = ?`)
+      .get(localIntentId)).toEqual({ targetIdentityDigest: null });
+  });
+
   it("derives the complete governed enqueue context without mutating durable state", async () => {
     const { sqlite, repo } = await setup();
     const before = sqlite.prepare("SELECT total_changes() AS changes").get();
@@ -1248,7 +1441,8 @@ describe("governed callback ledger", () => {
     expect(claimed).toMatchObject({
       delivery: { dispatchMode: "governed", governedState: "leased" },
       producer: PRODUCER,
-      intentReceiptDigest: expect.stringMatching(/^sha256:/)
+      intentReceiptDigest: expect.stringMatching(/^sha256:/),
+      targetIdentityDigest: TARGET_IDENTITY_DIGEST
     });
     const legacy = await repo.claimPendingCallbackDeliveries({ limit: 20, now: NOW });
     expect(legacy.every((delivery) => delivery.dispatchMode === "legacy")).toBe(true);
@@ -1260,6 +1454,10 @@ describe("governed callback ledger", () => {
       "UPDATE governed_callback_attempts SET request_digest = ? WHERE local_attempt_id = ?"
     ).run(`sha256:${"0".repeat(64)}`, claimed.attempt.localAttemptId))
       .toThrow("governed_callback_attempt_authority_immutable");
+    expect(() => sqlite.prepare(
+      "UPDATE governed_callback_intents SET target_identity_digest = NULL WHERE local_intent_id = ?"
+    ).run(claimed.intent.localIntentId))
+      .toThrow("governed_callback_intent_authority_immutable");
     sqlite.prepare("UPDATE governed_callback_attempts SET state = 'sending' WHERE local_attempt_id = ?")
       .run(claimed.attempt.localAttemptId);
     expect(() => sqlite.prepare(
@@ -1568,7 +1766,7 @@ describe("governed callback ledger", () => {
         providerReceiptId: "provider_receipt_unverified"
       }),
       now: new Date(NOW.getTime() + 32_000)
-    })).rejects.toMatchObject({ code: "GOVERNED_CALLBACK_RECONCILIATION_REQUIRED" });
+    })).rejects.toMatchObject({ code: "GOVERNED_CALLBACK_AUTHORITY_CONFLICT" });
     expect(sqlite.prepare("SELECT count(*) AS count FROM governed_callback_reconciliations").get())
       .toEqual({ count: 0 });
   });
@@ -1596,6 +1794,92 @@ describe("governed callback ledger", () => {
     expect(rows).toEqual([
       { attemptNumber: 1, state: "leased" }
     ]);
+  });
+
+  it("quarantines an expired claimed callback when frozen authority is invalid", async () => {
+    const { sqlite, repo } = await setup();
+    const { claimed } = await enqueueAndClaim(
+      repo,
+      "intent_expired_authority_conflict"
+    );
+    sqlite.prepare("UPDATE runs SET event_json = '{}' WHERE id = ?")
+      .run(RUN_ID);
+
+    await expect(repo.recoverExpiredGovernedCallbacks({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      now: new Date(NOW.getTime() + 31_000)
+    })).resolves.toEqual({ requeued: 0, outcomeUnknown: 0 });
+
+    expect(sqlite.prepare(`SELECT state, last_reason_code AS reasonCode
+      FROM governed_callback_intents WHERE local_intent_id = ?`)
+      .get(claimed.intent.localIntentId)).toEqual({
+      state: "attention",
+      reasonCode: "callback_local_error"
+    });
+    const attemptRow = sqlite.prepare(`SELECT state, attempt_receipt_digest AS receiptDigest,
+      attempt_receipt_json AS receiptJson, provider_receipt_id AS providerReceiptId,
+      resource_identity AS resourceIdentity,
+      provider_receipt_digest AS providerReceiptDigest,
+      provider_receipt_json AS providerReceiptJson
+      FROM governed_callback_attempts WHERE local_attempt_id = ?`)
+      .get(claimed.attempt.localAttemptId) as {
+        state: string;
+        receiptDigest: string;
+        receiptJson: string;
+        providerReceiptId: string | null;
+        resourceIdentity: string | null;
+        providerReceiptDigest: string | null;
+        providerReceiptJson: string | null;
+      };
+    expect(attemptRow).toMatchObject({
+      state: "attention",
+      providerReceiptId: null,
+      resourceIdentity: null,
+      providerReceiptDigest: null,
+      providerReceiptJson: null
+    });
+    const receipt = CallbackAttemptObservationReceiptEnvelopeV1Schema.parse(
+      JSON.parse(attemptRow.receiptJson)
+    );
+    const { receiptDigest, payloadDigest, ...receiptBase } = receipt;
+    expect(payloadDigest).toBe(canonicalSha256Json(receipt.payload));
+    expect(receiptDigest).toBe(canonicalSha256Json({
+      ...receiptBase,
+      payloadDigest
+    }));
+    expect(attemptRow.receiptDigest).toBe(receiptDigest);
+    expect(receipt.predecessorReceiptDigests).toEqual([
+      claimed.intentReceiptDigest
+    ]);
+    expect(receipt.payload).toMatchObject({
+      localIntentId: claimed.intent.localIntentId,
+      localAttemptId: claimed.attempt.localAttemptId,
+      attemptNumber: claimed.attempt.attemptNumber,
+      requestDigest: claimed.attempt.requestDigest,
+      outcome: "attention",
+      reasonCode: "callback_local_error",
+      nextAction: "repair-local-callback",
+      owner: PRODUCER.id
+    });
+    expect(sqlite.prepare(`SELECT governed_state AS state
+      FROM callback_deliveries WHERE id = ?`)
+      .get(claimed.delivery.id)).toEqual({ state: "attention" });
+    await expect(repo.claimGovernedCallbackIntents({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      leaseOwner: "worker_2",
+      leaseSeconds: 30,
+      now: new Date(NOW.getTime() + 32_000)
+    })).resolves.toEqual([]);
+    const audit = sqlite.prepare(`SELECT payload_json AS payloadJson
+      FROM run_events WHERE run_id = ? AND type = 'callback.governed.attention'
+      ORDER BY id DESC LIMIT 1`).get(RUN_ID) as { payloadJson: string };
+    expect(JSON.parse(audit.payloadJson)).toMatchObject({
+      localIntentId: claimed.intent.localIntentId,
+      localAttemptId: claimed.attempt.localAttemptId,
+      detail: "authority_conflict"
+    });
   });
 
   it("finalizes accepted atomically and projects intent then attempt then provider", async () => {
@@ -1885,7 +2169,8 @@ describe("governed callback ledger", () => {
         } : {}),
         now: new Date(NOW.getTime() + 2_000)
       })).resolves.toBe("finalized");
-      expect(sqlite.prepare("SELECT state FROM governed_callback_intents").get()).toEqual({ state: outcome });
+      expect(sqlite.prepare("SELECT state FROM governed_callback_intents").get())
+        .toEqual({ state: outcome === "outcome_unknown" ? "attention" : outcome });
       expect(sqlite.prepare("SELECT count(*) AS count FROM control_plane_projection_outbox").get())
         .toEqual({ count: outcome === "rejected" ? 4 : 3 });
     }
@@ -1971,26 +2256,22 @@ describe("governed callback ledger", () => {
         intentReceiptDigest: claimed.intentReceiptDigest,
         attemptedAt: sendingAt.toISOString(), outcome: "outcome_unknown"
       });
-      const unknownProvider = providerReceipt({
-        localIntentId: claimed.intent.localIntentId,
-        localAttemptId: claimed.attempt.localAttemptId,
-        outcome: "outcome_unknown", observedAt: unknownAttempt.observedAt,
-        attemptReceiptDigest: unknownAttempt.receiptDigest
-      });
       await repo.finalizeGovernedCallbackAttempt({
         destinationId: "cloud_1", organizationId: "org_1",
         localIntentId: claimed.intent.localIntentId,
         localAttemptId: claimed.attempt.localAttemptId,
         leaseToken: claimed.attempt.leaseToken!, attemptReceipt: unknownAttempt,
-        providerReceipt: unknownProvider, now: new Date(NOW.getTime() + 2_000)
+        now: new Date(NOW.getTime() + 2_000)
       });
       const positive = providerReceipt({
         localIntentId: claimed.intent.localIntentId,
         localAttemptId: claimed.attempt.localAttemptId,
         outcome: resolution, observedAt: new Date(NOW.getTime() + 3_000).toISOString(),
         attemptReceiptDigest: unknownAttempt.receiptDigest,
-        predecessorReceiptDigest: unknownProvider.receiptDigest,
-        providerReceiptId: `provider_receipt_positive_${resolution}`
+        predecessorReceiptDigest: unknownAttempt.receiptDigest,
+        providerReceiptId: resolution === "accepted"
+          ? "comment_456"
+          : "provider_receipt_positive_rejected"
       });
       const reconcileInput = {
         destinationId: "cloud_1", organizationId: "org_1",
@@ -2035,18 +2316,12 @@ describe("governed callback ledger", () => {
       intentReceiptDigest: claimed.intentReceiptDigest,
       attemptedAt: sendingAt.toISOString(), outcome: "outcome_unknown"
     });
-    const unknownProvider = providerReceipt({
-      localIntentId: claimed.intent.localIntentId,
-      localAttemptId: claimed.attempt.localAttemptId,
-      outcome: "outcome_unknown", observedAt: unknownAttempt.observedAt,
-      attemptReceiptDigest: unknownAttempt.receiptDigest
-    });
     await repo.finalizeGovernedCallbackAttempt({
       destinationId: "cloud_1", organizationId: "org_1",
       localIntentId: claimed.intent.localIntentId,
       localAttemptId: claimed.attempt.localAttemptId,
       leaseToken: claimed.attempt.leaseToken!, attemptReceipt: unknownAttempt,
-      providerReceipt: unknownProvider, now: new Date(NOW.getTime() + 2_000)
+      now: new Date(NOW.getTime() + 2_000)
     });
     const candidate = (overrides: Partial<Parameters<typeof providerReceipt>[0]> = {}) =>
       providerReceipt({
@@ -2055,24 +2330,15 @@ describe("governed callback ledger", () => {
         outcome: "accepted",
         observedAt: new Date(NOW.getTime() + 3_000).toISOString(),
         attemptReceiptDigest: unknownAttempt.receiptDigest,
-        predecessorReceiptDigest: unknownProvider.receiptDigest,
-        providerReceiptId: "provider_receipt_positive_candidate",
+        predecessorReceiptDigest: unknownAttempt.receiptDigest,
+        providerReceiptId: "comment_789",
         ...overrides
       });
     const rejected = [
-      unknownProvider,
-      providerReceipt({
-        localIntentId: claimed.intent.localIntentId,
-        localAttemptId: claimed.attempt.localAttemptId,
-        outcome: "outcome_unknown",
-        observedAt: new Date(NOW.getTime() + 3_000).toISOString(),
-        attemptReceiptDigest: unknownAttempt.receiptDigest,
-        predecessorReceiptDigest: unknownProvider.receiptDigest,
-        providerReceiptId: "provider_receipt_new_unknown"
-      }),
-      candidate({ predecessorReceiptDigest: unknownAttempt.receiptDigest }),
-      candidate({ resourceIdentity: "github:comment:other", providerReceiptId: "provider_receipt_wrong_resource" }),
-      candidate({ observedAt: sendingAt.toISOString(), providerReceiptId: "provider_receipt_stale" }),
+      candidate({ predecessorReceiptDigest: `sha256:${"0".repeat(64)}` }),
+      candidate({ resourceIdentity: "github:comment:788" }),
+      candidate({ observedAt: new Date(NOW.getTime() + 500).toISOString() }),
+      candidate({ targetIdentityDigest: `sha256:${"0".repeat(64)}` }),
       candidate({
         producer: { ...PRODUCER, id: "other_opentag" },
         providerReceiptId: "provider_receipt_foreign_producer"
@@ -2088,7 +2354,7 @@ describe("governed callback ledger", () => {
       })).rejects.toBeInstanceOf(GovernedCallbackConflictError);
     }
     expect(sqlite.prepare("SELECT state FROM governed_callback_intents").get())
-      .toEqual({ state: "outcome_unknown" });
+      .toEqual({ state: "attention" });
     expect(sqlite.prepare("SELECT count(*) AS count FROM governed_callback_reconciliations").get())
       .toEqual({ count: 0 });
     expect(sqlite.prepare("SELECT count(*) AS count FROM governed_callback_attempts").get())
@@ -2153,5 +2419,299 @@ describe("governed callback ledger", () => {
       now: new Date(NOW.getTime() + 2_000)
     })).resolves.toBe("finalized");
     expect(sqlite.prepare("SELECT state FROM governed_callback_intents").get()).toEqual({ state: "accepted" });
+  });
+
+  it("binds GitHub targets to the frozen event digest, repository, and issue or PR", async () => {
+    const invalidTargets = [
+      "https://example.test/callback",
+      "https://api.github.com/repos/acme/other/issues/1/comments",
+      "https://api.github.com/repos/acme/demo/issues/2/comments"
+    ];
+    for (const [index, target] of invalidTargets.entries()) {
+      const { repo } = await setup();
+      await expect(repo.enqueueGovernedCallbackIntent({
+        destinationId: "cloud_1",
+        runnerId: "runner_1",
+        idempotencyKey: `target_invalid_${index}`,
+        delivery: { ...governedDelivery(), target },
+        completionOperationId: COMPLETION_OPERATION_ID,
+        authority: AUTHORITY,
+        receipt: intentReceipt(`intent_target_invalid_${index}`),
+        now: NOW
+      })).rejects.toBeInstanceOf(GovernedCallbackConflictError);
+    }
+
+    const digestMismatch = await setup();
+    digestMismatch.sqlite.exec("DROP TRIGGER hosted_run_imports_immutable_update_guard");
+    digestMismatch.sqlite.prepare(
+      "UPDATE hosted_run_imports SET event_digest = ? WHERE run_id = ?"
+    ).run(`sha256:${"0".repeat(64)}`, RUN_ID);
+    await expect(digestMismatch.repo.enqueueGovernedCallbackIntent({
+      destinationId: "cloud_1",
+      runnerId: "runner_1",
+      idempotencyKey: "target_event_digest_mismatch",
+      delivery: governedDelivery(),
+      completionOperationId: COMPLETION_OPERATION_ID,
+      authority: AUTHORITY,
+      receipt: intentReceipt("intent_target_event_digest_mismatch"),
+      now: NOW
+    })).rejects.toMatchObject({ code: "GOVERNED_CALLBACK_AUTHORITY_CONFLICT" });
+
+    const pullRequest = await setup();
+    pullRequest.sqlite.exec("DROP TRIGGER hosted_run_imports_immutable_update_guard");
+    const run = pullRequest.sqlite.prepare("SELECT event_json AS eventJson FROM runs WHERE id = ?")
+      .get(RUN_ID) as { eventJson: string };
+    const event = OpenTagEventSchema.parse({
+      ...JSON.parse(run.eventJson),
+      metadata: { owner: "acme", repo: "demo", pullRequestNumber: 1 }
+    });
+    pullRequest.sqlite.prepare("UPDATE runs SET event_json = ? WHERE id = ?")
+      .run(JSON.stringify(event), RUN_ID);
+    pullRequest.sqlite.prepare("UPDATE hosted_run_imports SET event_digest = ? WHERE run_id = ?")
+      .run(canonicalSha256Json(event), RUN_ID);
+    await expect(pullRequest.repo.enqueueGovernedCallbackIntent({
+      destinationId: "cloud_1",
+      runnerId: "runner_1",
+      idempotencyKey: "target_pr",
+      delivery: governedDelivery(),
+      completionOperationId: COMPLETION_OPERATION_ID,
+      authority: AUTHORITY,
+      receipt: intentReceipt("intent_target_pr"),
+      now: NOW
+    })).resolves.toMatchObject({ outcome: "created" });
+  });
+
+  it("quarantines a claimed preflight failure before provider I/O", async () => {
+    const { sqlite, repo } = await setup();
+    const { claimed } = await enqueueAndClaim(repo, "intent_preflight_attention");
+    const receipt = attemptReceipt({
+      localIntentId: claimed.intent.localIntentId,
+      localAttemptId: claimed.attempt.localAttemptId,
+      attemptNumber: claimed.attempt.attemptNumber,
+      requestDigest: claimed.attempt.requestDigest,
+      intentReceiptDigest: claimed.intentReceiptDigest,
+      attemptedAt: new Date(NOW.getTime() + 1_000).toISOString(),
+      outcome: "attention"
+    });
+    await expect(repo.quarantineGovernedCallbackAttempt({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      localIntentId: claimed.intent.localIntentId,
+      localAttemptId: claimed.attempt.localAttemptId,
+      leaseToken: claimed.attempt.leaseToken!,
+      attemptReceipt: receipt,
+      now: new Date(NOW.getTime() + 2_000)
+    })).resolves.toBe("quarantined");
+    expect(sqlite.prepare(`SELECT state, reason_code AS reasonCode,
+      next_action AS nextAction, provider_receipt_json AS providerReceiptJson
+      FROM governed_callback_attempts`).get()).toEqual({
+      state: "attention",
+      reasonCode: "callback_sink_unhandled",
+      nextAction: "repair-local-callback",
+      providerReceiptJson: null
+    });
+    expect(sqlite.prepare("SELECT state FROM governed_callback_intents").get())
+      .toEqual({ state: "attention" });
+    expect(sqlite.prepare("SELECT governed_state AS state FROM callback_deliveries WHERE dispatch_mode = 'governed'").get())
+      .toEqual({ state: "attention" });
+    await expect(repo.recoverExpiredGovernedCallbacks({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      now: new Date(NOW.getTime() + 60_000)
+    })).resolves.toEqual({ requeued: 0, outcomeUnknown: 0 });
+  });
+
+  it("rejects an unknown attempt carrying any forged provider receipt tuple", async () => {
+    const { sqlite, repo } = await setup();
+    const { claimed } = await enqueueAndClaim(repo, "intent_unknown_tuple_guard");
+    await repo.beginGovernedCallbackSending({
+      destinationId: "cloud_1", organizationId: "org_1",
+      localIntentId: claimed.intent.localIntentId,
+      localAttemptId: claimed.attempt.localAttemptId,
+      leaseToken: claimed.attempt.leaseToken!,
+      now: new Date(NOW.getTime() + 1_000)
+    });
+    expect(() => sqlite.prepare(`UPDATE governed_callback_attempts SET
+      state = 'outcome_unknown', attempt_receipt_id = 'receipt_attempt',
+      attempt_receipt_digest = ?, attempt_receipt_json = '{}',
+      provider_receipt_id = 'provider_receipt_forged',
+      resource_identity = 'github:issue:1', provider_receipt_digest = ?,
+      provider_receipt_json = '{}' WHERE local_attempt_id = ?`).run(
+      `sha256:${"1".repeat(64)}`,
+      `sha256:${"2".repeat(64)}`,
+      claimed.attempt.localAttemptId
+    )).toThrow("incomplete governed callback terminal receipt tuple");
+  });
+
+  it("returns the persisted unknown attempt anchor when recovery wins a late finalize race", async () => {
+    const { repo } = await setup();
+    const { claimed } = await enqueueAndClaim(repo, "intent_late_finalize");
+    const sendingAt = new Date(NOW.getTime() + 1_000);
+    await repo.beginGovernedCallbackSending({
+      destinationId: "cloud_1", organizationId: "org_1",
+      localIntentId: claimed.intent.localIntentId,
+      localAttemptId: claimed.attempt.localAttemptId,
+      leaseToken: claimed.attempt.leaseToken!, now: sendingAt
+    });
+    await repo.recoverExpiredGovernedCallbacks({
+      destinationId: "cloud_1", organizationId: "org_1",
+      now: new Date(NOW.getTime() + 31_000)
+    });
+    const accepted = attemptReceipt({
+      localIntentId: claimed.intent.localIntentId,
+      localAttemptId: claimed.attempt.localAttemptId,
+      attemptNumber: claimed.attempt.attemptNumber,
+      requestDigest: claimed.attempt.requestDigest,
+      intentReceiptDigest: claimed.intentReceiptDigest,
+      attemptedAt: sendingAt.toISOString(), outcome: "accepted"
+    });
+    await expect(repo.finalizeGovernedCallbackAttempt({
+      destinationId: "cloud_1", organizationId: "org_1",
+      localIntentId: claimed.intent.localIntentId,
+      localAttemptId: claimed.attempt.localAttemptId,
+      leaseToken: claimed.attempt.leaseToken!,
+      attemptReceipt: accepted,
+      providerReceipt: providerReceipt({
+        localIntentId: claimed.intent.localIntentId,
+        localAttemptId: claimed.attempt.localAttemptId,
+        outcome: "accepted",
+        observedAt: new Date(NOW.getTime() + 32_000).toISOString(),
+        attemptReceiptDigest: accepted.receiptDigest
+      }),
+      now: new Date(NOW.getTime() + 32_000)
+    })).resolves.toMatchObject({
+      outcome: "reconciliation_required",
+      attemptReceiptId: `receipt_${claimed.attempt.localAttemptId}`
+    });
+  });
+
+  it("finds one durable accepted GitHub comment without latest-wins ambiguity", async () => {
+    const { repo } = await setup();
+    const record = async (id: string, commentId: number, reconcile = false) => {
+      const delivery = { ...governedDelivery(), statusMessageKey: "final-status" };
+      const intent = intentReceiptWithPayloadDigest(id, canonicalSha256Json({
+        method: "POST",
+        mode: delivery.mode,
+        target: delivery.target,
+        body: delivery.body,
+        threadKey: null,
+        agentId: null,
+        statusMessageKey: delivery.statusMessageKey,
+        blocks: null,
+        rich: null
+      }));
+      await repo.enqueueGovernedCallbackIntent({
+        destinationId: "cloud_1",
+        runnerId: "runner_1",
+        idempotencyKey: `lookup_${id}`,
+        delivery,
+        completionOperationId: COMPLETION_OPERATION_ID,
+        authority: AUTHORITY,
+        receipt: intent,
+        now: NOW
+      });
+      const [claimed] = await repo.claimGovernedCallbackIntents({
+        destinationId: "cloud_1", organizationId: "org_1",
+        leaseOwner: `worker_${id}`, leaseSeconds: 30, now: NOW
+      });
+      const sendingAt = new Date(NOW.getTime() + 1_000);
+      await repo.beginGovernedCallbackSending({
+        destinationId: "cloud_1", organizationId: "org_1",
+        localIntentId: claimed!.intent.localIntentId,
+        localAttemptId: claimed!.attempt.localAttemptId,
+        leaseToken: claimed!.attempt.leaseToken!, now: sendingAt
+      });
+      const attempt = attemptReceipt({
+        localIntentId: claimed!.intent.localIntentId,
+        localAttemptId: claimed!.attempt.localAttemptId,
+        attemptNumber: claimed!.attempt.attemptNumber,
+        requestDigest: claimed!.attempt.requestDigest,
+        intentReceiptDigest: claimed!.intentReceiptDigest,
+        attemptedAt: sendingAt.toISOString(),
+        outcome: reconcile ? "outcome_unknown" : "accepted"
+      });
+      await repo.finalizeGovernedCallbackAttempt({
+        destinationId: "cloud_1", organizationId: "org_1",
+        localIntentId: claimed!.intent.localIntentId,
+        localAttemptId: claimed!.attempt.localAttemptId,
+        leaseToken: claimed!.attempt.leaseToken!,
+        attemptReceipt: attempt,
+        ...(!reconcile ? {
+          providerReceipt: providerReceipt({
+            localIntentId: claimed!.intent.localIntentId,
+            localAttemptId: claimed!.attempt.localAttemptId,
+            outcome: "accepted" as const,
+            observedAt: attempt.observedAt,
+            attemptReceiptDigest: attempt.receiptDigest,
+            providerReceiptId: `comment_${commentId}`
+          })
+        } : {}),
+        now: new Date(NOW.getTime() + 2_000)
+      });
+      if (reconcile) {
+        await repo.reconcileGovernedCallbackOutcome({
+          destinationId: "cloud_1", organizationId: "org_1",
+          localIntentId: claimed!.intent.localIntentId,
+          localAttemptId: claimed!.attempt.localAttemptId,
+          providerReceipt: providerReceipt({
+            localIntentId: claimed!.intent.localIntentId,
+            localAttemptId: claimed!.attempt.localAttemptId,
+            outcome: "accepted",
+            observedAt: new Date(NOW.getTime() + 3_000).toISOString(),
+            attemptReceiptDigest: attempt.receiptDigest,
+            providerReceiptId: `comment_${commentId}`
+          }),
+          now: new Date(NOW.getTime() + 3_000)
+        });
+      }
+    };
+    const lookup = () => repo.getPriorAcceptedGovernedGitHubResource({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      runId: RUN_ID,
+      workThreadId: WORK_THREAD_ID,
+      statusMessageKey: "final-status",
+      targetIdentityDigest: TARGET_IDENTITY_DIGEST
+    });
+    await expect(lookup()).resolves.toEqual({ outcome: "not_found" });
+    await record("intent_lookup_direct", 123);
+    await expect(lookup()).resolves.toEqual({
+      outcome: "found",
+      providerReceiptId: "comment_123",
+      resourceIdentity: "github:comment:123",
+      targetIdentityDigest: TARGET_IDENTITY_DIGEST
+    });
+    await record("intent_lookup_reconciled", 123, true);
+    await expect(lookup()).resolves.toMatchObject({
+      outcome: "found",
+      resourceIdentity: "github:comment:123"
+    });
+    await record("intent_lookup_conflict", 456);
+    await expect(lookup()).resolves.toEqual({ outcome: "conflict" });
+  });
+
+  it("keeps legacy callback attention out of all retry claiming", async () => {
+    const { repo } = await setup();
+    const delivery = await repo.enqueueCallbackDelivery({
+      runId: RUN_ID,
+      kind: "final",
+      provider: "github",
+      uri: DELIVERY_TARGET,
+      body: "requires operator repair"
+    });
+    await repo.markCallbackAttention({
+      deliveryId: delivery.id,
+      reasonCode: "provider_outcome_unknown",
+      nextAction: "reconcile-provider",
+      owner: "local_opentag"
+    });
+    await expect(repo.listPendingCallbackDeliveries({ limit: 10 })).resolves.toEqual([]);
+    await expect(repo.claimPendingCallbackDeliveries({ limit: 10 })).resolves.toEqual([]);
+    await expect(repo.listRunEvents({ runId: RUN_ID })).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({
+        type: "callback.final.attention",
+        payload: expect.objectContaining({ status: "attention", attempts: 1 })
+      })])
+    );
   });
 });
