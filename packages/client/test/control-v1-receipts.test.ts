@@ -163,7 +163,7 @@ function assessment(): CompletionAssessmentReceiptEnvelopeV1 {
     payload: {
       assessmentId: "assessment_1",
       workThreadId: "thread_1",
-      contract: { contractId: "contract_1", version: 1, cycle: 1, contentDigest: digest },
+      contract: { contractId: "contract_1", version: 1, cycle: 1, mode: "governed", contentDigest: digest },
       admissionPolicySnapshot: { snapshotId: "policy_1", digest },
       runId: "run_1",
       attempt,
@@ -184,7 +184,7 @@ function assessment(): CompletionAssessmentReceiptEnvelopeV1 {
       }],
       conclusion: "pending",
       assessedAt: observedAt,
-      assessedBy: "local_1"
+      assessedBy: "local_opentag"
     }
   };
 }

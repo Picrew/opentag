@@ -314,7 +314,10 @@ describe("factory workstream persistence", () => {
       evidenceBacked,
       gateResults: [{ gateId: "checks", state: state === "satisfied" ? "passed" : "missing", evidenceIds: state === "satisfied" ? ["evidence"] : [], reasonCode: state === "satisfied" ? "verification_passed" : "verification_missing", reason: "authority", evaluatedAt: "2026-07-26T00:00:00.000Z" }],
       assessedAt: "2026-07-26T00:00:00.000Z",
-      assessedBy: "opentag"
+      assessedBy: "opentag",
+      ...(state === "satisfied"
+        ? { acceptedAt: "2026-07-26T00:00:00.000Z" }
+        : {})
     });
     const accepted = assessment("assessment-accepted", 1, "satisfied", true);
     const pending = assessment("assessment-pending", 2, "pending", false);
@@ -340,12 +343,12 @@ describe("factory workstream persistence", () => {
       inputDigest: `sha256:${"f".repeat(64)}`,
       targetBindings: [],
       state: "pending",
-      evidenceBacked: true,
+      evidenceBacked: false,
       gateResults: [{
         gateId: "acceptance",
-        state: "passed",
-        evidenceIds: ["evidence-broken-lineage"],
-        reasonCode: "human_acceptance_recorded",
+        state: "missing",
+        evidenceIds: [],
+        reasonCode: "human_acceptance_missing",
         reason: "The stored assessment is valid, but its declared predecessor is missing.",
         evaluatedAt: "2026-07-26T00:00:00.000Z"
       }],
@@ -392,7 +395,7 @@ describe("factory workstream persistence", () => {
         createdAt: "2026-07-26T00:00:00.000Z"
       }
     });
-    const waiver = (id: string, expiresAt: string) => ({
+    const waiver = (id: string, waivedAt: string, expiresAt: string) => ({
       id,
       contractId: "contract-waiver",
       contractVersion: 1,
@@ -402,11 +405,19 @@ describe("factory workstream persistence", () => {
       scope: "selected_gates" as const,
       policyScope: "work_context_owner_container" as const,
       gateIds: ["acceptance"],
-      waivedAt: "2026-07-26T00:01:00.000Z",
+      waivedAt,
       expiresAt
     });
-    const acceptedWaiver = waiver("waiver-active", "2999-01-01T00:00:00.000Z");
-    const expiredWaiver = waiver("waiver-expired", "2000-01-01T00:00:00.000Z");
+    const acceptedWaiver = waiver(
+      "waiver-active",
+      "2026-07-26T00:01:00.000Z",
+      "2999-01-01T00:00:00.000Z"
+    );
+    const expiredWaiver = waiver(
+      "waiver-expired",
+      "2026-07-26T00:00:00.000Z",
+      "2026-07-26T00:02:00.000Z"
+    );
     await repo.recordCompletionWaiver({ waiver: acceptedWaiver });
     await repo.recordCompletionWaiver({ waiver: expiredWaiver });
 

@@ -80,6 +80,7 @@ async function readyContext(input: {
           contractId: 'contract_1',
           version: 1,
           cycle: 1,
+          mode: 'governed' as const,
           contentDigest: DIGEST,
         },
         admissionPolicySnapshot: { snapshotId: 'policy_1', digest: DIGEST },

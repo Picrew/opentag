@@ -1,4 +1,8 @@
-import type { CompletionAssessment } from "@opentag/core";
+import {
+  compareCompletionGateIds,
+  type CompletionAssessment,
+  reduceCompletionGateStates
+} from "@opentag/core";
 import { describe, expect, it } from "vitest";
 import { deriveAcceptedProgressAttribution, type CompletionArtifact } from "../src/index.js";
 
@@ -15,6 +19,12 @@ function assessment(input: {
   gates: CompletionAssessment["gateResults"];
   bindings?: CompletionAssessment["targetBindings"];
 }): CompletionAssessment {
+  const gateResults = [...input.gates].sort((left, right) => compareCompletionGateIds(left.gateId, right.gateId));
+  const state = reduceCompletionGateStates(gateResults.map((result) => result.state));
+  const assessedAt = [
+    [t1, t2, t3][input.sequence - 1] ?? t3,
+    ...gateResults.map((result) => result.evaluatedAt)
+  ].sort().at(-1)!;
   return {
     id: input.id,
     workThreadId: "thread_1",
@@ -24,11 +34,12 @@ function assessment(input: {
     sequence: input.sequence,
     inputDigest: `sha256:${String(input.sequence).repeat(64)}`,
     targetBindings: input.bindings ?? [],
-    state: "pending",
+    state,
     evidenceBacked: true,
-    gateResults: input.gates,
-    assessedAt: [t1, t2, t3][input.sequence - 1]!,
+    gateResults,
+    assessedAt,
     assessedBy: "opentag",
+    ...((state === "satisfied" || state === "waived") ? { acceptedAt: assessedAt } : {}),
     ...(input.supersedesAssessmentId ? { supersedesAssessmentId: input.supersedesAssessmentId } : {})
   };
 }

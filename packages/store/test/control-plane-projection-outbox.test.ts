@@ -255,7 +255,13 @@ function allowedReceipts() {
       payload: {
         assessmentId: "assessment_1",
         workThreadId: "work_thread_1",
-        contract: { contractId: "contract_1", version: 1, cycle: 1, contentDigest: DIGEST },
+        contract: {
+          contractId: "contract_1",
+          version: 1,
+          cycle: 1,
+          mode: "governed",
+          contentDigest: DIGEST
+        },
         admissionPolicySnapshot: { snapshotId: "policy_1", digest: DIGEST },
         runId: "run_1",
         attempt,

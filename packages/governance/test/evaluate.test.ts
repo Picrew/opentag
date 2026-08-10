@@ -149,6 +149,38 @@ describe("evaluateCompletion", () => {
       runResults: [{ runId: "run-1", result: { conclusion: "cancelled", summary: "Stopped." }, recordedAt: t1 }]
     });
     expect(failed).toMatchObject({ state: "unsatisfied", evidenceBacked: false });
+    expect(failed.gateResults[0]).toMatchObject({ reasonCode: "execution_not_succeeded", state: "failed" });
+
+    const pending = evaluateCompletion({
+      ...baseInput(),
+      contract: compatibilityContract(),
+      artifacts: [],
+      runResults: []
+    });
+    expect(pending).toMatchObject({ state: "pending", evidenceBacked: false });
+    expect(pending.gateResults[0]).toMatchObject({ reasonCode: "execution_incomplete", state: "missing" });
+
+    const waiver: CompletionWaiver = {
+      id: "waiver-execution",
+      contractId: "compat-1",
+      contractVersion: 1,
+      cycle: 1,
+      actor: { provider: "github", providerUserId: "owner-1" },
+      reason: "The bounded compatibility result is accepted.",
+      scope: "selected_gates",
+      policyScope: "organization_default",
+      gateIds: ["execution"],
+      waivedAt: t2
+    };
+    const waived = evaluateCompletion({
+      ...baseInput(),
+      contract: compatibilityContract(),
+      artifacts: [],
+      runResults: [{ runId: "run-1", result: { conclusion: "failure", summary: "Failed." }, recordedAt: t1 }],
+      waivers: [waiver]
+    });
+    expect(waived).toMatchObject({ state: "waived", assessedBy: "human", waiver: { id: waiver.id } });
+    expect(waived.gateResults[0]).toMatchObject({ reasonCode: "gate_waived", state: "waived" });
   });
 
   it("requires verified current-head checks and merge after executor success", () => {
@@ -183,7 +215,33 @@ describe("evaluateCompletion", () => {
     const satisfied = evaluateCompletion({ ...baseInput(), evidence: [merged, verifiedChecks] });
 
     expect(satisfied).toMatchObject({ state: "satisfied", evidenceBacked: true, acceptedAt: t3 });
+    expect(satisfied.gateResults.map((gate) => gate.gateId)).toEqual(["checks", "merge", "pr"]);
     expect(satisfied.targetBindings).toEqual([expect.objectContaining({ resourceRef: "github:acme/demo:pull_request:7", resourceVersion: "head-2" })]);
+
+    const satisfiedAfterFailedExecution = evaluateCompletion({
+      ...baseInput(),
+      runResults: [{ runId: "run-1", result: { conclusion: "failure", summary: "Execution failed." }, recordedAt: t1 }],
+      evidence: [merged, verifiedChecks]
+    });
+    expect(satisfiedAfterFailedExecution.state).toBe("satisfied");
+
+    const submillisecondEvidence = {
+      ...verifiedChecks,
+      id: "checks-submillisecond",
+      observedAt: "2026-07-21T10:03:00.0001Z",
+      receivedAt: "2026-07-21T10:03:00.0009Z"
+    };
+    const submillisecondAssessment = evaluateCompletion({
+      ...baseInput(),
+      evidence: [merged, submillisecondEvidence]
+    });
+    expect(submillisecondAssessment).toMatchObject({
+      assessedAt: submillisecondEvidence.receivedAt,
+      acceptedAt: submillisecondEvidence.receivedAt
+    });
+    expect(submillisecondAssessment.gateResults.every((gate) =>
+      gate.evaluatedAt === submillisecondEvidence.receivedAt
+    )).toBe(true);
   });
 
   it("never combines a PR, checks, and merge from different targets or stale heads", () => {
@@ -335,6 +393,57 @@ describe("evaluateCompletion", () => {
     });
   });
 
+  it.each([
+    ["newer non-matching role", t1, t2],
+    ["same-instant conflicting role", t2, t2]
+  ])("uses only authoritative human acceptance for %s", (
+    _scenario,
+    ownerObservedAt,
+    reviewerObservedAt
+  ) => {
+    const contract: CompletionContract = {
+      ...strictContract(),
+      targetSelectors: [],
+      gates: [{
+        id: "approval",
+        kind: "human_acceptance",
+        requiredRole: "owner"
+      }]
+    };
+    const owner = evidence({
+      id: "acceptance-owner",
+      kind: "human.acceptance",
+      predicate: "role",
+      outcome: "owner",
+      observedAt: ownerObservedAt
+    });
+    const reviewer = evidence({
+      id: "acceptance-reviewer",
+      kind: "human.acceptance",
+      predicate: "role",
+      outcome: "reviewer",
+      observedAt: reviewerObservedAt
+    });
+
+    for (const facts of [[owner, reviewer], [reviewer, owner]]) {
+      const assessment = evaluateCompletion({
+        ...baseInput(),
+        contract,
+        artifacts: [],
+        evidence: facts
+      });
+      expect(assessment).toMatchObject({
+        state: "pending",
+        gateResults: [{
+          gateId: "approval",
+          state: "missing",
+          reasonCode: "human_acceptance_missing",
+          evidenceIds: []
+        }]
+      });
+    }
+  });
+
   it("canonicalizes target bindings and material action authority across input permutations", () => {
     const duplicateTargetArtifact = prArtifact({ id: "artifact-pr-6" });
     const explicitTime = "2026-07-21T10:04:00.000Z";
@@ -342,6 +451,29 @@ describe("evaluateCompletion", () => {
     const right = evaluateCompletion({ ...baseInput(), artifacts: [duplicateTargetArtifact, prArtifact()], evaluatedAt: explicitTime });
     expect(right).toEqual(left);
     expect(left.targetBindings[0]?.artifactId).toBe("artifact-pr-6");
+
+    const tiedRunA = {
+      ...baseInput().runResults[0]!,
+      runId: "run-a",
+      recordedAt: "2026-07-21T10:01:00Z"
+    };
+    const tiedRunZ = {
+      ...baseInput().runResults[0]!,
+      runId: "run-z",
+      recordedAt: t1
+    };
+    const tiedRunsLeft = evaluateCompletion({
+      ...baseInput(),
+      runResults: [tiedRunA, tiedRunZ],
+      evaluatedAt: explicitTime
+    });
+    const tiedRunsRight = evaluateCompletion({
+      ...baseInput(),
+      runResults: [tiedRunZ, tiedRunA],
+      evaluatedAt: explicitTime
+    });
+    expect(tiedRunsRight).toEqual(tiedRunsLeft);
+    expect(tiedRunsLeft.triggeredByRunId).toBe("run-z");
 
     const contract: CompletionContract = {
       ...strictContract(),
@@ -388,6 +520,124 @@ describe("evaluateCompletion", () => {
     };
     const waived = evaluateCompletion({ ...baseInput(), waivers: [waiver], evaluatedAt: t3 });
     expect(waived).toMatchObject({ state: "waived", assessedBy: "human", waiver: { id: waiver.id } });
+
+    const partialWaiver = { ...waiver, id: "waiver-partial", gateIds: ["checks"] };
+    const waivedWithMissing = evaluateCompletion({ ...baseInput(), waivers: [partialWaiver], evaluatedAt: t3 });
+    expect(waivedWithMissing).toMatchObject({ state: "pending", assessedBy: "human", waiver: { id: partialWaiver.id } });
+    expect(waivedWithMissing.acceptedAt).toBeUndefined();
+
+    const blockingEscalation: HumanEscalation = {
+      id: "escalation-waived",
+      workThreadId: "thread-1",
+      class: "verification",
+      audience: "repo_owner",
+      subjectRef: "github:acme/demo:pull_request:7",
+      state: "open",
+      blocking: true,
+      summary: "Human review remains required.",
+      reason: "The waiver does not resolve the active escalation.",
+      openedAt: t3
+    };
+    const waivedWithBlocking = evaluateCompletion({
+      ...baseInput(),
+      waivers: [waiver],
+      blockingEscalations: [blockingEscalation],
+      evaluatedAt: t3
+    });
+    expect(waivedWithBlocking).toMatchObject({ state: "blocked", assessedBy: "human", waiver: { id: waiver.id } });
+    expect(waivedWithBlocking.acceptedAt).toBeUndefined();
+
+    const newerCanonical = { ...partialWaiver, id: "waiver-newer", waivedAt: t3 };
+    const olderOtherGate = { ...waiver, id: "waiver-older", gateIds: ["merge"], waivedAt: t1 };
+    const canonicalOnly = evaluateCompletion({
+      ...baseInput(),
+      waivers: [olderOtherGate, newerCanonical],
+      evaluatedAt: t3
+    });
+    expect(canonicalOnly).toMatchObject({ state: "pending", waiver: { id: newerCanonical.id } });
+    expect(canonicalOnly.gateResults.find((gate) => gate.gateId === "merge")?.state).toBe("missing");
+
+    const newerIrrelevant = { ...waiver, id: "waiver-irrelevant", gateIds: ["not-a-contract-gate"], waivedAt: t3 };
+    const irrelevantCannotMask = evaluateCompletion({
+      ...baseInput(),
+      waivers: [waiver, newerIrrelevant],
+      evaluatedAt: t3
+    });
+    expect(irrelevantCannotMask).toMatchObject({ state: "waived", waiver: { id: waiver.id } });
+
+    const futureWaiver = {
+      ...partialWaiver,
+      id: "waiver-future",
+      waivedAt: "2026-07-21T10:04:00.000Z"
+    };
+    for (const contract of [strictContract(), compatibilityContract()]) {
+      const beforeGrant = evaluateCompletion({
+        ...baseInput(),
+        contract,
+        waivers: [{
+          ...futureWaiver,
+          contractId: contract.id,
+          contractVersion: contract.version,
+          cycle: contract.cycle,
+          gateIds: [contract.gates[0]!.id]
+        }],
+        evaluatedAt: t3
+      });
+      expect(beforeGrant.waiver).toBeUndefined();
+      expect(beforeGrant.assessedBy).toBe("opentag");
+    }
+
+    const mixedPrecisionFuture = evaluateCompletion({
+      ...baseInput(),
+      waivers: [{
+        ...partialWaiver,
+        id: "waiver-future-fractional",
+        waivedAt: "2026-07-21T10:03:00.100Z"
+      }],
+      evaluatedAt: "2026-07-21T10:03:00Z"
+    });
+    expect(mixedPrecisionFuture.waiver).toBeUndefined();
+    expect(mixedPrecisionFuture.assessedBy).toBe("opentag");
+
+    const submillisecondFuture = evaluateCompletion({
+      ...baseInput(),
+      waivers: [{
+        ...partialWaiver,
+        id: "waiver-future-submillisecond",
+        waivedAt: "2026-07-21T10:03:00.0009Z"
+      }],
+      evaluatedAt: "2026-07-21T10:03:00.0001Z"
+    });
+    expect(submillisecondFuture.waiver).toBeUndefined();
+    expect(submillisecondFuture.assessedBy).toBe("opentag");
+
+    const tiedZ = {
+      ...partialWaiver,
+      id: "z",
+      waivedAt: "2026-07-21T10:02:00Z"
+    };
+    const tiedUmlaut = { ...waiver, id: "ä", gateIds: ["merge"], waivedAt: t2 };
+    for (const waivers of [[tiedZ, tiedUmlaut], [tiedUmlaut, tiedZ]]) {
+      const tiedCanonical = evaluateCompletion({ ...baseInput(), waivers, evaluatedAt: t3 });
+      expect(tiedCanonical.waiver?.id).toBe("z");
+      expect(tiedCanonical.gateResults.find((gate) => gate.gateId === "checks")?.state).toBe("waived");
+      expect(tiedCanonical.gateResults.find((gate) => gate.gateId === "merge")?.state).toBe("missing");
+    }
+
+    const expiredAtFinalAssessment = evaluateCompletion({
+      ...baseInput(),
+      runResults: [{
+        ...baseInput().runResults[0]!,
+        recordedAt: "2026-07-21T10:03:00.100Z"
+      }],
+      waivers: [{
+        ...partialWaiver,
+        expiresAt: "2026-07-21T10:03:00.050Z"
+      }],
+      evaluatedAt: "2026-07-21T10:03:00Z"
+    });
+    expect(expiredAtFinalAssessment.state).toBe("pending");
+    expect(expiredAtFinalAssessment.waiver).toBeUndefined();
 
     const expired = evaluateCompletion({ ...baseInput(), waivers: [waiver], evaluatedAt: "2026-07-21T12:00:00.000Z" });
     expect(expired.state).toBe("pending");
@@ -473,7 +723,7 @@ describe("deriveWorkLoopView", () => {
       assessment: ambiguousArtifactAssessment
     });
     expect(ambiguousArtifactView).toMatchObject({
-      completion: "unsatisfied",
+      completion: "blocked",
       blockedGateIds: ["pr"],
       nextAction: { hint: { kind: "reassess_completion", targetId: "thread-1" } }
     });

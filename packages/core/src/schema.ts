@@ -743,6 +743,13 @@ export const CompletionContractSchema = z
         });
       }
       seen.add(gate.id);
+      if (gate.id.startsWith("human_escalation:")) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Completion contract gates cannot use the reserved human_escalation namespace.",
+          path: ["gates", index, "id"]
+        });
+      }
       if (gate.targetKey && !targetKeys.has(gate.targetKey)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -757,6 +764,21 @@ export const CompletionContractSchema = z
         message: "An execution compatibility contract cannot declare provider delivery targets.",
         path: ["targetSelectors"]
       });
+    }
+    if (contract.mode === "execution_compat") {
+      const executorGate = contract.gates[0];
+      if (
+        contract.gates.length !== 1
+        || executorGate?.kind !== "material_action"
+        || executorGate.actionFamily !== "executor_run"
+        || executorGate.requiredOutcome !== "succeeded"
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "An execution compatibility contract requires exactly one executor_run material-action gate.",
+          path: ["gates"]
+        });
+      }
     }
   });
 
@@ -791,6 +813,182 @@ export const CompletionReasonCodeSchema = z.enum([
   "execution_not_succeeded"
 ]);
 
+type CompletionGateResultStateValue = z.infer<typeof CompletionGateResultStateSchema>;
+type CompletionAssessmentStateValue = z.infer<typeof CompletionStateSchema>;
+type CompletionReasonCodeValue = z.infer<typeof CompletionReasonCodeSchema>;
+
+export const COMPLETION_REASON_ALLOWED_GATE_STATES = Object.freeze({
+  artifact_requirement_satisfied: ["passed"],
+  artifact_missing: ["missing"],
+  artifact_ambiguous: ["unknown"],
+  verification_passed: ["passed"],
+  verification_failed: ["failed"],
+  verification_missing: ["missing"],
+  verification_assurance_insufficient: ["unknown"],
+  verification_subject_mismatch: ["unknown"],
+  verification_stale: ["missing"],
+  external_state_satisfied: ["passed"],
+  external_state_mismatch: ["failed"],
+  external_state_missing: ["missing"],
+  external_state_assurance_insufficient: ["unknown"],
+  external_state_subject_mismatch: ["unknown"],
+  external_state_stale: ["missing"],
+  material_action_succeeded: ["passed"],
+  material_action_failed: ["failed"],
+  material_action_unknown: ["unknown"],
+  material_action_missing: ["missing"],
+  human_acceptance_recorded: ["passed"],
+  human_acceptance_missing: ["missing", "unknown"],
+  gate_waived: ["waived"],
+  waiver_invalid: ["unknown"],
+  execution_succeeded: ["passed"],
+  execution_incomplete: ["missing"],
+  execution_not_succeeded: ["failed"]
+} as const satisfies Record<CompletionReasonCodeValue, readonly CompletionGateResultStateValue[]>);
+
+const COMPLETION_REASON_REQUIRES_GATE_EVIDENCE = Object.freeze({
+  artifact_requirement_satisfied: true,
+  artifact_missing: false,
+  artifact_ambiguous: false,
+  verification_passed: true,
+  verification_failed: true,
+  verification_missing: false,
+  verification_assurance_insufficient: true,
+  verification_subject_mismatch: false,
+  verification_stale: true,
+  external_state_satisfied: true,
+  external_state_mismatch: true,
+  external_state_missing: false,
+  external_state_assurance_insufficient: true,
+  external_state_subject_mismatch: false,
+  external_state_stale: true,
+  material_action_succeeded: true,
+  material_action_failed: true,
+  material_action_unknown: true,
+  material_action_missing: false,
+  human_acceptance_recorded: true,
+  human_acceptance_missing: false,
+  gate_waived: false,
+  waiver_invalid: false,
+  execution_succeeded: false,
+  execution_incomplete: false,
+  execution_not_succeeded: false
+} as const satisfies Record<CompletionReasonCodeValue, boolean>);
+
+export function completionReasonAllowsGateState(
+  reasonCode: CompletionReasonCodeValue,
+  state: CompletionGateResultStateValue
+): boolean {
+  return (COMPLETION_REASON_ALLOWED_GATE_STATES[reasonCode] as readonly CompletionGateResultStateValue[]).includes(state);
+}
+
+export function completionReasonRequiresGateEvidence(reasonCode: CompletionReasonCodeValue): boolean {
+  return COMPLETION_REASON_REQUIRES_GATE_EVIDENCE[reasonCode];
+}
+
+export type CompletionGateAggregationState =
+  | CompletionGateResultStateValue
+  | CompletionAssessmentStateValue;
+
+export function reduceCompletionGateStates(
+  states: readonly CompletionGateAggregationState[]
+): CompletionAssessmentStateValue {
+  if (states.some((state) => state === "unknown" || state === "blocked")) return "blocked";
+  if (states.some((state) => state === "failed" || state === "unsatisfied")) return "unsatisfied";
+  if (states.some((state) => state === "missing" || state === "pending")) return "pending";
+  if (states.some((state) => state === "waived")) return "waived";
+  return "satisfied";
+}
+
+export function compareCompletionGateIds(left: string, right: string): number {
+  const leftPoints = Array.from(left, (value) => value.codePointAt(0) ?? 0);
+  const rightPoints = Array.from(right, (value) => value.codePointAt(0) ?? 0);
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = leftPoints[index]! - rightPoints[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
+const RFC3339_INSTANT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):(\d{2}))$/u;
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function parseRfc3339Instant(value: string): {
+  epochSeconds: number;
+  fractionalSeconds: string;
+} {
+  const match = RFC3339_INSTANT_PATTERN.exec(value);
+  if (!match) {
+    throw new TypeError("RFC3339 timestamp comparison requires valid timestamps.");
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[10] === undefined ? 0 : Number(match[10]);
+  const offsetMinute = match[11] === undefined ? 0 : Number(match[11]);
+  const daysInMonth = [
+    31,
+    isLeapYear(year) ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31
+  ];
+  if (
+    month < 1
+    || month > 12
+    || day < 1
+    || day > daysInMonth[month - 1]!
+    || hour > 23
+    || minute > 59
+    || second > 59
+    || offsetHour > 23
+    || offsetMinute > 59
+  ) {
+    throw new TypeError("RFC3339 timestamp comparison requires valid timestamps.");
+  }
+  const utc = new Date(0);
+  utc.setUTCFullYear(year, month - 1, day);
+  utc.setUTCHours(hour, minute, second, 0);
+  const offsetDirection = match[9] === "-" ? -1 : match[9] === "+" ? 1 : 0;
+  const offsetSeconds = offsetDirection * (offsetHour * 3_600 + offsetMinute * 60);
+  return {
+    epochSeconds: utc.getTime() / 1_000 - offsetSeconds,
+    fractionalSeconds: (match[7] ?? "").replace(/0+$/u, "")
+  };
+}
+
+export function compareRfc3339Timestamps(left: string, right: string): number {
+  const leftInstant = parseRfc3339Instant(left);
+  const rightInstant = parseRfc3339Instant(right);
+  if (leftInstant.epochSeconds !== rightInstant.epochSeconds) {
+    return leftInstant.epochSeconds < rightInstant.epochSeconds ? -1 : 1;
+  }
+  const precision = Math.max(
+    leftInstant.fractionalSeconds.length,
+    rightInstant.fractionalSeconds.length
+  );
+  for (let index = 0; index < precision; index += 1) {
+    const leftDigit = leftInstant.fractionalSeconds.charCodeAt(index) || 48;
+    const rightDigit = rightInstant.fractionalSeconds.charCodeAt(index) || 48;
+    if (leftDigit !== rightDigit) return leftDigit < rightDigit ? -1 : 1;
+  }
+  return 0;
+}
+
 export const CompletionGateResultSchema = z
   .object({
     gateId: CompletionGateIdSchema,
@@ -801,7 +999,23 @@ export const CompletionGateResultSchema = z
     reason: z.string().min(1),
     evaluatedAt: z.string().datetime()
   })
-  .strict();
+  .strict()
+  .superRefine((result, ctx) => {
+    if (!completionReasonAllowsGateState(result.reasonCode, result.state)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Completion gate reason and state are incompatible.",
+        path: ["state"]
+      });
+    }
+    if (completionReasonRequiresGateEvidence(result.reasonCode) && result.evidenceIds.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "This completion gate reason requires evidence.",
+        path: ["evidenceIds"]
+      });
+    }
+  });
 
 export const CompletionWaiverSchema = z
   .object({
@@ -831,6 +1045,16 @@ export const CompletionWaiverSchema = z
       }
       seen.add(gateId);
     });
+    if (
+      waiver.expiresAt
+      && compareRfc3339Timestamps(waiver.expiresAt, waiver.waivedAt) <= 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A completion waiver must expire after it is granted.",
+        path: ["expiresAt"]
+      });
+    }
   });
 
 export const CompletionAssessmentSchema = z
@@ -876,11 +1100,60 @@ export const CompletionAssessmentSchema = z
         });
       }
       seen.add(result.gateId);
+      const previous = assessment.gateResults[index - 1];
+      if (previous && compareCompletionGateIds(previous.gateId, result.gateId) >= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Completion gate results must be in canonical Unicode gate id order.",
+          path: ["gateResults", index, "gateId"]
+        });
+      }
+      if (compareRfc3339Timestamps(result.evaluatedAt, assessment.assessedAt) > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "A gate cannot be evaluated after its completion assessment.",
+          path: ["gateResults", index, "evaluatedAt"]
+        });
+      }
     });
-    if (assessment.state === "waived" && !assessment.waiver) {
+    const reducedState = reduceCompletionGateStates(assessment.gateResults.map((result) => result.state));
+    if (assessment.state !== reducedState) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "A waived completion assessment requires waiver attribution.",
+        message: "Completion assessment state must equal the deterministic gate reduction.",
+        path: ["state"]
+      });
+    }
+    const accepted = assessment.state === "satisfied" || assessment.state === "waived";
+    if (accepted !== Boolean(assessment.acceptedAt)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "acceptedAt is required exactly when completion is accepted.",
+        path: ["acceptedAt"]
+      });
+    }
+    if (
+      assessment.acceptedAt
+      && compareRfc3339Timestamps(assessment.acceptedAt, assessment.assessedAt) > 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Completion acceptance cannot occur after its assessment.",
+        path: ["acceptedAt"]
+      });
+    }
+    const hasWaivedGate = assessment.gateResults.some((result) => result.state === "waived");
+    if (hasWaivedGate && !assessment.waiver) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A completion assessment with waived gates requires waiver attribution.",
+        path: ["waiver"]
+      });
+    }
+    if (!hasWaivedGate && assessment.waiver) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Waiver attribution is only valid when at least one gate is waived.",
         path: ["waiver"]
       });
     }
@@ -888,6 +1161,13 @@ export const CompletionAssessmentSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "A completion waiver must be assessed by a human.",
+        path: ["assessedBy"]
+      });
+    }
+    if (!assessment.waiver && assessment.assessedBy !== "opentag") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A completion assessment without a waiver must be assessed by OpenTag.",
         path: ["assessedBy"]
       });
     }
@@ -901,6 +1181,43 @@ export const CompletionAssessmentSchema = z
         message: "A completion waiver must target the assessed contract version and cycle.",
         path: ["waiver"]
       });
+    }
+    if (
+      assessment.waiver
+      && compareRfc3339Timestamps(assessment.waiver.waivedAt, assessment.assessedAt) > 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A completion waiver cannot be applied before it is granted.",
+        path: ["waiver", "waivedAt"]
+      });
+    }
+    if (
+      assessment.waiver?.expiresAt
+      && compareRfc3339Timestamps(
+        assessment.waiver.expiresAt,
+        assessment.assessedAt,
+      ) <= 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "An expired completion waiver cannot be applied to an assessment.",
+        path: ["waiver", "expiresAt"]
+      });
+    }
+    if (assessment.waiver) {
+      const waivedGateIds = assessment.gateResults
+        .filter((result) => result.state === "waived")
+        .map((result) => result.gateId)
+        .sort(compareCompletionGateIds);
+      const attributedGateIds = [...assessment.waiver.gateIds].sort(compareCompletionGateIds);
+      if (JSON.stringify(waivedGateIds) !== JSON.stringify(attributedGateIds)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Waiver attribution gate ids must exactly equal the waived gate ids.",
+          path: ["waiver", "gateIds"]
+        });
+      }
     }
   });
 

@@ -122,7 +122,7 @@ const GOVERNED_PROJECTION_VECTORS_PATH = new URL(
   "./fixtures/control-v1-governed-projection-vectors.json",
   import.meta.url,
 );
-const GOVERNED_PROJECTION_VECTORS_SHA256 = "45541b26ef8b0bcd3360c4d41d8146bc4ab0ba1e11a6a23b8a4c1abbd6808fe7";
+const GOVERNED_PROJECTION_VECTORS_SHA256 = "33f5a96f9521329da18d840ff50b5811f93846f1f6e934d43d6afab5b34ee544";
 const COMPLETION_EVIDENCE_VECTORS_PATH = new URL(
   "./fixtures/control-v1-completion-evidence-vectors.json",
   import.meta.url,
@@ -166,6 +166,7 @@ function assessmentReceipt(): CompletionAssessmentReceiptEnvelopeV1 {
         contractId: "contract_1",
         version: 1,
         cycle: 1,
+        mode: "governed",
         contentDigest: digest,
       },
       admissionPolicySnapshot: {
@@ -3007,6 +3008,7 @@ describe("ReceiptEnvelope V1", () => {
     expect(
       CompletionAssessmentPayloadV1Schema.safeParse({
         ...payload,
+        contract: { ...payload.contract, mode: "execution_compat" },
         evidenceReceiptDigests: [],
         gateResults: [{
           gateId: "executor_run",
@@ -3017,6 +3019,179 @@ describe("ReceiptEnvelope V1", () => {
         conclusion: "satisfied",
       }).success,
     ).toBe(true);
+  });
+
+  it("enforces completion mode reasons, priority reduction, waiver attribution, and canonical gate order", () => {
+    const payload = assessmentReceipt().payload;
+    const waiver = {
+      ref: "waiver_1",
+      actorRef: "actor_1",
+      reasonDigest: otherDigest,
+    };
+    expect(CompletionAssessmentPayloadV1Schema.safeParse({
+      ...payload,
+      gateResults: [{
+        gateId: "execution",
+        state: "satisfied",
+        reasonCode: "execution_succeeded",
+        evidenceReceiptDigests: [],
+      }],
+      evidenceReceiptDigests: [],
+      conclusion: "satisfied",
+    }).success).toBe(false);
+    expect(CompletionAssessmentPayloadV1Schema.safeParse({
+      ...payload,
+      contract: { ...payload.contract, mode: "execution_compat" },
+      gateResults: [{
+        gateId: "checks",
+        state: "satisfied",
+        reasonCode: "verification_passed",
+        evidenceReceiptDigests: [digest],
+      }],
+    }).success).toBe(false);
+
+    const waivedAndPending = {
+      ...payload,
+      gateResults: [
+        {
+          gateId: "checks",
+          state: "waived" as const,
+          reasonCode: "gate_waived" as const,
+          evidenceReceiptDigests: [digest],
+        },
+        {
+          gateId: "merge",
+          state: "pending" as const,
+          reasonCode: "external_state_missing" as const,
+          evidenceReceiptDigests: [],
+        },
+      ],
+      evidenceReceiptDigests: [digest],
+      conclusion: "pending" as const,
+      assessedBy: "human",
+      waiver,
+    };
+    expect(CompletionAssessmentPayloadV1Schema.safeParse(waivedAndPending).success).toBe(true);
+    expect(CompletionAssessmentPayloadV1Schema.safeParse({
+      ...waivedAndPending,
+      gateResults: [...waivedAndPending.gateResults].reverse(),
+    }).success).toBe(false);
+
+    expect(CompletionAssessmentPayloadV1Schema.safeParse({
+      ...payload,
+      gateResults: [
+        {
+          gateId: "checks",
+          state: "waived",
+          reasonCode: "gate_waived",
+          evidenceReceiptDigests: [digest],
+        },
+        {
+          gateId: "human_escalation:review",
+          state: "blocked",
+          reasonCode: "human_acceptance_missing",
+          evidenceReceiptDigests: [otherDigest],
+        },
+      ],
+      evidenceReceiptDigests: [digest, otherDigest],
+      conclusion: "blocked",
+      assessedBy: "human",
+      waiver,
+    }).success).toBe(true);
+    expect(CompletionAssessmentPayloadV1Schema.safeParse({
+      ...waivedAndPending,
+      assessedBy: "local_opentag",
+    }).success).toBe(false);
+
+    const compatBase = {
+      ...payload,
+      contract: { ...payload.contract, mode: "execution_compat" as const },
+      evidenceReceiptDigests: [],
+      conclusion: "satisfied" as const,
+    };
+    expect(CompletionAssessmentPayloadV1Schema.safeParse({
+      ...compatBase,
+      gateResults: [
+        {
+          gateId: "execution",
+          state: "satisfied",
+          reasonCode: "execution_succeeded",
+          evidenceReceiptDigests: [],
+        },
+        {
+          gateId: "execution_other",
+          state: "satisfied",
+          reasonCode: "execution_succeeded",
+          evidenceReceiptDigests: [],
+        },
+      ],
+    }).success).toBe(false);
+    expect(CompletionAssessmentPayloadV1Schema.safeParse({
+      ...compatBase,
+      gateResults: [{
+        gateId: "ordinary_gate",
+        state: "pending",
+        reasonCode: "human_acceptance_missing",
+        evidenceReceiptDigests: [],
+      }],
+      conclusion: "pending",
+    }).success).toBe(false);
+    expect(CompletionAssessmentPayloadV1Schema.safeParse({
+      ...compatBase,
+      gateResults: [
+        {
+          gateId: "execution",
+          state: "satisfied",
+          reasonCode: "execution_succeeded",
+          evidenceReceiptDigests: [],
+        },
+        {
+          gateId: "human_escalation:review",
+          state: "blocked",
+          reasonCode: "human_acceptance_missing",
+          evidenceReceiptDigests: [digest],
+        },
+      ],
+      evidenceReceiptDigests: [digest],
+      conclusion: "blocked",
+    }).success).toBe(true);
+    expect(CompletionAssessmentPayloadV1Schema.safeParse({
+      ...compatBase,
+      gateResults: [
+        {
+          gateId: "execution",
+          state: "satisfied",
+          reasonCode: "execution_succeeded",
+          evidenceReceiptDigests: [],
+        },
+        {
+          gateId: "human_escalation:review",
+          state: "pending",
+          reasonCode: "human_acceptance_missing",
+          evidenceReceiptDigests: [digest],
+        },
+      ],
+      evidenceReceiptDigests: [digest],
+      conclusion: "pending",
+    }).success).toBe(false);
+    expect(CompletionAssessmentPayloadV1Schema.safeParse({
+      ...compatBase,
+      gateResults: [
+        {
+          gateId: "execution",
+          state: "satisfied",
+          reasonCode: "execution_succeeded",
+          evidenceReceiptDigests: [],
+        },
+        {
+          gateId: "human_escalation:review",
+          state: "blocked",
+          reasonCode: "human_acceptance_missing",
+          evidenceReceiptDigests: [],
+        },
+      ],
+      conclusion: "blocked",
+    }).success).toBe(false);
   });
 
   it("preserves evidence-backed synthetic human escalation gates", () => {
@@ -3034,6 +3209,32 @@ describe("ReceiptEnvelope V1", () => {
         conclusion: "blocked",
       }).success,
     ).toBe(true);
+    expect(
+      CompletionAssessmentPayloadV1Schema.safeParse({
+        ...payload,
+        evidenceReceiptDigests: [],
+        gateResults: [{
+          gateId: "human_escalation:escalation_1",
+          state: "pending",
+          reasonCode: "human_acceptance_missing",
+          evidenceReceiptDigests: [],
+        }],
+        conclusion: "pending",
+      }).success,
+    ).toBe(false);
+    expect(
+      CompletionAssessmentPayloadV1Schema.safeParse({
+        ...payload,
+        evidenceReceiptDigests: [digest],
+        gateResults: [{
+          gateId: "human_escalation:",
+          state: "blocked",
+          reasonCode: "human_acceptance_missing",
+          evidenceReceiptDigests: [digest],
+        }],
+        conclusion: "blocked",
+      }).success,
+    ).toBe(false);
   });
 
   it("binds a completion evidence observation to exact local authority and deterministic digests", async () => {

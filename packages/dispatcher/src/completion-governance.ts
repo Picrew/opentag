@@ -1,6 +1,8 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import {
+  compareCompletionGateIds,
+  compareRfc3339Timestamps,
   CompletionContractSchema,
   type CompletionAssessment,
   type CompletionContract,
@@ -400,7 +402,14 @@ function githubSnapshotSetRecords(input: {
     .update(JSON.stringify(canonicalizeGitHubCompletionValue(manifest)))
     .digest("hex")}`;
   const manifestRef = `github:${first.repository.owner}/${first.repository.repo}:completion_delivery:${first.deliveryId}`;
-  const observedAt = input.snapshots.map((snapshot) => snapshot.observedAt).sort().at(-1)!;
+  const observedAt = input.snapshots.slice(1).reduce((latest, snapshot) => {
+    const instantOrder = compareRfc3339Timestamps(snapshot.observedAt, latest);
+    if (instantOrder > 0) return snapshot.observedAt;
+    if (instantOrder < 0) return latest;
+    return compareCompletionGateIds(snapshot.observedAt, latest) < 0
+      ? snapshot.observedAt
+      : latest;
+  }, first.observedAt);
   return {
     manifestDigest,
     records: [
@@ -467,8 +476,11 @@ function artifactsFromRuns(input: {
           && fact.subject.provider === "github"
           && fact.subject.resourceRef === parsed.resourceRef
         )
-        .sort((left, right) => left.observedAt.localeCompare(right.observedAt))
-        .at(-1);
+        .sort((left, right) =>
+          compareRfc3339Timestamps(right.observedAt, left.observedAt)
+          || compareRfc3339Timestamps(right.receivedAt, left.receivedAt)
+          || compareCompletionGateIds(left.id, right.id)
+        )[0];
       artifacts.push({
         id: candidate.id,
         kind: "pull_request",
@@ -677,7 +689,10 @@ export function createDispatcherCompletionGovernance(input: {
         && escalation.runId === currentRun!.id
       );
       const storedEvidence = (await input.repo.listVerificationEvidence({ workThreadId }))
-        .filter((record) => !currentRun || record.receivedAt >= currentRun.createdAt);
+        .filter((record) =>
+          !currentRun
+          || compareRfc3339Timestamps(record.receivedAt, currentRun.createdAt) >= 0
+        );
       const evidence = storedEvidence.map(completionFactFromStoredEvidence).filter((fact): fact is CompletionEvidenceFact => Boolean(fact));
       return {
         contract,
@@ -759,7 +774,14 @@ export function createDispatcherCompletionGovernance(input: {
     const active = (await input.repo.listHumanEscalations({ workThreadId: assessment.workThreadId }))
       .filter((escalation) => escalation.state === "open" || escalation.state === "acknowledged");
     if (assessment.state === "blocked") {
-      if (active.some((escalation) => escalation.blocking && escalation.class === "reconciliation")) return;
+      const activeIds = new Set(active.map((escalation) => escalation.id));
+      const blockedByExistingEscalation = assessment.gateResults.some((gate) =>
+        gate.state === "unknown"
+        && gate.reasonCode === "human_acceptance_missing"
+        && gate.gateId.startsWith("human_escalation:")
+        && activeIds.has(gate.gateId.slice("human_escalation:".length))
+      );
+      if (blockedByExistingEscalation) return;
       const semantic = `${assessment.workThreadId}:${dedupeKey}`;
       await input.repo.openHumanEscalation({
         escalation: {
@@ -952,7 +974,13 @@ export function createDispatcherCompletionGovernance(input: {
       if (!contract.resolvedFrom.some((source) => source.scope === waiverInput.policyScope)) {
         throw new Error("A completion waiver policy scope must match the current contract authority.");
       }
-      if (waiverInput.expiresAt && waiverInput.expiresAt <= waiverInput.waivedAt) {
+      if (
+        waiverInput.expiresAt
+        && compareRfc3339Timestamps(
+          waiverInput.expiresAt,
+          waiverInput.waivedAt
+        ) <= 0
+      ) {
         throw new Error("A completion waiver expiresAt must be later than waivedAt.");
       }
       const semantic = JSON.stringify({
@@ -1038,7 +1066,10 @@ export function createDispatcherCompletionGovernance(input: {
           const currentResourceRefs = githubPullRequestResourceRefs(latestCandidateRun);
           if (matchingHeadRecords.some((record) =>
             record.workThreadId === candidate
-            && record.receivedAt >= latestCandidateRun.run.createdAt
+            && compareRfc3339Timestamps(
+              record.receivedAt,
+              latestCandidateRun.run.createdAt
+            ) >= 0
             && currentResourceRefs.has(record.subjectRef)
           )) headCandidates.push(candidate);
         }

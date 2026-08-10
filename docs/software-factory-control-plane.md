@@ -589,6 +589,9 @@ type CompletionAssessment = {
   workThreadId: string;
   triggeredByRunId?: string;
   contractId: string;
+  contractVersion: number;
+  cycle: number;
+  sequence: number;
   state: "pending" | "satisfied" | "unsatisfied" | "blocked" | "waived";
   gateResults: CompletionGateResult[];
   assessedAt: string;
@@ -605,6 +608,67 @@ target key, so a pull request artifact, check result, and merge observation from
 different pull requests or head revisions can never be combined into a satisfied
 assessment.
 
+### Completion algebra and protocol boundary
+
+Completion has two explicit modes. The mode is part of the immutable contract
+reference carried by every hosted assessment receipt; consumers must not infer
+it from the executor, result, or the number of gates. The local domain
+assessment remains joined to its immutable contract by contract ID, version,
+and cycle.
+
+| Mode | Contract and gate rule | Role of the executor result |
+| --- | --- | --- |
+| `governed` | The contract contains the configured delivery gates. Each gate is evaluated from its own attributable durable facts and receipts. | It is a linked execution receipt and may explain why more work is needed, but it is not a gate and does not participate in completion aggregation. |
+| `execution_compat` | The contract has exactly one `executor_run` gate, preserving the pre-governance completion behavior. Without a waiver its normal states are `pending`, `satisfied`, or `unsatisfied`; a valid scoped waiver may make it `waived`. Any blocking human escalation is an additional synthetic effective gate, not a contract gate. | A terminal successful result satisfies the executor gate; a terminal non-success result makes it unsatisfied; no terminal result leaves it pending. |
+
+The overall assessment is the deterministic reduction of its effective gate
+states, in this strict precedence order:
+
+```text
+blocked > unsatisfied > pending > waived > satisfied
+```
+
+`blocked` covers an unresolved authoritative blocker such as a required human
+decision or an ambiguous/unknown fact. It is not an executor-result alias. The
+reducer gives every replica the same answer and prevents a successful executor
+exit from overriding a failed, missing, or blocked governed requirement.
+
+Every gate result is ordered by gate ID and carries its exact evidence receipt
+digests. The assessment-level evidence list is exactly the sorted, deduplicated
+union of those gate lists. A receipt is invalid when it cites extra evidence,
+omits gate evidence, uses an evidence reason without evidence, or combines a
+reason code with an incompatible gate state.
+
+Waiver authority is also canonical: an assessment has at most one active
+waiver reference, and that waiver names the exact gates it attributes. The
+waiver must remain on the assessment whenever any of those gates is `waived`.
+It is intentionally retained even when another gate makes the overall result
+`blocked` or `pending`; a partial human exception cannot erase the remaining
+unsatisfied work. A waiver is never an unscoped switch for a contract, run, or
+future delivery cycle.
+
+### Local authority and hosted projection
+
+The local OpenTag runtime evaluates governed contracts, resolves the canonical
+waiver, and emits immutable receipt chains for the WorkThread, contract,
+evidence observations, and assessment. The Cloud control plane is a durable
+projection and relay, not a second governance evaluator. On ingestion it
+validates receipt authority, lineage, identity, dependency ordering, and
+digests, then rejects contradictions that can be decided from those local
+receipt fields. It does not recalculate gate results from cloud state or turn a
+cloud acknowledgement into completion authority.
+
+Local domain facts retain their original valid RFC 3339 instants, including
+fractional precision beyond milliseconds. Exact local ordering, waiver
+validity, assessment lineage, and authority digests use those original values.
+The V1 hosted receipt format deliberately uses `ControlTimestamp`: canonical
+UTC with exactly millisecond precision. Store normalizes timestamps only while
+constructing the hosted payload and envelope; it never rewrites the local fact
+or uses the normalized value to choose authority. Facts that fall within the
+same projected millisecond remain distinct through their authority and receipt
+digests. Cloud therefore validates the projected receipt contract and must not
+rederive local sub-millisecond ordering.
+
 ### Required semantic separation
 
 Examples:
@@ -614,10 +678,10 @@ Examples:
 | `succeeded` | `pending` | Agent finished, but required checks or merge evidence have not arrived |
 | `succeeded` | `unsatisfied` | Agent finished, but a required check failed |
 | `succeeded` | `satisfied` | All configured evidence gates passed; the work loop is complete |
-| `needs_human` | `blocked` | Execution or a gate requires judgment |
-| `failed` | `pending` | A later bounded repair run is allowed by policy |
-| `failed` | `unsatisfied` | Retry budget ended or policy makes the failure terminal |
-| any | `waived` | An authorized human accepted scoped missing or failed gates; the waiver remains visible |
+| `needs_human` | `blocked` | A durable, unresolved blocker is present; this is an explicit blocker condition, not the executor result itself acting as a gate |
+| `failed` | `pending` | One or more governed gates still lack current evidence; policy may allow a bounded repair run |
+| `failed` | `unsatisfied` | One or more governed gates have authoritative failing evidence; the failed executor result itself did not choose this state |
+| any | `waived` | An authorized human accepted scoped gates and every other effective gate is satisfied or waived; otherwise the reducer returns the dominant `blocked`, `unsatisfied`, or `pending` state while retaining the waiver |
 
 Existing run statuses must not be renamed to completion statuses. Completion is
 a separate aggregate and projection.
@@ -636,14 +700,24 @@ summary.
 
 ### Default compatibility contract
 
-Repositories without explicit completion configuration use one gate:
+Repositories without explicit completion configuration use
+`execution_compat` mode with one executor gate. Its three states are
+deterministic before waiver or blocking-escalation overrides:
 
 ```text
-verification(executor.conclusion == succeeded, assurance >= reported)
+no terminal executor result   -> pending
+terminal executor success     -> satisfied
+terminal executor non-success -> unsatisfied
 ```
 
-This preserves current behavior while making the distinction explicit. The
-first recommended governed profile should add source-control and check evidence.
+A valid waiver scoped to that executor gate changes it to `waived`. An active
+blocking human escalation adds a synthetic `blocked` gate and therefore wins
+the overall reducer while retaining any waiver attribution.
+
+This preserves current behavior without pretending that an executor self-report
+is governed delivery evidence. The first recommended `governed` profile adds
+source-control and check evidence; after that mode is selected, the executor
+result remains a receipt rather than a completion gate.
 
 ### First vertical profile
 

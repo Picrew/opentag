@@ -1,7 +1,7 @@
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,11 +9,15 @@ import {
   CallbackIntentObservationReceiptEnvelopeV1Schema,
   CallbackProviderObservationReceiptEnvelopeV1Schema,
   CompletionAssessmentReceiptEnvelopeV1Schema,
+  CompletionContractRefReceiptEnvelopeV1Schema,
+  CompletionEvidenceObservationReceiptEnvelopeV1Schema,
   HostedCompleteRequestV1Schema,
   HostedLifecycleReceiptEnvelopeV1Schema,
   OpenTagEventSchema,
+  WorkThreadRefReceiptEnvelopeV1Schema,
   canonicalJsonStringify
 } from "@opentag/core";
+import { evaluateCompletion } from "@opentag/governance";
 import { describe, expect, it } from "vitest";
 import { canonicalSha256Json } from "../src/canonical-json.js";
 import {
@@ -60,10 +64,9 @@ const WORK_THREAD_ID = "work_thread_1";
 const RUN_ATTEMPT_ID = "attempt_1";
 const CLAIM_OPERATION_ID = "claim_operation_1";
 const ASSESSMENT_REF = "assessment_1";
-const ASSESSMENT_RECEIPT_ID = "assessment_receipt_1";
 const PRODUCER = {
   kind: "local_opentag" as const,
-  id: "local_opentag",
+  id: "runner_1",
   credentialId: "credential_ref_1",
   registrationGeneration: 1
 };
@@ -178,20 +181,268 @@ const COMPLETION_RECEIPT = HostedLifecycleReceiptEnvelopeV1Schema.parse(withDige
   }
 }));
 
+const COMPLETION_CONTRACT = {
+  id: "contract_1",
+  version: 1,
+  workThreadId: WORK_THREAD_ID,
+  cycle: 1,
+  mode: "governed" as const,
+  targetSelectors: [{
+    key: "primary_change",
+    kind: "change_request" as const,
+    lineage: "current_cycle" as const,
+    cardinality: "exactly_one" as const
+  }],
+  resolvedFrom: [],
+  gates: [{
+    id: "checks",
+    kind: "verification" as const,
+    targetKey: "primary_change",
+    evidenceKind: "test",
+    requiredOutcome: "passed" as const,
+    minimumAssurance: "reported" as const
+  }],
+  maxAutomaticRetries: 0,
+  onSatisfied: "report_only" as const,
+  createdAt: NOW.toISOString()
+};
+const CONTRACT_CONTENT_DIGEST = `sha256:${createHash("sha256")
+  .update(JSON.stringify(COMPLETION_CONTRACT)).digest("hex")}`;
+const COMPLETION_ASSESSMENT = {
+  id: ASSESSMENT_REF,
+  workThreadId: WORK_THREAD_ID,
+  triggeredByRunId: RUN_ID,
+  contractId: "contract_1",
+  contractVersion: 1,
+  cycle: 1,
+  sequence: 1,
+  inputDigest: EVIDENCE_DIGEST,
+  targetBindings: [{
+    key: "primary_change",
+    provider: "github" as const,
+    resourceRef: "github:acme/demo:pull_request:1",
+    resourceVersion: "abc123",
+    artifactId: "artifact_1"
+  }],
+  state: "satisfied" as const,
+  evidenceBacked: true,
+  gateResults: [{
+    gateId: "checks",
+    targetKey: "primary_change",
+    state: "passed" as const,
+    evidenceIds: ["evidence_1"],
+    reasonCode: "verification_passed" as const,
+    reason: "Required verification passed.",
+    evaluatedAt: NOW.toISOString()
+  }],
+  assessedAt: NOW.toISOString(),
+  assessedBy: "opentag" as const,
+  acceptedAt: NOW.toISOString()
+};
+const COMPLETION_FACT = {
+  id: "evidence_1",
+  workThreadId: WORK_THREAD_ID,
+  cycle: 1,
+  kind: "test",
+  assurance: "verified" as const,
+  subject: {
+    provider: "github",
+    resourceRef: "github:acme/demo:pull_request:1",
+    resourceVersion: "abc123"
+  },
+  claim: {
+    predicate: "result",
+    outcome: "passed"
+  },
+  provenance: {
+    adapter: "governed-callback-test",
+    adapterVersion: "1",
+    payloadDigest: EVIDENCE_DIGEST,
+    providerDeliveryId: "delivery_evidence_1"
+  },
+  observedAt: NOW.toISOString(),
+  receivedAt: NOW.toISOString()
+};
+const VERIFICATION_EVIDENCE = {
+  id: COMPLETION_FACT.id,
+  kind: COMPLETION_FACT.kind,
+  assurance: COMPLETION_FACT.assurance,
+  subjectRef: `${COMPLETION_FACT.subject.resourceRef}@${COMPLETION_FACT.subject.resourceVersion}`,
+  summary: "The required verification passed for the assessed revision.",
+  createdAt: COMPLETION_FACT.observedAt,
+  metadata: { completionFact: COMPLETION_FACT }
+};
+const ASSESSMENT_IDENTITY = {
+  namespace: "opentag.control.receipt/completion-assessment/v1" as const,
+  parts: ["org_1", WORK_THREAD_ID, ASSESSMENT_REF]
+};
+const ASSESSMENT_PROJECTION_KEY = canonicalSha256Json({
+  purpose: "opentag-completion-assessment-projection-v1",
+  identity: ASSESSMENT_IDENTITY
+}).slice("sha256:".length);
+const ASSESSMENT_RECEIPT_ID = `assessment_receipt_${ASSESSMENT_PROJECTION_KEY}`;
+const LOCAL_WORK_THREAD_CREATION_AUTHORITY = {
+  schemaVersion: 1,
+  kind: "work_thread_created",
+  workThreadId: WORK_THREAD_ID,
+  scopeId: "scope_1",
+  canonicalKey: "thread_key_1",
+  provider: "github",
+  ownerContainerId: "owner_1",
+  workItemKind: "issue",
+  externalId: "1",
+  createdAt: NOW.toISOString()
+};
+const LOCAL_WORK_THREAD_CREATION_DIGEST = canonicalSha256Json(
+  LOCAL_WORK_THREAD_CREATION_AUTHORITY
+);
+const WORK_THREAD_RECEIPT_IDENTITY = {
+  namespace: "opentag.control.receipt/work-thread-ref/v1" as const,
+  parts: ["org_1", RUN_ID, WORK_THREAD_ID]
+};
+const WORK_THREAD_PROJECTION_KEY = canonicalSha256Json({
+  purpose: "opentag-work-thread-ref-projection-v1",
+  identity: WORK_THREAD_RECEIPT_IDENTITY
+}).slice("sha256:".length);
+const WORK_THREAD_RECEIPT = WorkThreadRefReceiptEnvelopeV1Schema.parse(withDigests({
+  schemaVersion: 1,
+  protocolVersion: "1.0",
+  receiptKind: "work_thread_ref",
+  receiptId: `work_thread_receipt_${WORK_THREAD_PROJECTION_KEY}`,
+  organizationId: "org_1",
+  operationId: `work_thread_operation_${WORK_THREAD_PROJECTION_KEY}`,
+  requiredCapabilities: ["relay.work-thread-ref.v1"],
+  producer: PRODUCER,
+  identity: WORK_THREAD_RECEIPT_IDENTITY,
+  predecessorReceiptDigests: [
+    canonicalSha256Json(CLAIM_AUTHORITY),
+    CLAIM_AUTHORITY.admissionPolicySnapshotDigest
+  ].sort(),
+  observedAt: NOW.toISOString(),
+  runId: RUN_ID,
+  workThreadId: WORK_THREAD_ID,
+  payload: {
+    workThreadId: WORK_THREAD_ID,
+    sourceIdentityDigest: SOURCE_DIGEST,
+    localCreationReceiptId: `local_work_thread_creation_${LOCAL_WORK_THREAD_CREATION_DIGEST
+      .slice("sha256:".length)}`,
+    localCreationReceiptDigest: LOCAL_WORK_THREAD_CREATION_DIGEST,
+    lineageKind: "hosted_source_identity",
+    hostedAuthorityRef: {
+      claimOperationId: CLAIM_OPERATION_ID,
+      authorityDigest: canonicalSha256Json(CLAIM_AUTHORITY),
+      attempt: COMPLETION_COMMON.attempt,
+      admissionPolicySnapshot: {
+        receiptId: CLAIM_AUTHORITY.admissionPolicyReceiptId,
+        snapshotId: CLAIM_AUTHORITY.admissionPolicySnapshotId,
+        digest: CLAIM_AUTHORITY.admissionPolicySnapshotDigest
+      }
+    },
+    createdAt: NOW.toISOString()
+  }
+}));
+const CONTRACT_RECEIPT_IDENTITY = {
+  namespace: "opentag.control.receipt/completion-contract-ref/v1" as const,
+  parts: ["org_1", RUN_ID, WORK_THREAD_ID, COMPLETION_CONTRACT.id, "1", "1"]
+};
+const CONTRACT_PROJECTION_KEY = canonicalSha256Json({
+  purpose: "opentag-completion-contract-ref-projection-v1",
+  identity: CONTRACT_RECEIPT_IDENTITY
+}).slice("sha256:".length);
+const CONTRACT_RECEIPT = CompletionContractRefReceiptEnvelopeV1Schema.parse(withDigests({
+  schemaVersion: 1,
+  protocolVersion: "1.0",
+  receiptKind: "completion_contract_ref",
+  receiptId: `completion_contract_receipt_${CONTRACT_PROJECTION_KEY}`,
+  organizationId: "org_1",
+  operationId: `completion_contract_operation_${CONTRACT_PROJECTION_KEY}`,
+  requiredCapabilities: ["relay.completion-contract-ref.v1"],
+  producer: PRODUCER,
+  identity: CONTRACT_RECEIPT_IDENTITY,
+  predecessorReceiptDigests: [WORK_THREAD_RECEIPT.receiptDigest],
+  observedAt: NOW.toISOString(),
+  runId: RUN_ID,
+  workThreadId: WORK_THREAD_ID,
+  payload: {
+    contractId: COMPLETION_CONTRACT.id,
+    version: COMPLETION_CONTRACT.version,
+    cycle: COMPLETION_CONTRACT.cycle,
+    mode: COMPLETION_CONTRACT.mode,
+    contentDigest: CONTRACT_CONTENT_DIGEST,
+    resolvedTargetDigests: [],
+    requiredGateIds: COMPLETION_CONTRACT.gates.map((gate) => gate.id).sort(),
+    createdAt: COMPLETION_CONTRACT.createdAt
+  }
+}));
+const EVIDENCE_PAYLOAD = {
+  evidenceType: "verification_evidence" as const,
+  evidenceId: COMPLETION_FACT.id,
+  authorityDigest: canonicalSha256Json(COMPLETION_FACT),
+  evidenceKind: COMPLETION_FACT.kind,
+  assurance: COMPLETION_FACT.assurance,
+  subject: COMPLETION_FACT.subject,
+  claim: {
+    predicate: COMPLETION_FACT.claim.predicate,
+    outcome: COMPLETION_FACT.claim.outcome
+  },
+  provenancePayloadDigest: COMPLETION_FACT.provenance.payloadDigest,
+  observedAt: COMPLETION_FACT.observedAt,
+  receivedAt: COMPLETION_FACT.receivedAt
+};
+const EVIDENCE_RECEIPT_IDENTITY = {
+  namespace: "opentag.control.receipt/completion-evidence-observation/v1" as const,
+  parts: [
+    "org_1",
+    WORK_THREAD_ID,
+    RUN_ID,
+    EVIDENCE_PAYLOAD.evidenceType,
+    EVIDENCE_PAYLOAD.evidenceId,
+    EVIDENCE_PAYLOAD.authorityDigest,
+    CONTRACT_RECEIPT.receiptDigest
+  ]
+};
+const EVIDENCE_PROJECTION_KEY = canonicalSha256Json({
+  purpose: "opentag-completion-evidence-projection-v1",
+  identity: EVIDENCE_RECEIPT_IDENTITY
+}).slice("sha256:".length);
+const EVIDENCE_RECEIPT = CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+  withDigests({
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    receiptKind: "completion_evidence_observation",
+    receiptId: `completion_evidence_receipt_${EVIDENCE_PROJECTION_KEY}`,
+    organizationId: "org_1",
+    operationId: `completion_evidence_operation_${EVIDENCE_PROJECTION_KEY}`,
+    requiredCapabilities: ["relay.completion-evidence.v1"],
+    producer: PRODUCER,
+    identity: EVIDENCE_RECEIPT_IDENTITY,
+    predecessorReceiptDigests: [
+      COMPLETION_RECEIPT.receiptDigest,
+      CONTRACT_RECEIPT.receiptDigest
+    ].sort(),
+    observedAt: COMPLETION_FACT.observedAt,
+    runId: RUN_ID,
+    workThreadId: WORK_THREAD_ID,
+    attempt: COMPLETION_COMMON.attempt,
+    payload: EVIDENCE_PAYLOAD
+  })
+);
+
 const ASSESSMENT_RECEIPT = CompletionAssessmentReceiptEnvelopeV1Schema.parse(withDigests({
   schemaVersion: 1,
   protocolVersion: "1.0",
   receiptKind: "completion_assessment",
   receiptId: ASSESSMENT_RECEIPT_ID,
   organizationId: "org_1",
-  operationId: "operation_assessment_1",
+  operationId: `assessment_operation_${ASSESSMENT_PROJECTION_KEY}`,
   requiredCapabilities: ["relay.completion-assessment.v1"],
   producer: PRODUCER,
-  identity: {
-    namespace: "opentag.control.receipt/completion-assessment/v1",
-    parts: ["org_1", WORK_THREAD_ID, ASSESSMENT_REF]
-  },
-  predecessorReceiptDigests: [COMPLETION_RECEIPT.receiptDigest],
+  identity: ASSESSMENT_IDENTITY,
+  predecessorReceiptDigests: [
+    COMPLETION_RECEIPT.receiptDigest,
+    CONTRACT_RECEIPT.receiptDigest,
+    EVIDENCE_RECEIPT.receiptDigest
+  ].sort(),
   observedAt: NOW.toISOString(),
   runId: RUN_ID,
   workThreadId: WORK_THREAD_ID,
@@ -203,7 +454,8 @@ const ASSESSMENT_RECEIPT = CompletionAssessmentReceiptEnvelopeV1Schema.parse(wit
       contractId: "contract_1",
       version: 1,
       cycle: 1,
-      contentDigest: EVIDENCE_DIGEST
+      mode: "governed",
+      contentDigest: CONTRACT_CONTENT_DIGEST
     },
     admissionPolicySnapshot: { snapshotId: "policy_snapshot_1", digest: EVIDENCE_DIGEST },
     runId: RUN_ID,
@@ -216,12 +468,12 @@ const ASSESSMENT_RECEIPT = CompletionAssessmentReceiptEnvelopeV1Schema.parse(wit
       resultDigest: RESULT_DIGEST
     },
     assessmentInputDigest: EVIDENCE_DIGEST,
-    evidenceReceiptDigests: [EVIDENCE_DIGEST],
+    evidenceReceiptDigests: [EVIDENCE_RECEIPT.receiptDigest],
     gateResults: [{
       gateId: "checks",
       state: "satisfied",
       reasonCode: "verification_passed",
-      evidenceReceiptDigests: [EVIDENCE_DIGEST]
+      evidenceReceiptDigests: [EVIDENCE_RECEIPT.receiptDigest]
     }],
     conclusion: "satisfied",
     assessedAt: NOW.toISOString(),
@@ -243,7 +495,13 @@ function governedDelivery(body = DELIVERY_BODY) {
   };
 }
 
-function seedAuthority(sqlite: Database.Database): void {
+function seedAuthority(
+  sqlite: Database.Database,
+  options: {
+    includeAssessment?: boolean;
+    includeAssessmentProjection?: boolean;
+  } = {}
+): void {
   const authorityJson = canonicalJsonStringify(CLAIM_AUTHORITY);
   const authorityDigest = canonicalSha256Json(CLAIM_AUTHORITY);
   const claimDigest = `sha256:${"d".repeat(64)}`;
@@ -361,39 +619,36 @@ function seedAuthority(sqlite: Database.Database): void {
     external_id, thread_json, current_assessment_id, created_at, updated_at
   ) VALUES (?, 'scope_1', 'thread_key_1', 'github', 'owner_1', 'issue',
     '1', '{}', ?, ?, ?)`)
-    .run(WORK_THREAD_ID, ASSESSMENT_REF, NOW.toISOString(), NOW.toISOString());
-  const assessment = {
-    id: ASSESSMENT_REF,
-    workThreadId: WORK_THREAD_ID,
-    triggeredByRunId: RUN_ID,
-    contractId: "contract_1",
-    contractVersion: 1,
-    cycle: 1,
-    sequence: 1,
-    inputDigest: EVIDENCE_DIGEST,
-    targetBindings: [{
-      key: "primary_change",
-      provider: "github",
-      resourceRef: "github:acme/demo:pull_request:1",
-      resourceVersion: "abc123",
-      artifactId: "artifact_1"
-    }],
-    state: "satisfied",
-    evidenceBacked: true,
-    gateResults: [{
-      gateId: "checks",
-      targetKey: "primary_change",
-      state: "passed",
-      evidenceIds: ["evidence_1"],
-      reasonCode: "verification_passed",
-      reason: "Required verification passed.",
-      evaluatedAt: NOW.toISOString()
-    }],
-    assessedAt: NOW.toISOString(),
-    assessedBy: "opentag",
-    acceptedAt: NOW.toISOString()
-  };
-  sqlite.prepare(`INSERT INTO completion_assessments (
+    .run(
+      WORK_THREAD_ID,
+      options.includeAssessment === false ? null : ASSESSMENT_REF,
+      NOW.toISOString(),
+      NOW.toISOString()
+    );
+  sqlite.prepare(`INSERT INTO completion_contracts (
+    id, version, work_thread_id, cycle, contract_json, content_digest, created_at
+  ) VALUES ('contract_1', 1, ?, 1, ?, ?, ?)`)
+    .run(
+      WORK_THREAD_ID,
+      JSON.stringify(COMPLETION_CONTRACT),
+      CONTRACT_CONTENT_DIGEST,
+      NOW.toISOString()
+    );
+  sqlite.prepare(`INSERT INTO verification_evidence (
+    id, work_thread_id, provider, delivery_id, subject_ref, subject_version,
+    kind, assurance, evidence_json, payload_digest, observed_at, received_at
+  ) VALUES (?, ?, 'github', 'delivery_evidence_1',
+    'github:acme/demo:pull_request:1', 'abc123', ?, ?, ?, ?, ?, ?)`).run(
+      VERIFICATION_EVIDENCE.id,
+      WORK_THREAD_ID,
+      VERIFICATION_EVIDENCE.kind,
+      VERIFICATION_EVIDENCE.assurance,
+      JSON.stringify(VERIFICATION_EVIDENCE),
+      EVIDENCE_DIGEST,
+      NOW.toISOString(),
+      NOW.toISOString()
+    );
+  if (options.includeAssessment !== false) sqlite.prepare(`INSERT INTO completion_assessments (
     id, work_thread_id, contract_id, contract_version, cycle, sequence,
     input_digest, state, assessment_json, created_at
   ) VALUES (?, ?, 'contract_1', 1, 1, 1, ?, 'satisfied', ?, ?)`)
@@ -401,10 +656,13 @@ function seedAuthority(sqlite: Database.Database): void {
       ASSESSMENT_REF,
       WORK_THREAD_ID,
       EVIDENCE_DIGEST,
-      JSON.stringify(assessment),
+      JSON.stringify(COMPLETION_ASSESSMENT),
       NOW.toISOString()
     );
-  sqlite.prepare(`INSERT INTO control_plane_projection_outbox (
+  if (
+    options.includeAssessment !== false
+    && options.includeAssessmentProjection === true
+  ) sqlite.prepare(`INSERT INTO control_plane_projection_outbox (
     receipt_id, destination_id, organization_id, run_id,
     work_thread_id, receipt_kind, identity_namespace, identity_parts_json,
     identity_key, operation_id, requires_lifecycle_operation_id,
@@ -561,7 +819,108 @@ function terminalLifecycleFixtures(result: TerminalResult) {
 async function setupTerminalResult(result: TerminalResult) {
   const sqlite = new Database(":memory:");
   migrateSchema(sqlite);
-  seedAuthority(sqlite);
+  seedAuthority(sqlite, { includeAssessmentProjection: false });
+  const repo = createOpenTagRepository(drizzle(sqlite));
+  const fixtures = terminalLifecycleFixtures(result);
+  await repo.completeHostedRunLocally({
+    runId: RUN_ID,
+    result,
+    runnerId: "runner_1",
+    attemptId: RUN_ATTEMPT_ID,
+    fencingToken: "raw-fence",
+    destinationId: "cloud_1",
+    organizationId: "org_1",
+    credentialId: PRODUCER.credentialId,
+    request: fixtures.request
+  });
+  const escalationRow = (sqlite.prepare(`SELECT escalation_json AS escalationJson
+    FROM human_escalations ORDER BY id`).all() as Array<{
+      escalationJson: string;
+    }>).find((row) => JSON.parse(row.escalationJson).runId === RUN_ID);
+  const activeEscalation = escalationRow
+    ? JSON.parse(escalationRow.escalationJson) as {
+        id: string;
+        reason: string;
+        openedAt: string;
+      }
+    : undefined;
+  const { acceptedAt: _acceptedAt, ...assessmentWithoutAcceptance } = COMPLETION_ASSESSMENT;
+  const terminalAssessment = activeEscalation
+    ? {
+          ...assessmentWithoutAcceptance,
+          state: "blocked" as const,
+          gateResults: [
+            ...COMPLETION_ASSESSMENT.gateResults,
+            {
+              gateId: `human_escalation:${activeEscalation.id}`,
+              state: "unknown" as const,
+              evidenceIds: [activeEscalation.id],
+              reasonCode: "human_acceptance_missing" as const,
+              reason: activeEscalation.reason,
+              evaluatedAt: activeEscalation.openedAt
+            }
+          ]
+        }
+    : COMPLETION_ASSESSMENT;
+  sqlite.prepare(`UPDATE completion_assessments
+    SET state = ?, assessment_json = ? WHERE id = ?`).run(
+      terminalAssessment.state,
+      JSON.stringify(terminalAssessment),
+      ASSESSMENT_REF
+    );
+  const claimedAt = new Date(Math.max(Date.now(), NOW.getTime()) + 1_000);
+  const [operation] = await repo.claimDueHostedLifecycleOperations({
+    destinationId: "cloud_1",
+    organizationId: "org_1",
+    leaseOwner: "lifecycle_pump",
+    leaseSeconds: 30,
+    now: claimedAt
+  });
+  await repo.acknowledgeHostedLifecycleOperation({
+    destinationId: "cloud_1",
+    organizationId: "org_1",
+    operationId: fixtures.operationId,
+    leaseToken: operation!.leaseToken!,
+    receipt: fixtures.receipt,
+    now: new Date(claimedAt.getTime() + 1_000)
+  });
+  const assessmentProjection = sqlite.prepare(`SELECT envelope_json AS envelopeJson
+    FROM control_plane_projection_outbox
+    WHERE receipt_kind = 'completion_assessment'`).get() as { envelopeJson: string };
+  const assessmentReceipt = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+    JSON.parse(assessmentProjection.envelopeJson)
+  );
+  return { sqlite, repo, ...fixtures, assessmentReceipt };
+}
+
+async function setupCompatibilityTerminal(result: TerminalResult) {
+  const sqlite = new Database(":memory:");
+  migrateSchema(sqlite);
+  seedAuthority(sqlite, {
+    includeAssessment: false,
+    includeAssessmentProjection: false
+  });
+  const contract = {
+    ...COMPLETION_CONTRACT,
+    mode: "execution_compat" as const,
+    targetSelectors: [],
+    gates: [{
+      id: "execution",
+      kind: "material_action" as const,
+      actionFamily: "executor_run",
+      requiredOutcome: "succeeded" as const
+    }]
+  };
+  const contentDigest = `sha256:${createHash("sha256")
+    .update(JSON.stringify(contract)).digest("hex")}`;
+  sqlite.prepare(`UPDATE completion_contracts
+    SET contract_json = ?, content_digest = ?
+    WHERE id = ? AND version = ?`).run(
+      JSON.stringify(contract),
+      contentDigest,
+      contract.id,
+      contract.version
+    );
   const repo = createOpenTagRepository(drizzle(sqlite));
   const fixtures = terminalLifecycleFixtures(result);
   await repo.completeHostedRunLocally({
@@ -591,19 +950,7 @@ async function setupTerminalResult(result: TerminalResult) {
     receipt: fixtures.receipt,
     now: new Date(claimedAt.getTime() + 1_000)
   });
-  sqlite.exec("DROP TRIGGER control_plane_projection_outbox_immutable_update_guard");
-  sqlite.prepare(`UPDATE control_plane_projection_outbox
-    SET operation_id = ?, requires_lifecycle_operation_id = ?,
-      payload_digest = ?, receipt_digest = ?, envelope_json = ?
-    WHERE receipt_id = ?`).run(
-      fixtures.assessmentReceipt.operationId,
-      fixtures.operationId,
-      fixtures.assessmentReceipt.payloadDigest,
-      fixtures.assessmentReceipt.receiptDigest,
-      canonicalJsonStringify(fixtures.assessmentReceipt),
-      ASSESSMENT_RECEIPT_ID
-    );
-  return { sqlite, repo, ...fixtures };
+  return { sqlite, repo, contract, contentDigest, ...fixtures };
 }
 
 function intentReceipt(localIntentId = "intent_1", overrides: Record<string, unknown> = {}) {
@@ -847,7 +1194,1650 @@ async function enqueueAndClaim(
   return { receipt, claimed: claimed! };
 }
 
+function expectGeneratedAssessmentProjection(sqlite: Database.Database): void {
+  const rows = sqlite.prepare(`SELECT
+    destination_id AS destinationId,
+    organization_id AS organizationId,
+    requires_lifecycle_operation_id AS requiresLifecycleOperationId,
+    envelope_json AS envelopeJson
+    FROM control_plane_projection_outbox
+    WHERE receipt_kind = 'completion_assessment'`).all() as Array<{
+      destinationId: string;
+      organizationId: string;
+      requiresLifecycleOperationId: string;
+      envelopeJson: string;
+    }>;
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({
+    destinationId: "cloud_1",
+    organizationId: "org_1",
+    requiresLifecycleOperationId: COMPLETION_OPERATION_ID
+  });
+  const envelope = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+    JSON.parse(rows[0]!.envelopeJson)
+  );
+  expect(envelope).toEqual(ASSESSMENT_RECEIPT);
+  expect(envelope.payloadDigest).toBe(canonicalSha256Json(envelope.payload));
+  const { receiptDigest: _receiptDigest, ...base } = envelope;
+  expect(envelope.receiptDigest).toBe(canonicalSha256Json(base));
+}
+
+function assessmentProjectionEnvelopes(
+  sqlite: Database.Database
+): Array<ReturnType<typeof CompletionAssessmentReceiptEnvelopeV1Schema.parse>> {
+  return (sqlite.prepare(`SELECT envelope_json AS envelopeJson
+    FROM control_plane_projection_outbox
+    WHERE receipt_kind = 'completion_assessment'
+    ORDER BY created_at, receipt_id`).all() as Array<{ envelopeJson: string }>)
+    .map((row) => CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+      JSON.parse(row.envelopeJson)
+    ));
+}
+
+function insertCompletionFact(
+  sqlite: Database.Database,
+  input: {
+    id: string;
+    outcome: string;
+    observedAt: string;
+    receivedAt?: string;
+    cycle?: number;
+    kind?: string;
+    predicate?: string;
+  }
+) {
+  const deliveryId = `delivery_${input.id}`;
+  const payloadDigest = canonicalSha256Json({
+    purpose: "governed-callback-test-evidence",
+    evidenceId: input.id
+  });
+  const fact = {
+    ...COMPLETION_FACT,
+    id: input.id,
+    cycle: input.cycle ?? COMPLETION_FACT.cycle,
+    kind: input.kind ?? COMPLETION_FACT.kind,
+    claim: {
+      ...COMPLETION_FACT.claim,
+      predicate: input.predicate ?? COMPLETION_FACT.claim.predicate,
+      outcome: input.outcome
+    },
+    provenance: {
+      ...COMPLETION_FACT.provenance,
+      payloadDigest,
+      providerDeliveryId: deliveryId
+    },
+    observedAt: input.observedAt,
+    receivedAt: input.receivedAt ?? input.observedAt
+  };
+  const evidence = {
+    ...VERIFICATION_EVIDENCE,
+    id: fact.id,
+    kind: fact.kind,
+    createdAt: fact.observedAt,
+    metadata: { completionFact: fact }
+  };
+  sqlite.prepare(`INSERT INTO verification_evidence (
+    id, work_thread_id, provider, delivery_id, subject_ref, subject_version,
+    kind, assurance, evidence_json, payload_digest, observed_at, received_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    fact.id,
+    WORK_THREAD_ID,
+    fact.subject.provider,
+    deliveryId,
+    fact.subject.resourceRef,
+    fact.subject.resourceVersion,
+    fact.kind,
+    fact.assurance,
+    JSON.stringify(evidence),
+    payloadDigest,
+    fact.observedAt,
+    fact.receivedAt
+  );
+  return fact;
+}
+
+function rejectedAssessmentMutationSnapshot(
+  sqlite: Database.Database
+): string {
+  return JSON.stringify({
+    assessments: sqlite.prepare(`SELECT * FROM completion_assessments
+      ORDER BY id`).all(),
+    threadHead: sqlite.prepare(`SELECT current_assessment_id AS currentAssessmentId
+      FROM work_threads WHERE id = ?`).get(WORK_THREAD_ID),
+    outbox: sqlite.prepare(`SELECT * FROM control_plane_projection_outbox
+      ORDER BY receipt_id`).all(),
+    governance: sqlite.prepare(`SELECT * FROM governance_events
+      ORDER BY id`).all(),
+    callbackIntents: sqlite.prepare(`SELECT * FROM governed_callback_intents
+      ORDER BY local_intent_id`).all(),
+    callbackDeliveries: sqlite.prepare(`SELECT * FROM callback_deliveries
+      ORDER BY id`).all()
+  });
+}
+
+function durableCompletionChainFixture(sqlite: Database.Database): string {
+  const rows = sqlite.prepare(`SELECT
+    receipt_id AS receiptId,
+    receipt_kind AS receiptKind,
+    depends_on_receipt_id AS dependsOnReceiptId,
+    requires_lifecycle_operation_id AS requiresLifecycleOperationId,
+    envelope_json AS envelopeJson
+    FROM control_plane_projection_outbox
+    WHERE run_id = ?
+    ORDER BY receipt_id`).all(RUN_ID) as Array<{
+      receiptId: string;
+      receiptKind: string;
+      dependsOnReceiptId: string | null;
+      requiresLifecycleOperationId: string;
+      envelopeJson: string;
+    }>;
+  const byParent = new Map<string | null, typeof rows>();
+  for (const row of rows) {
+    byParent.set(row.dependsOnReceiptId, [
+      ...(byParent.get(row.dependsOnReceiptId) ?? []),
+      row
+    ]);
+  }
+  const ordered: typeof rows = [];
+  let parent: string | null = null;
+  while (ordered.length < rows.length) {
+    const children = byParent.get(parent) ?? [];
+    if (children.length !== 1) {
+      throw new Error("fixture_completion_chain_is_not_linear");
+    }
+    const [child] = children;
+    ordered.push(child!);
+    parent = child!.receiptId;
+  }
+  const entries = ordered.map((row, index) => ({
+    ordinal: index + 1,
+    receiptId: row.receiptId,
+    receiptKind: row.receiptKind,
+    dependsOnReceiptId: row.dependsOnReceiptId,
+    requiresLifecycleOperationId: row.requiresLifecycleOperationId,
+    envelope: JSON.parse(row.envelopeJson) as unknown
+  }));
+  return `${JSON.stringify({
+    schemaVersion: 1,
+    fixtureKind: "opentag.control.store-completion-chain/v1",
+    chainDigest: canonicalSha256Json(entries),
+    entries
+  }, null, 2)}\n`;
+}
+
 describe("governed callback ledger", () => {
+  it("matches the frozen Store-produced completion chain fixture byte for byte", async () => {
+    const { sqlite } = await setup();
+    const actual = durableCompletionChainFixture(sqlite);
+    const expected = readFileSync(
+      new URL("./fixtures/control-v1-store-completion-chain.json", import.meta.url),
+      "utf8"
+    );
+    expect(actual).toBe(expected);
+    sqlite.close();
+  });
+
+  it("claims the completion chain in dependency order across repository restarts", async () => {
+    const initialized = await setup();
+    const { sqlite } = initialized;
+    let repo = initialized.repo;
+    const expectedKinds = [
+      "work_thread_ref",
+      "completion_contract_ref",
+      "completion_evidence_observation",
+      "completion_assessment"
+    ];
+    const claimedKinds: string[] = [];
+    const startedAt = Math.max(Date.now(), NOW.getTime()) + 10_000;
+    for (const [index, expectedKind] of expectedKinds.entries()) {
+      const claimAt = new Date(startedAt + index * 2_000);
+      const claim = await repo.claimDueControlPlaneProjections({
+        destinationId: "cloud_1",
+        organizationId: "org_1",
+        leaseOwner: `projection_pump_${index}`,
+        leaseSeconds: 30,
+        limit: 10,
+        now: claimAt
+      });
+      expect(claim.rejected).toEqual([]);
+      expect(claim.entries).toHaveLength(1);
+      expect(claim.entries[0]?.receiptKind).toBe(expectedKind);
+      claimedKinds.push(claim.entries[0]!.receiptKind);
+      await expect(repo.acknowledgeControlPlaneProjection({
+        destinationId: "cloud_1",
+        organizationId: "org_1",
+        receiptId: claim.entries[0]!.receiptId,
+        leaseToken: claim.entries[0]!.leaseToken!,
+        httpStatus: 200,
+        now: new Date(claimAt.getTime() + 1_000)
+      })).resolves.toMatchObject({ outcome: "acknowledged" });
+      repo = createOpenTagRepository(drizzle(sqlite));
+    }
+    expect(claimedKinds).toEqual(expectedKinds);
+    const beforeReplay = JSON.stringify(sqlite.prepare(`SELECT *
+      FROM control_plane_projection_outbox ORDER BY receipt_id`).all());
+    await expect(repo.appendCompletionAssessment({
+      assessment: COMPLETION_ASSESSMENT,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "duplicate" });
+    expect(JSON.stringify(sqlite.prepare(`SELECT *
+      FROM control_plane_projection_outbox ORDER BY receipt_id`).all()))
+      .toBe(beforeReplay);
+    await expect(repo.claimDueControlPlaneProjections({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      leaseOwner: "projection_pump_done",
+      leaseSeconds: 30,
+      limit: 10,
+      now: new Date(startedAt + 20_000)
+    })).resolves.toEqual({ entries: [], rejected: [] });
+    sqlite.close();
+  });
+
+  it("materializes every hosted assessment in lineage order when complete is acknowledged late", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: COMPLETION_ASSESSMENT,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    const assessmentB = {
+      ...COMPLETION_ASSESSMENT,
+      id: "assessment_2",
+      sequence: 2,
+      supersedesAssessmentId: COMPLETION_ASSESSMENT.id,
+      inputDigest: `sha256:${"2".repeat(64)}`,
+      assessedAt: new Date(NOW.getTime() + 1_000).toISOString(),
+      acceptedAt: COMPLETION_ASSESSMENT.acceptedAt
+    };
+    await expect(repo.appendCompletionAssessment({
+      assessment: assessmentB,
+      expectedCurrentAssessmentId: COMPLETION_ASSESSMENT.id
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    expect(sqlite.prepare(`SELECT count(*) AS count
+      FROM control_plane_projection_outbox
+      WHERE receipt_kind = 'completion_assessment'`).get()).toEqual({ count: 0 });
+
+    await completeAndAcknowledge(repo);
+    const projected = assessmentProjectionEnvelopes(sqlite);
+    expect(projected).toHaveLength(2);
+    expect(projected.map((envelope) => envelope.payload.assessmentId).sort())
+      .toEqual([COMPLETION_ASSESSMENT.id, assessmentB.id]);
+    const projectedB = projected.find((envelope) =>
+      envelope.payload.assessmentId === assessmentB.id
+    );
+    expect(projectedB?.payload.supersedesAssessmentId)
+      .toBe(COMPLETION_ASSESSMENT.id);
+    const lineageRows = sqlite.prepare(`SELECT
+      receipt_id AS receiptId,
+      receipt_kind AS receiptKind,
+      depends_on_receipt_id AS dependsOnReceiptId,
+      requires_lifecycle_operation_id AS requiresLifecycleOperationId,
+      envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      ORDER BY created_at, receipt_id`).all() as Array<{
+        receiptId: string;
+        receiptKind: string;
+        dependsOnReceiptId: string | null;
+        requiresLifecycleOperationId: string;
+        envelopeJson: string;
+      }>;
+    const assessmentRows = lineageRows.filter((row) =>
+      row.receiptKind === "completion_assessment"
+    );
+    const assessmentARow = assessmentRows.find((row) =>
+      CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+        JSON.parse(row.envelopeJson)
+      ).payload.assessmentId === COMPLETION_ASSESSMENT.id
+    )!;
+    const assessmentBRow = assessmentRows.find((row) =>
+      CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+        JSON.parse(row.envelopeJson)
+      ).payload.assessmentId === assessmentB.id
+    )!;
+    expect(assessmentARow.dependsOnReceiptId).toBe(EVIDENCE_RECEIPT.receiptId);
+    expect(assessmentBRow).toMatchObject({
+      dependsOnReceiptId: assessmentARow.receiptId,
+      requiresLifecycleOperationId: COMPLETION_OPERATION_ID
+    });
+    expect(projectedB?.predecessorReceiptDigests).toEqual([
+      COMPLETION_RECEIPT.receiptDigest,
+      CONTRACT_RECEIPT.receiptDigest,
+      EVIDENCE_RECEIPT.receiptDigest,
+      projected.find((envelope) =>
+        envelope.payload.assessmentId === COMPLETION_ASSESSMENT.id
+      )!.receiptDigest
+    ].sort());
+    expect(await repo.getCurrentCompletionAssessment({ workThreadId: WORK_THREAD_ID }))
+      .toMatchObject({
+        id: assessmentB.id,
+        supersedesAssessmentId: COMPLETION_ASSESSMENT.id,
+        assessedAt: assessmentB.assessedAt,
+        acceptedAt: COMPLETION_ASSESSMENT.acceptedAt
+      });
+    await expect(repo.appendCompletionAssessment({
+      assessment: COMPLETION_ASSESSMENT,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "duplicate" });
+    await expect(repo.appendCompletionAssessment({
+      assessment: assessmentB,
+      expectedCurrentAssessmentId: COMPLETION_ASSESSMENT.id
+    })).resolves.toMatchObject({ outcome: "duplicate" });
+    expect(assessmentProjectionEnvelopes(sqlite)).toHaveLength(2);
+    sqlite.close();
+  });
+
+  it("rejects a sub-millisecond first acceptance before assessedAt", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    const prematureAcceptance = {
+      ...COMPLETION_ASSESSMENT,
+      id: "assessment_premature_acceptance",
+      assessedAt: "2026-08-10T00:00:00.0009Z",
+      acceptedAt: "2026-08-10T00:00:00.0001Z"
+    };
+    const before = rejectedAssessmentMutationSnapshot(sqlite);
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: prematureAcceptance,
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow("completion_assessment_projection_authority_conflict");
+    expect(rejectedAssessmentMutationSnapshot(sqlite)).toBe(before);
+    sqlite.close();
+  });
+
+  it("projects a monotonic same-run contract successor with explicit supersession", async () => {
+    const { sqlite, repo } = await setup();
+    const contractB = {
+      ...COMPLETION_CONTRACT,
+      id: "contract_2",
+      version: 2
+    };
+    await expect(repo.recordCompletionContract({ contract: contractB }))
+      .resolves.toMatchObject({ created: true });
+    const assessmentB = {
+      ...COMPLETION_ASSESSMENT,
+      id: "assessment_contract_2",
+      contractId: contractB.id,
+      contractVersion: contractB.version,
+      sequence: 2,
+      supersedesAssessmentId: COMPLETION_ASSESSMENT.id,
+      inputDigest: `sha256:${"2".repeat(64)}`
+    };
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: assessmentB,
+      expectedCurrentAssessmentId: COMPLETION_ASSESSMENT.id
+    })).resolves.toMatchObject({ outcome: "recorded" });
+
+    const rows = sqlite.prepare(`SELECT
+      receipt_id AS receiptId,
+      receipt_kind AS receiptKind,
+      depends_on_receipt_id AS dependsOnReceiptId,
+      requires_lifecycle_operation_id AS requiresLifecycleOperationId,
+      envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      ORDER BY created_at, receipt_id`).all() as Array<{
+        receiptId: string;
+        receiptKind: string;
+        dependsOnReceiptId: string | null;
+        requiresLifecycleOperationId: string;
+        envelopeJson: string;
+      }>;
+    const assessmentRows = rows.filter((row) =>
+      row.receiptKind === "completion_assessment"
+    );
+    const assessmentARow = assessmentRows.find((row) =>
+      CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+        JSON.parse(row.envelopeJson)
+      ).payload.assessmentId === COMPLETION_ASSESSMENT.id
+    )!;
+    const assessmentBRow = assessmentRows.find((row) =>
+      CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+        JSON.parse(row.envelopeJson)
+      ).payload.assessmentId === assessmentB.id
+    )!;
+    const contractBRow = rows.find((row) => {
+      if (row.receiptKind !== "completion_contract_ref") return false;
+      return CompletionContractRefReceiptEnvelopeV1Schema.parse(
+        JSON.parse(row.envelopeJson)
+      ).payload.contractId === contractB.id;
+    })!;
+    const contractBEnvelope = CompletionContractRefReceiptEnvelopeV1Schema.parse(
+      JSON.parse(contractBRow.envelopeJson)
+    );
+    const evidenceBRow = rows.find((row) => {
+      if (row.receiptKind !== "completion_evidence_observation") return false;
+      const envelope = CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+        JSON.parse(row.envelopeJson)
+      );
+      return envelope.identity.parts[6] === contractBEnvelope.receiptDigest;
+    })!;
+    const evidenceBEnvelope = CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+      JSON.parse(evidenceBRow.envelopeJson)
+    );
+    const workThreadRow = rows.find((row) => row.receiptKind === "work_thread_ref")!;
+
+    expect(contractBEnvelope.identity.parts).toEqual([
+      "org_1",
+      RUN_ID,
+      WORK_THREAD_ID,
+      contractB.id,
+      "2",
+      "1"
+    ]);
+    expect(contractBEnvelope.payload).toMatchObject({
+      contractId: contractB.id,
+      version: 2,
+      cycle: 1,
+      supersedesContractId: COMPLETION_CONTRACT.id,
+      resolvedTargetDigests: []
+    });
+    expect(contractBRow).toMatchObject({
+      dependsOnReceiptId: assessmentARow.receiptId,
+      requiresLifecycleOperationId: COMPLETION_OPERATION_ID
+    });
+    expect(contractBEnvelope.predecessorReceiptDigests).toEqual([
+      JSON.parse(workThreadRow.envelopeJson).receiptDigest,
+      JSON.parse(assessmentARow.envelopeJson).receiptDigest
+    ].sort());
+    expect(evidenceBRow).toMatchObject({
+      dependsOnReceiptId: contractBRow.receiptId,
+      requiresLifecycleOperationId: COMPLETION_OPERATION_ID
+    });
+    expect(evidenceBEnvelope.predecessorReceiptDigests).toEqual([
+      COMPLETION_RECEIPT.receiptDigest,
+      contractBEnvelope.receiptDigest
+    ].sort());
+    expect(assessmentBRow).toMatchObject({
+      dependsOnReceiptId: evidenceBRow.receiptId,
+      requiresLifecycleOperationId: COMPLETION_OPERATION_ID
+    });
+    expect(CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+      JSON.parse(assessmentBRow.envelopeJson)
+    ).predecessorReceiptDigests).toEqual([
+      COMPLETION_RECEIPT.receiptDigest,
+      contractBEnvelope.receiptDigest,
+      evidenceBEnvelope.receiptDigest,
+      JSON.parse(assessmentARow.envelopeJson).receiptDigest
+    ].sort());
+
+    const beforeReplay = JSON.stringify(rows);
+    await expect(repo.appendCompletionAssessment({
+      assessment: assessmentB,
+      expectedCurrentAssessmentId: COMPLETION_ASSESSMENT.id
+    })).resolves.toMatchObject({ outcome: "duplicate" });
+    expect(JSON.stringify(sqlite.prepare(`SELECT
+      receipt_id AS receiptId,
+      receipt_kind AS receiptKind,
+      depends_on_receipt_id AS dependsOnReceiptId,
+      requires_lifecycle_operation_id AS requiresLifecycleOperationId,
+      envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      ORDER BY created_at, receipt_id`).all())).toBe(beforeReplay);
+    sqlite.close();
+  });
+
+  it("rejects a non-monotonic same-run contract successor without advancing authority", async () => {
+    const { sqlite, repo } = await setup();
+    const nonMonotonicContract = {
+      ...COMPLETION_CONTRACT,
+      id: "contract_non_monotonic"
+    };
+    await repo.recordCompletionContract({ contract: nonMonotonicContract });
+    const outboxBefore = JSON.stringify(sqlite.prepare(`SELECT *
+      FROM control_plane_projection_outbox ORDER BY receipt_id`).all());
+    const governanceCountBefore = sqlite.prepare(`SELECT count(*) AS count
+      FROM governance_events`).get();
+    const assessmentB = {
+      ...COMPLETION_ASSESSMENT,
+      id: "assessment_non_monotonic",
+      contractId: nonMonotonicContract.id,
+      sequence: 2,
+      supersedesAssessmentId: COMPLETION_ASSESSMENT.id,
+      inputDigest: `sha256:${"3".repeat(64)}`
+    };
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: assessmentB,
+      expectedCurrentAssessmentId: COMPLETION_ASSESSMENT.id
+    })).rejects.toThrow("completion_assessment_projection_authority_conflict");
+    expect(await repo.getCurrentCompletionAssessment({ workThreadId: WORK_THREAD_ID }))
+      .toMatchObject({ id: COMPLETION_ASSESSMENT.id });
+    expect(sqlite.prepare(`SELECT count(*) AS count FROM completion_assessments`).get())
+      .toEqual({ count: 1 });
+    expect(JSON.stringify(sqlite.prepare(`SELECT *
+      FROM control_plane_projection_outbox ORDER BY receipt_id`).all()))
+      .toBe(outboxBefore);
+    expect(sqlite.prepare(`SELECT count(*) AS count FROM governance_events`).get())
+      .toEqual(governanceCountBefore);
+    sqlite.close();
+  });
+
+  it("chains cross-run supersession through the predecessor and the current lifecycle", async () => {
+    const { sqlite, repo } = await setup();
+    const runIdB = "run-callback-2";
+    const attemptIdB = "attempt_2";
+    const claimOperationIdB = "claim_operation_2";
+    const rawFenceB = "raw-fence-2";
+    const fenceDigestB = `sha256:${createHash("sha256")
+      .update(rawFenceB).digest("hex")}`;
+    const claimAuthorityB = {
+      ...CLAIM_AUTHORITY,
+      runId: runIdB,
+      attemptId: attemptIdB,
+      fencingTokenDigest: fenceDigestB
+    };
+    const completionCommonB = {
+      ...COMPLETION_COMMON,
+      runId: runIdB,
+      attempt: {
+        attemptId: attemptIdB,
+        attemptNumber: 1,
+        epoch: 1,
+        fencingTokenDigest: fenceDigestB
+      }
+    };
+    const completionRequestDigestB = canonicalSha256Json(completionCommonB);
+    const completionOperationIdB = `op_${completionRequestDigestB
+      .slice("sha256:".length)}`;
+    const completionRequestIdB = `req_${canonicalSha256Json({
+      purpose: "opentag-hosted-lifecycle-request-id-v1",
+      operationId: completionOperationIdB,
+      requestDigest: completionRequestDigestB
+    }).slice("sha256:".length)}`;
+    const completionRequestB = HostedCompleteRequestV1Schema.parse({
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      requiredCapabilities: ["relay.lifecycle.v1"],
+      requestId: completionRequestIdB,
+      operationId: completionOperationIdB,
+      attempt: { ...completionCommonB.attempt, fencingToken: rawFenceB },
+      requestDigest: completionRequestDigestB,
+      occurredAt: NOW.toISOString(),
+      conclusion: "success",
+      reasonCode: "executor_success",
+      resultDigest: RESULT_DIGEST,
+      artifactDigests: [],
+      evidenceDigests: []
+    });
+    const completionReceiptB = HostedLifecycleReceiptEnvelopeV1Schema.parse(withDigests({
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      receiptKind: "attempt_lifecycle",
+      receiptId: `lifecycle_${canonicalSha256Json({
+        organizationId: "org_1",
+        operationId: completionOperationIdB
+      }).slice("sha256:".length)}`,
+      organizationId: "org_1",
+      requestId: completionRequestIdB,
+      operationId: completionOperationIdB,
+      requestDigest: completionRequestDigestB,
+      requiredCapabilities: ["relay.lifecycle.v1"],
+      producer: {
+        kind: "runner" as const,
+        id: "runner_1",
+        credentialId: PRODUCER.credentialId
+      },
+      identity: {
+        namespace: "opentag.control.receipt/attempt-lifecycle/v1" as const,
+        parts: ["org_1", runIdB, attemptIdB, "executor_result", completionOperationIdB]
+      },
+      observedAt: NOW.toISOString(),
+      runId: runIdB,
+      attempt: completionCommonB.attempt,
+      payload: {
+        operation: "executor_result" as const,
+        occurredAt: NOW.toISOString(),
+        conclusion: "success" as const,
+        reasonCode: "executor_success",
+        resultDigest: RESULT_DIGEST,
+        artifactDigests: [],
+        evidenceDigests: []
+      }
+    }));
+    const eventB = OpenTagEventSchema.parse({
+      id: "event_2",
+      source: "github",
+      sourceEventId: "comment_2",
+      receivedAt: NOW.toISOString(),
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      target: { mention: "@opentag", agentId: "opentag" },
+      command: { rawText: "complete again", intent: "fix", args: {} },
+      context: [],
+      permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
+      callback: { provider: "github", uri: DELIVERY_TARGET },
+      metadata: { owner: "acme", repo: "demo", issueNumber: 1 }
+    });
+    const authorityJsonB = canonicalJsonStringify(claimAuthorityB);
+    const authorityDigestB = canonicalSha256Json(claimAuthorityB);
+    const claimDigestB = `sha256:${"e".repeat(64)}`;
+    sqlite.prepare(`INSERT INTO runs (
+      id, event_id, status, event_json, assigned_runner_id, repo_provider,
+      work_thread_id, current_attempt_id, routing_rejections_json, created_at,
+      updated_at
+    ) VALUES (?, 'event_2', 'running', ?, 'runner_1', 'github', ?, ?, '[]', ?, ?)`)
+      .run(
+        runIdB,
+        JSON.stringify(eventB),
+        WORK_THREAD_ID,
+        attemptIdB,
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    sqlite.prepare(`INSERT INTO attempts (
+      id, run_id, number, runner_id, runner_locality, fencing_token, status,
+      started_at, heartbeat_at, lease_expires_at, finished_at, created_at, updated_at
+    ) VALUES (?, ?, 1, 'runner_1', 'hosted', ?, 'running', ?, ?, ?, NULL, ?, ?)`)
+      .run(
+        attemptIdB,
+        runIdB,
+        rawFenceB,
+        NOW.toISOString(),
+        NOW.toISOString(),
+        "2099-08-10T01:00:00.000Z",
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    sqlite.prepare(`INSERT INTO hosted_claim_operations (
+      operation_id, request_id, organization_id, runner_id, destination_id,
+      request_digest, request_json, state, run_id, claim_digest, authority_digest,
+      authority_json, attempt_id, attempt_number, fencing_token_digest, credential_id,
+      execution_started_at, created_at, updated_at
+    ) VALUES (?, 'claim_request_2', 'org_1', 'runner_1', 'cloud_1', ?, '{}',
+      'claimed', ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`)
+      .run(
+        claimOperationIdB,
+        `sha256:${"2".repeat(64)}`,
+        runIdB,
+        claimDigestB,
+        authorityDigestB,
+        authorityJsonB,
+        attemptIdB,
+        fenceDigestB,
+        PRODUCER.credentialId,
+        NOW.toISOString(),
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    sqlite.prepare(`INSERT INTO hosted_run_imports (
+      run_id, admission_id, admission_operation_id, claim_operation_id,
+      attempt_id, fencing_token_digest, source_identity_digest,
+      delivery_payload_digest, admission_envelope_digest, policy_receipt_id,
+      policy_payload_digest, policy_receipt_digest, event_digest,
+      context_packet_digest, work_thread_id, claim_digest, authority_digest,
+      authority_json, imported_at
+    ) VALUES (?, 'admission_2', 'admission_operation_2', ?, ?, ?, ?, ?, ?,
+      'policy_receipt_1', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        runIdB,
+        claimOperationIdB,
+        attemptIdB,
+        fenceDigestB,
+        `sha256:${"0".repeat(64)}`,
+        `sha256:${"3".repeat(64)}`,
+        `sha256:${"4".repeat(64)}`,
+        `sha256:${"9".repeat(64)}`,
+        `sha256:${"a".repeat(64)}`,
+        canonicalSha256Json(eventB),
+        `sha256:${"b".repeat(64)}`,
+        WORK_THREAD_ID,
+        claimDigestB,
+        authorityDigestB,
+        authorityJsonB,
+        NOW.toISOString()
+      );
+    sqlite.prepare(`INSERT INTO hosted_attempt_imports (
+      attempt_id, run_id, attempt_number, claim_operation_id,
+      fencing_token_digest, claim_digest, authority_digest, authority_json,
+      imported_at
+    ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        attemptIdB,
+        runIdB,
+        claimOperationIdB,
+        fenceDigestB,
+        claimDigestB,
+        authorityDigestB,
+        authorityJsonB,
+        NOW.toISOString()
+      );
+
+    await expect(repo.completeHostedRunLocally({
+      runId: runIdB,
+      result: RUN_RESULT,
+      runnerId: "runner_1",
+      attemptId: attemptIdB,
+      fencingToken: rawFenceB,
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      credentialId: PRODUCER.credentialId,
+      request: completionRequestB
+    })).resolves.toBe("completed");
+    const claimNow = new Date(Math.max(Date.now(), NOW.getTime()) + 2_000);
+    const [completionOperationB] = await repo.claimDueHostedLifecycleOperations({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      leaseOwner: "lifecycle_pump_b",
+      leaseSeconds: 30,
+      now: claimNow
+    });
+    expect(completionOperationB?.operationId).toBe(completionOperationIdB);
+    await expect(repo.acknowledgeHostedLifecycleOperation({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      operationId: completionOperationIdB,
+      leaseToken: completionOperationB!.leaseToken!,
+      receipt: completionReceiptB,
+      now: new Date(claimNow.getTime() + 1_000)
+    })).resolves.toBe("acknowledged");
+
+    const assessmentB = {
+      ...COMPLETION_ASSESSMENT,
+      id: "assessment_cross_run_2",
+      triggeredByRunId: runIdB,
+      sequence: 2,
+      supersedesAssessmentId: COMPLETION_ASSESSMENT.id,
+      inputDigest: `sha256:${"f".repeat(64)}`
+    };
+    await expect(repo.appendCompletionAssessment({
+      assessment: assessmentB,
+      expectedCurrentAssessmentId: COMPLETION_ASSESSMENT.id
+    })).resolves.toMatchObject({ outcome: "recorded" });
+
+    const rows = sqlite.prepare(`SELECT
+      receipt_id AS receiptId,
+      receipt_kind AS receiptKind,
+      run_id AS runId,
+      depends_on_receipt_id AS dependsOnReceiptId,
+      requires_lifecycle_operation_id AS requiresLifecycleOperationId,
+      envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      ORDER BY created_at, receipt_id`).all() as Array<{
+        receiptId: string;
+        receiptKind: string;
+        runId: string;
+        dependsOnReceiptId: string | null;
+        requiresLifecycleOperationId: string;
+        envelopeJson: string;
+      }>;
+    const assessmentARow = rows.find((row) =>
+      row.receiptKind === "completion_assessment" && row.runId === RUN_ID
+    )!;
+    const rowsB = rows.filter((row) => row.runId === runIdB);
+    const workThreadBRow = rowsB.find((row) => row.receiptKind === "work_thread_ref")!;
+    const contractBRow = rowsB.find((row) =>
+      row.receiptKind === "completion_contract_ref"
+    )!;
+    const evidenceBRow = rowsB.find((row) =>
+      row.receiptKind === "completion_evidence_observation"
+    )!;
+    const assessmentBRow = rowsB.find((row) =>
+      row.receiptKind === "completion_assessment"
+    )!;
+    expect(completionOperationIdB).not.toBe(COMPLETION_OPERATION_ID);
+    expect(rowsB).toHaveLength(4);
+    expect(rowsB.map((row) => row.requiresLifecycleOperationId))
+      .toEqual(Array(4).fill(completionOperationIdB));
+    expect(workThreadBRow.dependsOnReceiptId).toBe(assessmentARow.receiptId);
+    expect(contractBRow.dependsOnReceiptId).toBe(workThreadBRow.receiptId);
+    expect(evidenceBRow.dependsOnReceiptId).toBe(contractBRow.receiptId);
+    expect(assessmentBRow.dependsOnReceiptId).toBe(evidenceBRow.receiptId);
+
+    const workThreadBEnvelope = WorkThreadRefReceiptEnvelopeV1Schema.parse(
+      JSON.parse(workThreadBRow.envelopeJson)
+    );
+    const contractBEnvelope = CompletionContractRefReceiptEnvelopeV1Schema.parse(
+      JSON.parse(contractBRow.envelopeJson)
+    );
+    const evidenceBEnvelope = CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+      JSON.parse(evidenceBRow.envelopeJson)
+    );
+    const assessmentBEnvelope = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+      JSON.parse(assessmentBRow.envelopeJson)
+    );
+    const assessmentAEnvelope = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+      JSON.parse(assessmentARow.envelopeJson)
+    );
+    expect(workThreadBEnvelope.predecessorReceiptDigests).toEqual([
+      authorityDigestB,
+      claimAuthorityB.admissionPolicySnapshotDigest,
+      assessmentAEnvelope.receiptDigest
+    ].sort());
+    expect(contractBEnvelope.identity.parts).toEqual([
+      "org_1",
+      runIdB,
+      WORK_THREAD_ID,
+      COMPLETION_CONTRACT.id,
+      "1",
+      "1"
+    ]);
+    expect(contractBEnvelope.payload).not.toHaveProperty("supersedesContractId");
+    expect(contractBEnvelope.predecessorReceiptDigests)
+      .toEqual([workThreadBEnvelope.receiptDigest]);
+    expect(evidenceBEnvelope.identity.parts[6]).toBe(contractBEnvelope.receiptDigest);
+    expect(evidenceBEnvelope.predecessorReceiptDigests).toEqual([
+      completionReceiptB.receiptDigest,
+      contractBEnvelope.receiptDigest
+    ].sort());
+    expect(assessmentBEnvelope.predecessorReceiptDigests).toEqual([
+      completionReceiptB.receiptDigest,
+      contractBEnvelope.receiptDigest,
+      evidenceBEnvelope.receiptDigest,
+      assessmentAEnvelope.receiptDigest
+    ].sort());
+    expect(assessmentBEnvelope.payload.executorResultReceiptRef).toEqual({
+      receiptId: completionReceiptB.receiptId,
+      operationId: completionOperationIdB,
+      requestId: completionRequestIdB,
+      requestDigest: completionRequestDigestB,
+      resultDigest: RESULT_DIGEST
+    });
+    sqlite.close();
+  });
+
+  it("ensures the current hosted assessment when assessment is appended after complete ack", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+
+    await completeAndAcknowledge(repo);
+    expect(sqlite.prepare(`SELECT count(*) AS count
+      FROM control_plane_projection_outbox
+      WHERE receipt_kind = 'completion_assessment'`).get()).toEqual({ count: 0 });
+    await expect(repo.appendCompletionAssessment({
+      assessment: COMPLETION_ASSESSMENT,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    expectGeneratedAssessmentProjection(sqlite);
+    sqlite.close();
+  });
+
+  it("ignores generic verification evidence that does not claim completion authority", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    await expect(repo.recordVerificationEvidence({
+      id: "evidence_generic_review",
+      workThreadId: WORK_THREAD_ID,
+      provider: "github",
+      deliveryId: "delivery_generic_review",
+      subjectRef: "github:acme/demo:pull_request:1",
+      subjectVersion: "abc123",
+      evidence: {
+        id: "evidence_generic_review",
+        kind: "source_control.review",
+        assurance: "verified",
+        subjectRef: "github:acme/demo:pull_request:1@abc123",
+        summary: "A review exists, but it is not a completion fact.",
+        createdAt: NOW.toISOString()
+      },
+      payloadDigest: `sha256:${"7".repeat(64)}`,
+      observedAt: NOW.toISOString(),
+      receivedAt: NOW.toISOString()
+    })).resolves.toMatchObject({ created: true });
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: COMPLETION_ASSESSMENT,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    expect(assessmentProjectionEnvelopes(sqlite)).toHaveLength(1);
+    const evidence = sqlite.prepare(`SELECT envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      WHERE receipt_kind = 'completion_evidence_observation'`).all() as Array<{
+        envelopeJson: string;
+      }>;
+    expect(evidence).toHaveLength(1);
+    expect(CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+      JSON.parse(evidence[0]!.envelopeJson)
+    ).payload.evidenceId).toBe(COMPLETION_FACT.id);
+    sqlite.close();
+  });
+
+  it("rejects malformed evidence that explicitly claims completion authority", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    await expect(repo.recordVerificationEvidence({
+      id: "evidence_malformed_completion",
+      workThreadId: WORK_THREAD_ID,
+      provider: "github",
+      deliveryId: "delivery_malformed_completion",
+      subjectRef: "github:acme/demo:pull_request:1",
+      subjectVersion: "abc123",
+      evidence: {
+        id: "evidence_malformed_completion",
+        kind: "test",
+        assurance: "verified",
+        subjectRef: "github:acme/demo:pull_request:1@abc123",
+        summary: "This record claims completion authority but is incomplete.",
+        createdAt: NOW.toISOString(),
+        metadata: { completionFact: { id: "evidence_malformed_completion" } }
+      },
+      payloadDigest: `sha256:${"6".repeat(64)}`,
+      observedAt: NOW.toISOString(),
+      receivedAt: NOW.toISOString()
+    })).resolves.toMatchObject({ created: true });
+    const before = rejectedAssessmentMutationSnapshot(sqlite);
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: COMPLETION_ASSESSMENT,
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow("completion_assessment_projection_authority_conflict");
+    expect(rejectedAssessmentMutationSnapshot(sqlite)).toBe(before);
+    sqlite.close();
+  });
+
+  it("structurally validates and then ignores valid completion facts from another cycle", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    insertCompletionFact(sqlite, {
+      id: "evidence_other_cycle_failure",
+      outcome: "failed",
+      observedAt: NOW.toISOString(),
+      cycle: 2
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: COMPLETION_ASSESSMENT,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    const evidence = sqlite.prepare(`SELECT envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      WHERE receipt_kind = 'completion_evidence_observation'`).all() as Array<{
+        envelopeJson: string;
+      }>;
+    expect(evidence).toHaveLength(1);
+    expect(CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+      JSON.parse(evidence[0]!.envelopeJson)
+    ).payload.evidenceId).toBe(COMPLETION_FACT.id);
+    sqlite.close();
+  });
+
+  it("rolls back an assessment whose evidence reference has no durable authority", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    const unresolved = {
+      ...COMPLETION_ASSESSMENT,
+      gateResults: COMPLETION_ASSESSMENT.gateResults.map((gate) => ({
+        ...gate,
+        evidenceIds: ["evidence_missing"]
+      }))
+    };
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: unresolved,
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow("completion_assessment_projection_authority_conflict");
+    expect(sqlite.prepare(`SELECT count(*) AS count
+      FROM completion_assessments`).get()).toEqual({ count: 0 });
+    expect(sqlite.prepare(`SELECT current_assessment_id AS currentAssessmentId
+      FROM work_threads WHERE id = ?`).get(WORK_THREAD_ID))
+      .toEqual({ currentAssessmentId: null });
+    expect(assessmentProjectionEnvelopes(sqlite)).toHaveLength(0);
+    sqlite.close();
+  });
+
+  it("rejects a verification evidence reference owned by another work thread", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    sqlite.prepare(`INSERT INTO work_threads (
+      id, scope_id, canonical_key, provider, owner_container_id, work_item_kind,
+      external_id, thread_json, current_assessment_id, created_at, updated_at
+    ) VALUES ('work_thread_other', 'scope_1', 'thread_key_other', 'github',
+      'owner_1', 'issue', '2', '{}', NULL, ?, ?)`).run(
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    sqlite.prepare(`UPDATE verification_evidence
+      SET work_thread_id = 'work_thread_other' WHERE id = ?`)
+      .run(VERIFICATION_EVIDENCE.id);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: COMPLETION_ASSESSMENT,
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow("completion_assessment_projection_authority_conflict");
+    expect(sqlite.prepare(`SELECT count(*) AS count
+      FROM completion_assessments`).get()).toEqual({ count: 0 });
+    expect(assessmentProjectionEnvelopes(sqlite)).toHaveLength(0);
+    sqlite.close();
+  });
+
+  it("rejects verification evidence received before the hosted run authority window", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    sqlite.prepare(`UPDATE verification_evidence SET received_at = ? WHERE id = ?`)
+      .run(new Date(NOW.getTime() - 1_000).toISOString(), VERIFICATION_EVIDENCE.id);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: COMPLETION_ASSESSMENT,
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow("completion_assessment_projection_authority_conflict");
+    expect(sqlite.prepare(`SELECT count(*) AS count
+      FROM completion_assessments`).get()).toEqual({ count: 0 });
+    expect(assessmentProjectionEnvelopes(sqlite)).toHaveLength(0);
+    sqlite.close();
+  });
+
+  it("rejects a satisfied assessment when a newer authoritative fact fails", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    const failedAt = new Date(NOW.getTime() + 1_000).toISOString();
+    const assessedAt = new Date(NOW.getTime() + 2_000).toISOString();
+    insertCompletionFact(sqlite, {
+      id: "evidence_newer_failure",
+      outcome: "failed",
+      observedAt: failedAt
+    });
+    const staleAssessment = {
+      ...COMPLETION_ASSESSMENT,
+      id: "assessment_stale_pass",
+      inputDigest: `sha256:${"a".repeat(64)}`,
+      assessedAt,
+      acceptedAt: assessedAt
+    };
+    const before = rejectedAssessmentMutationSnapshot(sqlite);
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: staleAssessment,
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow("completion_assessment_projection_authority_conflict");
+    expect(rejectedAssessmentMutationSnapshot(sqlite)).toBe(before);
+    sqlite.close();
+  });
+
+  it("rejects an evidence-free satisfied assessment without any durable writes", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    const evidenceFreeAssessment = {
+      ...COMPLETION_ASSESSMENT,
+      id: "assessment_evidence_free",
+      inputDigest: `sha256:${"b".repeat(64)}`,
+      gateResults: COMPLETION_ASSESSMENT.gateResults.map((gate) => ({
+        ...gate,
+        evidenceIds: []
+      }))
+    };
+    const before = rejectedAssessmentMutationSnapshot(sqlite);
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: evidenceFreeAssessment,
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow();
+    expect(rejectedAssessmentMutationSnapshot(sqlite)).toBe(before);
+    sqlite.close();
+  });
+
+  it("rejects an assessment that cites an extra stale verification fact", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    const currentAt = new Date(NOW.getTime() + 1_000).toISOString();
+    const assessedAt = new Date(NOW.getTime() + 2_000).toISOString();
+    insertCompletionFact(sqlite, {
+      id: "evidence_current_pass",
+      outcome: "passed",
+      observedAt: currentAt
+    });
+    const overCitedAssessment = {
+      ...COMPLETION_ASSESSMENT,
+      id: "assessment_extra_evidence",
+      inputDigest: `sha256:${"c".repeat(64)}`,
+      assessedAt,
+      acceptedAt: assessedAt,
+      gateResults: COMPLETION_ASSESSMENT.gateResults.map((gate) => ({
+        ...gate,
+        evidenceIds: ["evidence_current_pass", COMPLETION_FACT.id]
+      }))
+    };
+    const before = rejectedAssessmentMutationSnapshot(sqlite);
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: overCitedAssessment,
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow("completion_assessment_projection_authority_conflict");
+    expect(rejectedAssessmentMutationSnapshot(sqlite)).toBe(before);
+    sqlite.close();
+  });
+
+  it("projects only the deterministic winner from tied successful verification facts", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    const currentAt = new Date(NOW.getTime() + 1_000).toISOString();
+    const assessedAt = new Date(NOW.getTime() + 2_000).toISOString();
+    insertCompletionFact(sqlite, {
+      id: "evidence_tied_pass_a",
+      outcome: "passed",
+      observedAt: currentAt
+    });
+    insertCompletionFact(sqlite, {
+      id: "evidence_tied_pass_b",
+      outcome: "passed",
+      observedAt: currentAt
+    });
+    const canonicalAssessment = {
+      ...COMPLETION_ASSESSMENT,
+      id: "assessment_canonical_tied_evidence",
+      inputDigest: `sha256:${"d".repeat(64)}`,
+      assessedAt,
+      acceptedAt: assessedAt,
+      gateResults: COMPLETION_ASSESSMENT.gateResults.map((gate) => ({
+        ...gate,
+        evidenceIds: ["evidence_tied_pass_a"]
+      }))
+    };
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: canonicalAssessment,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    const evidence = sqlite.prepare(`SELECT envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      WHERE receipt_kind = 'completion_evidence_observation'`).all() as Array<{
+        envelopeJson: string;
+      }>;
+    expect(evidence).toHaveLength(1);
+    expect(CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+      JSON.parse(evidence[0]!.envelopeJson)
+    ).payload.evidenceId).toBe("evidence_tied_pass_a");
+    sqlite.close();
+  });
+
+  it("retains every tied authoritative fact when their completion claims conflict", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    const currentAt = new Date(NOW.getTime() + 1_000).toISOString();
+    const assessedAt = new Date(NOW.getTime() + 2_000).toISOString();
+    insertCompletionFact(sqlite, {
+      id: "evidence_tied_conflict_a",
+      outcome: "passed",
+      observedAt: currentAt
+    });
+    insertCompletionFact(sqlite, {
+      id: "evidence_tied_conflict_b",
+      outcome: "failed",
+      observedAt: currentAt
+    });
+    const { acceptedAt: _acceptedAt, ...assessmentBase } = COMPLETION_ASSESSMENT;
+    const conflictedAssessment = {
+      ...assessmentBase,
+      id: "assessment_tied_evidence_conflict",
+      inputDigest: `sha256:${"4".repeat(64)}`,
+      state: "blocked" as const,
+      assessedAt,
+      gateResults: COMPLETION_ASSESSMENT.gateResults.map((gate) => ({
+        ...gate,
+        state: "unknown" as const,
+        evidenceIds: ["evidence_tied_conflict_a", "evidence_tied_conflict_b"],
+        reasonCode: "verification_assurance_insufficient" as const,
+        reason: "Equally current authoritative verification observations conflict.",
+        evaluatedAt: assessedAt
+      }))
+    };
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: conflictedAssessment,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    const evidence = (sqlite.prepare(`SELECT envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      WHERE receipt_kind = 'completion_evidence_observation'`).all() as Array<{
+        envelopeJson: string;
+      }>).map((row) => CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+      JSON.parse(row.envelopeJson)
+    ).payload.evidenceId).sort();
+    expect(evidence).toEqual([
+      "evidence_tied_conflict_a",
+      "evidence_tied_conflict_b"
+    ]);
+    sqlite.close();
+  });
+
+  it("projects an unresolved verification target only as missing with no evidence", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    const { acceptedAt: _acceptedAt, ...assessmentBase } = COMPLETION_ASSESSMENT;
+    const pendingAssessment = {
+      ...assessmentBase,
+      id: "assessment_verification_missing",
+      targetBindings: [],
+      state: "pending" as const,
+      evidenceBacked: false,
+      gateResults: [{
+        ...COMPLETION_ASSESSMENT.gateResults[0]!,
+        state: "missing" as const,
+        evidenceIds: [],
+        reasonCode: "verification_missing" as const,
+        reason: "The delivery target has not been resolved."
+      }]
+    };
+    const corrupted = {
+      ...pendingAssessment,
+      gateResults: pendingAssessment.gateResults.map((gate) => ({
+        ...gate,
+        state: "passed" as const
+      }))
+    };
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: corrupted,
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow();
+    expect(sqlite.prepare("SELECT count(*) AS count FROM completion_assessments").get())
+      .toEqual({ count: 0 });
+    await expect(repo.appendCompletionAssessment({
+      assessment: pendingAssessment,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    const [projection] = assessmentProjectionEnvelopes(sqlite);
+    expect(projection?.payload).toMatchObject({
+      evidenceReceiptDigests: [],
+      gateResults: [{
+        gateId: "checks",
+        state: "pending",
+        reasonCode: "verification_missing",
+        evidenceReceiptDigests: []
+      }]
+    });
+    sqlite.close();
+  });
+
+  it("binds external-state subject mismatch to a proven provider mismatch", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const externalContract = {
+      ...COMPLETION_CONTRACT,
+      gates: [{
+        id: "merge",
+        kind: "external_state" as const,
+        targetKey: "primary_change",
+        provider: "gitlab",
+        requiredState: "merged",
+        minimumAssurance: "reported" as const
+      }]
+    };
+    const externalContractDigest = `sha256:${createHash("sha256")
+      .update(JSON.stringify(externalContract)).digest("hex")}`;
+    sqlite.prepare(`UPDATE completion_contracts
+      SET contract_json = ?, content_digest = ?
+      WHERE id = ? AND version = ?`).run(
+        JSON.stringify(externalContract),
+        externalContractDigest,
+        externalContract.id,
+        externalContract.version
+      );
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    const { acceptedAt: _acceptedAt, ...assessmentBase } = COMPLETION_ASSESSMENT;
+    const blockedAssessment = {
+      ...assessmentBase,
+      id: "assessment_external_provider_mismatch",
+      state: "blocked" as const,
+      evidenceBacked: false,
+      gateResults: [{
+        gateId: "merge",
+        targetKey: "primary_change",
+        state: "unknown" as const,
+        evidenceIds: [],
+        reasonCode: "external_state_subject_mismatch" as const,
+        reason: "The resolved target provider does not match this gate.",
+        evaluatedAt: NOW.toISOString()
+      }]
+    };
+    const corrupted = {
+      ...blockedAssessment,
+      gateResults: blockedAssessment.gateResults.map((gate) => ({
+        ...gate,
+        state: "missing" as const
+      }))
+    };
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: corrupted,
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow();
+    await expect(repo.appendCompletionAssessment({
+      assessment: blockedAssessment,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    const [projection] = assessmentProjectionEnvelopes(sqlite);
+    expect(projection?.payload.gateResults).toEqual([{
+      gateId: "merge",
+      state: "blocked",
+      reasonCode: "external_state_subject_mismatch",
+      evidenceReceiptDigests: []
+    }]);
+    sqlite.close();
+  });
+
+  it("rejects a stale material fence and projects exact Governance time", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const materialContract = {
+      ...COMPLETION_CONTRACT,
+      targetSelectors: [],
+      gates: [{
+        id: "deploy",
+        kind: "material_action" as const,
+        actionFamily: "deploy",
+        requiredOutcome: "succeeded" as const
+      }]
+    };
+    const materialContractDigest = `sha256:${createHash("sha256")
+      .update(JSON.stringify(materialContract)).digest("hex")}`;
+    sqlite.prepare(`UPDATE completion_contracts
+      SET contract_json = ?, content_digest = ?
+      WHERE id = ? AND version = ?`).run(
+        JSON.stringify(materialContract),
+        materialContractDigest,
+        materialContract.id,
+        materialContract.version
+      );
+    const receipt = {
+      id: "material_receipt_1",
+      actionId: "material_action_1",
+      provider: "github" as const,
+      receiptRef: "github:deployment:1",
+      outcome: "succeeded" as const,
+      observedAt: "2026-08-10T00:00:00.0009Z",
+      metadata: { actionFamily: "deploy" }
+    };
+    sqlite.prepare(`INSERT INTO material_actions (
+      id, run_id, attempt_id, action_family, capability, scope_json, target_json,
+      risk_tier, status, idempotency_key, attempt_fence_digest, receipt_json,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, 'deploy', 'deploy:write', '{}', '{}', 'high',
+      'succeeded', 'deploy-once', ?, ?, ?, ?)`).run(
+        receipt.actionId,
+        RUN_ID,
+        RUN_ATTEMPT_ID,
+        "0".repeat(64),
+        JSON.stringify(receipt),
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    const materialAssessment = evaluateCompletion({
+      contract: materialContract,
+      runResults: [{
+        runId: RUN_ID,
+        result: RUN_RESULT,
+        recordedAt: NOW.toISOString()
+      }],
+      artifacts: [],
+      evidence: [],
+      materialActionReceipts: [receipt],
+      waivers: [],
+      blockingEscalations: [],
+      lineage: { sequence: 1 }
+    });
+    expect(materialAssessment).toMatchObject({
+      state: "satisfied",
+      assessedAt: receipt.observedAt,
+      acceptedAt: receipt.observedAt
+    });
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: materialAssessment,
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow("completion_assessment_projection_authority_conflict");
+    sqlite.prepare(`UPDATE material_actions SET attempt_fence_digest = ? WHERE id = ?`)
+      .run(FENCE_DIGEST.slice("sha256:".length), receipt.actionId);
+    await expect(repo.appendCompletionAssessment({
+      assessment: materialAssessment,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    const evidence = sqlite.prepare(`SELECT envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      WHERE receipt_kind = 'completion_evidence_observation'`).get() as {
+        envelopeJson: string;
+      };
+    expect(CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+      JSON.parse(evidence.envelopeJson)
+    ).payload).toMatchObject({
+      evidenceType: "material_action",
+      evidenceId: receipt.id,
+      actionId: receipt.actionId,
+      actionFamily: "deploy",
+      outcome: "succeeded",
+      observedAt: NOW.toISOString()
+    });
+    expect(assessmentProjectionEnvelopes(sqlite)[0]?.payload.assessedAt)
+      .toBe(NOW.toISOString());
+    sqlite.close();
+  });
+
+  it("rolls back lifecycle acknowledgement when delayed evidence cannot be resolved", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const unresolved = {
+      ...COMPLETION_ASSESSMENT,
+      gateResults: COMPLETION_ASSESSMENT.gateResults.map((gate) => ({
+        ...gate,
+        evidenceIds: ["evidence_missing"]
+      }))
+    };
+    await expect(repo.appendCompletionAssessment({
+      assessment: unresolved,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    await expect(repo.completeHostedRunLocally({
+      runId: RUN_ID,
+      result: RUN_RESULT,
+      runnerId: "runner_1",
+      attemptId: RUN_ATTEMPT_ID,
+      fencingToken: "raw-fence",
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      credentialId: PRODUCER.credentialId,
+      request: COMPLETION_REQUEST
+    })).resolves.toBe("completed");
+    const claimNow = new Date();
+    const [operation] = await repo.claimDueHostedLifecycleOperations({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      leaseOwner: "lifecycle_pump",
+      leaseSeconds: 30,
+      now: claimNow
+    });
+    await expect(repo.acknowledgeHostedLifecycleOperation({
+      destinationId: "cloud_1",
+      organizationId: "org_1",
+      operationId: COMPLETION_OPERATION_ID,
+      leaseToken: operation!.leaseToken!,
+      receipt: COMPLETION_RECEIPT,
+      now: new Date(claimNow.getTime() + 1_000)
+    })).rejects.toThrow("completion_assessment_projection_authority_conflict");
+    expect(sqlite.prepare(`SELECT state, receipt_json AS receiptJson
+      FROM hosted_lifecycle_operations WHERE operation_id = ?`)
+      .get(COMPLETION_OPERATION_ID)).toEqual({ state: "leased", receiptJson: null });
+    expect(assessmentProjectionEnvelopes(sqlite)).toHaveLength(0);
+    sqlite.close();
+  });
+
+  it("binds a synthetic blocking escalation gate to its scoped durable digest", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    const escalation = {
+      id: "escalation_1",
+      workThreadId: WORK_THREAD_ID,
+      runId: RUN_ID,
+      attemptId: RUN_ATTEMPT_ID,
+      class: "verification" as const,
+      audience: "operator" as const,
+      subjectRef: "github:acme/demo:pull_request:1",
+      state: "open" as const,
+      blocking: true,
+      summary: "Verification authority needs operator attention.",
+      reason: "A required result is outcome-unknown.",
+      openedAt: NOW.toISOString()
+    };
+    await expect(repo.openHumanEscalation({ escalation }))
+      .resolves.toMatchObject({ created: true });
+    const { acceptedAt: _acceptedAt, ...assessmentBase } = COMPLETION_ASSESSMENT;
+    const blockedAssessment = {
+      ...assessmentBase,
+      id: "assessment_blocked_1",
+      state: "blocked" as const,
+      gateResults: [
+        ...COMPLETION_ASSESSMENT.gateResults,
+        {
+          gateId: `human_escalation:${escalation.id}`,
+          state: "unknown" as const,
+          evidenceIds: [escalation.id],
+          reasonCode: "human_acceptance_missing" as const,
+          reason: escalation.reason,
+          evaluatedAt: NOW.toISOString()
+        }
+      ]
+    };
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: blockedAssessment,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    const [envelope] = assessmentProjectionEnvelopes(sqlite);
+    const evidenceReceipts = (sqlite.prepare(`SELECT
+      envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      WHERE receipt_kind = 'completion_evidence_observation'
+      ORDER BY receipt_id`).all() as Array<{ envelopeJson: string }>).map((row) =>
+      CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+        JSON.parse(row.envelopeJson)
+      )
+    );
+    const escalationReceipt = evidenceReceipts.find((receipt) =>
+      receipt.payload.evidenceType === "human_escalation"
+    );
+    const verificationReceipt = evidenceReceipts.find((receipt) =>
+      receipt.payload.evidenceType === "verification_evidence"
+    );
+    expect(escalationReceipt?.payload).toMatchObject({
+      evidenceType: "human_escalation",
+      evidenceId: escalation.id,
+      authorityDigest: canonicalSha256Json(escalation),
+      reasonDigest: canonicalSha256Json(escalation.reason)
+    });
+    expect(verificationReceipt?.predecessorReceiptDigests)
+      .toContain(escalationReceipt?.receiptDigest);
+    expect(envelope?.payload.gateResults).toContainEqual({
+      gateId: `human_escalation:${escalation.id}`,
+      state: "blocked",
+      reasonCode: "human_acceptance_missing",
+      evidenceReceiptDigests: [escalationReceipt?.receiptDigest]
+    });
+    expect(envelope?.payload.evidenceReceiptDigests).toEqual([
+      escalationReceipt!.receiptDigest,
+      verificationReceipt!.receiptDigest
+    ].sort());
+    sqlite.close();
+  });
+
   it("replaces old callback triggers after adding target digest authority", async () => {
     const { sqlite, repo } = await setup();
     sqlite.exec(`
@@ -1040,17 +3030,16 @@ describe("governed callback ledger", () => {
     expect(sqlite.prepare("SELECT total_changes() AS changes").get()).toEqual(before);
   });
 
-  it("accepts every supported terminal completion only with matching released attempt evidence", async () => {
-    const results: TerminalResult[] = [
-      RUN_RESULT,
-      { conclusion: "failure", summary: "executor failed locally" },
-      {
-        conclusion: "needs_human",
-        summary: "operator input is required",
-        humanResolutionUnavailableReason: "No operator response is available."
-      }
-    ];
-    for (const result of results) {
+  for (const result of [
+    RUN_RESULT,
+    { conclusion: "failure", summary: "executor failed locally" },
+    {
+      conclusion: "needs_human",
+      summary: "operator input is required",
+      humanResolutionUnavailableReason: "No operator response is available."
+    }
+  ] satisfies TerminalResult[]) {
+    it(`accepts a ${result.conclusion} terminal completion only with matching released attempt evidence`, async () => {
       const isolated = await setupTerminalResult(result);
       await expect(isolated.repo.getGovernedCallbackEnqueueContext({
         runId: RUN_ID,
@@ -1062,7 +3051,579 @@ describe("governed callback ledger", () => {
         authority: AUTHORITY
       });
       isolated.sqlite.close();
+    });
+  }
+
+  it("projects execution-compat success without governed evidence", async () => {
+    const isolated = await setupCompatibilityTerminal(RUN_RESULT);
+    const compatibilityAssessment = {
+      ...COMPLETION_ASSESSMENT,
+      id: "assessment_compat_success",
+      targetBindings: [],
+      evidenceBacked: false,
+      gateResults: [{
+        gateId: "execution",
+        state: "passed" as const,
+        evidenceIds: [RUN_ID],
+        reasonCode: "execution_succeeded" as const,
+        reason: "Executor run succeeded under the compatibility contract.",
+        evaluatedAt: NOW.toISOString()
+      }]
+    };
+
+    await expect(isolated.repo.appendCompletionAssessment({
+      assessment: compatibilityAssessment,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    const [projection] = assessmentProjectionEnvelopes(isolated.sqlite);
+    expect(projection?.payload).toMatchObject({
+      contract: { mode: "execution_compat" },
+      evidenceReceiptDigests: [],
+      gateResults: [{
+        gateId: "execution",
+        state: "satisfied",
+        reasonCode: "execution_succeeded",
+        evidenceReceiptDigests: []
+      }],
+      conclusion: "satisfied"
+    });
+    isolated.sqlite.close();
+  });
+
+  it("cross-checks execution-compat terminal failure against the run result", async () => {
+    const result = {
+      conclusion: "failure" as const,
+      summary: "executor failed locally"
+    };
+    const isolated = await setupCompatibilityTerminal(result);
+    const { acceptedAt: _acceptedAt, ...assessmentBase } = COMPLETION_ASSESSMENT;
+    const invalidPendingAssessment = {
+      ...assessmentBase,
+      id: "assessment_compat_incomplete",
+      inputDigest: `sha256:${"e".repeat(64)}`,
+      targetBindings: [],
+      state: "pending" as const,
+      evidenceBacked: false,
+      gateResults: [{
+        gateId: "execution",
+        state: "missing" as const,
+        evidenceIds: [],
+        reasonCode: "execution_incomplete" as const,
+        reason: "No terminal executor result is available.",
+        evaluatedAt: NOW.toISOString()
+      }]
+    };
+    const before = rejectedAssessmentMutationSnapshot(isolated.sqlite);
+
+    await expect(isolated.repo.appendCompletionAssessment({
+      assessment: invalidPendingAssessment,
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow("completion_assessment_projection_authority_conflict");
+    expect(rejectedAssessmentMutationSnapshot(isolated.sqlite)).toBe(before);
+
+    const failureAssessment = {
+      ...invalidPendingAssessment,
+      id: "assessment_compat_failure",
+      inputDigest: `sha256:${"f".repeat(64)}`,
+      state: "unsatisfied" as const,
+      gateResults: [{
+        ...invalidPendingAssessment.gateResults[0]!,
+        state: "failed" as const,
+        reasonCode: "execution_not_succeeded" as const,
+        reason: "The terminal executor result did not succeed."
+      }]
+    };
+    await expect(isolated.repo.appendCompletionAssessment({
+      assessment: failureAssessment,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    const [projection] = assessmentProjectionEnvelopes(isolated.sqlite);
+    expect(projection?.payload).toMatchObject({
+      contract: { mode: "execution_compat" },
+      gateResults: [{
+        gateId: "execution",
+        state: "unsatisfied",
+        reasonCode: "execution_not_succeeded",
+        evidenceReceiptDigests: []
+      }],
+      conclusion: "unsatisfied"
+    });
+    isolated.sqlite.close();
+  });
+
+  it("allows one canonical waiver to override a failed execution-compat gate", async () => {
+    const result = {
+      conclusion: "failure" as const,
+      summary: "executor failed locally"
+    };
+    const isolated = await setupCompatibilityTerminal(result);
+    const waiver = {
+      id: "waiver_compat_execution",
+      runId: RUN_ID,
+      contractId: isolated.contract.id,
+      contractVersion: isolated.contract.version,
+      cycle: isolated.contract.cycle,
+      actor: {
+        provider: "github",
+        providerUserId: "owner-1",
+        handle: "repo-owner"
+      },
+      reason: "The failed compatibility run is accepted for this bounded cycle.",
+      scope: "selected_gates" as const,
+      policyScope: "work_context_owner_container" as const,
+      gateIds: ["execution"],
+      waivedAt: NOW.toISOString()
+    };
+    await isolated.repo.recordCompletionWaiver({ waiver });
+    const waivedAssessment = {
+      ...COMPLETION_ASSESSMENT,
+      id: "assessment_compat_waived",
+      inputDigest: `sha256:${"0".repeat(64)}`,
+      targetBindings: [],
+      state: "waived" as const,
+      evidenceBacked: false,
+      gateResults: [{
+        gateId: "execution",
+        state: "waived" as const,
+        evidenceIds: [],
+        reasonCode: "gate_waived" as const,
+        reason: "The execution gate was waived by the repository owner.",
+        evaluatedAt: NOW.toISOString()
+      }],
+      assessedBy: "human" as const,
+      waiver
+    };
+
+    await expect(isolated.repo.appendCompletionAssessment({
+      assessment: waivedAssessment,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    const [projection] = assessmentProjectionEnvelopes(isolated.sqlite);
+    expect(projection?.payload).toMatchObject({
+      contract: { mode: "execution_compat" },
+      conclusion: "waived",
+      waiver: { ref: waiver.id },
+      gateResults: [{
+        gateId: "execution",
+        state: "waived",
+        reasonCode: "gate_waived"
+      }]
+    });
+    expect(projection?.payload.evidenceReceiptDigests).toHaveLength(1);
+    const evidenceRows = isolated.sqlite.prepare(`SELECT envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      WHERE receipt_kind = 'completion_evidence_observation'`).all() as Array<{
+        envelopeJson: string;
+      }>;
+    expect(evidenceRows).toHaveLength(1);
+    expect(CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+      JSON.parse(evidenceRows[0]!.envelopeJson)
+    ).payload).toMatchObject({
+      evidenceType: "completion_waiver",
+      evidenceId: waiver.id
+    });
+    isolated.sqlite.close();
+  });
+
+  it("projects the exact Governance assessment using one global canonical waiver", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const contract = {
+      ...COMPLETION_CONTRACT,
+      id: "contract_global_waiver",
+      gates: [
+        COMPLETION_CONTRACT.gates[0]!,
+        { ...COMPLETION_CONTRACT.gates[0]!, id: "merge_checks" }
+      ]
+    };
+    await expect(repo.recordCompletionContract({ contract }))
+      .resolves.toMatchObject({ created: true });
+    const tiedWaiver = {
+      id: "waiver_z_checks_tied",
+      runId: RUN_ID,
+      contractId: contract.id,
+      contractVersion: contract.version,
+      cycle: contract.cycle,
+      actor: {
+        provider: "github" as const,
+        providerUserId: "owner-1",
+        handle: "repo-owner"
+      },
+      reason: "A same-instant bounded exception for the first gate.",
+      scope: "selected_gates" as const,
+      policyScope: "work_context_owner_container" as const,
+      gateIds: ["checks"],
+      waivedAt: NOW.toISOString()
+    };
+    const canonicalWaiver = {
+      ...tiedWaiver,
+      id: "waiver_a_merge_tied",
+      reason: "The code-point winner applies only to merge checks.",
+      gateIds: ["merge_checks"],
+      waivedAt: "2026-08-10T00:00:00Z"
+    };
+    const invalidNewerWaiver = {
+      ...tiedWaiver,
+      id: "waiver_unknown_gate_newest",
+      reason: "This waiver is outside the current contract and cannot be selected.",
+      gateIds: ["not_in_contract"],
+      waivedAt: new Date(NOW.getTime() + 2_000).toISOString()
+    };
+    for (const waiver of [tiedWaiver, canonicalWaiver, invalidNewerWaiver]) {
+      await expect(repo.recordCompletionWaiver({ waiver }))
+        .resolves.toMatchObject({ created: true });
     }
+    await completeAndAcknowledge(repo);
+    const assessment = evaluateCompletion({
+      contract,
+      runResults: [{
+        runId: RUN_ID,
+        result: RUN_RESULT,
+        recordedAt: NOW.toISOString()
+      }],
+      artifacts: [{
+        id: "artifact_1",
+        kind: "pull_request",
+        sourceRunId: RUN_ID,
+        uri: "https://github.com/acme/demo/pull/1",
+        target: {
+          key: "primary_change",
+          provider: "github",
+          resourceRef: COMPLETION_FACT.subject.resourceRef,
+          resourceVersion: COMPLETION_FACT.subject.resourceVersion
+        },
+        recordedAt: NOW.toISOString()
+      }],
+      evidence: [COMPLETION_FACT],
+      materialActionReceipts: [],
+      waivers: [tiedWaiver, canonicalWaiver, invalidNewerWaiver],
+      blockingEscalations: [],
+      evaluatedAt: new Date(NOW.getTime() + 3_000).toISOString(),
+      lineage: { sequence: 1 }
+    });
+    expect(assessment).toMatchObject({
+      state: "waived",
+      waiver: { id: canonicalWaiver.id },
+      gateResults: [
+        { gateId: "checks", state: "passed", evidenceIds: [COMPLETION_FACT.id] },
+        { gateId: "merge_checks", state: "waived", evidenceIds: [] }
+      ]
+    });
+
+    await expect(repo.appendCompletionAssessment({
+      assessment,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded", assessment });
+    const [projection] = assessmentProjectionEnvelopes(sqlite);
+    expect(projection?.payload).toMatchObject({
+      conclusion: "waived",
+      waiver: { ref: canonicalWaiver.id },
+      gateResults: [
+        { gateId: "checks", state: "satisfied" },
+        { gateId: "merge_checks", state: "waived" }
+      ]
+    });
+    const evidenceTypes = (sqlite.prepare(`SELECT envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      WHERE receipt_kind = 'completion_evidence_observation'`).all() as Array<{
+        envelopeJson: string;
+      }>).map((row) => CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+      JSON.parse(row.envelopeJson)
+    ).payload).map((payload) => [payload.evidenceType, payload.evidenceId]).sort();
+    expect(evidenceTypes).toEqual([
+      ["completion_waiver", canonicalWaiver.id],
+      ["verification_evidence", COMPLETION_FACT.id]
+    ]);
+    sqlite.close();
+  });
+
+  it.each([
+    ["whole-second", "2026-08-10T00:00:01Z", "2026-08-10T00:00:01Z"],
+    [
+      "sub-millisecond",
+      "2026-08-10T00:00:00.0001Z",
+      "2026-08-10T00:00:00.0009Z"
+    ]
+  ])("projects Governance %s evidence through the V1 timestamp bridge", async (
+    _precision,
+    observedAt,
+    receivedAt
+  ) => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const preciseFact = {
+      ...COMPLETION_FACT,
+      observedAt,
+      receivedAt
+    };
+    const preciseEvidence = {
+      ...VERIFICATION_EVIDENCE,
+      createdAt: preciseFact.observedAt,
+      metadata: { completionFact: preciseFact }
+    };
+    sqlite.prepare(`UPDATE verification_evidence
+      SET evidence_json = ?, observed_at = ?, received_at = ?
+      WHERE id = ?`).run(
+        JSON.stringify(preciseEvidence),
+        preciseFact.observedAt,
+        preciseFact.receivedAt,
+        preciseFact.id
+      );
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    const assessment = evaluateCompletion({
+      contract: COMPLETION_CONTRACT,
+      runResults: [{
+        runId: RUN_ID,
+        result: RUN_RESULT,
+        recordedAt: NOW.toISOString()
+      }],
+      artifacts: [{
+        id: "artifact_1",
+        kind: "pull_request",
+        sourceRunId: RUN_ID,
+        uri: "https://github.com/acme/demo/pull/1",
+        target: {
+          key: "primary_change",
+          provider: "github",
+          resourceRef: COMPLETION_FACT.subject.resourceRef,
+          resourceVersion: COMPLETION_FACT.subject.resourceVersion
+        },
+        recordedAt: NOW.toISOString()
+      }],
+      evidence: [preciseFact],
+      materialActionReceipts: [],
+      waivers: [],
+      blockingEscalations: [],
+      lineage: { sequence: 1 }
+    });
+    expect(assessment).toMatchObject({
+      state: "satisfied",
+      assessedAt: preciseFact.receivedAt,
+      acceptedAt: preciseFact.receivedAt
+    });
+
+    await expect(repo.appendCompletionAssessment({
+      assessment,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded", assessment });
+    const [projection] = assessmentProjectionEnvelopes(sqlite);
+    expect(projection?.payload.assessedAt).toBe(
+      new Date(preciseFact.receivedAt).toISOString()
+    );
+    const evidence = sqlite.prepare(`SELECT envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      WHERE receipt_kind = 'completion_evidence_observation'`).get() as {
+        envelopeJson: string;
+      };
+    expect(CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+      JSON.parse(evidence.envelopeJson)
+    ).payload).toMatchObject({
+      observedAt: new Date(preciseFact.observedAt).toISOString(),
+      receivedAt: new Date(preciseFact.receivedAt).toISOString()
+    });
+    sqlite.close();
+  });
+
+  it.each([
+    [
+      "newer non-matching role",
+      "2026-08-10T00:00:00.001Z",
+      "2026-08-10T00:00:00.002Z"
+    ],
+    [
+      "same-instant conflicting role",
+      "2026-08-10T00:00:00.002Z",
+      "2026-08-10T00:00:00.002Z"
+    ]
+  ])("projects authoritative human acceptance for %s", async (
+    _scenario,
+    ownerObservedAt,
+    reviewerObservedAt
+  ) => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    seedAuthority(sqlite, {
+      includeAssessment: false,
+      includeAssessmentProjection: false
+    });
+    const contract = {
+      ...COMPLETION_CONTRACT,
+      targetSelectors: [],
+      gates: [{
+        id: "approval",
+        kind: "human_acceptance" as const,
+        requiredRole: "owner"
+      }]
+    };
+    const contentDigest = `sha256:${createHash("sha256")
+      .update(JSON.stringify(contract)).digest("hex")}`;
+    sqlite.prepare(`UPDATE completion_contracts
+      SET contract_json = ?, content_digest = ?
+      WHERE id = ? AND version = ?`).run(
+        JSON.stringify(contract),
+        contentDigest,
+        contract.id,
+        contract.version
+      );
+    const owner = insertCompletionFact(sqlite, {
+      id: "acceptance_owner",
+      kind: "human.acceptance",
+      predicate: "role",
+      outcome: "owner",
+      observedAt: ownerObservedAt
+    });
+    const reviewer = insertCompletionFact(sqlite, {
+      id: "acceptance_reviewer",
+      kind: "human.acceptance",
+      predicate: "role",
+      outcome: "reviewer",
+      observedAt: reviewerObservedAt
+    });
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await completeAndAcknowledge(repo);
+    const assessment = evaluateCompletion({
+      contract,
+      runResults: [{
+        runId: RUN_ID,
+        result: RUN_RESULT,
+        recordedAt: NOW.toISOString()
+      }],
+      artifacts: [],
+      evidence: [owner, reviewer],
+      materialActionReceipts: [],
+      waivers: [],
+      blockingEscalations: [],
+      lineage: { sequence: 1 }
+    });
+    expect(assessment).toMatchObject({
+      state: "pending",
+      gateResults: [{
+        gateId: "approval",
+        state: "missing",
+        reasonCode: "human_acceptance_missing",
+        evidenceIds: []
+      }]
+    });
+
+    await expect(repo.appendCompletionAssessment({
+      assessment,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded", assessment });
+    expect(assessmentProjectionEnvelopes(sqlite)[0]?.payload.gateResults)
+      .toEqual([{
+        gateId: "approval",
+        state: "pending",
+        reasonCode: "human_acceptance_missing",
+        evidenceReceiptDigests: []
+      }]);
+    sqlite.close();
+  });
+
+  it("preserves a waived gate when a blocking escalation dominates the conclusion", async () => {
+    const isolated = await setupCompatibilityTerminal({
+      conclusion: "failure",
+      summary: "executor failed locally"
+    });
+    const waiver = {
+      id: "waiver_compat_blocked",
+      runId: RUN_ID,
+      contractId: isolated.contract.id,
+      contractVersion: isolated.contract.version,
+      cycle: isolated.contract.cycle,
+      actor: {
+        provider: "github",
+        providerUserId: "owner-1",
+        handle: "repo-owner"
+      },
+      reason: "The execution gate is waived while operator input remains blocking.",
+      scope: "selected_gates" as const,
+      policyScope: "work_context_owner_container" as const,
+      gateIds: ["execution"],
+      waivedAt: NOW.toISOString()
+    };
+    const escalation = {
+      id: "escalation_compat_blocked",
+      workThreadId: WORK_THREAD_ID,
+      runId: RUN_ID,
+      attemptId: RUN_ATTEMPT_ID,
+      class: "missing_input" as const,
+      audience: "operator" as const,
+      subjectRef: "compatibility:execution",
+      state: "open" as const,
+      blocking: true,
+      summary: "Operator input is still required.",
+      reason: "The execution waiver does not resolve the blocking input request.",
+      openedAt: NOW.toISOString()
+    };
+    await isolated.repo.recordCompletionWaiver({ waiver });
+    await isolated.repo.openHumanEscalation({ escalation });
+    const { acceptedAt: _acceptedAt, ...assessmentBase } = COMPLETION_ASSESSMENT;
+    const blockedAssessment = {
+      ...assessmentBase,
+      id: "assessment_compat_blocked_waiver",
+      inputDigest: `sha256:${"1".repeat(64)}`,
+      targetBindings: [],
+      state: "blocked" as const,
+      evidenceBacked: false,
+      gateResults: [
+        {
+          gateId: "execution",
+          state: "waived" as const,
+          evidenceIds: [],
+          reasonCode: "gate_waived" as const,
+          reason: "The execution gate was waived by the repository owner.",
+          evaluatedAt: NOW.toISOString()
+        },
+        {
+          gateId: `human_escalation:${escalation.id}`,
+          state: "unknown" as const,
+          evidenceIds: [escalation.id],
+          reasonCode: "human_acceptance_missing" as const,
+          reason: escalation.reason,
+          evaluatedAt: NOW.toISOString()
+        }
+      ],
+      assessedBy: "human" as const,
+      waiver
+    };
+
+    await expect(isolated.repo.appendCompletionAssessment({
+      assessment: blockedAssessment,
+      expectedCurrentAssessmentId: null
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    const [projection] = assessmentProjectionEnvelopes(isolated.sqlite);
+    expect(projection?.payload).toMatchObject({
+      conclusion: "blocked",
+      waiver: { ref: waiver.id },
+      gateResults: [
+        { gateId: "execution", state: "waived", reasonCode: "gate_waived" },
+        {
+          gateId: `human_escalation:${escalation.id}`,
+          state: "blocked",
+          reasonCode: "human_acceptance_missing"
+        }
+      ]
+    });
+    expect(projection?.payload.evidenceReceiptDigests).toHaveLength(2);
+    const evidenceTypes = (isolated.sqlite.prepare(`SELECT envelope_json AS envelopeJson
+      FROM control_plane_projection_outbox
+      WHERE receipt_kind = 'completion_evidence_observation'`).all() as Array<{
+        envelopeJson: string;
+      }>).map((row) => CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+        JSON.parse(row.envelopeJson)
+      ).payload.evidenceType).sort();
+    expect(evidenceTypes).toEqual(["completion_waiver", "human_escalation"]);
+    isolated.sqlite.close();
   });
 
   it("fails closed when terminal run or attempt evidence is resurrected or corrupted", async () => {
@@ -1751,7 +4312,7 @@ describe("governed callback ledger", () => {
     expect(sqlite.prepare("SELECT state FROM governed_callback_attempts").get()).toEqual({ state: "outcome_unknown" });
     expect(sqlite.prepare(
       "SELECT count(*) AS count FROM control_plane_projection_outbox"
-    ).get()).toEqual({ count: 3 });
+    ).get()).toEqual({ count: 6 });
     await expect(repo.reconcileGovernedCallbackOutcome({
       destinationId: "cloud_1",
       organizationId: "org_1",
@@ -1927,7 +4488,7 @@ describe("governed callback ledger", () => {
       now: new Date(NOW.getTime() + 2_000)
     })).rejects.toThrow("injected callback finalize failure");
     expect(sqlite.prepare("SELECT state FROM governed_callback_intents").get()).toEqual({ state: "sending" });
-    expect(sqlite.prepare("SELECT count(*) AS count FROM control_plane_projection_outbox").get()).toEqual({ count: 2 });
+    expect(sqlite.prepare("SELECT count(*) AS count FROM control_plane_projection_outbox").get()).toEqual({ count: 5 });
     sqlite.exec("DROP TRIGGER reject_callback_final_event");
     await expect(repo.finalizeGovernedCallbackAttempt({
       destinationId: "cloud_1",
@@ -2172,7 +4733,7 @@ describe("governed callback ledger", () => {
       expect(sqlite.prepare("SELECT state FROM governed_callback_intents").get())
         .toEqual({ state: outcome === "outcome_unknown" ? "attention" : outcome });
       expect(sqlite.prepare("SELECT count(*) AS count FROM control_plane_projection_outbox").get())
-        .toEqual({ count: outcome === "rejected" ? 4 : 3 });
+        .toEqual({ count: outcome === "rejected" ? 7 : 6 });
     }
   );
 

@@ -1,0 +1,290 @@
+{
+  "schemaVersion": 1,
+  "fixtureKind": "opentag.control.store-completion-chain/v1",
+  "chainDigest": "sha256:6d34107e6193b2447033082e6bdf3d0fd57f2b2e7d8c7cb360ea8e386149d0af",
+  "entries": [
+    {
+      "ordinal": 1,
+      "receiptId": "work_thread_receipt_82f05bcbb737138ce619e484fcf791f46276ff947fd26c131253dd22a55f235d",
+      "receiptKind": "work_thread_ref",
+      "dependsOnReceiptId": null,
+      "requiresLifecycleOperationId": "op_8287a1e11fc2bb8a9aa4572487b55e1d1cd26da3639013eb83f0688aeb103601",
+      "envelope": {
+        "identity": {
+          "namespace": "opentag.control.receipt/work-thread-ref/v1",
+          "parts": [
+            "org_1",
+            "run-callback-1",
+            "work_thread_1"
+          ]
+        },
+        "observedAt": "2026-08-10T00:00:00.000Z",
+        "operationId": "work_thread_operation_82f05bcbb737138ce619e484fcf791f46276ff947fd26c131253dd22a55f235d",
+        "organizationId": "org_1",
+        "payload": {
+          "createdAt": "2026-08-10T00:00:00.000Z",
+          "hostedAuthorityRef": {
+            "admissionPolicySnapshot": {
+              "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "receiptId": "policy_receipt_1",
+              "snapshotId": "policy_snapshot_1"
+            },
+            "attempt": {
+              "attemptId": "attempt_1",
+              "attemptNumber": 1,
+              "epoch": 1,
+              "fencingTokenDigest": "sha256:2d712d57c254c1eba40839bec5fdabdc237ea5dfaee0a35f7939925b0ca4e66d"
+            },
+            "authorityDigest": "sha256:7fd89ef34e4bcad67b8d42aa5b5a9aa7faf1447aa674cf226d2c28c3515ccc82",
+            "claimOperationId": "claim_operation_1"
+          },
+          "lineageKind": "hosted_source_identity",
+          "localCreationReceiptDigest": "sha256:8d423cd2422bdfa4391dc1053f0b400371bafebb0bdfa0f8203be51cdaa92218",
+          "localCreationReceiptId": "local_work_thread_creation_8d423cd2422bdfa4391dc1053f0b400371bafebb0bdfa0f8203be51cdaa92218",
+          "sourceIdentityDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "workThreadId": "work_thread_1"
+        },
+        "payloadDigest": "sha256:fb7d21d9e9cdd87745f98023aaacb01bb50cc0851ad7985a9e36115687b8c734",
+        "predecessorReceiptDigests": [
+          "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "sha256:7fd89ef34e4bcad67b8d42aa5b5a9aa7faf1447aa674cf226d2c28c3515ccc82"
+        ],
+        "producer": {
+          "credentialId": "credential_ref_1",
+          "id": "runner_1",
+          "kind": "local_opentag",
+          "registrationGeneration": 1
+        },
+        "protocolVersion": "1.0",
+        "receiptDigest": "sha256:816e82e87c3adee06afd5a93d4fe00800adfcea49d4ef3f6d902baa6a49cfda0",
+        "receiptId": "work_thread_receipt_82f05bcbb737138ce619e484fcf791f46276ff947fd26c131253dd22a55f235d",
+        "receiptKind": "work_thread_ref",
+        "requiredCapabilities": [
+          "relay.work-thread-ref.v1"
+        ],
+        "runId": "run-callback-1",
+        "schemaVersion": 1,
+        "workThreadId": "work_thread_1"
+      }
+    },
+    {
+      "ordinal": 2,
+      "receiptId": "completion_contract_receipt_d6b54e25f62a87f3ecaea407c9e6fbccec7946e1836989c4ab4ca935b86e611f",
+      "receiptKind": "completion_contract_ref",
+      "dependsOnReceiptId": "work_thread_receipt_82f05bcbb737138ce619e484fcf791f46276ff947fd26c131253dd22a55f235d",
+      "requiresLifecycleOperationId": "op_8287a1e11fc2bb8a9aa4572487b55e1d1cd26da3639013eb83f0688aeb103601",
+      "envelope": {
+        "identity": {
+          "namespace": "opentag.control.receipt/completion-contract-ref/v1",
+          "parts": [
+            "org_1",
+            "run-callback-1",
+            "work_thread_1",
+            "contract_1",
+            "1",
+            "1"
+          ]
+        },
+        "observedAt": "2026-08-10T00:00:00.000Z",
+        "operationId": "completion_contract_operation_d6b54e25f62a87f3ecaea407c9e6fbccec7946e1836989c4ab4ca935b86e611f",
+        "organizationId": "org_1",
+        "payload": {
+          "contentDigest": "sha256:75f0338d9be322ef06a01290ea368853dd57436da785015fb85e7bfd1f263309",
+          "contractId": "contract_1",
+          "createdAt": "2026-08-10T00:00:00.000Z",
+          "cycle": 1,
+          "mode": "governed",
+          "requiredGateIds": [
+            "checks"
+          ],
+          "resolvedTargetDigests": [],
+          "version": 1
+        },
+        "payloadDigest": "sha256:6f94bf6218d24ba7d3b51b464874c0bed2fd9068ec2b892170181394c661a6cb",
+        "predecessorReceiptDigests": [
+          "sha256:816e82e87c3adee06afd5a93d4fe00800adfcea49d4ef3f6d902baa6a49cfda0"
+        ],
+        "producer": {
+          "credentialId": "credential_ref_1",
+          "id": "runner_1",
+          "kind": "local_opentag",
+          "registrationGeneration": 1
+        },
+        "protocolVersion": "1.0",
+        "receiptDigest": "sha256:f0c74cebb3cdc814133ebe0ec7b35c9052a3e3e6905fa99935b6c6679d456beb",
+        "receiptId": "completion_contract_receipt_d6b54e25f62a87f3ecaea407c9e6fbccec7946e1836989c4ab4ca935b86e611f",
+        "receiptKind": "completion_contract_ref",
+        "requiredCapabilities": [
+          "relay.completion-contract-ref.v1"
+        ],
+        "runId": "run-callback-1",
+        "schemaVersion": 1,
+        "workThreadId": "work_thread_1"
+      }
+    },
+    {
+      "ordinal": 3,
+      "receiptId": "completion_evidence_receipt_24ac02f1c355631511ecdfab165851820699713da36785e0a5092facf51ddae4",
+      "receiptKind": "completion_evidence_observation",
+      "dependsOnReceiptId": "completion_contract_receipt_d6b54e25f62a87f3ecaea407c9e6fbccec7946e1836989c4ab4ca935b86e611f",
+      "requiresLifecycleOperationId": "op_8287a1e11fc2bb8a9aa4572487b55e1d1cd26da3639013eb83f0688aeb103601",
+      "envelope": {
+        "attempt": {
+          "attemptId": "attempt_1",
+          "attemptNumber": 1,
+          "epoch": 1,
+          "fencingTokenDigest": "sha256:2d712d57c254c1eba40839bec5fdabdc237ea5dfaee0a35f7939925b0ca4e66d"
+        },
+        "identity": {
+          "namespace": "opentag.control.receipt/completion-evidence-observation/v1",
+          "parts": [
+            "org_1",
+            "work_thread_1",
+            "run-callback-1",
+            "verification_evidence",
+            "evidence_1",
+            "sha256:fcd09e9dc760d66de17c2e58498ee2268c98ce6a165c22dbdb4d5f653d7c68df",
+            "sha256:f0c74cebb3cdc814133ebe0ec7b35c9052a3e3e6905fa99935b6c6679d456beb"
+          ]
+        },
+        "observedAt": "2026-08-10T00:00:00.000Z",
+        "operationId": "completion_evidence_operation_24ac02f1c355631511ecdfab165851820699713da36785e0a5092facf51ddae4",
+        "organizationId": "org_1",
+        "payload": {
+          "assurance": "verified",
+          "authorityDigest": "sha256:fcd09e9dc760d66de17c2e58498ee2268c98ce6a165c22dbdb4d5f653d7c68df",
+          "claim": {
+            "outcome": "passed",
+            "predicate": "result"
+          },
+          "evidenceId": "evidence_1",
+          "evidenceKind": "test",
+          "evidenceType": "verification_evidence",
+          "observedAt": "2026-08-10T00:00:00.000Z",
+          "provenancePayloadDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "receivedAt": "2026-08-10T00:00:00.000Z",
+          "subject": {
+            "provider": "github",
+            "resourceRef": "github:acme/demo:pull_request:1",
+            "resourceVersion": "abc123"
+          }
+        },
+        "payloadDigest": "sha256:7b76081d27ad44c79e15cf36ce7e1ed92fc0f9bbfaca7365f6d6e40349e6c27b",
+        "predecessorReceiptDigests": [
+          "sha256:be0acb36b508e4ce97784ae34ab4b8a79a274629605fc920330431250683a8c0",
+          "sha256:f0c74cebb3cdc814133ebe0ec7b35c9052a3e3e6905fa99935b6c6679d456beb"
+        ],
+        "producer": {
+          "credentialId": "credential_ref_1",
+          "id": "runner_1",
+          "kind": "local_opentag",
+          "registrationGeneration": 1
+        },
+        "protocolVersion": "1.0",
+        "receiptDigest": "sha256:b98e30a26d051da5a803b4332275f9591dfa51db21c35e1b2076300cc5840739",
+        "receiptId": "completion_evidence_receipt_24ac02f1c355631511ecdfab165851820699713da36785e0a5092facf51ddae4",
+        "receiptKind": "completion_evidence_observation",
+        "requiredCapabilities": [
+          "relay.completion-evidence.v1"
+        ],
+        "runId": "run-callback-1",
+        "schemaVersion": 1,
+        "workThreadId": "work_thread_1"
+      }
+    },
+    {
+      "ordinal": 4,
+      "receiptId": "assessment_receipt_e39f83938763e30e0314a3f9903ace594c5f0637f6536b8d505ac7cee2ff266a",
+      "receiptKind": "completion_assessment",
+      "dependsOnReceiptId": "completion_evidence_receipt_24ac02f1c355631511ecdfab165851820699713da36785e0a5092facf51ddae4",
+      "requiresLifecycleOperationId": "op_8287a1e11fc2bb8a9aa4572487b55e1d1cd26da3639013eb83f0688aeb103601",
+      "envelope": {
+        "attempt": {
+          "attemptId": "attempt_1",
+          "attemptNumber": 1,
+          "epoch": 1,
+          "fencingTokenDigest": "sha256:2d712d57c254c1eba40839bec5fdabdc237ea5dfaee0a35f7939925b0ca4e66d"
+        },
+        "identity": {
+          "namespace": "opentag.control.receipt/completion-assessment/v1",
+          "parts": [
+            "org_1",
+            "work_thread_1",
+            "assessment_1"
+          ]
+        },
+        "observedAt": "2026-08-10T00:00:00.000Z",
+        "operationId": "assessment_operation_e39f83938763e30e0314a3f9903ace594c5f0637f6536b8d505ac7cee2ff266a",
+        "organizationId": "org_1",
+        "payload": {
+          "admissionPolicySnapshot": {
+            "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "snapshotId": "policy_snapshot_1"
+          },
+          "assessedAt": "2026-08-10T00:00:00.000Z",
+          "assessedBy": "local_opentag",
+          "assessmentId": "assessment_1",
+          "assessmentInputDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "attempt": {
+            "attemptId": "attempt_1",
+            "attemptNumber": 1,
+            "epoch": 1,
+            "fencingTokenDigest": "sha256:2d712d57c254c1eba40839bec5fdabdc237ea5dfaee0a35f7939925b0ca4e66d"
+          },
+          "conclusion": "satisfied",
+          "contract": {
+            "contentDigest": "sha256:75f0338d9be322ef06a01290ea368853dd57436da785015fb85e7bfd1f263309",
+            "contractId": "contract_1",
+            "cycle": 1,
+            "mode": "governed",
+            "version": 1
+          },
+          "evidenceReceiptDigests": [
+            "sha256:b98e30a26d051da5a803b4332275f9591dfa51db21c35e1b2076300cc5840739"
+          ],
+          "executorResultReceiptRef": {
+            "operationId": "op_8287a1e11fc2bb8a9aa4572487b55e1d1cd26da3639013eb83f0688aeb103601",
+            "receiptId": "lifecycle_54411a92e71d13035dd14eb2253344b8c18b791dfb90e30e5ddf060dcaf2465d",
+            "requestDigest": "sha256:8287a1e11fc2bb8a9aa4572487b55e1d1cd26da3639013eb83f0688aeb103601",
+            "requestId": "req_6bfe17f0f5a94c4b25ec09ecbc70a902b6c03122b0236c4d16ada13f9e72e53f",
+            "resultDigest": "sha256:aae646ae1fe73bf6f6a9fca9599bde976ffadb944f817df065c5a7596f2afc34"
+          },
+          "gateResults": [
+            {
+              "evidenceReceiptDigests": [
+                "sha256:b98e30a26d051da5a803b4332275f9591dfa51db21c35e1b2076300cc5840739"
+              ],
+              "gateId": "checks",
+              "reasonCode": "verification_passed",
+              "state": "satisfied"
+            }
+          ],
+          "runId": "run-callback-1",
+          "workThreadId": "work_thread_1"
+        },
+        "payloadDigest": "sha256:02d9299a2ad8c4761d4afe9d96df31cc146bb1482f2462fc554513a2fdd79a10",
+        "predecessorReceiptDigests": [
+          "sha256:b98e30a26d051da5a803b4332275f9591dfa51db21c35e1b2076300cc5840739",
+          "sha256:be0acb36b508e4ce97784ae34ab4b8a79a274629605fc920330431250683a8c0",
+          "sha256:f0c74cebb3cdc814133ebe0ec7b35c9052a3e3e6905fa99935b6c6679d456beb"
+        ],
+        "producer": {
+          "credentialId": "credential_ref_1",
+          "id": "runner_1",
+          "kind": "local_opentag",
+          "registrationGeneration": 1
+        },
+        "protocolVersion": "1.0",
+        "receiptDigest": "sha256:abe64a960203607dc2bcfeb5c69504334a05a205da4e8c001b8ed2ddb953da65",
+        "receiptId": "assessment_receipt_e39f83938763e30e0314a3f9903ace594c5f0637f6536b8d505ac7cee2ff266a",
+        "receiptKind": "completion_assessment",
+        "requiredCapabilities": [
+          "relay.completion-assessment.v1"
+        ],
+        "runId": "run-callback-1",
+        "schemaVersion": 1,
+        "workThreadId": "work_thread_1"
+      }
+    }
+  ]
+}

@@ -990,7 +990,7 @@ describe("workstream batch admission", () => {
       })
     );
     await expect(failed.json()).resolves.toMatchObject({
-      completion: { completion: "unsatisfied" },
+      completion: { completion: "pending" },
       continuation: { outcome: "not_eligible", reasonCode: "trigger_not_enabled" }
     });
 

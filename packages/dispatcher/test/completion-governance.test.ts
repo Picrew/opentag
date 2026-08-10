@@ -392,9 +392,9 @@ describe("dispatcher completion governance", () => {
         missingGateIds: ["required_checks", "merge"],
         currentAssessment: {
           gateResults: [
+            { gateId: "merge", state: "missing" },
             { gateId: "pull_request", state: "passed" },
-            { gateId: "required_checks", state: "missing" },
-            { gateId: "merge", state: "missing" }
+            { gateId: "required_checks", state: "missing" }
           ]
         }
       }
@@ -524,7 +524,7 @@ describe("dispatcher completion governance", () => {
         sequence: 1,
         supersedesAssessmentId: currentAssessment.id,
         inputDigest: `sha256:${"9".repeat(64)}`,
-        assessedAt: "2026-07-21T10:06:00.000Z"
+        assessedAt: currentAssessment.assessedAt
       }
     })).resolves.toMatchObject({ outcome: "recorded" });
     sqlite.close();
@@ -625,9 +625,9 @@ describe("dispatcher completion governance", () => {
         missingGateIds: ["verified_pull_request", "observed_checks"],
         currentAssessment: {
           gateResults: [
+            { gateId: "observed_checks", state: "missing" },
             { gateId: "pull_request", state: "passed" },
-            { gateId: "verified_pull_request", state: "missing" },
-            { gateId: "observed_checks", state: "missing" }
+            { gateId: "verified_pull_request", state: "missing" }
           ]
         }
       }
@@ -1175,6 +1175,113 @@ describe("dispatcher completion governance", () => {
     ]);
   });
 
+  it("does not let an old-run reconciliation suppress the current verification escalation", async () => {
+    const setup = await startRun({
+      runId: "run_old_reconciliation_z",
+      completionPolicies: [strictPolicy],
+      completionNow: () => "2099-07-21T10:10:00.000Z"
+    });
+    await completeRun({
+      setup,
+      runId: "run_old_reconciliation_z",
+      conclusion: "success"
+    });
+    const oldReconciliation = await setup.app.request(
+      "/v1/completion-escalations/github",
+      jsonRequest({
+        operation: "open",
+        escalation: {
+          class: "reconciliation",
+          audience: "repo_owner",
+          subjectRef: "github:acme/demo:pull_request:7",
+          state: "open",
+          blocking: true,
+          summary: "Old run reconciliation remains unresolved.",
+          reason: "The previous run still needs provider reconciliation.",
+          dedupeKey: "github:acme/demo:pull_request:7:old-run-reconciliation"
+        },
+        correlation: {
+          provider: "github",
+          deliveryId: "delivery-old-run-reconciliation",
+          eventName: "pull_request",
+          repository: { owner: "acme", repo: "demo" },
+          pullRequestNumbers: [7]
+        }
+      })
+    );
+    expect(oldReconciliation.status).toBe(201);
+
+    expect((await setup.app.request("/v1/runs", jsonRequest({
+      runId: "run_current_verification_a",
+      event: githubIssueEvent({
+        id: "event_current_verification",
+        sourceEventId: "comment_current_verification"
+      })
+    }))).status).toBe(201);
+    setup.claim = await (await setup.app.request(
+      "/v1/runners/runner_1/claim",
+      { method: "POST" }
+    )).json() as { attemptId: string; fencingToken: string };
+    await completeRun({
+      setup,
+      runId: "run_current_verification_a",
+      conclusion: "success"
+    });
+
+    const observedAt = "2026-07-21T10:05:00.000Z";
+    expect((await setup.app.request(
+      "/v1/completion-evidence/github",
+      jsonRequest(githubSnapshot({
+        deliveryId: "delivery-current-verification-passed",
+        observedAt
+      }))
+    )).status).toBe(201);
+    const conflicting = await setup.app.request(
+      "/v1/completion-evidence/github",
+      jsonRequest(githubSnapshot({
+        deliveryId: "delivery-current-verification-conflict",
+        state: "open",
+        checks: { build: "failed", test: "passed" },
+        observedAt
+      }))
+    );
+    expect(conflicting.status).toBe(201);
+    await expect(conflicting.json()).resolves.toMatchObject({
+      completion: { completion: "blocked" }
+    });
+
+    const firstExplanation = await (await setup.app.request(
+      "/v1/runs/run_current_verification_a/completion"
+    )).json() as {
+      completion: {
+        openHumanEscalations: Array<{ id: string; runId?: string; class: string }>;
+      };
+    };
+    const verificationEscalations = firstExplanation.completion.openHumanEscalations
+      .filter((escalation) => escalation.class === "verification");
+    expect(verificationEscalations).toHaveLength(1);
+    expect(verificationEscalations[0]).toMatchObject({
+      runId: "run_current_verification_a"
+    });
+    expect(firstExplanation.completion.openHumanEscalations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        runId: "run_old_reconciliation_z",
+        class: "reconciliation"
+      })
+    ]));
+
+    const replayExplanation = await (await setup.app.request(
+      "/v1/runs/run_current_verification_a/completion"
+    )).json() as {
+      completion: {
+        openHumanEscalations: Array<{ id: string; runId?: string; class: string }>;
+      };
+    };
+    expect(replayExplanation.completion.openHumanEscalations
+      .filter((escalation) => escalation.class === "verification")
+      .map((escalation) => escalation.id)).toEqual([verificationEscalations[0]!.id]);
+  });
+
   it("fails closed when a status head SHA has no current WorkThread correlation", async () => {
     const setup = await startRun({ runId: "run_head_none", completionPolicies: [strictPolicy] });
     await completeRun({ setup, runId: "run_head_none", conclusion: "success" });
@@ -1284,7 +1391,7 @@ describe("dispatcher completion governance", () => {
     await expect(failed.json()).resolves.toMatchObject({
       completion: {
         execution: "failed",
-        completion: "unsatisfied",
+        completion: "pending",
         currentAssessment: { triggeredByRunId: "run_cycle_failure" }
       }
     });
@@ -1447,17 +1554,33 @@ describe("dispatcher completion governance", () => {
     const databasePath = temporaryDatabasePath();
     const setup = await startRun({ runId: "run_multi_pr_delivery", completionPolicies: [strictPolicy], databasePath });
     await completeRun({ setup, runId: "run_multi_pr_delivery", conclusion: "success", pullRequestNumber: 7 });
-    const snapshots = [7, 8].map((pullRequestNumber) => githubSnapshot({
-      deliveryId: "delivery-multi-pr",
-      eventName: "status",
-      pullRequestNumber
-    }));
+    const snapshots = [
+      githubSnapshot({
+        deliveryId: "delivery-multi-pr",
+        eventName: "status",
+        pullRequestNumber: 7,
+        observedAt: "2026-07-21T10:05:00Z"
+      }),
+      githubSnapshot({
+        deliveryId: "delivery-multi-pr",
+        eventName: "status",
+        pullRequestNumber: 8,
+        observedAt: "2026-07-21T10:05:00.0009Z"
+      })
+    ];
     const first = await setup.app.request("/v1/completion-evidence/github/batch", jsonRequest({ snapshots }));
     expect(first.status).toBe(201);
     await expect(first.json()).resolves.toMatchObject({ outcome: "recorded", workThreadIds: [expect.any(String)] });
     const sqlite = new Database(databasePath);
     expect((sqlite.prepare("SELECT COUNT(*) AS count FROM verification_evidence WHERE delivery_id = ?")
       .get("delivery-multi-pr") as { count: number }).count).toBe(9);
+    expect(sqlite.prepare(`
+      SELECT observed_at AS observedAt
+      FROM verification_evidence
+      WHERE delivery_id = ? AND subject_version = 'snapshot-set-v1'
+    `).get("delivery-multi-pr")).toEqual({
+      observedAt: "2026-07-21T10:05:00.0009Z"
+    });
 
     const replay = await setup.app.request("/v1/completion-evidence/github/batch", jsonRequest({ snapshots: [...snapshots].reverse() }));
     expect(replay.status).toBe(200);
@@ -1469,6 +1592,39 @@ describe("dispatcher completion governance", () => {
     expect((await setup.app.request("/v1/completion-evidence/github/batch", jsonRequest({ snapshots: [snapshots[0]] }))).status).toBe(409);
     expect((sqlite.prepare("SELECT COUNT(*) AS count FROM verification_evidence WHERE delivery_id = ?")
       .get("delivery-multi-pr") as { count: number }).count).toBe(9);
+
+    const sameInstantSnapshots = [
+      githubSnapshot({
+        deliveryId: "delivery-multi-pr-same-instant",
+        eventName: "status",
+        pullRequestNumber: 7,
+        observedAt: "2026-07-21T10:06:00.1Z"
+      }),
+      githubSnapshot({
+        deliveryId: "delivery-multi-pr-same-instant",
+        eventName: "status",
+        pullRequestNumber: 8,
+        observedAt: "2026-07-21T10:06:00.100Z"
+      })
+    ];
+    const sameInstant = await setup.app.request(
+      "/v1/completion-evidence/github/batch",
+      jsonRequest({ snapshots: sameInstantSnapshots })
+    );
+    expect(sameInstant.status).toBe(201);
+    expect(sqlite.prepare(`
+      SELECT observed_at AS observedAt
+      FROM verification_evidence
+      WHERE delivery_id = ? AND subject_version = 'snapshot-set-v1'
+    `).get("delivery-multi-pr-same-instant")).toEqual({
+      observedAt: "2026-07-21T10:06:00.100Z"
+    });
+    const sameInstantReplay = await setup.app.request(
+      "/v1/completion-evidence/github/batch",
+      jsonRequest({ snapshots: [...sameInstantSnapshots].reverse() })
+    );
+    expect(sameInstantReplay.status).toBe(200);
+    await expect(sameInstantReplay.json()).resolves.toMatchObject({ outcome: "duplicate" });
     sqlite.close();
   });
 
@@ -1499,7 +1655,7 @@ describe("dispatcher completion governance", () => {
     const setup = await startRun({
       runId: "run_waived",
       completionPolicies: [strictPolicy],
-      completionNow: () => "2026-07-21T10:11:00.000Z"
+      completionNow: () => "2099-07-21T10:10:00.050Z"
     });
     await completeRun({ setup, runId: "run_waived", conclusion: "success" });
     const body = {
@@ -1508,11 +1664,12 @@ describe("dispatcher completion governance", () => {
       scope: "selected_gates",
       policyScope: "work_context_owner_container",
       gateIds: ["required_checks", "merge"],
-      waivedAt: "2026-07-21T10:10:00.000Z",
-      expiresAt: "2026-07-22T10:10:00.000Z"
+      waivedAt: "2099-07-21T10:10:00Z",
+      expiresAt: "2099-07-21T10:10:00.100Z"
     };
     const first = await setup.app.request("/v1/runs/run_waived/completion/waivers", jsonRequest(body));
-    expect(first.status).toBe(201);
+    const firstError = first.status === 201 ? undefined : await first.clone().json();
+    expect(first.status, JSON.stringify(firstError)).toBe(201);
     await expect(first.json()).resolves.toMatchObject({
       outcome: "recorded",
       completion: {
@@ -1536,7 +1693,7 @@ describe("dispatcher completion governance", () => {
     const invalid = await setup.app.request("/v1/runs/run_waived/completion/waivers", jsonRequest({
       ...body,
       gateIds: ["not-a-current-gate"],
-      waivedAt: "2026-07-21T10:11:00.000Z"
+      waivedAt: "2099-07-21T10:11:00.000Z"
     }));
     expect(invalid.status).toBe(400);
     await expect(invalid.json()).resolves.toMatchObject({ error: "invalid_completion_waiver" });
@@ -1583,7 +1740,7 @@ describe("dispatcher completion governance", () => {
   });
 
   it("projects a read-time waiver expiry exactly once and keeps replay reads quiet", async () => {
-    let now = "2026-07-21T10:00:00.000Z";
+    let now = "2099-07-21T10:00:00.000Z";
     const setup = await startRun({
       runId: "run_waiver_expiry",
       completionPolicies: [strictPolicy],
@@ -1596,12 +1753,13 @@ describe("dispatcher completion governance", () => {
       scope: "selected_gates",
       policyScope: "work_context_owner_container",
       gateIds: ["required_checks", "merge"],
-      waivedAt: "2026-07-21T10:00:00.000Z",
-      expiresAt: "2026-07-21T10:05:00.000Z"
+      waivedAt: "2099-07-21T10:00:00.000Z",
+      expiresAt: "2099-07-21T10:05:00.000Z"
     }));
-    expect(waiver.status).toBe(201);
+    const waiverError = waiver.status === 201 ? undefined : await waiver.clone().json();
+    expect(waiver.status, JSON.stringify(waiverError)).toBe(201);
     const callbacksBeforeExpiry = setup.delivered.length;
-    now = "2026-07-21T10:06:00.000Z";
+    now = "2099-07-21T10:06:00.000Z";
 
     const firstRead = await setup.app.request("/v1/runs/run_waiver_expiry/completion");
     expect(firstRead.status).toBe(200);
@@ -1713,6 +1871,43 @@ describe("dispatcher completion governance", () => {
         completion: "unsatisfied",
         targetBindings: [{ resourceVersion: HEAD_CURRENT }],
         failedGateIds: ["required_checks", "merge"]
+      }
+    });
+  });
+
+  it("selects the actually latest pull-request head across RFC3339 fractional precision", async () => {
+    const setup = await startRun({
+      runId: "run_fractional_head",
+      completionPolicies: [strictPolicy]
+    });
+    await completeRun({
+      setup,
+      runId: "run_fractional_head",
+      conclusion: "success"
+    });
+    const currentHead = await setup.app.request(
+      "/v1/completion-evidence/github",
+      jsonRequest(githubSnapshot({
+        deliveryId: "delivery-fractional-current",
+        headSha: HEAD_CURRENT,
+        observedAt: "2026-07-21T10:05:00Z"
+      }))
+    );
+    expect(currentHead.status).toBe(201);
+
+    const actuallyLaterHead = await setup.app.request(
+      "/v1/completion-evidence/github",
+      jsonRequest(githubSnapshot({
+        deliveryId: "delivery-fractional-later",
+        headSha: HEAD_OLD,
+        observedAt: "2026-07-21T10:05:00.0009Z"
+      }))
+    );
+    expect(actuallyLaterHead.status).toBe(201);
+    await expect(actuallyLaterHead.json()).resolves.toMatchObject({
+      completion: {
+        completion: "satisfied",
+        targetBindings: [{ resourceVersion: HEAD_OLD }]
       }
     });
   });

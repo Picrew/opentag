@@ -155,6 +155,7 @@
           "contractId": "contract-1",
           "version": 3,
           "cycle": 2,
+          "mode": "governed",
           "contentDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
         },
         "admissionPolicySnapshot": {
@@ -200,15 +201,15 @@
         ],
         "conclusion": "waived",
         "assessedAt": "2026-08-09T01:03:04.000Z",
-        "assessedBy": "local-opentag-1",
+        "assessedBy": "human",
         "waiver": {
           "ref": "waiver-1",
           "actorRef": "user-1",
           "reasonDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
         }
       },
-      "payloadDigest": "sha256:2502ad4b1c8fd7da644467b7d672ee65d41b4b00d642b3aaf269b7b5a80b3952",
-      "receiptDigest": "sha256:8278163acc2c1f348506d18155630159d48375f7c7fe2150084a5c922c80a072"
+      "payloadDigest": "sha256:0a7e7ec638fe182857ad6aeda07fe47506e20a1d872bb021c590c021ced5c528",
+      "receiptDigest": "sha256:98ba2f21dc611ea8a3f7596caa3155fabff43a1391a08a0dc5f793f1daad6e5b"
     },
     "callbackIntentObservation": {
       "schemaVersion": 1,

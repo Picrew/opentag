@@ -26,10 +26,14 @@ import {
   computeHostedLifecycleReceiptIdV1,
   computeHostedClaimFencingTokenDigestV1,
   CompletionAssessmentReceiptEnvelopeV1Schema,
+  CompletionEvidenceObservationPayloadV1Schema,
+  CompletionEvidenceObservationReceiptEnvelopeV1Schema,
   CompletionContractRefReceiptEnvelopeV1Schema,
   CallbackAttemptObservationReceiptEnvelopeV1Schema,
   CallbackIntentObservationReceiptEnvelopeV1Schema,
   CallbackProviderObservationReceiptEnvelopeV1Schema,
+  compareCompletionGateIds,
+  compareRfc3339Timestamps,
   ContextPacketSchema,
   conversationKeyFromEvent,
   conversationKeysFromEvent,
@@ -41,6 +45,9 @@ import {
   ReassessmentObligationSchema,
   ReassessmentObligationSourceKindSchema,
   ReassessmentObligationStateSchema,
+  reduceCompletionGateStates,
+  runResultArtifactId,
+  runResultCreatedPullRequestArtifactId,
   PolicyRuleSchema,
   PolicySnapshotProvenanceSchema,
   ProposalLineageSchema,
@@ -102,6 +109,8 @@ import {
   type CompletionContract,
   type CompletionWaiver,
   type CompletionAssessmentReceiptEnvelopeV1,
+  type CompletionEvidenceObservationPayloadV1,
+  type CompletionEvidenceObservationReceiptEnvelopeV1,
   type CompletionContractRefReceiptEnvelopeV1,
   type FrozenRoutingPolicy,
   type FactoryRecipeSnapshotInput,
@@ -147,7 +156,8 @@ import {
 import {
   deriveAcceptedProgressAttribution,
   evaluateRouting,
-  type CompletionArtifact
+  type CompletionArtifact,
+  type CompletionEvidenceFact
 } from "@opentag/governance";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, notExists, or, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
@@ -200,6 +210,7 @@ export type ControlPlaneProjectionEnvelope =
   | RunnerReadinessReceiptEnvelopeV1
   | WorkThreadRefReceiptEnvelopeV1
   | CompletionContractRefReceiptEnvelopeV1
+  | CompletionEvidenceObservationReceiptEnvelopeV1
   | CompletionAssessmentReceiptEnvelopeV1
   | typeof CallbackIntentObservationReceiptEnvelopeV1Schema._output
   | typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output
@@ -1074,6 +1085,7 @@ const projectionEnvelopeSchemas = {
   runner_readiness: RunnerReadinessReceiptEnvelopeV1Schema,
   work_thread_ref: WorkThreadRefReceiptEnvelopeV1Schema,
   completion_contract_ref: CompletionContractRefReceiptEnvelopeV1Schema,
+  completion_evidence_observation: CompletionEvidenceObservationReceiptEnvelopeV1Schema,
   completion_assessment: CompletionAssessmentReceiptEnvelopeV1Schema,
   callback_intent_observation: CallbackIntentObservationReceiptEnvelopeV1Schema,
   callback_attempt_observation: CallbackAttemptObservationReceiptEnvelopeV1Schema,
@@ -1086,6 +1098,19 @@ const PROJECTION_FORBIDDEN_FIELD = /^(?:uri|url|body|headers?|comment|credential
 function isProjectionTimestamp(value: string): boolean {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+
+function isRfc3339Instant(value: string): boolean {
+  try {
+    return compareRfc3339Timestamps(value, value) === 0;
+  } catch {
+    return false;
+  }
+}
+
+function toControlTimestamp(value: string): string {
+  if (!isRfc3339Instant(value)) throw new Error("projection_timestamp_invalid");
+  return new Date(value).toISOString();
 }
 
 function assertProjectionMutableReference(value: string): void {
@@ -1873,6 +1898,158 @@ function stableActionJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const allowed = new Set(keys);
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function completionFactFromStoredEvidence(input: {
+  evidence: VerificationEvidence;
+  workThreadId: string;
+}): CompletionEvidenceFact | null {
+  const metadata = input.evidence.metadata;
+  const direct = metadata?.["completionFact"];
+  const template = metadata?.["completionFactTemplate"];
+  if (direct !== undefined && template !== undefined) return null;
+  const candidate = direct ?? (isPlainRecord(template)
+    ? { ...template, workThreadId: input.workThreadId }
+    : undefined);
+  if (!isPlainRecord(candidate) || !hasOnlyKeys(candidate, [
+    "id",
+    "workThreadId",
+    "cycle",
+    "kind",
+    "assurance",
+    "subject",
+    "claim",
+    "provenance",
+    "observedAt",
+    "receivedAt"
+  ])) return null;
+  const subject = candidate["subject"];
+  const claim = candidate["claim"];
+  const provenance = candidate["provenance"];
+  if (
+    typeof candidate["id"] !== "string"
+    || typeof candidate["workThreadId"] !== "string"
+    || !Number.isSafeInteger(candidate["cycle"])
+    || (candidate["cycle"] as number) <= 0
+    || typeof candidate["kind"] !== "string"
+    || !["verified", "reported", "unverifiable"].includes(
+      candidate["assurance"] as string
+    )
+    || typeof candidate["observedAt"] !== "string"
+    || typeof candidate["receivedAt"] !== "string"
+    || !isPlainRecord(subject)
+    || !hasOnlyKeys(subject, ["provider", "resourceRef", "resourceVersion"])
+    || typeof subject["provider"] !== "string"
+    || typeof subject["resourceRef"] !== "string"
+    || typeof subject["resourceVersion"] !== "string"
+    || !isPlainRecord(claim)
+    || !hasOnlyKeys(claim, ["predicate", "outcome", "observations"])
+    || typeof claim["predicate"] !== "string"
+    || typeof claim["outcome"] !== "string"
+    || !isPlainRecord(provenance)
+    || !hasOnlyKeys(provenance, [
+      "adapter",
+      "adapterVersion",
+      "payloadDigest",
+      "sourceEventId",
+      "providerDeliveryId"
+    ])
+    || typeof provenance["adapter"] !== "string"
+    || typeof provenance["adapterVersion"] !== "string"
+    || typeof provenance["payloadDigest"] !== "string"
+    || (provenance["sourceEventId"] !== undefined
+      && typeof provenance["sourceEventId"] !== "string")
+    || (provenance["providerDeliveryId"] !== undefined
+      && typeof provenance["providerDeliveryId"] !== "string")
+  ) return null;
+  const observations = claim["observations"];
+  if (
+    observations !== undefined
+    && (!isPlainRecord(observations)
+      || Object.values(observations).some((value) => typeof value !== "string"))
+  ) return null;
+  return {
+    id: candidate["id"],
+    workThreadId: candidate["workThreadId"],
+    cycle: candidate["cycle"] as number,
+    kind: candidate["kind"],
+    assurance: candidate["assurance"] as CompletionEvidenceFact["assurance"],
+    subject: {
+      provider: subject["provider"],
+      resourceRef: subject["resourceRef"],
+      resourceVersion: subject["resourceVersion"]
+    },
+    claim: {
+      predicate: claim["predicate"],
+      outcome: claim["outcome"],
+      ...(observations
+        ? { observations: observations as Record<string, string> }
+        : {})
+    },
+    provenance: {
+      adapter: provenance["adapter"],
+      adapterVersion: provenance["adapterVersion"],
+      payloadDigest: provenance["payloadDigest"],
+      ...(typeof provenance["sourceEventId"] === "string"
+        ? { sourceEventId: provenance["sourceEventId"] }
+        : {}),
+      ...(typeof provenance["providerDeliveryId"] === "string"
+        ? { providerDeliveryId: provenance["providerDeliveryId"] }
+        : {})
+    },
+    observedAt: candidate["observedAt"],
+    receivedAt: candidate["receivedAt"]
+  };
+}
+
+function storedEvidenceClaimsCompletionFact(
+  evidence: VerificationEvidence
+): boolean {
+  const metadata = evidence.metadata;
+  return metadata !== undefined
+    && (
+      Object.prototype.hasOwnProperty.call(metadata, "completionFact")
+      || Object.prototype.hasOwnProperty.call(metadata, "completionFactTemplate")
+    );
+}
+
+function completionAssuranceAccepted(
+  actual: CompletionEvidenceFact["assurance"],
+  minimum: "verified" | "reported"
+): boolean {
+  return minimum === "verified"
+    ? actual === "verified"
+    : actual === "verified" || actual === "reported";
+}
+
+function githubPullRequestResourceRef(input: {
+  uri: string;
+  owner: string;
+  repo: string;
+}): string | null {
+  let url: URL;
+  try {
+    url = new URL(input.uri);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com") return null;
+  const match = /^\/([^/]+)\/([^/]+)\/pull\/([1-9][0-9]*)\/?$/u.exec(url.pathname);
+  if (
+    !match
+    || match[1]!.toLowerCase() !== input.owner.toLowerCase()
+    || match[2]!.toLowerCase() !== input.repo.toLowerCase()
+  ) return null;
+  return `github:${input.owner}/${input.repo}:pull_request:${match[3]}`;
+}
+
 function isAutomaticWorkstreamContinuationActionJson(value: string | null): boolean {
   if (!value) return false;
   try {
@@ -1921,8 +2098,9 @@ function currentAssessmentIsAccepted(row: CurrentAssessmentAuthorityRow, evaluat
       || row.waiverContractId !== assessment.contractId
       || row.waiverContractVersion !== assessment.contractVersion
       || row.waiverCycle !== assessment.cycle
-      || waiver.waivedAt > evaluatedAt
-      || (waiver.expiresAt !== undefined && waiver.expiresAt <= evaluatedAt)
+      || compareRfc3339Timestamps(waiver.waivedAt, evaluatedAt) > 0
+      || (waiver.expiresAt !== undefined
+        && compareRfc3339Timestamps(waiver.expiresAt, evaluatedAt) <= 0)
       || (waiver.runId !== undefined && waiver.runId !== assessment.triggeredByRunId)
     ) {
       return false;
@@ -3749,7 +3927,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const artifacts = artifactsByWorkThread.get(row.workThreadId) ?? [];
       if (parsedResult.data.createdPullRequestUrl) {
         artifacts.push({
-          id: `${row.id}:created-pull-request`,
+          id: runResultCreatedPullRequestArtifactId(row.id),
           kind: "pull_request",
           sourceRunId: row.id,
           uri: parsedResult.data.createdPullRequestUrl,
@@ -3758,7 +3936,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       }
       for (const [index, artifact] of (parsedResult.data.artifacts ?? []).entries()) {
         artifacts.push({
-          id: artifact.id ?? `${row.id}:artifact:${index + 1}`,
+          id: artifact.id ?? runResultArtifactId(row.id, index),
           kind: artifact.kind ?? artifact.type ?? "custom",
           sourceRunId: row.id,
           ...(artifact.uri ? { uri: artifact.uri } : {}),
@@ -4077,6 +4255,1633 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     )).limit(1).get();
     if (!created) throw new Error("control_plane_projection_outbox_insert_lost");
     return { outcome: "created", entry: projectionOutboxEntryFromRow(created) };
+  }
+
+  function ensureCompletionAssessmentProjectionTx(
+    tx: ProjectionTransaction,
+    input: { workThreadId: string; runId: string; assessmentId: string }
+  ): void {
+    const importedRuns = tx.select().from(hostedRunImports)
+      .where(eq(hostedRunImports.runId, input.runId)).all();
+    if (importedRuns.length === 0) return;
+    if (importedRuns.length !== 1) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const importedRun = importedRuns[0]!;
+    if (importedRun.workThreadId !== input.workThreadId) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const thread = tx.select().from(workThreads).where(and(
+      eq(workThreads.id, input.workThreadId),
+      eq(workThreads.id, importedRun.workThreadId)
+    )).limit(1).get();
+    if (!thread?.currentAssessmentId) return;
+    const currentAssessmentRow = tx.select().from(completionAssessments).where(and(
+      eq(completionAssessments.id, thread.currentAssessmentId),
+      eq(completionAssessments.workThreadId, input.workThreadId)
+    )).limit(1).get();
+    if (!currentAssessmentRow) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const currentAssessment = CompletionAssessmentSchema.parse(
+      JSON.parse(currentAssessmentRow.assessmentJson)
+    );
+    if (
+      currentAssessmentRow.assessmentJson !== JSON.stringify(currentAssessment)
+      || currentAssessmentRow.id !== currentAssessment.id
+      || currentAssessmentRow.workThreadId !== currentAssessment.workThreadId
+      || currentAssessmentRow.contractId !== currentAssessment.contractId
+      || currentAssessmentRow.contractVersion !== currentAssessment.contractVersion
+      || currentAssessmentRow.cycle !== currentAssessment.cycle
+      || currentAssessmentRow.sequence !== currentAssessment.sequence
+      || currentAssessmentRow.supersedesAssessmentId
+        !== (currentAssessment.supersedesAssessmentId ?? null)
+      || currentAssessmentRow.inputDigest !== currentAssessment.inputDigest
+      || currentAssessmentRow.state !== currentAssessment.state
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+    const assessmentRow = tx.select().from(completionAssessments).where(and(
+      eq(completionAssessments.id, input.assessmentId),
+      eq(completionAssessments.workThreadId, input.workThreadId)
+    )).limit(1).get();
+    if (!assessmentRow) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const assessment = CompletionAssessmentSchema.parse(
+      JSON.parse(assessmentRow.assessmentJson)
+    );
+    if (
+      assessmentRow.assessmentJson !== JSON.stringify(assessment)
+      || assessmentRow.id !== assessment.id
+      || assessmentRow.workThreadId !== assessment.workThreadId
+      || assessmentRow.contractId !== assessment.contractId
+      || assessmentRow.contractVersion !== assessment.contractVersion
+      || assessmentRow.cycle !== assessment.cycle
+      || assessmentRow.sequence !== assessment.sequence
+      || assessmentRow.supersedesAssessmentId !== (assessment.supersedesAssessmentId ?? null)
+      || assessmentRow.inputDigest !== assessment.inputDigest
+      || assessmentRow.state !== assessment.state
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+    if (assessment.triggeredByRunId !== input.runId) return;
+
+    const importedAttempts = tx.select().from(hostedAttemptImports).where(and(
+      eq(hostedAttemptImports.attemptId, importedRun.attemptId),
+      eq(hostedAttemptImports.runId, importedRun.runId),
+      eq(hostedAttemptImports.claimOperationId, importedRun.claimOperationId),
+      eq(hostedAttemptImports.fencingTokenDigest, importedRun.fencingTokenDigest)
+    )).all();
+    const claims = tx.select().from(hostedClaimOperations).where(and(
+      eq(hostedClaimOperations.operationId, importedRun.claimOperationId),
+      eq(hostedClaimOperations.runId, importedRun.runId),
+      eq(hostedClaimOperations.attemptId, importedRun.attemptId),
+      eq(hostedClaimOperations.fencingTokenDigest, importedRun.fencingTokenDigest)
+    )).all();
+    if (importedAttempts.length !== 1 || claims.length !== 1) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const importedAttempt = importedAttempts[0]!;
+    const claim = claims[0]!;
+    let authority: HostedClaimV1["authority"];
+    try {
+      authority = hostedClaimAuthoritySnapshotFromJson(importedRun.authorityJson);
+    } catch {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    if (
+      importedRun.workThreadId !== input.workThreadId
+      || importedRun.authorityJson !== importedAttempt.authorityJson
+      || importedRun.authorityJson !== claim.authorityJson
+      || importedRun.authorityDigest !== importedAttempt.authorityDigest
+      || importedRun.authorityDigest !== claim.authorityDigest
+      || importedRun.claimDigest !== importedAttempt.claimDigest
+      || importedRun.claimDigest !== claim.claimDigest
+      || canonicalSha256Json(authority) !== importedRun.authorityDigest
+      || authority.organizationId !== claim.organizationId
+      || authority.runnerId !== claim.runnerId
+      || authority.runId !== importedRun.runId
+      || authority.credentialId !== claim.credentialId
+      || authority.attemptId !== importedRun.attemptId
+      || authority.attemptNumber !== importedAttempt.attemptNumber
+      || authority.attemptId !== claim.attemptId
+      || authority.attemptNumber !== claim.attemptNumber
+      || authority.epoch !== importedAttempt.attemptNumber
+      || authority.fencingTokenDigest !== importedRun.fencingTokenDigest
+      || claim.state !== "claimed"
+      || claim.executionStartedAt === null
+      || claim.terminalReasonCode !== null
+      || claim.destinationId.length === 0
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+
+    const completionRows = tx.select().from(hostedLifecycleOperations).where(and(
+      eq(hostedLifecycleOperations.destinationId, claim.destinationId),
+      eq(hostedLifecycleOperations.organizationId, authority.organizationId),
+      eq(hostedLifecycleOperations.action, "complete"),
+      eq(hostedLifecycleOperations.runId, input.runId)
+    )).all();
+    if (completionRows.length === 0) return;
+    if (completionRows.length !== 1) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const completion = completionRows[0]!;
+    if (completion.state !== "acknowledged") return;
+    if (
+      completion.runnerId !== authority.runnerId
+      || completion.credentialId !== authority.credentialId
+      || completion.attemptId !== authority.attemptId
+      || completion.attemptNumber !== authority.attemptNumber
+      || completion.fencingTokenDigest !== authority.fencingTokenDigest
+      || !validAcknowledgedLifecycleDependency(completion)
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+
+    const contractRow = tx.select().from(completionContracts).where(and(
+      eq(completionContracts.id, assessment.contractId),
+      eq(completionContracts.version, assessment.contractVersion),
+      eq(completionContracts.workThreadId, assessment.workThreadId),
+      eq(completionContracts.cycle, assessment.cycle)
+    )).limit(1).get();
+    if (!contractRow) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const contract = CompletionContractSchema.parse(JSON.parse(contractRow.contractJson));
+    if (
+      contractRow.contractJson !== JSON.stringify(contract)
+      || contractRow.contentDigest !== sha256Json(contract)
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+    const contractGateIds = new Set(contract.gates.map((gate) => gate.id));
+    const assessmentGateIds = new Set(assessment.gateResults.map((gate) => gate.gateId));
+    if (
+      [...contractGateIds].some((gateId) => !assessmentGateIds.has(gateId))
+      || [...assessmentGateIds].some((gateId) =>
+        !contractGateIds.has(gateId) && !/^human_escalation:/u.test(gateId)
+      )
+    ) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+
+    const completionRequest = HostedCompleteRequestV1Schema.parse(
+      JSON.parse(completion.requestJson)
+    );
+    const completionReceipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(
+      JSON.parse(completion.receiptJson!)
+    );
+    const run = tx.select().from(runs).where(and(
+      eq(runs.id, input.runId),
+      eq(runs.workThreadId, input.workThreadId)
+    )).limit(1).get();
+    const attempt = tx.select().from(attempts).where(and(
+      eq(attempts.id, authority.attemptId),
+      eq(attempts.runId, input.runId),
+      eq(attempts.number, authority.attemptNumber),
+      eq(attempts.runnerId, authority.runnerId)
+    )).limit(1).get();
+    const runResult = run?.resultJson
+      ? OpenTagRunResultSchema.parse(JSON.parse(run.resultJson))
+      : undefined;
+    const attemptResult = attempt?.resultJson
+      ? OpenTagRunResultSchema.parse(JSON.parse(attempt.resultJson))
+      : undefined;
+    const expectedRunStatus = runResult?.conclusion === "success"
+      ? "succeeded"
+      : runResult?.conclusion === "failure"
+        ? "failed"
+        : runResult?.conclusion === "needs_human"
+          ? "needs_approval"
+          : runResult?.conclusion;
+    const expectedAttemptStatus = runResult?.conclusion === "success"
+      ? "succeeded"
+      : runResult?.conclusion === "failure"
+        ? "failed"
+        : runResult?.conclusion === "needs_human"
+          ? "needs_human"
+          : runResult?.conclusion;
+    if (
+      !run?.resultJson || !attempt?.resultJson
+      || `sha256:${createHash("sha256").update(attempt.fencingToken).digest("hex")}`
+        !== authority.fencingTokenDigest
+      || !releasedTerminalAttemptMatchesRun(attempt, run)
+      || run.status !== expectedRunStatus
+      || attempt.status !== expectedAttemptStatus
+      || completionRequest.conclusion !== runResult?.conclusion
+      || canonicalJsonStringify(runResult) !== canonicalJsonStringify(attemptResult)
+      || canonicalSha256Json(runResult) !== completionRequest.resultDigest
+      || canonicalSha256Json(attemptResult) !== completionRequest.resultDigest
+      || completionReceipt.receiptId !== completion.receiptId
+      || completionReceipt.receiptDigest !== completion.receiptDigest
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+
+    const projectionAttempt = {
+      attemptId: authority.attemptId,
+      attemptNumber: authority.attemptNumber,
+      epoch: authority.epoch,
+      fencingTokenDigest: authority.fencingTokenDigest
+    };
+    const projectionProducer = {
+      kind: "local_opentag" as const,
+      id: authority.runnerId,
+      credentialId: authority.credentialId,
+      registrationGeneration: authority.registrationGeneration
+    };
+    const evidenceIdentity = (
+      payload: CompletionEvidenceObservationPayloadV1,
+      contractReceiptDigest: string
+    ) => ({
+      namespace: "opentag.control.receipt/completion-evidence-observation/v1" as const,
+      parts: [
+        authority.organizationId,
+        input.workThreadId,
+        input.runId,
+        payload.evidenceType,
+        payload.evidenceId,
+        payload.authorityDigest,
+        contractReceiptDigest
+      ]
+    });
+    const evidenceSelectionKey = (
+      payload: CompletionEvidenceObservationPayloadV1
+    ): string => canonicalSha256Json({
+      purpose: "opentag-completion-evidence-selection-v1",
+      organizationId: authority.organizationId,
+      workThreadId: input.workThreadId,
+      runId: input.runId,
+      evidenceType: payload.evidenceType,
+      evidenceId: payload.evidenceId,
+      authorityDigest: payload.authorityDigest
+    });
+    const evidenceReceiptId = (
+      payload: CompletionEvidenceObservationPayloadV1,
+      contractReceiptDigest: string
+    ): string => {
+      const identity = evidenceIdentity(payload, contractReceiptDigest);
+      const projectionKey = canonicalSha256Json({
+        purpose: "opentag-completion-evidence-projection-v1",
+        identity
+      }).slice("sha256:".length);
+      return `completion_evidence_receipt_${projectionKey}`;
+    };
+    const evidenceEnvelope = (
+      payload: CompletionEvidenceObservationPayloadV1,
+      contractReceiptDigest: string,
+      predecessorReceiptDigests: string[]
+    ): CompletionEvidenceObservationReceiptEnvelopeV1 => {
+      const identity = evidenceIdentity(payload, contractReceiptDigest);
+      const receiptId = evidenceReceiptId(payload, contractReceiptDigest);
+      const projectionKey = receiptId.slice("completion_evidence_receipt_".length);
+      const observedAt = payload.evidenceType === "completion_waiver"
+        ? payload.waivedAt
+        : payload.observedAt;
+      const base = {
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        receiptKind: "completion_evidence_observation" as const,
+        receiptId,
+        organizationId: authority.organizationId,
+        operationId: `completion_evidence_operation_${projectionKey}`,
+        requiredCapabilities: ["relay.completion-evidence.v1" as const],
+        producer: projectionProducer,
+        identity,
+        predecessorReceiptDigests: [...new Set(predecessorReceiptDigests)].sort(),
+        observedAt,
+        runId: input.runId,
+        workThreadId: input.workThreadId,
+        attempt: projectionAttempt,
+        payload,
+        payloadDigest: canonicalSha256Json(payload)
+      };
+      return CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse({
+        ...base,
+        receiptDigest: canonicalSha256Json(base)
+      });
+    };
+    const verificationById = new Map<string, {
+      fact: CompletionEvidenceFact;
+      payload: CompletionEvidenceObservationPayloadV1;
+    }>();
+    for (const row of tx.select().from(verificationEvidenceRecords).where(
+      eq(verificationEvidenceRecords.workThreadId, input.workThreadId)
+    ).all()) {
+      const evidence = VerificationEvidenceSchema.parse(JSON.parse(row.evidenceJson));
+      if (!storedEvidenceClaimsCompletionFact(evidence)) continue;
+      const fact = completionFactFromStoredEvidence({
+        evidence,
+        workThreadId: input.workThreadId
+      });
+      if (
+        !fact
+        || row.id !== evidence.id
+        || row.id !== fact.id
+        || fact.workThreadId !== input.workThreadId
+        || evidence.kind !== row.kind
+        || evidence.kind !== fact.kind
+        || evidence.assurance !== row.assurance
+        || evidence.assurance !== fact.assurance
+        || evidence.subjectRef !== `${fact.subject.resourceRef}@${fact.subject.resourceVersion}`
+        || evidence.createdAt !== fact.observedAt
+        || row.provider !== fact.subject.provider
+        || row.subjectRef !== fact.subject.resourceRef
+        || row.subjectVersion !== fact.subject.resourceVersion
+        || row.payloadDigest !== fact.provenance.payloadDigest
+        || row.observedAt !== fact.observedAt
+        || row.receivedAt !== fact.receivedAt
+        || (fact.provenance.providerDeliveryId !== undefined
+          && fact.provenance.providerDeliveryId !== row.deliveryId)
+        || row.evidenceJson !== JSON.stringify(evidence)
+        || !/^sha256:[0-9a-f]{64}$/u.test(row.payloadDigest)
+        || !isRfc3339Instant(row.observedAt)
+        || !isRfc3339Instant(row.receivedAt)
+        || compareRfc3339Timestamps(row.receivedAt, row.observedAt) < 0
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      if (fact.cycle !== assessment.cycle) continue;
+      if (
+        compareRfc3339Timestamps(row.receivedAt, run.createdAt) < 0
+        || compareRfc3339Timestamps(row.receivedAt, assessment.assessedAt) > 0
+      ) continue;
+      const payload = CompletionEvidenceObservationPayloadV1Schema.parse({
+        evidenceType: "verification_evidence",
+        evidenceId: fact.id,
+        authorityDigest: canonicalSha256Json(fact),
+        evidenceKind: fact.kind,
+        assurance: fact.assurance,
+        subject: fact.subject,
+        claim: {
+          predicate: fact.claim.predicate,
+          outcome: fact.claim.outcome,
+          ...(fact.claim.observations
+            ? { observationsDigest: canonicalSha256Json(fact.claim.observations) }
+            : {})
+        },
+        provenancePayloadDigest: fact.provenance.payloadDigest,
+        observedAt: toControlTimestamp(fact.observedAt),
+        receivedAt: toControlTimestamp(fact.receivedAt)
+      });
+      const existing = verificationById.get(fact.id);
+      if (existing && canonicalJsonStringify(existing.payload) !== canonicalJsonStringify(payload)) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      verificationById.set(fact.id, { fact, payload });
+    }
+
+    const materialById = new Map<string, {
+      receipt: MaterialActionReceipt;
+      actionFamily: string;
+      payload: CompletionEvidenceObservationPayloadV1;
+    }>();
+    for (const row of tx.select().from(materialActions).where(and(
+      eq(materialActions.runId, input.runId),
+      isNotNull(materialActions.receiptJson)
+    )).all()) {
+      const receipt = MaterialActionReceiptSchema.parse(JSON.parse(row.receiptJson!));
+      if (
+        receipt.actionId !== row.id
+        || row.attemptId !== authority.attemptId
+        || row.attemptFenceDigest
+          !== authority.fencingTokenDigest.slice("sha256:".length)
+        || row.receiptJson !== JSON.stringify(receipt)
+        || row.status !== receipt.outcome
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      if (compareRfc3339Timestamps(receipt.observedAt, assessment.assessedAt) > 0) {
+        continue;
+      }
+      const payload = CompletionEvidenceObservationPayloadV1Schema.parse({
+        evidenceType: "material_action",
+        evidenceId: receipt.id,
+        authorityDigest: canonicalSha256Json(receipt),
+        actionId: receipt.actionId,
+        actionFamily: row.actionFamily,
+        outcome: receipt.outcome,
+        observedAt: toControlTimestamp(receipt.observedAt)
+      });
+      const existing = materialById.get(receipt.id);
+      if (existing && canonicalJsonStringify(existing.payload) !== canonicalJsonStringify(payload)) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      materialById.set(receipt.id, { receipt, actionFamily: row.actionFamily, payload });
+    }
+
+    const waiverById = new Map<string, {
+      waiver: CompletionWaiver;
+      payload: CompletionEvidenceObservationPayloadV1;
+    }>();
+    for (const row of tx.select().from(completionWaivers).where(
+      eq(completionWaivers.workThreadId, input.workThreadId)
+    ).all()) {
+      const storedWaiver = CompletionWaiverSchema.parse(JSON.parse(row.waiverJson));
+      const { id: _waiverId, ...semanticWaiver } = storedWaiver;
+      const authorityDigest = `sha256:${sha256(stableActionJson(semanticWaiver))}`;
+      if (
+        storedWaiver.id !== row.id
+        || storedWaiver.contractId !== row.contractId
+        || storedWaiver.contractVersion !== row.contractVersion
+        || storedWaiver.cycle !== row.cycle
+        || row.waiverJson !== JSON.stringify(storedWaiver)
+        || row.contentDigest !== authorityDigest
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      if (
+        storedWaiver.contractId !== assessment.contractId
+        || storedWaiver.contractVersion !== assessment.contractVersion
+        || storedWaiver.cycle !== assessment.cycle
+        || (storedWaiver.runId !== undefined && storedWaiver.runId !== input.runId)
+      ) continue;
+      const payload = CompletionEvidenceObservationPayloadV1Schema.parse({
+        evidenceType: "completion_waiver",
+        evidenceId: storedWaiver.id,
+        authorityDigest,
+        contractId: storedWaiver.contractId,
+        version: storedWaiver.contractVersion,
+        cycle: storedWaiver.cycle,
+        runId: input.runId,
+        gateIds: [...storedWaiver.gateIds].sort(compareCompletionGateIds),
+        actorRef: `actor_${canonicalSha256Json(storedWaiver.actor).slice("sha256:".length)}`,
+        reasonDigest: canonicalSha256Json(storedWaiver.reason),
+        waivedAt: toControlTimestamp(storedWaiver.waivedAt),
+        ...(storedWaiver.expiresAt
+          ? { expiresAt: toControlTimestamp(storedWaiver.expiresAt) }
+          : {})
+      });
+      waiverById.set(storedWaiver.id, { waiver: storedWaiver, payload });
+    }
+
+    const event = OpenTagEventSchema.parse(JSON.parse(run.eventJson));
+    const eventOwner = event.metadata["owner"];
+    const eventRepo = event.metadata["repo"];
+    if (
+      canonicalSha256Json(event) !== importedRun.eventDigest
+      || typeof eventOwner !== "string"
+      || typeof eventRepo !== "string"
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+    const artifactById = new Map<string, {
+      authority: CompletionArtifact;
+      payload: CompletionEvidenceObservationPayloadV1;
+    }>();
+    const artifactCandidates = [
+      ...(runResult.createdPullRequestUrl
+        ? [{
+            id: runResultCreatedPullRequestArtifactId(input.runId),
+            kind: "pull_request",
+            uri: runResult.createdPullRequestUrl,
+            sourceRunId: input.runId
+          }]
+        : []),
+      ...(runResult.artifacts ?? []).map((artifact, index) => ({
+        id: artifact.id ?? runResultArtifactId(input.runId, index),
+        kind: artifact.kind ?? artifact.type ?? "custom",
+        uri: artifact.uri,
+        sourceRunId: artifact.sourceRunId ?? input.runId
+      }))
+    ];
+    for (const candidate of artifactCandidates) {
+      const binding = assessment.targetBindings.find((target) => target.artifactId === candidate.id);
+      if (!binding) continue;
+      const resourceRef = githubPullRequestResourceRef({
+        uri: candidate.uri,
+        owner: eventOwner,
+        repo: eventRepo
+      });
+      if (
+        candidate.kind !== "pull_request"
+        || candidate.sourceRunId !== input.runId
+        || binding.key !== "primary_change"
+        || binding.provider !== "github"
+        || resourceRef !== binding.resourceRef
+        || (binding.resourceVersion !== "unverified"
+          && ![...verificationById.values()].some(({ fact }) =>
+            fact.assurance === "verified"
+            && fact.subject.provider === "github"
+            && fact.subject.resourceRef === binding.resourceRef
+            && fact.subject.resourceVersion === binding.resourceVersion
+          ))
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      const artifactAuthority: CompletionArtifact = {
+        id: candidate.id,
+        kind: candidate.kind,
+        sourceRunId: input.runId,
+        uri: candidate.uri,
+        target: {
+          key: binding.key,
+          provider: binding.provider,
+          resourceRef: binding.resourceRef,
+          resourceVersion: binding.resourceVersion
+        },
+        recordedAt: run.updatedAt
+      };
+      const payload = CompletionEvidenceObservationPayloadV1Schema.parse({
+        evidenceType: "run_artifact",
+        evidenceId: candidate.id,
+        authorityDigest: canonicalSha256Json(artifactAuthority),
+        artifactKind: candidate.kind,
+        sourceRunId: input.runId,
+        target: {
+          provider: binding.provider,
+          resourceRef: binding.resourceRef,
+          resourceVersion: binding.resourceVersion
+        },
+        observedAt: toControlTimestamp(run.updatedAt)
+      });
+      const existing = artifactById.get(candidate.id);
+      if (existing && canonicalJsonStringify(existing.payload) !== canonicalJsonStringify(payload)) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      artifactById.set(candidate.id, { authority: artifactAuthority, payload });
+    }
+
+    const escalationById = new Map<string, {
+      escalation: HumanEscalation;
+      payload: CompletionEvidenceObservationPayloadV1;
+    }>();
+    for (const row of tx.select().from(humanEscalations).where(
+      eq(humanEscalations.workThreadId, input.workThreadId)
+    ).all()) {
+      const escalation = HumanEscalationSchema.parse(JSON.parse(row.escalationJson));
+      if (
+        row.escalationJson !== JSON.stringify(escalation)
+        || escalation.id !== row.id
+        || escalation.workThreadId !== row.workThreadId
+        || escalation.class !== row.class
+        || escalation.state !== row.state
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      if (
+        escalation.runId !== input.runId
+        || escalation.attemptId !== authority.attemptId
+        || !escalation.blocking
+        || compareRfc3339Timestamps(escalation.openedAt, assessment.assessedAt) > 0
+        || (escalation.state !== "open" && escalation.state !== "acknowledged")
+      ) continue;
+      escalationById.set(escalation.id, {
+        escalation,
+        payload: CompletionEvidenceObservationPayloadV1Schema.parse({
+          evidenceType: "human_escalation",
+          evidenceId: escalation.id,
+          authorityDigest: canonicalSha256Json(escalation),
+          class: escalation.class,
+          state: escalation.state,
+          blocking: true,
+          reasonDigest: canonicalSha256Json(escalation.reason),
+          observedAt: toControlTimestamp(escalation.openedAt)
+        })
+      });
+    }
+
+    const selectedEvidence = new Map<string, CompletionEvidenceObservationPayloadV1>();
+    const selectEvidence = (
+      payload: CompletionEvidenceObservationPayloadV1
+    ): string => {
+      const selectionKey = evidenceSelectionKey(payload);
+      const existing = selectedEvidence.get(selectionKey);
+      if (existing && canonicalJsonStringify(existing) !== canonicalJsonStringify(payload)) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      selectedEvidence.set(selectionKey, payload);
+      return selectionKey;
+    };
+    type GateAuthority = {
+      state: "passed" | "failed" | "missing" | "unknown" | "waived";
+      reasonCode: string;
+      evidenceIds: string[];
+      evidenceKind?: "verification" | "material" | "artifact";
+      waiverId?: string;
+    };
+    const authoritativeFacts = (
+      records: Array<{ fact: CompletionEvidenceFact }>
+    ): { records: Array<{ fact: CompletionEvidenceFact }>; conflicted: boolean } => {
+      const ordered = [...records].sort((left, right) =>
+        compareRfc3339Timestamps(right.fact.observedAt, left.fact.observedAt)
+        || compareRfc3339Timestamps(right.fact.receivedAt, left.fact.receivedAt)
+        || compareCompletionGateIds(left.fact.id, right.fact.id)
+      );
+      const latest = ordered[0];
+      if (!latest) return { records: [], conflicted: false };
+      const current = ordered.filter((item) =>
+        compareRfc3339Timestamps(item.fact.observedAt, latest.fact.observedAt) === 0
+        && compareRfc3339Timestamps(item.fact.receivedAt, latest.fact.receivedAt) === 0
+      );
+      const claims = new Set(current.map(({ fact }) => canonicalJsonStringify({
+        assurance: fact.assurance,
+        claim: fact.claim
+      })));
+      return { records: current, conflicted: claims.size > 1 };
+    };
+    const currentMaterialReceipts = (
+      actionFamily: string
+    ): {
+      records: Array<{ receipt: MaterialActionReceipt; actionFamily: string }>;
+      conflicted: boolean;
+    } => {
+      const ordered = [...materialById.values()]
+        .filter((item) => item.actionFamily === actionFamily)
+        .sort((left, right) =>
+          compareRfc3339Timestamps(
+            right.receipt.observedAt,
+            left.receipt.observedAt
+          )
+          || compareCompletionGateIds(left.receipt.id, right.receipt.id)
+        );
+      const latest = ordered[0];
+      if (!latest) return { records: [], conflicted: false };
+      const current = ordered.filter((item) =>
+        compareRfc3339Timestamps(
+          item.receipt.observedAt,
+          latest.receipt.observedAt
+        ) === 0
+      );
+      return {
+        records: current,
+        conflicted: new Set(current.map((item) => item.receipt.outcome)).size > 1
+      };
+    };
+    const exactIds = (left: string[], right: string[]): boolean =>
+      canonicalJsonStringify([...new Set(left)].sort())
+        === canonicalJsonStringify([...new Set(right)].sort());
+    const canonicalActiveWaiver = [...waiverById.values()]
+      .filter(({ waiver: candidate }) =>
+        candidate.contractId === contract.id
+        && candidate.contractVersion === contract.version
+        && candidate.cycle === contract.cycle
+        && (candidate.runId === undefined || candidate.runId === input.runId)
+        && candidate.gateIds.every((gateId) => contractGateIds.has(gateId))
+        && compareRfc3339Timestamps(
+          candidate.waivedAt,
+          assessment.assessedAt
+        ) <= 0
+        && (candidate.expiresAt === undefined
+          || compareRfc3339Timestamps(
+            candidate.expiresAt,
+            assessment.assessedAt
+          ) > 0)
+      )
+      .sort((left, right) => {
+        const timeOrder = compareRfc3339Timestamps(
+          left.waiver.waivedAt,
+          right.waiver.waivedAt
+        );
+        if (timeOrder !== 0) return -timeOrder;
+        return compareCompletionGateIds(left.waiver.id, right.waiver.id);
+      })[0];
+    const authorityForGate = (
+      gate: CompletionAssessment["gateResults"][number]
+    ): GateAuthority => {
+      const syntheticEscalationId = gate.gateId.startsWith("human_escalation:")
+        ? gate.gateId.slice("human_escalation:".length)
+        : undefined;
+      if (syntheticEscalationId) {
+        if (!escalationById.has(syntheticEscalationId)) {
+          throw new Error("completion_assessment_projection_authority_conflict");
+        }
+        return {
+          state: "unknown",
+          reasonCode: "human_acceptance_missing",
+          evidenceIds: [syntheticEscalationId],
+          evidenceKind: "verification"
+        };
+      }
+      const contractGate = contract.gates.find((candidate) => candidate.id === gate.gateId);
+      if (!contractGate) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      if (canonicalActiveWaiver?.waiver.gateIds.includes(gate.gateId)) {
+        return {
+          state: "waived",
+          reasonCode: "gate_waived",
+          evidenceIds: [],
+          waiverId: canonicalActiveWaiver.waiver.id
+        };
+      }
+      if (contract.mode === "execution_compat") {
+        const exactCompatibilityContract = contract.gates.length === 1
+          && contractGate.kind === "material_action"
+          && contractGate.actionFamily === "executor_run"
+          && contractGate.requiredOutcome === "succeeded"
+          && assessment.targetBindings.length === 0;
+        if (!exactCompatibilityContract) {
+          throw new Error("completion_assessment_projection_authority_conflict");
+        }
+        return runResult.conclusion === "success"
+          ? {
+              state: "passed",
+              reasonCode: "execution_succeeded",
+              evidenceIds: [input.runId]
+            }
+          : {
+              state: "failed",
+              reasonCode: "execution_not_succeeded",
+              evidenceIds: []
+            };
+      }
+      if (contractGate.kind === "artifact") {
+        const candidates = [...artifactById.values()].filter((item) =>
+          item.authority.target?.key === contractGate.targetKey
+        );
+        const identities = new Set(candidates.map((item) => canonicalJsonStringify([
+          item.authority.target?.provider,
+          item.authority.target?.resourceRef,
+          item.authority.target?.resourceVersion
+        ])));
+        if (identities.size > 1) {
+          return { state: "unknown", reasonCode: "artifact_ambiguous", evidenceIds: [] };
+        }
+        const matching = candidates.filter((item) =>
+          item.authority.kind === contractGate.artifactKind
+        );
+        return identities.size === 0 || matching.length < contractGate.minimum
+          ? { state: "missing", reasonCode: "artifact_missing", evidenceIds: [] }
+          : {
+              state: "passed",
+              reasonCode: "artifact_requirement_satisfied",
+              evidenceIds: matching.map((item) => item.authority.id).sort(),
+              evidenceKind: "artifact"
+            };
+      }
+      if (contractGate.kind === "material_action") {
+        const current = currentMaterialReceipts(contractGate.actionFamily);
+        if (current.conflicted) {
+          return {
+            state: "unknown",
+            reasonCode: "material_action_unknown",
+            evidenceIds: current.records.map((item) => item.receipt.id).sort(),
+            evidenceKind: "material"
+          };
+        }
+        const required = current.records.filter((item) =>
+          item.receipt.outcome === contractGate.requiredOutcome
+        );
+        if (required.length > 0) {
+          return {
+            state: "passed",
+            reasonCode: "material_action_succeeded",
+            evidenceIds: [required[0]!.receipt.id],
+            evidenceKind: "material"
+          };
+        }
+        const unknown = current.records.filter((item) => item.receipt.outcome === "unknown");
+        if (unknown.length > 0) {
+          return {
+            state: "unknown",
+            reasonCode: "material_action_unknown",
+            evidenceIds: [unknown[0]!.receipt.id],
+            evidenceKind: "material"
+          };
+        }
+        const failed = current.records.filter((item) => item.receipt.outcome === "failed");
+        return failed.length > 0
+          ? {
+              state: "failed",
+              reasonCode: "material_action_failed",
+              evidenceIds: [failed[0]!.receipt.id],
+              evidenceKind: "material"
+            }
+          : { state: "missing", reasonCode: "material_action_missing", evidenceIds: [] };
+      }
+      if (contractGate.kind === "human_acceptance") {
+        const authoritative = authoritativeFacts([...verificationById.values()].filter(
+          ({ fact }) => fact.kind === "human.acceptance" && fact.claim.predicate === "role"
+        ));
+        const accepted = !authoritative.conflicted
+          ? authoritative.records.filter(({ fact }) =>
+              fact.assurance === "verified"
+              && fact.claim.outcome === contractGate.requiredRole
+            )
+          : [];
+        return accepted.length > 0
+          ? {
+              state: "passed",
+              reasonCode: "human_acceptance_recorded",
+              evidenceIds: [accepted[0]!.fact.id],
+              evidenceKind: "verification"
+            }
+          : {
+              state: "missing",
+              reasonCode: "human_acceptance_missing",
+              evidenceIds: []
+            };
+      }
+      const binding = assessment.targetBindings.find((candidate) =>
+        candidate.key === contractGate.targetKey
+      );
+      if (!binding) {
+        return {
+          state: "missing",
+          reasonCode: contractGate.kind === "verification"
+            ? "verification_missing"
+            : "external_state_missing",
+          evidenceIds: []
+        };
+      }
+      if (contractGate.kind === "external_state" && binding.provider !== contractGate.provider) {
+        return {
+          state: "unknown",
+          reasonCode: "external_state_subject_mismatch",
+          evidenceIds: []
+        };
+      }
+      const relevant = [...verificationById.values()].filter(({ fact }) =>
+        fact.subject.provider === binding.provider
+        && fact.subject.resourceRef === binding.resourceRef
+        && fact.subject.resourceVersion === binding.resourceVersion
+        && (contractGate.kind === "verification"
+          ? fact.kind === contractGate.evidenceKind
+          : fact.claim.predicate === "state")
+      );
+      if (relevant.length === 0) {
+        const stale = [...verificationById.values()].filter(({ fact }) =>
+          fact.subject.provider === binding.provider
+          && fact.subject.resourceRef === binding.resourceRef
+          && fact.subject.resourceVersion !== binding.resourceVersion
+          && (contractGate.kind === "verification"
+            ? fact.kind === contractGate.evidenceKind
+            : fact.claim.predicate === "state")
+        );
+        return {
+          state: "missing",
+          reasonCode: stale.length > 0
+            ? contractGate.kind === "verification"
+              ? "verification_stale"
+              : "external_state_stale"
+            : contractGate.kind === "verification"
+              ? "verification_missing"
+              : "external_state_missing",
+          evidenceIds: stale.map(({ fact }) => fact.id).sort(),
+          ...(stale.length > 0 ? { evidenceKind: "verification" as const } : {})
+        };
+      }
+      const authoritative = authoritativeFacts(relevant);
+      if (authoritative.conflicted) {
+        return {
+          state: "unknown",
+          reasonCode: contractGate.kind === "verification"
+            ? "verification_assurance_insufficient"
+            : "external_state_assurance_insufficient",
+          evidenceIds: authoritative.records.map(({ fact }) => fact.id).sort(),
+          evidenceKind: "verification"
+        };
+      }
+      const assured = authoritative.records.filter(({ fact }) =>
+        completionAssuranceAccepted(fact.assurance, contractGate.minimumAssurance)
+      );
+      if (assured.length === 0) {
+        return {
+          state: "unknown",
+          reasonCode: contractGate.kind === "verification"
+            ? "verification_assurance_insufficient"
+            : "external_state_assurance_insufficient",
+          evidenceIds: authoritative.records.map(({ fact }) => fact.id).sort(),
+          evidenceKind: "verification"
+        };
+      }
+      const satisfied = assured.filter(({ fact }) =>
+        fact.claim.outcome === (
+          contractGate.kind === "verification"
+            ? contractGate.requiredOutcome
+            : contractGate.requiredState
+        )
+        && (contractGate.kind !== "verification"
+          || (contractGate.requiredObservations ?? []).every((name) =>
+            fact.claim.observations?.[name] === "passed"
+          ))
+      );
+      return satisfied.length > 0
+        ? {
+            state: "passed",
+            reasonCode: contractGate.kind === "verification"
+              ? "verification_passed"
+              : "external_state_satisfied",
+            evidenceIds: [satisfied[0]!.fact.id],
+            evidenceKind: "verification"
+          }
+        : {
+            state: "failed",
+            reasonCode: contractGate.kind === "verification"
+              ? "verification_failed"
+              : "external_state_mismatch",
+            evidenceIds: assured.map(({ fact }) => fact.id).sort(),
+            evidenceKind: "verification"
+          };
+    };
+    const selectedGateResults = [...assessment.gateResults]
+      .sort((left, right) => compareCompletionGateIds(left.gateId, right.gateId))
+      .map((gate) => {
+        const expected = authorityForGate(gate);
+        if (
+          gate.state !== expected.state
+          || gate.reasonCode !== expected.reasonCode
+          || !exactIds(gate.evidenceIds, expected.evidenceIds)
+        ) throw new Error("completion_assessment_projection_authority_conflict");
+        let evidenceReceiptIds: string[] = [];
+        if (expected.waiverId) {
+          if (assessment.waiver?.id !== expected.waiverId) {
+            throw new Error("completion_assessment_projection_authority_conflict");
+          }
+          evidenceReceiptIds = [selectEvidence(
+            waiverById.get(expected.waiverId)!.payload
+          )];
+        } else if (expected.evidenceKind === "verification") {
+          evidenceReceiptIds = expected.evidenceIds.map((id) => {
+            const record = verificationById.get(id) ?? escalationById.get(id);
+            if (!record) {
+              throw new Error("completion_assessment_projection_authority_conflict");
+            }
+            return selectEvidence(record.payload);
+          });
+        } else if (expected.evidenceKind === "material") {
+          evidenceReceiptIds = expected.evidenceIds.map((id) => {
+            const record = materialById.get(id);
+            if (!record) {
+              throw new Error("completion_assessment_projection_authority_conflict");
+            }
+            return selectEvidence(record.payload);
+          });
+        } else if (expected.evidenceKind === "artifact") {
+          evidenceReceiptIds = expected.evidenceIds.map((id) => {
+            const record = artifactById.get(id);
+            if (!record) {
+              throw new Error("completion_assessment_projection_authority_conflict");
+            }
+            return selectEvidence(record.payload);
+          });
+        }
+        return {
+          gateId: gate.gateId,
+          state: gate.state === "passed"
+          ? "satisfied" as const
+          : gate.state === "failed"
+            ? "unsatisfied" as const
+            : gate.state === "missing"
+              ? "pending" as const
+              : gate.state === "unknown"
+                ? "blocked" as const
+                : "waived" as const,
+          reasonCode: gate.reasonCode,
+          evidenceReceiptIds: [...new Set(evidenceReceiptIds)].sort()
+        };
+      });
+    const activeEscalationGateIds = [...escalationById.keys()]
+      .map((id) => `human_escalation:${id}`)
+      .sort();
+    const projectedEscalationGateIds = assessment.gateResults
+      .filter((gate) => gate.gateId.startsWith("human_escalation:"))
+      .map((gate) => gate.gateId)
+      .sort();
+    const uniqueAssessmentGateIds = new Set(
+      assessment.gateResults.map((gate) => gate.gateId)
+    );
+    const contractGateStates = assessment.gateResults.filter((gate) =>
+      contractGateIds.has(gate.gateId)
+    );
+    const effectiveGateStates = selectedGateResults.map((gate) => gate.state);
+    const expectedAssessmentState = reduceCompletionGateStates(
+      effectiveGateStates
+    );
+    let supersededAssessment: CompletionAssessment | undefined;
+    if (assessment.supersedesAssessmentId) {
+      const supersededRow = tx.select().from(completionAssessments).where(and(
+        eq(completionAssessments.id, assessment.supersedesAssessmentId),
+        eq(completionAssessments.workThreadId, assessment.workThreadId)
+      )).limit(1).get();
+      if (!supersededRow) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      supersededAssessment = CompletionAssessmentSchema.parse(
+        JSON.parse(supersededRow.assessmentJson)
+      );
+      if (
+        supersededRow.assessmentJson !== JSON.stringify(supersededAssessment)
+        || supersededAssessment.id !== assessment.supersedesAssessmentId
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const assessmentAccepted = assessment.state === "satisfied"
+      || assessment.state === "waived";
+    const supersededAccepted = supersededAssessment?.state === "satisfied"
+      || supersededAssessment?.state === "waived";
+    const acceptedAtLineageMismatch = assessmentAccepted
+      && (
+        assessment.acceptedAt === undefined
+        || (supersededAccepted
+          ? supersededAssessment?.acceptedAt === undefined
+            || compareRfc3339Timestamps(
+              assessment.acceptedAt,
+              supersededAssessment.acceptedAt
+            ) !== 0
+          : compareRfc3339Timestamps(
+              assessment.acceptedAt,
+              assessment.assessedAt
+            ) !== 0)
+      );
+    if (
+      uniqueAssessmentGateIds.size !== assessment.gateResults.length
+      || !exactIds(activeEscalationGateIds, projectedEscalationGateIds)
+      || contractGateStates.length !== contract.gates.length
+      || assessment.state !== expectedAssessmentState
+      || (contract.mode === "execution_compat"
+        && assessment.state !== "waived"
+        && assessment.evidenceBacked)
+      || (contract.mode === "governed"
+        && (assessment.state === "satisfied" || assessment.state === "waived")
+        && !assessment.evidenceBacked)
+      || acceptedAtLineageMismatch
+      || selectedGateResults.some((gate) =>
+        (gate.state === "waived"
+          || (contract.mode === "governed" && gate.state === "satisfied"))
+        && gate.evidenceReceiptIds.length === 0
+      )
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+    let waiver: {
+      ref: string;
+      actorRef: string;
+      reasonDigest: string;
+    } | undefined;
+    const hasWaivedGate = selectedGateResults.some((gate) => gate.state === "waived");
+    if (
+      hasWaivedGate !== Boolean(assessment.waiver)
+      || (assessment.waiver
+        ? assessment.assessedBy !== "human"
+        : assessment.assessedBy !== "opentag")
+    ) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    if (assessment.waiver) {
+      const waiverRow = tx.select().from(completionWaivers).where(and(
+        eq(completionWaivers.id, assessment.waiver.id),
+        eq(completionWaivers.workThreadId, assessment.workThreadId),
+        eq(completionWaivers.contractId, assessment.contractId),
+        eq(completionWaivers.contractVersion, assessment.contractVersion),
+        eq(completionWaivers.cycle, assessment.cycle)
+      )).limit(1).get();
+      if (!waiverRow || waiverRow.waiverJson !== JSON.stringify(assessment.waiver)) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      waiver = {
+        ref: assessment.waiver.id,
+        actorRef: `actor_${canonicalSha256Json(assessment.waiver.actor)
+          .slice("sha256:".length)}`,
+        reasonDigest: canonicalSha256Json(assessment.waiver.reason)
+      };
+    }
+
+    const projectionLifecycleDependency = (
+      row: typeof controlPlaneProjectionOutbox.$inferSelect
+    ): typeof hostedLifecycleOperations.$inferSelect => {
+      if (!row.requiresLifecycleOperationId) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      const lifecycleRows = tx.select().from(hostedLifecycleOperations).where(and(
+        eq(hostedLifecycleOperations.destinationId, row.destinationId),
+        eq(hostedLifecycleOperations.organizationId, row.organizationId),
+        eq(hostedLifecycleOperations.operationId, row.requiresLifecycleOperationId)
+      )).all();
+      if (
+        lifecycleRows.length !== 1
+        || lifecycleRows[0]!.action !== "complete"
+        || lifecycleRows[0]!.runId !== row.runId
+        || !validAcknowledgedLifecycleDependency(lifecycleRows[0]!)
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      return lifecycleRows[0]!;
+    };
+
+    let predecessorAssessmentRow: typeof controlPlaneProjectionOutbox.$inferSelect
+      | undefined;
+    let predecessorAssessmentEnvelope: ReturnType<
+      typeof CompletionAssessmentReceiptEnvelopeV1Schema.parse
+    > | undefined;
+    if (assessment.supersedesAssessmentId) {
+      const predecessorRows = tx.select().from(controlPlaneProjectionOutbox).where(and(
+        eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+        eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+        eq(controlPlaneProjectionOutbox.workThreadId, input.workThreadId),
+        eq(controlPlaneProjectionOutbox.receiptKind, "completion_assessment")
+      )).all().filter((row) => {
+        try {
+          const predecessor = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+            JSON.parse(row.envelopeJson)
+          );
+          return predecessor.payload.assessmentId === assessment.supersedesAssessmentId;
+        } catch {
+          throw new Error("completion_assessment_projection_authority_conflict");
+        }
+      });
+      if (predecessorRows.length !== 1) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      predecessorAssessmentRow = predecessorRows[0]!;
+      predecessorAssessmentEnvelope = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+        JSON.parse(predecessorAssessmentRow.envelopeJson)
+      );
+      const predecessorLifecycle = projectionLifecycleDependency(
+        predecessorAssessmentRow
+      );
+      const predecessorCompletionRequest = HostedCompleteRequestV1Schema.parse(
+        JSON.parse(predecessorLifecycle.requestJson)
+      );
+      if (
+        predecessorAssessmentRow.envelopeJson
+          !== canonicalJsonStringify(predecessorAssessmentEnvelope)
+        || predecessorAssessmentRow.receiptDigest
+          !== predecessorAssessmentEnvelope.receiptDigest
+        || predecessorAssessmentRow.runId !== predecessorAssessmentEnvelope.runId
+        || predecessorAssessmentRow.workThreadId
+          !== predecessorAssessmentEnvelope.workThreadId
+        || predecessorAssessmentEnvelope.workThreadId !== input.workThreadId
+        || predecessorAssessmentEnvelope.payload.executorResultReceiptRef.receiptId
+          !== predecessorLifecycle.receiptId
+        || predecessorAssessmentEnvelope.payload.executorResultReceiptRef.operationId
+          !== predecessorLifecycle.operationId
+        || predecessorAssessmentEnvelope.payload.executorResultReceiptRef.requestId
+          !== predecessorLifecycle.requestId
+        || predecessorAssessmentEnvelope.payload.executorResultReceiptRef.requestDigest
+          !== predecessorLifecycle.requestDigest
+        || predecessorAssessmentEnvelope.payload.executorResultReceiptRef.resultDigest
+          !== predecessorCompletionRequest.resultDigest
+        || !(predecessorAssessmentEnvelope.predecessorReceiptDigests ?? []).includes(
+          predecessorLifecycle.receiptDigest!
+        )
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      assertProjectionCustodySafe(predecessorAssessmentEnvelope);
+      assertProjectionDigests(predecessorAssessmentEnvelope);
+    }
+    const sameRunPredecessor = predecessorAssessmentEnvelope?.runId === input.runId;
+    const crossRunPredecessor = predecessorAssessmentEnvelope !== undefined
+      && !sameRunPredecessor;
+
+    const localCreationAuthority = {
+      schemaVersion: 1 as const,
+      kind: "work_thread_created" as const,
+      workThreadId: thread.id,
+      scopeId: thread.scopeId,
+      canonicalKey: thread.canonicalKey,
+      provider: thread.provider,
+      ownerContainerId: thread.ownerContainerId,
+      workItemKind: thread.workItemKind,
+      externalId: thread.externalId,
+      createdAt: thread.createdAt
+    };
+    const localCreationReceiptDigest = canonicalSha256Json(localCreationAuthority);
+    const localCreationReceiptId = `local_work_thread_creation_${localCreationReceiptDigest
+      .slice("sha256:".length)}`;
+    const workThreadIdentity = {
+      namespace: "opentag.control.receipt/work-thread-ref/v1" as const,
+      parts: [authority.organizationId, input.runId, input.workThreadId]
+    };
+    const workThreadProjectionKey = canonicalSha256Json({
+      purpose: "opentag-work-thread-ref-projection-v1",
+      identity: workThreadIdentity
+    }).slice("sha256:".length);
+    const workThreadObservedAt = [
+      thread.createdAt,
+      importedRun.importedAt,
+      ...(crossRunPredecessor && predecessorAssessmentEnvelope
+        ? [predecessorAssessmentEnvelope.observedAt]
+        : [])
+    ].sort(compareRfc3339Timestamps).at(-1)!;
+    const workThreadPayload = {
+      workThreadId: input.workThreadId,
+      sourceIdentityDigest: importedRun.sourceIdentityDigest,
+      localCreationReceiptId,
+      localCreationReceiptDigest,
+      lineageKind: "hosted_source_identity",
+      hostedAuthorityRef: {
+        claimOperationId: importedRun.claimOperationId,
+        authorityDigest: importedRun.authorityDigest,
+        attempt: projectionAttempt,
+        admissionPolicySnapshot: {
+          receiptId: authority.admissionPolicyReceiptId,
+          snapshotId: authority.admissionPolicySnapshotId,
+          digest: authority.admissionPolicySnapshotDigest
+        }
+      },
+      createdAt: toControlTimestamp(thread.createdAt)
+    };
+    const workThreadBase = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      receiptKind: "work_thread_ref" as const,
+      receiptId: `work_thread_receipt_${workThreadProjectionKey}`,
+      organizationId: authority.organizationId,
+      operationId: `work_thread_operation_${workThreadProjectionKey}`,
+      requiredCapabilities: ["relay.work-thread-ref.v1" as const],
+      producer: projectionProducer,
+      identity: workThreadIdentity,
+      predecessorReceiptDigests: [...new Set([
+        importedRun.authorityDigest,
+        authority.admissionPolicySnapshotDigest,
+        ...(crossRunPredecessor && predecessorAssessmentEnvelope
+          ? [predecessorAssessmentEnvelope.receiptDigest]
+          : [])
+      ])].sort(),
+      observedAt: toControlTimestamp(workThreadObservedAt),
+      runId: input.runId,
+      workThreadId: input.workThreadId,
+      payload: workThreadPayload,
+      payloadDigest: canonicalSha256Json(workThreadPayload)
+    };
+    const workThreadEnvelope = WorkThreadRefReceiptEnvelopeV1Schema.parse({
+      ...workThreadBase,
+      receiptDigest: canonicalSha256Json(workThreadBase)
+    });
+    assertProjectionCustodySafe(workThreadEnvelope);
+    assertProjectionDigests(workThreadEnvelope);
+    const existingWorkThreadRow = tx.select().from(controlPlaneProjectionOutbox)
+      .where(and(
+        eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+        eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+        eq(controlPlaneProjectionOutbox.receiptId, workThreadEnvelope.receiptId)
+      )).limit(1).get();
+    const workThreadDependsOnReceiptId = crossRunPredecessor
+      ? predecessorAssessmentRow!.receiptId
+      : undefined;
+    if (existingWorkThreadRow) {
+      const existingWorkThreadLifecycle = projectionLifecycleDependency(
+        existingWorkThreadRow
+      );
+      if (
+        existingWorkThreadRow.envelopeJson !== canonicalJsonStringify(workThreadEnvelope)
+        || existingWorkThreadRow.receiptDigest !== workThreadEnvelope.receiptDigest
+        || existingWorkThreadRow.dependsOnReceiptId
+          !== (workThreadDependsOnReceiptId ?? null)
+        || (!sameRunPredecessor
+          && existingWorkThreadLifecycle.operationId !== completion.operationId)
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+    } else {
+      if (sameRunPredecessor) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+        destinationId: claim.destinationId,
+        envelope: workThreadEnvelope,
+        ...(workThreadDependsOnReceiptId
+          ? { dependsOnReceiptId: workThreadDependsOnReceiptId }
+          : {}),
+        requiresLifecycleOperationId: completion.operationId,
+        now: new Date(workThreadObservedAt)
+      }));
+    }
+
+    let chainParentReceiptId = sameRunPredecessor
+      ? predecessorAssessmentRow!.receiptId
+      : workThreadEnvelope.receiptId;
+    let chainParentReceiptDigest = sameRunPredecessor
+      ? predecessorAssessmentEnvelope!.receiptDigest
+      : workThreadEnvelope.receiptDigest;
+
+    const contractIdentity = {
+      namespace: "opentag.control.receipt/completion-contract-ref/v1" as const,
+      parts: [
+        authority.organizationId,
+        input.runId,
+        input.workThreadId,
+        contract.id,
+        String(contract.version),
+        String(contract.cycle)
+      ]
+    };
+    const contractProjectionKey = canonicalSha256Json({
+      purpose: "opentag-completion-contract-ref-projection-v1",
+      identity: contractIdentity
+    }).slice("sha256:".length);
+    const predecessorContract = predecessorAssessmentEnvelope?.payload.contract;
+    const sameContractTuple = predecessorContract !== undefined
+      && predecessorContract.contractId === contract.id
+      && predecessorContract.version === contract.version
+      && predecessorContract.cycle === contract.cycle;
+    const sameRunContractEvolution = sameRunPredecessor && !sameContractTuple;
+    if (
+      sameRunContractEvolution
+      && predecessorContract
+      && !(
+        contract.cycle > predecessorContract.cycle
+        || (
+          contract.cycle === predecessorContract.cycle
+          && contract.version > predecessorContract.version
+        )
+      )
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+    const contractPayload = {
+      contractId: contract.id,
+      version: contract.version,
+      cycle: contract.cycle,
+      mode: contract.mode,
+      contentDigest: contractRow.contentDigest,
+      resolvedTargetDigests: [] as [],
+      requiredGateIds: contract.gates.map((gate) => gate.id)
+        .sort(compareCompletionGateIds),
+      createdAt: toControlTimestamp(contract.createdAt),
+      ...(sameRunContractEvolution && predecessorContract
+        ? { supersedesContractId: predecessorContract.contractId }
+        : {})
+    };
+    const contractReceiptId = `completion_contract_receipt_${contractProjectionKey}`;
+    const existingContractRow = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+      eq(controlPlaneProjectionOutbox.receiptId, contractReceiptId)
+    )).limit(1).get();
+    let contractEnvelope: ReturnType<typeof CompletionContractRefReceiptEnvelopeV1Schema.parse>;
+    if (existingContractRow) {
+      const existingContractLifecycle = projectionLifecycleDependency(existingContractRow);
+      contractEnvelope = CompletionContractRefReceiptEnvelopeV1Schema.parse(
+        JSON.parse(existingContractRow.envelopeJson)
+      );
+      const contractParentRow = existingContractRow.dependsOnReceiptId
+        ? tx.select().from(controlPlaneProjectionOutbox).where(and(
+            eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+            eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+            eq(controlPlaneProjectionOutbox.receiptId, existingContractRow.dependsOnReceiptId)
+          )).limit(1).get()
+        : undefined;
+      if (
+        existingContractRow.envelopeJson !== canonicalJsonStringify(contractEnvelope)
+        || existingContractRow.receiptDigest !== contractEnvelope.receiptDigest
+        || contractEnvelope.receiptId !== contractReceiptId
+        || contractEnvelope.operationId
+          !== `completion_contract_operation_${contractProjectionKey}`
+        || contractEnvelope.organizationId !== authority.organizationId
+        || canonicalJsonStringify(contractEnvelope.producer)
+          !== canonicalJsonStringify(projectionProducer)
+        || canonicalJsonStringify(contractEnvelope.identity)
+          !== canonicalJsonStringify(contractIdentity)
+        || contractEnvelope.runId !== input.runId
+        || contractEnvelope.workThreadId !== input.workThreadId
+        || canonicalJsonStringify(contractEnvelope.payload)
+          !== canonicalJsonStringify(contractPayload)
+        || compareRfc3339Timestamps(
+          contractEnvelope.observedAt,
+          contractPayload.createdAt
+        ) < 0
+        || compareRfc3339Timestamps(
+          contractEnvelope.observedAt,
+          workThreadEnvelope.observedAt
+        ) < 0
+        || !contractParentRow
+        || !(contractEnvelope.predecessorReceiptDigests ?? []).includes(
+          contractParentRow.receiptDigest
+        )
+        || !(contractEnvelope.predecessorReceiptDigests ?? []).includes(
+          workThreadEnvelope.receiptDigest
+        )
+        || (!sameRunPredecessor || !sameContractTuple)
+          && (
+            existingContractLifecycle.operationId !== completion.operationId
+            || existingContractRow.dependsOnReceiptId !== chainParentReceiptId
+          )
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      assertProjectionCustodySafe(contractEnvelope);
+      assertProjectionDigests(contractEnvelope);
+      if (!sameRunPredecessor || !sameContractTuple) {
+        chainParentReceiptId = contractEnvelope.receiptId;
+        chainParentReceiptDigest = contractEnvelope.receiptDigest;
+      }
+    } else {
+      if (sameRunPredecessor && sameContractTuple) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      const contractObservedAt = [
+        contract.createdAt,
+        workThreadEnvelope.observedAt,
+        ...(predecessorAssessmentEnvelope
+          ? [predecessorAssessmentEnvelope.observedAt]
+          : [])
+      ].sort(compareRfc3339Timestamps).at(-1)!;
+      const contractBase = {
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        receiptKind: "completion_contract_ref" as const,
+        receiptId: contractReceiptId,
+        organizationId: authority.organizationId,
+        operationId: `completion_contract_operation_${contractProjectionKey}`,
+        requiredCapabilities: ["relay.completion-contract-ref.v1" as const],
+        producer: projectionProducer,
+        identity: contractIdentity,
+        predecessorReceiptDigests: [...new Set([
+          workThreadEnvelope.receiptDigest,
+          chainParentReceiptDigest
+        ])].sort(),
+        observedAt: toControlTimestamp(contractObservedAt),
+        runId: input.runId,
+        workThreadId: input.workThreadId,
+        payload: contractPayload,
+        payloadDigest: canonicalSha256Json(contractPayload)
+      };
+      contractEnvelope = CompletionContractRefReceiptEnvelopeV1Schema.parse({
+        ...contractBase,
+        receiptDigest: canonicalSha256Json(contractBase)
+      });
+      assertProjectionCustodySafe(contractEnvelope);
+      assertProjectionDigests(contractEnvelope);
+      assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+        destinationId: claim.destinationId,
+        envelope: contractEnvelope,
+        dependsOnReceiptId: chainParentReceiptId,
+        requiresLifecycleOperationId: completion.operationId,
+        now: new Date(contractObservedAt)
+      }));
+      chainParentReceiptId = contractEnvelope.receiptId;
+      chainParentReceiptDigest = contractEnvelope.receiptDigest;
+    }
+
+    const finalEvidenceBySelectionKey = new Map<
+      string,
+      CompletionEvidenceObservationReceiptEnvelopeV1
+    >();
+    const orderedEvidence = [...selectedEvidence.entries()].sort(
+      ([leftSelectionKey, left], [rightSelectionKey, right]) =>
+        left.evidenceType.localeCompare(right.evidenceType)
+        || left.evidenceId.localeCompare(right.evidenceId)
+        || leftSelectionKey.localeCompare(rightSelectionKey)
+    );
+    for (const [selectionKey, evidencePayload] of orderedEvidence) {
+      const receiptId = evidenceReceiptId(
+        evidencePayload,
+        contractEnvelope.receiptDigest
+      );
+      const existing = tx.select().from(controlPlaneProjectionOutbox).where(and(
+        eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+        eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+        eq(controlPlaneProjectionOutbox.receiptId, receiptId)
+      )).limit(1).get();
+      if (existing) {
+        projectionLifecycleDependency(existing);
+        const persistedEnvelope = CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+          JSON.parse(existing.envelopeJson)
+        );
+        const persistedParent = existing.dependsOnReceiptId
+          ? tx.select().from(controlPlaneProjectionOutbox).where(and(
+              eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+              eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+              eq(controlPlaneProjectionOutbox.receiptId, existing.dependsOnReceiptId)
+            )).limit(1).get()
+          : undefined;
+        const isCurrentChainEvidence = existing.dependsOnReceiptId
+          === chainParentReceiptId;
+        if (
+          existing.envelopeJson !== canonicalJsonStringify(persistedEnvelope)
+          || existing.receiptDigest !== persistedEnvelope.receiptDigest
+          || persistedEnvelope.receiptId !== receiptId
+          || persistedEnvelope.organizationId !== authority.organizationId
+          || canonicalJsonStringify(persistedEnvelope.producer)
+            !== canonicalJsonStringify(projectionProducer)
+          || canonicalJsonStringify(persistedEnvelope.identity)
+            !== canonicalJsonStringify(evidenceIdentity(
+              evidencePayload,
+              contractEnvelope.receiptDigest
+            ))
+          || persistedEnvelope.runId !== input.runId
+          || persistedEnvelope.workThreadId !== input.workThreadId
+          || canonicalJsonStringify(persistedEnvelope.attempt)
+            !== canonicalJsonStringify(projectionAttempt)
+          || canonicalJsonStringify(persistedEnvelope.payload)
+            !== canonicalJsonStringify(evidencePayload)
+          || !persistedParent
+          || !(persistedEnvelope.predecessorReceiptDigests ?? []).includes(
+            persistedParent.receiptDigest
+          )
+          || !(persistedEnvelope.predecessorReceiptDigests ?? []).includes(
+            completionReceipt.receiptDigest
+          )
+          || !(persistedEnvelope.predecessorReceiptDigests ?? []).includes(
+            contractEnvelope.receiptDigest
+          )
+          || ((!sameRunPredecessor || !sameContractTuple)
+            && !isCurrentChainEvidence)
+        ) throw new Error("completion_assessment_projection_authority_conflict");
+        assertProjectionCustodySafe(persistedEnvelope);
+        assertProjectionDigests(persistedEnvelope);
+        finalEvidenceBySelectionKey.set(selectionKey, persistedEnvelope);
+        if (isCurrentChainEvidence) {
+          chainParentReceiptId = persistedEnvelope.receiptId;
+          chainParentReceiptDigest = persistedEnvelope.receiptDigest;
+        }
+        continue;
+      }
+      const evidence = evidenceEnvelope(
+        evidencePayload,
+        contractEnvelope.receiptDigest,
+        [
+        completionReceipt.receiptDigest,
+        contractEnvelope.receiptDigest,
+        chainParentReceiptDigest
+        ]
+      );
+      assertProjectionCustodySafe(evidence);
+      assertProjectionDigests(evidence);
+      assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+        destinationId: claim.destinationId,
+        envelope: evidence,
+        dependsOnReceiptId: chainParentReceiptId,
+        requiresLifecycleOperationId: completion.operationId,
+        now: new Date(evidence.observedAt)
+      }));
+      finalEvidenceBySelectionKey.set(selectionKey, evidence);
+      chainParentReceiptId = evidence.receiptId;
+      chainParentReceiptDigest = evidence.receiptDigest;
+    }
+
+    const gateResults = selectedGateResults.map((gate) => ({
+      gateId: gate.gateId,
+      state: gate.state,
+      reasonCode: gate.reasonCode,
+      evidenceReceiptDigests: gate.evidenceReceiptIds.map((selectionKey) => {
+        const evidence = finalEvidenceBySelectionKey.get(selectionKey);
+        if (!evidence) throw new Error("completion_assessment_projection_authority_conflict");
+        return evidence.receiptDigest;
+      }).sort()
+    }));
+    const evidenceReceiptDigests = [...new Set(
+      gateResults.flatMap((gate) => gate.evidenceReceiptDigests)
+    )].sort();
+
+    const identity = {
+      namespace: "opentag.control.receipt/completion-assessment/v1" as const,
+      parts: [authority.organizationId, input.workThreadId, assessment.id]
+    };
+    const projectionKey = canonicalSha256Json({
+      purpose: "opentag-completion-assessment-projection-v1",
+      identity
+    }).slice("sha256:".length);
+    const payload = {
+      assessmentId: assessment.id,
+      workThreadId: assessment.workThreadId,
+      contract: {
+        contractId: contract.id,
+        version: contract.version,
+        cycle: contract.cycle,
+        mode: contract.mode,
+        contentDigest: contractRow.contentDigest
+      },
+      admissionPolicySnapshot: {
+        snapshotId: authority.admissionPolicySnapshotId,
+        digest: authority.admissionPolicySnapshotDigest
+      },
+      runId: input.runId,
+      attempt: {
+        attemptId: authority.attemptId,
+        attemptNumber: authority.attemptNumber,
+        epoch: authority.epoch,
+        fencingTokenDigest: authority.fencingTokenDigest
+      },
+      executorResultReceiptRef: {
+        receiptId: completionReceipt.receiptId,
+        operationId: completion.operationId,
+        requestId: completion.requestId,
+        requestDigest: completion.requestDigest,
+        resultDigest: completionRequest.resultDigest
+      },
+      assessmentInputDigest: assessment.inputDigest,
+      evidenceReceiptDigests,
+      gateResults,
+      conclusion: assessment.state,
+      assessedAt: toControlTimestamp(assessment.assessedAt),
+      assessedBy: assessment.assessedBy === "opentag" ? "local_opentag" : "human",
+      ...(assessment.supersedesAssessmentId
+        ? { supersedesAssessmentId: assessment.supersedesAssessmentId }
+        : {}),
+      ...(waiver ? { waiver } : {})
+    };
+    const base = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      receiptKind: "completion_assessment" as const,
+      receiptId: `assessment_receipt_${projectionKey}`,
+      organizationId: authority.organizationId,
+      operationId: `assessment_operation_${projectionKey}`,
+      requiredCapabilities: ["relay.completion-assessment.v1" as const],
+      producer: projectionProducer,
+      identity,
+      predecessorReceiptDigests: [...new Set([
+        completionReceipt.receiptDigest,
+        contractEnvelope.receiptDigest,
+        ...evidenceReceiptDigests,
+        ...(predecessorAssessmentEnvelope
+          ? [predecessorAssessmentEnvelope.receiptDigest]
+          : [])
+      ])].sort(),
+      observedAt: toControlTimestamp(assessment.assessedAt),
+      runId: input.runId,
+      workThreadId: input.workThreadId,
+      attempt: projectionAttempt,
+      payload,
+      payloadDigest: canonicalSha256Json(payload)
+    };
+    const envelope = CompletionAssessmentReceiptEnvelopeV1Schema.parse({
+      ...base,
+      receiptDigest: canonicalSha256Json(base)
+    });
+    assertProjectionCustodySafe(envelope);
+    assertProjectionDigests(envelope);
+    const existingAssessment = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+      eq(controlPlaneProjectionOutbox.receiptId, envelope.receiptId)
+    )).limit(1).get();
+    if (existingAssessment) {
+      if (
+        existingAssessment.receiptDigest !== envelope.receiptDigest
+        || existingAssessment.envelopeJson !== canonicalJsonStringify(envelope)
+        || existingAssessment.requiresLifecycleOperationId !== completion.operationId
+        || existingAssessment.dependsOnReceiptId !== chainParentReceiptId
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      return;
+    }
+    assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+      destinationId: claim.destinationId,
+      envelope,
+      dependsOnReceiptId: chainParentReceiptId,
+      requiresLifecycleOperationId: completion.operationId,
+      now: new Date(assessment.assessedAt)
+    }));
   }
 
   function assertGovernedCallbackAuthorityTx(
@@ -4577,6 +6382,33 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       )).run();
       if (claimUpdated.changes !== 1) {
         throw new Error("hosted_reject_start_claim_update_lost");
+      }
+    }
+    if (acknowledged && row.action === "complete") {
+      const importedRun = tx.select({ workThreadId: hostedRunImports.workThreadId })
+        .from(hostedRunImports)
+        .where(eq(hostedRunImports.runId, row.runId))
+        .limit(1)
+        .get();
+      if (importedRun?.workThreadId) {
+        const assessmentRows = tx.select().from(completionAssessments).where(
+          eq(completionAssessments.workThreadId, importedRun.workThreadId)
+        ).orderBy(
+          asc(completionAssessments.cycle),
+          asc(completionAssessments.sequence),
+          asc(completionAssessments.id)
+        ).all();
+        for (const assessmentRow of assessmentRows) {
+          const assessment = CompletionAssessmentSchema.parse(
+            JSON.parse(assessmentRow.assessmentJson)
+          );
+          if (assessment.triggeredByRunId !== row.runId) continue;
+          ensureCompletionAssessmentProjectionTx(tx, {
+            workThreadId: importedRun.workThreadId,
+            runId: row.runId,
+            assessmentId: assessment.id
+          });
+        }
       }
     }
     return acknowledged;
@@ -6173,7 +8005,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           if (duplicateById.assessmentJson !== assessmentJson) {
             throw new Error(`CompletionAssessment ${assessment.id} is immutable.`);
           }
-          return { outcome: "duplicate" as const, assessment: completionAssessmentFromRow(duplicateById) };
+          const duplicate = completionAssessmentFromRow(duplicateById);
+          if (duplicate.triggeredByRunId) {
+            ensureCompletionAssessmentProjectionTx(tx, {
+              workThreadId: duplicate.workThreadId,
+              runId: duplicate.triggeredByRunId,
+              assessmentId: duplicate.id
+            });
+          }
+          return { outcome: "duplicate" as const, assessment: duplicate };
         }
         const duplicateByInput = tx.select().from(completionAssessments).where(and(
           eq(completionAssessments.workThreadId, assessment.workThreadId),
@@ -6184,7 +8024,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           if (duplicateByInput.assessmentJson !== assessmentJson) {
             throw new Error(`CompletionAssessment input digest ${assessment.inputDigest} is immutable.`);
           }
-          return { outcome: "duplicate" as const, assessment: completionAssessmentFromRow(duplicateByInput) };
+          const duplicate = completionAssessmentFromRow(duplicateByInput);
+          if (duplicate.triggeredByRunId) {
+            ensureCompletionAssessmentProjectionTx(tx, {
+              workThreadId: duplicate.workThreadId,
+              runId: duplicate.triggeredByRunId,
+              assessmentId: duplicate.id
+            });
+          }
+          return { outcome: "duplicate" as const, assessment: duplicate };
         }
         const thread = tx.select().from(workThreads).where(eq(workThreads.id, assessment.workThreadId)).limit(1).get();
         if (!thread) throw new Error(`WorkThread ${assessment.workThreadId} does not exist.`);
@@ -6253,6 +8101,13 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             }),
             createdAt: assessment.acceptedAt
           }).run();
+        }
+        if (assessment.triggeredByRunId) {
+          ensureCompletionAssessmentProjectionTx(tx, {
+            workThreadId: assessment.workThreadId,
+            runId: assessment.triggeredByRunId,
+            assessmentId: assessment.id
+          });
         }
         return { outcome: "recorded" as const, assessment };
       });
@@ -10674,7 +12529,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ? {
               artifacts: parsedResult.artifacts.map((artifact, index) => ({
                 ...artifact,
-                id: artifact.id ?? `${input.runId}:artifact:${index + 1}`,
+                id: artifact.id ?? runResultArtifactId(input.runId, index),
                 sourceRunId: input.runId,
                 createdAt: artifact.createdAt ?? updatedAt
               }))
