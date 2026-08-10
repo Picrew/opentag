@@ -967,7 +967,7 @@ function parseRfc3339Instant(value: string): {
   const offsetSeconds = offsetDirection * (offsetHour * 3_600 + offsetMinute * 60);
   return {
     epochSeconds: utc.getTime() / 1_000 - offsetSeconds,
-    fractionalSeconds: (match[7] ?? "").replace(/0+$/u, "")
+    fractionalSeconds: match[7] ?? ""
   };
 }
 
