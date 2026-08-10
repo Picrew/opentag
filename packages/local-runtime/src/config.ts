@@ -87,6 +87,7 @@ const HostedControlPairedRegistrationSchema = z
 export type HostedCredentialMutationRequest =
   | RunnerCredentialRotationRequestV1
   | RunnerCredentialRevocationRequestV1;
+export type HostedCredentialMutationEndpoint = "rotate" | "revoke";
 type ReplayedRunnerCredentialRotationResponseV1 = z.infer<
   typeof ReplayedRunnerCredentialRotationResponseV1Schema
 >;
@@ -357,21 +358,23 @@ export function assertHostedRelayAuthorization(input: {
   }
 }
 
-export function hostedCredentialMutationRequestDigest(requestValue: HostedCredentialMutationRequest): string {
-  const request = z
-    .union([
-      RunnerCredentialRotationRequestV1Schema,
-      RunnerCredentialRevocationRequestV1Schema,
-    ])
-    .parse(requestValue);
-  return `sha256:${createHash("sha256").update(canonicalJsonStringify(request)).digest("hex")}`;
+export function hostedCredentialMutationRequestDigest(
+  endpoint: HostedCredentialMutationEndpoint,
+  requestValue: HostedCredentialMutationRequest
+): string {
+  const request = endpoint === "rotate"
+    ? RunnerCredentialRotationRequestV1Schema.parse(requestValue)
+    : RunnerCredentialRevocationRequestV1Schema.parse(requestValue);
+  const digestInput = { endpoint, request };
+  return `sha256:${createHash("sha256").update(canonicalJsonStringify(digestInput)).digest("hex")}`;
 }
 
 function verifiedHostedCredentialMutationDigest(
+  endpoint: HostedCredentialMutationEndpoint,
   request: HostedCredentialMutationRequest,
   suppliedDigest?: string
 ): string {
-  const computedDigest = hostedCredentialMutationRequestDigest(request);
+  const computedDigest = hostedCredentialMutationRequestDigest(endpoint, request);
   if (suppliedDigest !== undefined && ReceiptDigestSchema.parse(suppliedDigest) !== computedDigest) {
     throw new Error("Hosted credential mutation digest does not match the canonical strict request.");
   }
@@ -692,7 +695,8 @@ export const OpenTagDaemonConfigSchema = z
     }
     if (
       "canonicalRequestDigest" in control
-      && control.canonicalRequestDigest !== hostedCredentialMutationRequestDigest(control.request)
+      && control.canonicalRequestDigest
+        !== hostedCredentialMutationRequestDigest(control.endpoint, control.request)
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -716,7 +720,7 @@ export const OpenTagDaemonConfigSchema = z
     if (
       conflictEvidence
       && conflictEvidence.originalCanonicalRequestDigest
-        !== hostedCredentialMutationRequestDigest(conflictEvidence.originalRequest)
+        !== hostedCredentialMutationRequestDigest("rotate", conflictEvidence.originalRequest)
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -791,7 +795,7 @@ export const OpenTagDaemonConfigSchema = z
       } else if (
         control.evidence.failure.reason !== control.recoveryReason
         || control.evidence.originalCanonicalRequestDigest
-          !== hostedCredentialMutationRequestDigest(control.evidence.originalRequest)
+          !== hostedCredentialMutationRequestDigest("rotate", control.evidence.originalRequest)
       ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -803,7 +807,8 @@ export const OpenTagDaemonConfigSchema = z
     if (
       control.state === "unpaired"
       && "successorReplay" in control
-      && control.successorCanonicalRequestDigest !== hostedCredentialMutationRequestDigest(control.successorRequest)
+      && control.successorCanonicalRequestDigest
+        !== hostedCredentialMutationRequestDigest("rotate", control.successorRequest)
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -1125,7 +1130,11 @@ export function beginHostedCredentialRotation(
     "rotate",
     RunnerCredentialRotationRequestV1Schema
   );
-  const canonicalRequestDigest = verifiedHostedCredentialMutationDigest(request, input.canonicalRequestDigest);
+  const canonicalRequestDigest = verifiedHostedCredentialMutationDigest(
+    "rotate",
+    request,
+    input.canonicalRequestDigest
+  );
   return parseDaemonConfig({
     ...withoutHostedTokens(config),
     controlRegistration: {
@@ -1173,7 +1182,11 @@ export function beginHostedCredentialRotationSuccessor(
   ) {
     throw new Error("Successor rotation must be fresh and target the verified replay credential tuple.");
   }
-  const canonicalRequestDigest = verifiedHostedCredentialMutationDigest(request, input.canonicalRequestDigest);
+  const canonicalRequestDigest = verifiedHostedCredentialMutationDigest(
+    "rotate",
+    request,
+    input.canonicalRequestDigest
+  );
   return parseDaemonConfig({
     ...withoutHostedTokens(config),
     controlRegistration: {
@@ -1347,7 +1360,11 @@ export function beginHostedCredentialRevocation(
     "revoke",
     RunnerCredentialRevocationRequestV1Schema
   );
-  const canonicalRequestDigest = verifiedHostedCredentialMutationDigest(request, input.canonicalRequestDigest);
+  const canonicalRequestDigest = verifiedHostedCredentialMutationDigest(
+    "revoke",
+    request,
+    input.canonicalRequestDigest
+  );
   return parseDaemonConfig({
     ...withoutHostedTokens(config),
     controlRegistration: {

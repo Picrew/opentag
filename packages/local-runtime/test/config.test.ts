@@ -80,14 +80,21 @@ const hostedCredentialRevocationRequest = {
   operationId: "operation_revoke_1",
 };
 
-const hostedCredentialMutationDigest = hostedCredentialMutationRequestDigest(hostedCredentialMutationRequest);
+const hostedCredentialMutationDigest = hostedCredentialMutationRequestDigest(
+  "rotate",
+  hostedCredentialMutationRequest
+);
+const hostedCredentialRevocationDigest = hostedCredentialMutationRequestDigest(
+  "revoke",
+  hostedCredentialRevocationRequest
+);
 
 function rotationInput(request = hostedCredentialMutationRequest) {
-  return { request, canonicalRequestDigest: hostedCredentialMutationRequestDigest(request) };
+  return { request, canonicalRequestDigest: hostedCredentialMutationRequestDigest("rotate", request) };
 }
 
 function revocationInput(request = hostedCredentialRevocationRequest) {
-  return { request, canonicalRequestDigest: hostedCredentialMutationRequestDigest(request) };
+  return { request, canonicalRequestDigest: hostedCredentialMutationRequestDigest("revoke", request) };
 }
 
 const rotatedHostedRotation = {
@@ -1219,12 +1226,14 @@ describe("Hosted Control V1 credential state", () => {
       (raw: any) => {
         raw.controlRegistration.request.operationId = hostedCredentialMutationRequest.operationId;
         raw.controlRegistration.canonicalRequestDigest = hostedCredentialMutationRequestDigest(
+          "rotate",
           raw.controlRegistration.request
         );
       },
       (raw: any) => {
         raw.controlRegistration.request.expectedCredentialId = "credential_other";
         raw.controlRegistration.canonicalRequestDigest = hostedCredentialMutationRequestDigest(
+          "rotate",
           raw.controlRegistration.request
         );
       }
@@ -1245,7 +1254,10 @@ describe("Hosted Control V1 credential state", () => {
     const corruptedSuccessorTuple = JSON.parse(JSON.stringify(successorTerminal));
     corruptedSuccessorTuple.controlRegistration.successorRequest.expectedCredentialId = "credential_other";
     corruptedSuccessorTuple.controlRegistration.successorCanonicalRequestDigest =
-      hostedCredentialMutationRequestDigest(corruptedSuccessorTuple.controlRegistration.successorRequest);
+      hostedCredentialMutationRequestDigest(
+        "rotate",
+        corruptedSuccessorTuple.controlRegistration.successorRequest
+      );
     expect(() => parseDaemonConfig(corruptedSuccessorTuple)).toThrow(/successor/iu);
 
     const normalUnknown = markHostedCredentialRotationOutcomeUnknown(
@@ -1267,7 +1279,10 @@ describe("Hosted Control V1 credential state", () => {
       controlRegistration: {
         ...nonSuccessorTerminal.controlRegistration,
         successorRequest: successorRotationRequest,
-        successorCanonicalRequestDigest: hostedCredentialMutationRequestDigest(successorRotationRequest)
+        successorCanonicalRequestDigest: hostedCredentialMutationRequestDigest(
+          "rotate",
+          successorRotationRequest
+        )
       }
     })).toThrow(/unrecognized/iu);
     const corruptedFailureCode = JSON.parse(JSON.stringify(nonSuccessorTerminal));
@@ -1303,6 +1318,16 @@ describe("Hosted Control V1 credential state", () => {
       request: successorRotationRequest,
       canonicalRequestDigest: wrongDigest
     })).toThrow(/digest does not match/iu);
+  });
+
+  it("binds canonical mutation digests to the requested endpoint", () => {
+    expect(hostedCredentialMutationRequestDigest(
+      "rotate",
+      hostedCredentialMutationRequest
+    )).not.toBe(hostedCredentialMutationRequestDigest(
+      "revoke",
+      hostedCredentialMutationRequest
+    ));
   });
 
   it("rejects revoked snapshots whose pre-revocation tuple is corrupted", () => {
@@ -1377,8 +1402,8 @@ describe("Hosted Control V1 credential state", () => {
         kind: "hosted_control_v1",
         state: "revocation_outcome_unknown",
         endpoint: "revoke",
-        canonicalRequestDigest: hostedCredentialMutationDigest,
-        request: hostedCredentialMutationRequest,
+        canonicalRequestDigest: hostedCredentialRevocationDigest,
+        request: hostedCredentialRevocationRequest,
         registration: hostedRegistration
       }
     })).toThrow(/must not contain a runtime runner token/iu);

@@ -996,7 +996,7 @@ export function compareRfc3339Timestamps(left: string, right: string): number {
   return comparison;
 }
 
-const CompletionTimestampSchema = z.string().datetime().superRefine((value, ctx) => {
+const CompletionTimestampSchema = z.string().datetime({ offset: true }).superRefine((value, ctx) => {
   if (parseRfc3339Instant(value) === undefined) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,

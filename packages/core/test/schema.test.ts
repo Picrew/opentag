@@ -776,6 +776,14 @@ describe("Completion governance schemas", () => {
 
     expect(assessment.state).toBe("pending");
     expect(assessment.triggeredByRunId).toBe("run_1");
+    expect(CompletionAssessmentSchema.parse({
+      ...assessment,
+      gateResults: [{
+        ...assessment.gateResults[0],
+        evaluatedAt: "2026-07-21T08:00:00+08:00"
+      }],
+      assessedAt: "2026-07-20T20:00:00-04:00"
+    }).assessedAt).toBe("2026-07-20T20:00:00-04:00");
     const invalidAssessedAt = CompletionAssessmentSchema.safeParse({
       ...assessment,
       assessedAt: "2026-02-30T00:00:00Z"
