@@ -122,11 +122,13 @@ const GOVERNED_PROJECTION_VECTORS_PATH = new URL(
   "./fixtures/control-v1-governed-projection-vectors.json",
   import.meta.url,
 );
-const GOVERNED_PROJECTION_VECTORS_SHA256 = "4b14911bdba4fb8d2bdefebf6e5c974e14feff8ecec0be54dbe2a0b58d2b656f";
+const GOVERNED_PROJECTION_VECTORS_SHA256 = "45541b26ef8b0bcd3360c4d41d8146bc4ab0ba1e11a6a23b8a4c1abbd6808fe7";
 const COMPLETION_EVIDENCE_VECTORS_PATH = new URL(
   "./fixtures/control-v1-completion-evidence-vectors.json",
   import.meta.url,
 );
+const COMPLETION_EVIDENCE_VECTORS_SHA256 =
+  "4eb8b2386d96fdd95eb8833799500f5c4d0fc2b5f649b16cb001df48e205d9b6";
 
 function assessmentReceipt(): CompletionAssessmentReceiptEnvelopeV1 {
   return {
@@ -225,6 +227,7 @@ async function completionEvidenceReceipt(
     receivedAt: observedAt,
   },
 ): Promise<CompletionEvidenceObservationReceiptEnvelopeV1> {
+  const contractReceiptDigest = `sha256:${"c".repeat(64)}`;
   const payloadDigest = await computeCompletionEvidenceObservationPayloadDigestV1(
     payload,
   );
@@ -252,8 +255,10 @@ async function completionEvidenceReceipt(
         payload.evidenceType,
         payload.evidenceId,
         payload.authorityDigest,
+        contractReceiptDigest,
       ],
     },
+    predecessorReceiptDigests: [contractReceiptDigest],
     runId: "run_1",
     workThreadId: "wt_1",
     attempt: {
@@ -2518,6 +2523,48 @@ describe("runner credential rotation and revocation", () => {
 });
 
 describe("governed projection fixture vectors", () => {
+  it("scopes identical completion contracts to distinct Run identities and receipt digests", async () => {
+    const artifact = JSON.parse(
+      readFileSync(GOVERNED_PROJECTION_VECTORS_PATH, "utf8"),
+    ) as { fixtures: { completionContractRef: Record<string, unknown> } };
+    const first = CompletionContractRefReceiptEnvelopeV1Schema.parse(
+      artifact.fixtures.completionContractRef,
+    );
+    const secondIdentity = {
+      namespace: first.identity.namespace,
+      parts: [
+        first.organizationId,
+        "run-2",
+        first.workThreadId,
+        first.payload.contractId,
+        String(first.payload.version),
+        String(first.payload.cycle),
+      ],
+    };
+    const secondDigestInput = {
+      ...first,
+      runId: "run-2",
+      identity: secondIdentity,
+      receiptDigest: undefined,
+    };
+    const { receiptDigest: _omitted, ...secondWithoutDigest } = secondDigestInput;
+    const second = CompletionContractRefReceiptEnvelopeV1Schema.parse({
+      ...secondWithoutDigest,
+      receiptDigest: await computeControlReceiptDigestV1(secondWithoutDigest),
+    });
+
+    expect(first.payload).toEqual(second.payload);
+    expect(first.workThreadId).toBe(second.workThreadId);
+    expect(first.identity).not.toEqual(second.identity);
+    expect(first.receiptDigest).not.toBe(second.receiptDigest);
+    for (const receipt of [first, second]) {
+      const { receiptDigest, ...digestInput } = receipt;
+      await expect(computeControlReceiptDigestV1(digestInput)).resolves.toBe(
+        receiptDigest,
+      );
+    }
+  });
+
   it("parses and verifies the protocol-authority artifact", () => {
     const artifactBytes = readFileSync(GOVERNED_PROJECTION_VECTORS_PATH);
     const artifactText = artifactBytes.toString("utf8");
@@ -2940,8 +2987,8 @@ describe("ReceiptEnvelope V1", () => {
           ...receipt.identity,
           parts: [
             receipt.organizationId,
-            receipt.runId,
             receipt.workThreadId,
+            receipt.runId,
             receipt.payload.evidenceType,
             receipt.payload.evidenceId,
             receipt.payload.authorityDigest,
@@ -2965,10 +3012,56 @@ describe("ReceiptEnvelope V1", () => {
     ).resolves.toBe(false);
   });
 
+  it("scopes the same completion evidence authority to its contract receipt", async () => {
+    const first = await completionEvidenceReceipt();
+    const secondContractReceiptDigest = `sha256:${"d".repeat(64)}`;
+    const { receiptDigest: _receiptDigest, ...secondDigestInput } = {
+      ...first,
+      identity: {
+        ...first.identity,
+        parts: [
+          first.organizationId,
+          first.workThreadId,
+          first.runId,
+          first.payload.evidenceType,
+          first.payload.evidenceId,
+          first.payload.authorityDigest,
+          secondContractReceiptDigest,
+        ],
+      },
+      predecessorReceiptDigests: [secondContractReceiptDigest],
+    };
+    const second = CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse({
+      ...secondDigestInput,
+      receiptDigest:
+        await computeCompletionEvidenceObservationReceiptDigestV1(
+          secondDigestInput,
+        ),
+    });
+
+    expect(first.payload).toEqual(second.payload);
+    expect(first.payload.authorityDigest).toBe(second.payload.authorityDigest);
+    expect(first.identity).not.toEqual(second.identity);
+    expect(first.receiptDigest).not.toBe(second.receiptDigest);
+    await expect(
+      verifyCompletionEvidenceObservationReceiptDigestsV1(first),
+    ).resolves.toBe(true);
+    await expect(
+      verifyCompletionEvidenceObservationReceiptDigestsV1(second),
+    ).resolves.toBe(true);
+  });
+
   it("publishes a deterministic completion evidence interop vector", async () => {
-    const fixture = JSON.parse(
-      readFileSync(COMPLETION_EVIDENCE_VECTORS_PATH, "utf8"),
-    ) as { schemaVersion: number; vectors: Array<{ name: string; envelope: unknown }> };
+    const fixtureBytes = readFileSync(COMPLETION_EVIDENCE_VECTORS_PATH);
+    const fixtureText = fixtureBytes.toString("utf8");
+    expect(fixtureText.endsWith("\n")).toBe(true);
+    expect(createHash("sha256").update(fixtureBytes).digest("hex")).toBe(
+      COMPLETION_EVIDENCE_VECTORS_SHA256,
+    );
+    const fixture = JSON.parse(fixtureText) as {
+      schemaVersion: number;
+      vectors: Array<{ name: string; envelope: unknown }>;
+    };
     expect(fixture.schemaVersion).toBe(1);
     expect(fixture.vectors.map((vector) => vector.name)).toEqual([
       "verification-evidence",
@@ -2980,7 +3073,7 @@ describe("ReceiptEnvelope V1", () => {
       "sha256:132f1f69a572bea244f9bd938226f2489a849e733ef71016922dbf34b6218b4d",
     );
     expect(envelope.receiptDigest).toBe(
-      "sha256:f78d246d1951c2c4acc5067feb87858dc8b371b2b5a8314cfe828be9332d4dd4",
+      "sha256:7afc495a85e2abef74acf66046720dd526ec09b84e099ccdf98855b0a62f4454",
     );
     await expect(
       verifyCompletionEvidenceObservationReceiptDigestsV1(envelope),
@@ -3320,19 +3413,25 @@ describe("ReceiptEnvelope V1", () => {
     ).toBe(false);
   });
 
-  it("projects only contract refs and digests, never contract content", () => {
+  it("projects only immutable contract refs, never resolved targets or contract content", () => {
     const contractRef = {
       contractId: "contract_1",
       version: 1,
       cycle: 1,
       mode: "governed",
       contentDigest: digest,
-      resolvedTargetDigests: [digest],
+      resolvedTargetDigests: [],
       requiredGateIds: ["checks", "merge"],
       createdAt: observedAt,
     } as const;
 
     expect(CompletionContractRefPayloadV1Schema.safeParse(contractRef).success).toBe(true);
+    expect(
+      CompletionContractRefPayloadV1Schema.safeParse({
+        ...contractRef,
+        resolvedTargetDigests: [digest],
+      }).success,
+    ).toBe(false);
     expect(
       CompletionContractRefPayloadV1Schema.safeParse({
         ...contractRef,

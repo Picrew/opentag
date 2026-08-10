@@ -124,7 +124,7 @@ function contractRef(): CompletionContractRefReceiptEnvelopeV1 {
     workThreadId: "thread_1",
     identity: {
       namespace: "opentag.control.receipt/completion-contract-ref/v1",
-      parts: ["org_1", "thread_1", "contract_1", "1", "1"]
+      parts: ["org_1", "run_1", "thread_1", "contract_1", "1", "1"]
     },
     payload: {
       contractId: "contract_1",
@@ -132,7 +132,7 @@ function contractRef(): CompletionContractRefReceiptEnvelopeV1 {
       cycle: 1,
       mode: "governed",
       contentDigest: digest,
-      resolvedTargetDigests: [digest],
+      resolvedTargetDigests: [],
       requiredGateIds: ["checks"],
       createdAt: observedAt
     }
@@ -292,6 +292,7 @@ async function completionEvidence(): Promise<
     observedAt,
     receivedAt: observedAt,
   };
+  const contractReceiptDigest = `sha256:${"c".repeat(64)}`;
   const { receiptDigest: _receiptDigest, ...baseWithoutReceiptDigest } = base;
   const input = {
     ...baseWithoutReceiptDigest,
@@ -318,8 +319,10 @@ async function completionEvidence(): Promise<
         "verification_evidence",
         "verification_1",
         digest,
+        contractReceiptDigest,
       ],
     },
+    predecessorReceiptDigests: [contractReceiptDigest],
     payload,
     payloadDigest:
       await computeCompletionEvidenceObservationPayloadDigestV1(payload),

@@ -2618,7 +2618,7 @@ export const CompletionContractRefPayloadV1Schema = z
     cycle: z.number().int().positive(),
     mode: z.enum(["execution_compat", "governed"]),
     contentDigest: ReceiptDigestSchema,
-    resolvedTargetDigests: DigestSetSchema,
+    resolvedTargetDigests: z.tuple([]),
     requiredGateIds: sortedUniqueArray(GovernedProjectionStableReferenceV1Schema),
     createdAt: ControlTimestampSchema,
     supersedesContractId: GovernedProjectionStableReferenceV1Schema.optional(),
@@ -2761,6 +2761,7 @@ export const CompletionContractRefReceiptEnvelopeV1Schema = z
       receipt.producer.registrationGeneration === undefined ||
       !hasExactReceiptIdentity(receipt.identity, "opentag.control.receipt/completion-contract-ref/v1", [
         receipt.organizationId,
+        receipt.runId,
         receipt.workThreadId,
         receipt.payload.contractId,
         String(receipt.payload.version),
@@ -2952,9 +2953,14 @@ export const CompletionEvidenceObservationReceiptEnvelopeV1Schema =
       const payloadObservedAt = receipt.payload.evidenceType === "completion_waiver"
         ? receipt.payload.waivedAt
         : receipt.payload.observedAt;
+      const contractReceiptDigest = receipt.identity.parts[6];
       if (
         receipt.producer.kind !== "local_opentag"
         || payloadObservedAt !== receipt.observedAt
+        || !ReceiptDigestSchema.safeParse(contractReceiptDigest).success
+        || !(receipt.predecessorReceiptDigests ?? []).includes(
+          contractReceiptDigest ?? "",
+        )
         || (
           receipt.payload.evidenceType === "run_artifact"
           && receipt.payload.sourceRunId !== receipt.runId
@@ -2973,6 +2979,7 @@ export const CompletionEvidenceObservationReceiptEnvelopeV1Schema =
             receipt.payload.evidenceType,
             receipt.payload.evidenceId,
             receipt.payload.authorityDigest,
+            contractReceiptDigest ?? "",
           ],
         )
       ) {

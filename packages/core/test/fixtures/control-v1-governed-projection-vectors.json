@@ -87,6 +87,7 @@
         "namespace": "opentag.control.receipt/completion-contract-ref/v1",
         "parts": [
           "org-1",
+          "run-1",
           "thread-1",
           "contract-1",
           "3",
@@ -99,10 +100,7 @@
         "cycle": 2,
         "mode": "governed",
         "contentDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-        "resolvedTargetDigests": [
-          "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-          "sha256:3333333333333333333333333333333333333333333333333333333333333333"
-        ],
+        "resolvedTargetDigests": [],
         "requiredGateIds": [
           "artifact",
           "verification"
@@ -110,8 +108,8 @@
         "createdAt": "2026-08-09T01:02:03.000Z",
         "supersedesContractId": "contract-0"
       },
-      "payloadDigest": "sha256:a62fab4eb55043218aec48432a06e68ded6bd88f9caa77c95cf6e243901f8b31",
-      "receiptDigest": "sha256:72812b5f7889fc27e520012d873d8e3815807a4405aade4b8d30b20058f02a54"
+      "payloadDigest": "sha256:b7e44f94ed451f5eeb2b10e3aa7596c1e7a1b8af0c6a471da0dbca441c5288b3",
+      "receiptDigest": "sha256:1aa79c71a0a099b1f50dcc68fd210d4a856d85d9bbd232202b9db754300c7ad2"
     },
     "completionAssessment": {
       "schemaVersion": 1,

@@ -55,6 +55,7 @@ function callbackEntry(): ControlPlaneProjectionOutboxEntry {
 
 function completionEvidenceEntry(): ControlPlaneProjectionOutboxEntry {
   const authorityDigest = `sha256:${"a".repeat(64)}`;
+  const contractReceiptDigest = `sha256:${"e".repeat(64)}`;
   const payloadDigest = `sha256:${"c".repeat(64)}`;
   const receiptDigest = `sha256:${"d".repeat(64)}`;
   return {
@@ -74,6 +75,7 @@ function completionEvidenceEntry(): ControlPlaneProjectionOutboxEntry {
         "human_escalation",
         "escalation_1",
         authorityDigest,
+        contractReceiptDigest,
       ],
       key: "identity",
     },
@@ -104,8 +106,10 @@ function completionEvidenceEntry(): ControlPlaneProjectionOutboxEntry {
           "human_escalation",
           "escalation_1",
           authorityDigest,
+          contractReceiptDigest,
         ],
       },
+      predecessorReceiptDigests: [contractReceiptDigest],
       observedAt: now.toISOString(),
       payloadDigest,
       receiptDigest,
