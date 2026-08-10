@@ -248,6 +248,7 @@ flowchart LR
 - [Replay harness](docs/replay-harness.md)
 - [Agent Work Protocol](docs/agent-work-protocol.md)
 - [本地 npm 发布指南](docs/npm-release.md)
+- [npm prerelease 候选发布指南](docs/npm-prerelease.md)
 
 ## 本地开发
 
@@ -269,7 +270,10 @@ opentag-dev setup
 
 ## 软件包
 
-当前源码包版本：`v0.9.0`；npm dist-tag 是各发布通道当前公开版本的权威来源。OpenTag 在 `@opentag` scope 下协调发布 16 个公开软件包。
+当前源码候选版本：`v0.10.0-next.0`。此源码状态只表示已准备本地发布验证，
+不代表候选版本已经发布；npm dist-tag 仍是公开通道版本的权威来源，在注册表
+证据表明发生变化前，`0.9.0` 仍是文档所述的稳定版本。OpenTag 在
+`@opentag` scope 下协调发布 16 个公开软件包。
 
 | 包 | 用途 |
 | --- | --- |

@@ -1,6 +1,6 @@
 {
   "name": "@opentag/local-runtime",
-  "version": "0.9.0",
+  "version": "0.10.0-next.0",
   "description": "Local OpenTag dispatcher, daemon, and diagnostics runtime helpers.",
   "type": "module",
   "engines": {

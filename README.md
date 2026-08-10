@@ -257,6 +257,7 @@ The default loop is artifact-first rather than chat-first: a final reply should 
 - [Agent Work Protocol](docs/agent-work-protocol.md)
 - [ACP-First Agent Runtime and Channel Integration](docs/acp-first-agent-runtime-design.md)
 - [Local npm release guide](docs/npm-release.md)
+- [npm prerelease candidate guide](docs/npm-prerelease.md)
 
 ## Development
 
@@ -278,7 +279,12 @@ opentag-dev setup
 
 ## Packages
 
-Package source version: `v0.9.0`. npm dist-tags are authoritative for the currently published channel versions. The coordinated package family contains 16 public packages under the `@opentag` scope.
+Package source candidate: `v0.10.0-next.0`. This source state is prepared for
+local release validation only; it is not evidence that the candidate was
+published. npm dist-tags remain authoritative for public channel versions, and
+`0.9.0` remains the documented stable release until registry evidence says
+otherwise. The coordinated package family contains 16 public packages under
+the `@opentag` scope.
 
 | Package | Purpose |
 | --- | --- |

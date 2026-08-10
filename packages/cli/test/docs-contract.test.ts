@@ -7,6 +7,37 @@ function repoFile(path: string): string {
 }
 
 describe("platform setup docs contract", () => {
+  it("keeps the 0.10.0-next.0 candidate procedure fail-closed and next-only", () => {
+    const prereleaseGuide = repoFile("docs/npm-prerelease.md");
+    const normalizedPrereleaseGuide = prereleaseGuide.replace(/\s+/g, " ");
+    const versioningGuide = repoFile("docs/versioning.md");
+    const readme = repoFile("README.md");
+    const readmeZh = repoFile("README.zh-CN.md");
+
+    expect(normalizedPrereleaseGuide).toContain(
+      "exactly `0.10.0-next.0` for all 16 public packages"
+    );
+    expect(prereleaseGuide).toContain("npm `next` only");
+    expect(prereleaseGuide).toContain("Absence must be a confirmed registry `404`");
+    expect(prereleaseGuide).toContain("never issue `npm publish` for that version again");
+    expect(prereleaseGuide).toContain(
+      "npm publish <preserved-tarball> --access public --tag next --provenance"
+    );
+    expect(normalizedPrereleaseGuide).toContain(
+      "all recorded pre-publication `latest` dist-tags are unchanged"
+    );
+    expect(normalizedPrereleaseGuide).toContain(
+      "Never report `published` from local output alone"
+    );
+    expect(normalizedPrereleaseGuide).toContain(
+      "stable promotion is outside this procedure"
+    );
+    expect(prereleaseGuide).not.toContain("npm publish <preserved-tarball> --access public --tag latest");
+    expect(versioningGuide).toContain("`0.10.0-next.0` prerelease");
+    expect(readme).toContain("[npm prerelease candidate guide](docs/npm-prerelease.md)");
+    expect(readmeZh).toContain("[npm prerelease 候选发布指南](docs/npm-prerelease.md)");
+  });
+
   it("keeps the 0.9.0 release procedure explicit and concurrency-safe", () => {
     const releaseGuide = repoFile("docs/npm-release.md");
     const liveGuide = repoFile("docs/live-e2e-smoke-harness.md");

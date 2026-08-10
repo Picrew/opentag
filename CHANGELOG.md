@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+Source manifests are prepared as the coordinated `0.10.0-next.0` candidate.
+This is local release-preparation evidence only: the candidate is not claimed
+as published, the npm `next` channel must be verified independently, and the
+documented public stable release remains `0.9.0` until registry evidence says
+otherwise.
+
 OpenTag now applies a zero-config verified completion tier to GitHub-backed
 runs. When a run ships a pull request and the repository has no explicit
 completion policy, the run stays open after executor success until GitHub
