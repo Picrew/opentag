@@ -220,6 +220,156 @@ describe("dispatcher completion governance", () => {
     expect(currentRunReads).toHaveBeenCalledTimes(1);
   });
 
+  it("uses the canonical one-based ID for a result artifact missing its own ID", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const governance = createDispatcherCompletionGovernance({
+      repo,
+      policies: [strictPolicy],
+      now: () => "2099-07-21T10:10:00.000Z"
+    });
+    const runId = "run_missing_artifact_id";
+    await repo.createRun({
+      id: runId,
+      event: githubIssueEvent({
+        id: `event_${runId}`,
+        sourceEventId: `comment_${runId}`
+      })
+    });
+    await repo.completeRun({
+      runId,
+      result: {
+        conclusion: "success",
+        summary: "created pull request 7",
+        artifacts: [{
+          kind: "pull_request",
+          title: "Pull request",
+          uri: "https://github.com/acme/demo/pull/7"
+        }]
+      }
+    });
+    const stored = await repo.getRun({ runId });
+    expect(stored).not.toBeNull();
+    vi.spyOn(repo, "listRunsForWorkThread").mockResolvedValue([{
+      ...stored!,
+      run: {
+        ...stored!.run,
+        result: {
+          ...stored!.run.result!,
+          artifacts: stored!.run.result!.artifacts!.map((artifact) => ({
+            ...artifact,
+            id: undefined
+          }))
+        }
+      }
+    }]);
+
+    const result = await governance.ingestRunResult(runId);
+    const pullRequestGate = result!.assessment.gateResults.find(
+      (gate) => gate.gateId === "pull_request"
+    );
+
+    expect(pullRequestGate?.evidenceIds).toEqual([
+      "run_missing_artifact_id:artifact:1"
+    ]);
+    expect(pullRequestGate?.evidenceIds).not.toContain(
+      "run_missing_artifact_id:artifact:0"
+    );
+    sqlite.close();
+  });
+
+  it("returns the exact latest assessment only for a source-thread state transition", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const governance = createDispatcherCompletionGovernance({
+      repo,
+      policies: [strictPolicy],
+      now: () => "2099-07-21T10:10:00.000Z"
+    });
+    const runId = "run_source_transition_assessment";
+    await repo.createRun({
+      id: runId,
+      event: githubIssueEvent({
+        id: `event_${runId}`,
+        sourceEventId: `comment_${runId}`
+      })
+    });
+    await repo.completeRun({
+      runId,
+      result: {
+        conclusion: "success",
+        summary: "created pull request 7",
+        createdPullRequestUrl: "https://github.com/acme/demo/pull/7"
+      }
+    });
+    const stored = await repo.getRun({ runId });
+    const workThreadId = stored!.run.thread!.id;
+
+    await governance.ingestRunResult(runId);
+    await expect(governance.getSourceThreadTransition(workThreadId)).resolves.toBeNull();
+
+    await governance.ingestGitHubSnapshot(githubSnapshot({
+      deliveryId: "delivery-source-transition-open-pending",
+      state: "open",
+      checks: { build: "passed", test: "pending" },
+      observedAt: "2026-07-21T10:05:00.000Z"
+    }));
+    await governance.ingestGitHubSnapshot(githubSnapshot({
+      deliveryId: "delivery-source-transition-open-passed",
+      state: "open",
+      checks: { build: "passed", test: "passed" },
+      observedAt: "2026-07-21T10:06:00.000Z"
+    }));
+    const sameStateAssessments = await repo.listCompletionAssessments({ workThreadId });
+    expect(sameStateAssessments).toHaveLength(3);
+    expect(sameStateAssessments.at(-2)!.state).toBe(sameStateAssessments.at(-1)!.state);
+    await expect(governance.getSourceThreadTransition(workThreadId)).resolves.toBeNull();
+    let segmentStartIndex = sameStateAssessments.length - 1;
+    while (
+      segmentStartIndex > 0
+      && sameStateAssessments[segmentStartIndex - 1]!.state
+        === sameStateAssessments.at(-1)!.state
+    ) {
+      segmentStartIndex -= 1;
+    }
+    const retriedTransition = await governance.getSourceThreadTransition(workThreadId, {
+      retryPendingTransition: true
+    });
+    expect(retriedTransition).toMatchObject({
+      assessment: { id: sameStateAssessments.at(-1)!.id },
+      transitionKey: `completion-transition:${sameStateAssessments[segmentStartIndex]!.id}:${sameStateAssessments.at(-1)!.state}`
+    });
+    const forcedTransition = await governance.getSourceThreadTransition(workThreadId, {
+      forceCurrentAssessment: true
+    });
+    expect(forcedTransition).toMatchObject({
+      assessment: { id: sameStateAssessments.at(-1)!.id },
+      transitionKey: `completion-assessment:${sameStateAssessments.at(-1)!.id}:${sameStateAssessments.at(-1)!.state}`
+    });
+
+    await governance.ingestGitHubSnapshot(githubSnapshot({
+      deliveryId: "delivery-source-transition-assessment",
+      observedAt: "2026-07-21T10:07:00.000Z"
+    }));
+    const current = await repo.getCurrentCompletionAssessment({ workThreadId });
+    expect(current).not.toBeNull();
+    const transition = await governance.getSourceThreadTransition(workThreadId);
+    expect(transition).not.toBeNull();
+    expect(transition!.assessment).toEqual(current);
+    expect(transition!.completion.currentAssessment).toEqual(current);
+    expect(transition).toMatchObject({
+      runId,
+      event: { id: `event_${runId}` },
+      transitionKey: `completion-transition:${current!.id}:${current!.state}`
+    });
+    expect(transition!.assessment.id).toBe(
+      (await repo.listCompletionAssessments({ workThreadId })).at(-1)!.id
+    );
+    sqlite.close();
+  });
+
   it("rejects an unsafe strict policy without required checks", () => {
     expect(() => createDispatcherApp({
       databasePath: ":memory:",

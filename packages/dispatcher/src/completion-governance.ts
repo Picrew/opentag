@@ -7,7 +7,9 @@ import {
   type CompletionWaiver,
   type HumanEscalation,
   type OpenTagEvent,
-  type OpenTagRun
+  type OpenTagRun,
+  runResultArtifactId,
+  runResultCreatedPullRequestArtifactId
 } from "@opentag/core";
 import {
   createOpenTagGovernance,
@@ -443,10 +445,14 @@ function artifactsFromRuns(input: {
     if (!repository || repository.provider !== "github") continue;
     const candidates = [
       ...(result.createdPullRequestUrl
-        ? [{ id: `${stored.run.id}:created-pull-request`, kind: "pull_request", uri: result.createdPullRequestUrl }]
+        ? [{
+            id: runResultCreatedPullRequestArtifactId(stored.run.id),
+            kind: "pull_request",
+            uri: result.createdPullRequestUrl
+          }]
         : []),
       ...(result.artifacts ?? []).map((artifact, index) => ({
-        id: artifact.id ?? `${stored.run.id}:artifact:${index}`,
+        id: artifact.id ?? runResultArtifactId(stored.run.id, index),
         kind: artifact.kind ?? artifact.type ?? "custom",
         uri: artifact.uri
       }))
@@ -645,6 +651,7 @@ export type CompletionSourceThreadTransition = {
   runId: string;
   event: OpenTagEvent;
   completion: WorkLoopView;
+  assessment: CompletionAssessment;
   transitionKey: string;
 };
 
@@ -1121,19 +1128,49 @@ export function createDispatcherCompletionGovernance(input: {
       return buildCompletionExplanation(workThreadId);
     },
 
-    async getSourceThreadTransition(workThreadId: string): Promise<CompletionSourceThreadTransition | null> {
+    async getSourceThreadTransition(
+      workThreadId: string,
+      options: {
+        retryPendingTransition?: boolean;
+        forceCurrentAssessment?: boolean;
+      } = {}
+    ): Promise<CompletionSourceThreadTransition | null> {
       const assessments = await input.repo.listCompletionAssessments({ workThreadId });
       const current = assessments.at(-1);
-      const previous = assessments.at(-2);
-      if (!current || !previous || current.state === previous.state) return null;
-      const latest = currentWorkThreadRun(await input.repo.listRunsForWorkThread({ workThreadId }));
+      if (!current) return null;
+      let transitionAssessment = current;
+      let previous = assessments.at(-2);
+      if (!options.forceCurrentAssessment && previous?.state === current.state) {
+        if (!options.retryPendingTransition) return null;
+        let transitionIndex = assessments.length - 1;
+        while (
+          transitionIndex > 0
+          && assessments[transitionIndex - 1]?.state === current.state
+        ) {
+          transitionIndex -= 1;
+        }
+        transitionAssessment = assessments[transitionIndex]!;
+        previous = assessments[transitionIndex - 1];
+      }
+      if (
+        !options.forceCurrentAssessment
+        && (!previous || transitionAssessment.state === previous.state)
+      ) return null;
+      const runs = await input.repo.listRunsForWorkThread({ workThreadId });
+      const latest = current.triggeredByRunId
+        ? runs.find((entry) => entry.run.id === current.triggeredByRunId)
+        : currentWorkThreadRun(runs);
       if (!latest?.run.result) return null;
       const completion = await governance.read({ type: "get_work_loop", workThreadId }) as WorkLoopView;
+      if (completion.currentAssessment.id !== current.id) return null;
       return {
         runId: latest.run.id,
         event: latest.event,
         completion,
-        transitionKey: `completion-transition:${current.id}:${current.state}`
+        assessment: current,
+        transitionKey: options.forceCurrentAssessment
+          ? `completion-assessment:${current.id}:${current.state}`
+          : `completion-transition:${transitionAssessment.id}:${current.state}`
       };
     }
   };

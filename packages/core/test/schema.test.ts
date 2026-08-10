@@ -21,8 +21,27 @@ import {
   RunEventSchema,
   SuccessMetricNameSchema,
   SuggestedChangesSnapshotSchema,
-  WorkThreadSchema
+  WorkThreadSchema,
+  runResultArtifactId,
+  runResultCreatedPullRequestArtifactId
 } from "../src/schema.js";
+
+describe("run-result artifact identities", () => {
+  it("uses stable dedicated and one-based synthetic artifact IDs", () => {
+    expect(runResultCreatedPullRequestArtifactId("run_42")).toBe(
+      "run_42:created-pull-request"
+    );
+    expect(runResultArtifactId("run_42", 0)).toBe("run_42:artifact:1");
+    expect(runResultArtifactId("run_42", 1)).toBe("run_42:artifact:2");
+    expect(runResultArtifactId("run_42", 0)).not.toBe("run_42:artifact:0");
+  });
+
+  it("rejects invalid synthetic identity inputs", () => {
+    expect(() => runResultCreatedPullRequestArtifactId("")).toThrow(/non-empty run ID/u);
+    expect(() => runResultArtifactId("run_42", -1)).toThrow(/non-negative safe integer/u);
+    expect(() => runResultArtifactId("run_42", 0.5)).toThrow(/non-negative safe integer/u);
+  });
+});
 
 describe("ActionPermissionRequestSchema", () => {
   it("rejects credential-like titles before they enter durable action storage", () => {

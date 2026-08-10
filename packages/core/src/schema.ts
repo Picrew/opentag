@@ -1518,6 +1518,34 @@ export const OpenTagEventSchema = z.object({
   metadata: z.record(z.string(), z.unknown())
 });
 
+function requireRunResultArtifactRunId(runId: string): void {
+  if (runId.length === 0) {
+    throw new Error("Run-result artifact IDs require a non-empty run ID.");
+  }
+}
+
+/**
+ * Stable identity for the dedicated pull-request field on a run result.
+ */
+export function runResultCreatedPullRequestArtifactId(runId: string): string {
+  requireRunResultArtifactRunId(runId);
+  return `${runId}:created-pull-request`;
+}
+
+/**
+ * Stable identity for a run-result artifact that did not provide its own ID.
+ *
+ * `artifactIndex` is the zero-based position in `result.artifacts`; the
+ * serialized suffix is deliberately one-based so the first artifact is `:1`.
+ */
+export function runResultArtifactId(runId: string, artifactIndex: number): string {
+  requireRunResultArtifactRunId(runId);
+  if (!Number.isSafeInteger(artifactIndex) || artifactIndex < 0) {
+    throw new RangeError("Run-result artifact index must be a non-negative safe integer.");
+  }
+  return `${runId}:artifact:${artifactIndex + 1}`;
+}
+
 export const ResultArtifactSchema = z.object({
   id: z.string().min(1).optional(),
   type: RunArtifactTypeSchema.optional(),

@@ -45,7 +45,7 @@ describe("createTeamsCallbackSink", () => {
     expect(String(connectorCalls[1]?.[0])).toContain("/activities/reply-1");
   });
 
-  it("surfaces a non-2xx connector response as an error", async () => {
+  it("classifies an authoritative 4xx connector response as rejected", async () => {
     const fetchImpl = vi.fn(async (url: RequestInfo | URL) => {
       if (String(url).includes("/oauth2/")) return jsonResponse({ access_token: "tok", expires_in: 3600 });
       return new Response("forbidden", { status: 403 });
@@ -54,10 +54,10 @@ describe("createTeamsCallbackSink", () => {
 
     await expect(
       sink.deliver({ runId: "run_x", kind: "acknowledgement", provider: "teams", uri, threadKey, body: "ack" })
-    ).rejects.toThrow(/403/);
+    ).resolves.toEqual({ handled: true, outcome: "rejected", reasonCode: "provider_rejected" });
   });
 
-  it("keeps delivering later updates after an earlier one fails in the chain", async () => {
+  it("does not issue a second write after an earlier provider result is unknown", async () => {
     let connectorCalls = 0;
     const fetchImpl = vi.fn(async (url: RequestInfo | URL) => {
       const u = String(url);
@@ -71,12 +71,16 @@ describe("createTeamsCallbackSink", () => {
     // Start the second delivery before the first settles so it chains onto the failing one.
     const first = sink.deliver({ runId: "run_2", kind: "progress", provider: "teams", uri, threadKey, body: "first" });
     const second = sink.deliver({ runId: "run_2", kind: "final", provider: "teams", uri, threadKey, body: "second" });
-    await Promise.allSettled([first, second]);
+    const results = await Promise.allSettled([first, second]);
 
-    expect(connectorCalls).toBe(2);
+    expect(results).toEqual([
+      expect.objectContaining({ status: "rejected" }),
+      expect.objectContaining({ status: "rejected" })
+    ]);
+    expect(connectorCalls).toBe(1);
   });
 
-  it("cleans up the edit chain when final delivery fails", async () => {
+  it("replays an unknown edit result without issuing another provider write", async () => {
     let connectorCalls = 0;
     const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       const u = String(url);
@@ -87,16 +91,30 @@ describe("createTeamsCallbackSink", () => {
       if (connectorCalls === 3 && init?.method === "POST") return jsonResponse({ id: "reply-2" }, 201);
       return jsonResponse({}, 200);
     });
-    const sink = createTeamsCallbackSink({ appId: "app", appPassword: "s", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const sink = createTeamsCallbackSink({
+      appId: "app",
+      appPassword: "s",
+      producerId: "runner_local_1",
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
 
     await sink.deliver({ runId: "run_cleanup", kind: "acknowledgement", provider: "teams", uri, threadKey, body: "ack" });
+    const unknown = {
+      handled: true,
+      outcome: "outcome_unknown",
+      reasonCode: "provider_timeout",
+      nextAction: "reconcile-provider",
+      owner: "runner_local_1"
+    } as const;
     await expect(
       sink.deliver({ runId: "run_cleanup", kind: "final", provider: "teams", uri, threadKey, body: "final" })
-    ).rejects.toThrow(/500/);
-    await sink.deliver({ runId: "run_cleanup", kind: "progress", provider: "teams", uri, threadKey, body: "later" });
+    ).resolves.toEqual(unknown);
+    await expect(
+      sink.deliver({ runId: "run_cleanup", kind: "progress", provider: "teams", uri, threadKey, body: "later" })
+    ).resolves.toEqual(unknown);
 
     const connectorRequests = fetchImpl.mock.calls.filter(([callUrl]) => String(callUrl).includes("/v3/conversations/"));
-    expect(connectorRequests.map(([, init]) => init?.method)).toEqual(["POST", "PUT", "POST"]);
+    expect(connectorRequests.map(([, init]) => init?.method)).toEqual(["POST", "PUT"]);
   });
 
   it("ignores non-Teams callback messages", async () => {
@@ -107,7 +125,7 @@ describe("createTeamsCallbackSink", () => {
 
     await expect(
       sink.deliver({ runId: "run_3", kind: "final", provider: "discord", uri, body: "done" })
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ handled: false });
   });
 
   it("does nothing when credentials are not configured", async () => {
@@ -118,6 +136,6 @@ describe("createTeamsCallbackSink", () => {
 
     await expect(
       sink.deliver({ runId: "run_4", kind: "acknowledgement", provider: "teams", uri, threadKey, body: "ack" })
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ handled: false });
   });
 });
