@@ -117,13 +117,23 @@ function isCredentialSafeStableReference(value: string): boolean {
   return true;
 }
 
+function isCustodySafeStableReference(value: string): boolean {
+  return !/^[a-z][a-z0-9+.-]*:\/\//iu.test(value)
+    && !/^(?:\/|~\/|[A-Za-z]:[\\/])/u.test(value)
+    && !/(?:^|[/\\])\.\.(?:[/\\]|$)/u.test(value);
+}
+
 export const GovernedProjectionStableReferenceV1Schema = z
   .string()
   .min(1)
   .max(128)
   .regex(
-    /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u,
+    /^[A-Za-z0-9][A-Za-z0-9._:@/#-]*$/u,
     "Governed projection reference must contain only stable identifier characters.",
+  )
+  .refine(
+    isCustodySafeStableReference,
+    "Governed projection reference must not be a URL, absolute path, or traversal path.",
   )
   .refine(
     isCredentialSafeStableReference,

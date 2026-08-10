@@ -50,6 +50,7 @@ import {
   HostedAuthorityRefV1Schema,
   HostedExecutorResultReceiptRefV1Schema,
   HostedExecutorResultReasonCodeV1Schema,
+  GovernedProjectionStableReferenceV1Schema,
   GovernedProjectionAttemptRefV1Schema,
   HostedHeartbeatRequestV1Schema,
   HostedLifecycleReceiptPayloadV1Schema,
@@ -2611,6 +2612,63 @@ describe("governed projection fixture vectors", () => {
 });
 
 describe("ReceiptEnvelope V1", () => {
+  it("carries production-shaped governed WorkThread and completion contract references", () => {
+    const workThreadId =
+      "thread_github_acme/demo#42_issuecomment-100";
+    const contractId = `completion:${workThreadId}:github-pr`;
+    const authority = {
+      claimOperationId: "claim_operation_1",
+      authorityDigest: otherDigest,
+      attempt: {
+        attemptId: "attempt_1",
+        attemptNumber: 1,
+        epoch: 1,
+        fencingTokenDigest: digest,
+      },
+      admissionPolicySnapshot: {
+        receiptId: "policy_receipt_1",
+        snapshotId: "policy_1",
+        digest,
+      },
+    };
+
+    expect(WorkThreadRefPayloadV1Schema.safeParse({
+      workThreadId,
+      sourceIdentityDigest: digest,
+      localCreationReceiptId: "work-thread-receipt@1",
+      localCreationReceiptDigest: otherDigest,
+      lineageKind: "github:issue/comment",
+      hostedAuthorityRef: authority,
+      createdAt: observedAt,
+    }).success).toBe(true);
+    expect(CompletionContractRefPayloadV1Schema.safeParse({
+      contractId,
+      version: 1,
+      cycle: 1,
+      mode: "governed",
+      contentDigest: digest,
+      resolvedTargetDigests: [],
+      requiredGateIds: ["pull_request"],
+      createdAt: observedAt,
+    }).success).toBe(true);
+  });
+
+  it("rejects unsafe governed projection references after widening authoritative IDs", () => {
+    for (const unsafeReference of [
+      "https://github.com/acme/demo#42",
+      "/Users/alice/private/contract",
+      "C:/Users/alice/private/contract",
+      "thread_github_acme/demo#42/../private",
+      "thread_github_pat_abcdefghijklmnopqrstuvwxyz123456",
+    ]) {
+      expect(
+        GovernedProjectionStableReferenceV1Schema.safeParse(unsafeReference)
+          .success,
+        unsafeReference,
+      ).toBe(false);
+    }
+  });
+
   it("derives the Cloud-compatible deterministic lifecycle receipt ID", async () => {
     await expect(computeHostedLifecycleReceiptIdV1({
       organizationId: "org_1",
