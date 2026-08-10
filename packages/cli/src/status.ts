@@ -32,6 +32,7 @@ import { formatConfiguredCapabilities } from "./catalogs/capabilities.js";
 import type { PlatformId } from "./catalogs/platforms.js";
 import {
   defaultConfigPath,
+  hostedRunnerAuthProblem,
   readCliConfig,
   readRedactedCliConfig,
   relayUrlFromConfig,
@@ -76,6 +77,20 @@ export type StatusSummary = {
   acceptedProgressMetrics?: AcceptedProgressMetrics;
   acceptedProgressMetricsError?: string;
 };
+
+function assertHostedStatusAuth(config: OpenTagCliConfig): void {
+  const problem = hostedRunnerAuthProblem(config.daemon);
+  if (problem) throw new Error(problem);
+}
+
+function assertHostedRunStatusAuth(config: OpenTagCliConfig): void {
+  if (!config.daemon.controlRegistration) return;
+  const problem = hostedRunnerAuthProblem({
+    ...config.daemon,
+    pairingToken: undefined
+  });
+  if (problem) throw new Error(problem);
+}
 
 type RunAuditEvent = {
   type?: unknown;
@@ -196,6 +211,7 @@ export async function statusFromConfig(input: {
   healthTimeoutMs?: number;
   secretConfig?: unknown;
 }): Promise<StatusSummary> {
+  assertHostedStatusAuth(input.config);
   const relayUrl = relayUrlFromConfig(input.config);
   const dispatcher = (await probeDispatcherHealth({
     dispatcherUrl: input.config.daemon.dispatcherUrl,
@@ -258,6 +274,7 @@ async function loadRoutingState(input: {
   metricsError?: string;
 }> {
   if (input.dispatcher !== "online") return { runners: [] };
+  assertHostedStatusAuth(input.config);
   const token = runnerDispatcherToken(input.config.daemon);
   const client = createOpenTagClient({
     dispatcherUrl: input.config.daemon.dispatcherUrl,
@@ -286,6 +303,7 @@ async function loadControlPlaneAlertState(input: {
   fetchImpl?: typeof fetch;
 }): Promise<{ alerts: ControlPlaneAlert[]; error?: string }> {
   if (input.dispatcher !== "online") return { alerts: [] };
+  assertHostedStatusAuth(input.config);
   try {
     const token = runnerDispatcherToken(input.config.daemon);
     const client = createOpenTagClient({
@@ -379,7 +397,10 @@ function governanceStatusClient(input: {
   config: OpenTagCliConfig;
   fetchImpl?: typeof fetch;
 }) {
-  const token = input.config.daemon.pairingToken ?? runnerDispatcherToken(input.config.daemon);
+  assertHostedStatusAuth(input.config);
+  const token = input.config.daemon.controlRegistration
+    ? runnerDispatcherToken(input.config.daemon)
+    : input.config.daemon.pairingToken ?? runnerDispatcherToken(input.config.daemon);
   return createOpenTagClient({
     dispatcherUrl: input.config.daemon.dispatcherUrl,
     ...(token ? { pairingToken: token } : {}),
@@ -423,6 +444,7 @@ export async function workstreamStatusFromConfig(input: {
   workstreamId: string;
   fetchImpl?: typeof fetch;
 }): Promise<WorkstreamStatusSummary> {
+  assertHostedStatusAuth(input.config);
   const token = runnerDispatcherToken(input.config.daemon);
   const client = createOpenTagClient({
     dispatcherUrl: input.config.daemon.dispatcherUrl,
@@ -455,6 +477,7 @@ export async function channelStatusFromConfig(input: {
   channel: string;
   fetchImpl?: typeof fetch;
 }): Promise<ChannelStatusSummary> {
+  assertHostedStatusAuth(input.config);
   const channel = parseChannelRef(input.channel);
   const token = runnerDispatcherToken(input.config.daemon);
   const client = createOpenTagClient({
@@ -477,17 +500,23 @@ export async function runStatusFromConfig(input: {
   runId: string;
   fetchImpl?: typeof fetch;
 }): Promise<RunStatusSummary> {
+  assertHostedRunStatusAuth(input.config);
   const runnerToken = runnerDispatcherToken(input.config.daemon);
+  const runtimeToken = input.config.daemon.controlRegistration
+    ? input.config.daemon.runnerToken
+    : runnerToken;
   const runnerClient = createOpenTagClient({
     dispatcherUrl: input.config.daemon.dispatcherUrl,
-    ...(runnerToken ? { pairingToken: runnerToken } : {}),
+    ...(runtimeToken ? { pairingToken: runtimeToken } : {}),
     ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
   });
-  const pairingToken = input.config.daemon.pairingToken;
-  const completionRequest = pairingToken
+  const governanceToken = input.config.daemon.controlRegistration
+    ? runtimeToken
+    : input.config.daemon.pairingToken;
+  const completionRequest = governanceToken
     ? createOpenTagClient({
         dispatcherUrl: input.config.daemon.dispatcherUrl,
-        pairingToken,
+        pairingToken: governanceToken,
         ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
       }).getCompletion({ runId: input.runId }).catch((error: unknown) => {
         if (isCompletionNotAvailable(error)) return undefined;

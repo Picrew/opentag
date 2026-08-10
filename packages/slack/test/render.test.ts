@@ -122,6 +122,11 @@ describe("Slack callback rendering", () => {
     );
   });
 
+  it("preserves a long unmatched Markdown link prefix", () => {
+    const text = `${"[".repeat(4_096)}tail`;
+    expect(markdownToSlackMrkdwn(text)).toBe(text);
+  });
+
   it("builds Slack post and update payloads", () => {
     expect(createSlackPostMessagePayload({ channelId: "C123", threadTs: "171.001", text: "**hello**" })).toEqual({
       channel: "C123",

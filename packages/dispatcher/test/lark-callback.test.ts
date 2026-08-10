@@ -16,7 +16,7 @@ function larkMessage(overrides?: Partial<CallbackMessage>): CallbackMessage {
 }
 
 function mockClient() {
-  const reply = vi.fn(async () => ({}));
+  const reply = vi.fn(async () => ({ data: { message_id: "om_reply" } }));
   const client: LarkReplyClient = { im: { message: { reply } } };
   return { client, reply };
 }

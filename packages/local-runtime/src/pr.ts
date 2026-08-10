@@ -8,7 +8,10 @@ import {
   type CommandRunner,
   type ExecutorCapabilityContract
 } from "@opentag/runner";
-import type { RepositoryBindingConfig } from "./config.js";
+import {
+  canonicalRepositoryIdentity,
+  type RepositoryBindingConfig,
+} from "./config.js";
 
 export type PullRequestOptions = {
   githubToken?: string;
@@ -24,14 +27,25 @@ function hasPermission(event: OpenTagEvent, scope: string): boolean {
 
 function isGitHubRepositoryTarget(input: { event: OpenTagEvent; binding: RepositoryBindingConfig }): boolean {
   const repoProvider = input.event.metadata["repoProvider"];
-  return input.binding.provider === "github" && (repoProvider == null || repoProvider === "github");
+  return input.binding.provider.toLowerCase() === "github"
+    && (repoProvider == null
+      || (typeof repoProvider === "string" && repoProvider.toLowerCase() === "github"));
 }
 
 function repositoryTargetMatchesBinding(input: { event: OpenTagEvent; binding: RepositoryBindingConfig }): boolean {
   const owner = input.event.metadata["owner"];
   const repo = input.event.metadata["repo"];
   if (typeof owner !== "string" || typeof repo !== "string") return false;
-  return owner === input.binding.owner && repo === input.binding.repo;
+  const provider = input.event.metadata["repoProvider"];
+  const targetIdentity = canonicalRepositoryIdentity({
+    provider: typeof provider === "string" ? provider : input.binding.provider,
+    owner,
+    repo,
+  });
+  const bindingIdentity = canonicalRepositoryIdentity(input.binding);
+  return targetIdentity.provider === bindingIdentity.provider
+    && targetIdentity.owner === bindingIdentity.owner
+    && targetIdentity.repo === bindingIdentity.repo;
 }
 
 type CreatePullRequestIntent = {
@@ -68,6 +82,7 @@ export async function maybeCreatePullRequest(input: {
   binding: RepositoryBindingConfig;
   result: OpenTagRunResult;
   options: PullRequestOptions;
+  assertExecutionCurrent?: () => Promise<boolean>;
 }): Promise<OpenTagRunResult> {
   if (!input.options.allowAutoCreatePullRequest && !input.options.preparePullRequestBranch) return input.result;
   if (!isGitHubRepositoryTarget({ event: input.event, binding: input.binding })) return input.result;
@@ -81,7 +96,16 @@ export async function maybeCreatePullRequest(input: {
   const intent = createPullRequestIntent(input.result);
   const branchName = intent?.head ?? branchNameForRun(input.run.id);
   const runner = input.options.commandRunner ?? nodeCommandRunner;
+  const assertExecutionCurrent = async () => {
+    if (
+      input.assertExecutionCurrent
+      && !(await input.assertExecutionCurrent())
+    ) {
+      throw new Error("execution_authority_expired");
+    }
+  };
   if (input.executorCapability?.sourceControl !== "self_committing") {
+    await assertExecutionCurrent();
     await commitChangedFiles({
       runner,
       workspacePath: input.binding.checkoutPath,
@@ -89,6 +113,7 @@ export async function maybeCreatePullRequest(input: {
       message: `OpenTag run ${input.run.id}`
     });
   }
+  await assertExecutionCurrent();
   await pushBranch({
     runner,
     workspacePath: input.binding.checkoutPath,
@@ -101,6 +126,7 @@ export async function maybeCreatePullRequest(input: {
   }
   if (!input.options.githubToken) return input.result;
 
+  await assertExecutionCurrent();
   const pullRequestUrl = await createPullRequestViaFetch(
     {
       token: input.options.githubToken,

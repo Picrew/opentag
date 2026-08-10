@@ -9,6 +9,7 @@ import { doctorHasFailures, formatDoctorChecks, runDoctor } from "./doctor.js";
 import { createDaemonRuntimeInput, executorsFromConfig, runnerExecutorRegistrations } from "./runtime.js";
 
 const program = new Command();
+const databasePath = process.env.OPENTAG_DATABASE_PATH ?? "opentag.db";
 
 function loadConfigOrExit() {
   try {
@@ -235,7 +236,14 @@ program
   .description("Claim and execute one run if available")
   .action(async () => {
     const config = loadConfigOrExit();
-    const didWork = await runOneDaemonIteration(createDaemonRuntimeInput(config));
+    const runtime = createDaemonRuntimeInput(config, { databasePath });
+    if (runtime.mode === "control-v1-sidecar") {
+      await runtime.controlLoop.close();
+      throw new Error(
+        "opentagd run-once is unavailable for Hosted Control V1; use opentagd serve to run the context/readiness/outbox sidecar."
+      );
+    }
+    const didWork = await runOneDaemonIteration(runtime);
     console.log(didWork ? "OpenTag run completed" : "No OpenTag run available");
   });
 
@@ -244,7 +252,7 @@ program
   .description("Continuously poll for and execute OpenTag runs")
   .action(async () => {
     const config = loadConfigOrExit();
-    await serveDaemon(createDaemonRuntimeInput(config));
+    await serveDaemon(createDaemonRuntimeInput(config, { databasePath }));
   });
 
 await program.parseAsync(process.argv);

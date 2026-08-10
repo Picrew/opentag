@@ -85,7 +85,11 @@ function assessment(input: {
   supersedesAssessmentId?: string;
   state?: CompletionAssessment["state"];
   acceptedAt?: string;
+  assessedAt?: string;
 }): CompletionAssessment {
+  const state = input.state ?? "pending";
+  const accepted = state === "satisfied";
+  const assessedAt = input.assessedAt ?? timestamp;
   return {
     id: input.id,
     workThreadId: input.workThreadId,
@@ -101,18 +105,20 @@ function assessment(input: {
       resourceVersion: "abc123",
       artifactId: "artifact-pr-7"
     }],
-    state: input.state ?? "pending",
+    state,
     evidenceBacked: true,
     gateResults: [{
       gateId: "checks",
       targetKey: "primary_change",
-      state: "missing",
-      evidenceIds: [],
-      reasonCode: "verification_missing",
-      reason: "Required check evidence has not arrived.",
-      evaluatedAt: timestamp
+      state: accepted ? "passed" : "missing",
+      evidenceIds: accepted ? ["evidence-checks"] : [],
+      reasonCode: accepted ? "verification_passed" : "verification_missing",
+      reason: accepted
+        ? "Required check evidence passed."
+        : "Required check evidence has not arrived.",
+      evaluatedAt: assessedAt
     }],
-    assessedAt: timestamp,
+    assessedAt,
     assessedBy: "opentag",
     ...(input.acceptedAt ? { acceptedAt: input.acceptedAt } : {}),
     ...(input.supersedesAssessmentId ? { supersedesAssessmentId: input.supersedesAssessmentId } : {})
@@ -468,7 +474,8 @@ describe("completion governance persistence", () => {
       digestChar: "e",
       supersedesAssessmentId: pending.id,
       state: "satisfied",
-      acceptedAt
+      acceptedAt,
+      assessedAt: acceptedAt
     });
     const stillAccepted = assessment({
       id: "assessment-metric-still-accepted",
@@ -477,7 +484,8 @@ describe("completion governance persistence", () => {
       digestChar: "f",
       supersedesAssessmentId: accepted.id,
       state: "satisfied",
-      acceptedAt
+      acceptedAt,
+      assessedAt: "2026-07-21T10:06:00.000Z"
     });
 
     await repo.appendCompletionAssessment({ assessment: pending, expectedCurrentAssessmentId: null });

@@ -47,6 +47,30 @@ const attemptLease = {
 };
 
 describe("opentagd", () => {
+  it("never claims from the legacy run-once path for a Control V1 runner", async () => {
+    const claim = vi.fn(async () => null);
+    await expect(runOneDaemonIteration({
+      mode: "control-v1-sidecar",
+      controlLoop: {
+        async beforeIteration() { return true; },
+        async afterIteration() {},
+        abort() {},
+        async close() {},
+      },
+      client: {
+        claim,
+        async markRunning() {},
+        async heartbeat() {},
+        async progress() {},
+        async complete() {},
+        async requestActionPermission() { throw new Error("should not run"); },
+        async resolveActionPermission() { throw new Error("should not run"); },
+        async recordMaterialActionReceipt() { throw new Error("should not run"); },
+      },
+    } as never)).rejects.toThrow(/accepts only a legacy claim-capable daemon runtime/iu);
+    expect(claim).not.toHaveBeenCalled();
+  });
+
   it("claims a run and completes it with echo executor", async () => {
     const calls: string[] = [];
 
@@ -115,6 +139,7 @@ describe("opentagd", () => {
     let claimCount = 0;
 
     const daemonPromise = serveDaemon({
+      mode: "legacy",
       runnerId: "runner_1",
       repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
       executors: { echo: createEchoExecutor() },
@@ -608,6 +633,7 @@ describe("opentagd", () => {
 
     try {
       await serveDaemon({
+        mode: "legacy",
         runnerId: "runner_1",
         repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
         executors: { echo: createEchoExecutor() },

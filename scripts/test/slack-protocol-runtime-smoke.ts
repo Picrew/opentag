@@ -25,6 +25,7 @@ try {
     callbackSink: {
       async deliver(message) {
         delivered.push(message);
+        return { handled: true, outcome: 'accepted' } as const;
       }
     }
   });
@@ -76,7 +77,10 @@ try {
 
   const created = await client.createRun({ runId: "run_slack_smoke_1", event });
   assert(created.run.contextPacket?.summary === "investigate the flaky smoke test", "Slack run should include context packet");
-  assert(!created.run.thread, "Slack event without canonical work item should not invent a work thread");
+  assert(
+    created.run.thread?.workItemReference.externalId === event.workItem?.externalId,
+    "Bound Slack threads should preserve their canonical work item on the work thread"
+  );
   assert(delivered.length === 1, "Slack acknowledgement should be delivered");
   assert(delivered[0]?.provider === "slack", "acknowledgement should target Slack");
   assert(delivered[0]?.kind === "acknowledgement", "first Slack callback should be acknowledgement");
@@ -142,7 +146,10 @@ try {
   const proposal = await client.getProposal({ proposalId: "proposal_slack_smoke_1" });
   assert(proposal.runId === "run_slack_smoke_1", "Slack proposal should point to source run");
   assert(proposal.snapshot.sourceRunId === "run_slack_smoke_1", "Slack proposal should carry sourceRunId");
-  assert(!proposal.snapshot.workThread, "Slack proposal should not invent a canonical work thread");
+  assert(
+    proposal.snapshot.workThread?.workItemReference.externalId === event.workItem?.externalId,
+    "Slack proposal should preserve the bound thread work item"
+  );
 
   const lineage = await client.getProposalLineage({ proposalId: "proposal_slack_smoke_1" });
   assert(lineage.lineage.entries[0]?.status === "current", "Slack proposal intent should be current");

@@ -19,7 +19,14 @@ const tempDir = await mkdtemp(join(tmpdir(), "opentag-protocol-smoke-"));
 const databasePath = join(tempDir, "opentag-smoke.db");
 
 try {
-  const app = createDispatcherApp({ databasePath });
+  const app = createDispatcherApp({
+    databasePath,
+    callbackSink: {
+      async deliver() {
+        return { handled: true, outcome: 'accepted' } as const;
+      }
+    }
+  });
   const client = createOpenTagClient({
     dispatcherUrl: "http://opentag-smoke.local",
     fetchImpl: async (url, init) => {

@@ -17,16 +17,37 @@ import {
   CompletionAssessmentSchema,
   CompletionContractSchema,
   CompletionWaiverSchema,
+  canonicalJsonStringify,
+  computeControlPayloadDigestV1,
+  computeControlReceiptDigestV1,
+  computeHostedLifecycleRequestDigestV1,
+  computeHostedLifecycleRequestIdV1,
+  computeHostedLifecycleOperationIdV1,
+  computeHostedLifecycleReceiptIdV1,
+  computeHostedClaimFencingTokenDigestV1,
+  CompletionAssessmentReceiptEnvelopeV1Schema,
+  CompletionEvidenceObservationPayloadV1Schema,
+  CompletionEvidenceObservationReceiptEnvelopeV1Schema,
+  CompletionContractRefReceiptEnvelopeV1Schema,
+  CallbackAttemptObservationReceiptEnvelopeV1Schema,
+  CallbackIntentObservationReceiptEnvelopeV1Schema,
+  CallbackProviderObservationReceiptEnvelopeV1Schema,
+  compareCompletionGateIds,
+  compareRfc3339Timestamps,
   ContextPacketSchema,
   conversationKeyFromEvent,
   conversationKeysFromEvent,
   defaultRunEventMetadata,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
+  parseGitHubIssueCommentsTargetV1,
   ReassessmentObligationReasonCodeSchema,
   ReassessmentObligationSchema,
   ReassessmentObligationSourceKindSchema,
   ReassessmentObligationStateSchema,
+  reduceCompletionGateStates,
+  runResultArtifactId,
+  runResultCreatedPullRequestArtifactId,
   PolicyRuleSchema,
   PolicySnapshotProvenanceSchema,
   ProposalLineageSchema,
@@ -50,13 +71,27 @@ import {
   RunEventVisibilitySchema,
   RoutingDecisionSchema,
   RunnerDirectoryEntrySchema,
+  RunnerReadinessReceiptEnvelopeV1Schema,
   RunnerRegistrationInputSchema,
   SuggestedChangesSnapshotSchema,
   HumanEscalationSchema,
+  HostedClaimRequestV1Schema,
+  HostedClaimV1Schema,
+  HostedHeartbeatRequestV1Schema,
+  HostedProgressRequestV1Schema,
+  HostedRejectStartRequestV1Schema,
+  HostedRunningRequestV1Schema,
+  HostedCompleteRequestV1Schema,
+  HostedLifecycleRequestV1Schema,
+  HostedLifecycleReceiptEnvelopeV1Schema,
   VerificationEvidenceSchema,
+  WorkThreadRefReceiptEnvelopeV1Schema,
   WorkThreadSchema,
   WorkstreamAdmissionBatchInputSchema,
   WorkstreamInputSchema,
+  verifyHostedAdmissionEnvelopeDigestV1,
+  verifyHostedClaimFencingTokenDigestV1,
+  verifyHostedLifecycleReceiptV1,
   type ApprovalDecision,
   type AgentAccessProfileSnapshot,
   type ActorIdentity,
@@ -73,9 +108,23 @@ import {
   type CompletionAssessment,
   type CompletionContract,
   type CompletionWaiver,
+  type CompletionAssessmentReceiptEnvelopeV1,
+  type CompletionEvidenceObservationPayloadV1,
+  type CompletionEvidenceObservationReceiptEnvelopeV1,
+  type CompletionContractRefReceiptEnvelopeV1,
   type FrozenRoutingPolicy,
   type FactoryRecipeSnapshotInput,
   type HumanEscalation,
+  type HostedClaimRequestV1,
+  type HostedClaimV1,
+  type HostedHeartbeatRequestV1,
+  type HostedProgressRequestV1,
+  type HostedRejectStartRequestV1,
+  type HostedRunningRequestV1,
+  type HostedCompleteRequestV1,
+  type HostedLifecycleActionV1,
+  type HostedLifecycleRequestV1,
+  type HostedLifecycleReceiptEnvelopeV1,
   type MutationIntentActionability,
   type OpenTagEvent,
   type OpenTagManagedChannelBindingOwnership,
@@ -97,15 +146,18 @@ import {
   type RunnerDirectoryEntry,
   type RunnerRegistrationConfig,
   type RunnerRegistrationInput,
+  type RunnerReadinessReceiptEnvelopeV1,
   type SuggestedChangesSnapshot,
   type VerificationEvidence,
+  type WorkThreadRefReceiptEnvelopeV1,
   type WorkThread,
   type WorkstreamInput
 } from "@opentag/core";
 import {
   deriveAcceptedProgressAttribution,
   evaluateRouting,
-  type CompletionArtifact
+  type CompletionArtifact,
+  type CompletionEvidenceFact
 } from "@opentag/governance";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, notExists, or, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
@@ -121,11 +173,16 @@ import {
   completionAssessments,
   completionContracts,
   completionWaivers,
+  controlPlaneProjectionOutbox,
   controlPlaneEvents,
   factoryRecipeSnapshots,
   factoryWorkstreamMembers,
   factoryWorkstreams,
   governanceEvents,
+  hostedAttemptImports,
+  hostedClaimOperations,
+  hostedLifecycleOperations,
+  hostedRunImports,
   humanEscalations,
   linearOAuthInstallStates,
   linearRelayInstallations,
@@ -134,6 +191,9 @@ import {
   repoPolicyRules,
   reassessmentObligations,
   callbackDeliveries,
+  governedCallbackAttempts,
+  governedCallbackIntents,
+  governedCallbackReconciliations,
   followUpRequests,
   runEvents,
   sourceDeliveries,
@@ -145,6 +205,86 @@ import {
   workstreamAdmissionBatchItems,
   workstreamAdmissionBatches
 } from "./schema.js";
+
+export type ControlPlaneProjectionEnvelope =
+  | RunnerReadinessReceiptEnvelopeV1
+  | WorkThreadRefReceiptEnvelopeV1
+  | CompletionContractRefReceiptEnvelopeV1
+  | CompletionEvidenceObservationReceiptEnvelopeV1
+  | CompletionAssessmentReceiptEnvelopeV1
+  | typeof CallbackIntentObservationReceiptEnvelopeV1Schema._output
+  | typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output
+  | typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+
+export type ControlPlaneProjectionOutboxState = "pending" | "leased" | "acknowledged" | "attention";
+
+export type ControlPlaneProjectionOutboxEntry = {
+  receiptId: string;
+  destinationId: string;
+  organizationId: string;
+  runnerId?: string;
+  runId?: string;
+  workThreadId?: string;
+  receiptKind: ControlPlaneProjectionEnvelope["receiptKind"];
+  identity: { namespace: string; parts: string[]; key: string };
+  operationId: string;
+  dependsOnReceiptId?: string;
+  requiresLifecycleOperationId?: string;
+  payloadDigest: string;
+  receiptDigest: string;
+  envelope: ControlPlaneProjectionEnvelope;
+  state: ControlPlaneProjectionOutboxState;
+  attemptCount: number;
+  nextAttemptAt?: string;
+  leaseOwner?: string;
+  leaseToken?: string;
+  leaseExpiresAt?: string;
+  lastReasonCode?: string;
+  lastHttpStatus?: number;
+  createdAt: string;
+  updatedAt: string;
+  acknowledgedAt?: string;
+};
+
+export type EnqueueControlPlaneProjectionInput = {
+  destinationId: string;
+  envelope: unknown;
+  dependsOnReceiptId?: string;
+  requiresLifecycleOperationId?: string;
+  now?: Date;
+};
+
+export type EnqueueControlPlaneProjectionResult =
+  | { outcome: "created" | "replay"; entry: ControlPlaneProjectionOutboxEntry }
+  | { outcome: "conflict"; conflictOn: "receipt_id" | "identity" | "operation"; existingReceiptId: string };
+
+export type ClaimControlPlaneProjectionsResult = {
+  entries: ControlPlaneProjectionOutboxEntry[];
+  rejected: Array<{
+    receiptId?: string;
+    rowIdentityDigest: string;
+    reasonCode:
+      | "stored_row_invalid"
+      | "dependency_missing"
+      | "dependency_cross_destination"
+      | "dependency_invalid";
+  }>;
+};
+
+export class ControlPlaneProjectionOutboxValidationError extends Error {
+  readonly code:
+    | "projection_envelope_invalid"
+    | "projection_custody_violation"
+    | "projection_destination_invalid"
+    | "projection_digest_mismatch"
+    | "projection_invalid_unicode";
+
+  constructor(code: ControlPlaneProjectionOutboxValidationError["code"]) {
+    super(code);
+    this.name = "ControlPlaneProjectionOutboxValidationError";
+    this.code = code;
+  }
+}
 
 export type OpenTagRunWithEvent = {
   run: OpenTagRun;
@@ -236,6 +376,177 @@ export type ClaimedOpenTagRun = OpenTagRunWithEvent & {
   routingDecision: RoutingDecision;
 };
 
+export const HOSTED_IMPORT_ERROR_CODES = [
+  "HOSTED_IMPORT_CLAIM_INVALID",
+  "HOSTED_IMPORT_EVENT_MISMATCH",
+  "HOSTED_IMPORT_RUN_CONFLICT",
+  "HOSTED_IMPORT_ADMISSION_CONFLICT",
+  "HOSTED_IMPORT_OPERATION_CONFLICT",
+  "HOSTED_IMPORT_ATTEMPT_CONFLICT",
+  "HOSTED_IMPORT_FENCE_CONFLICT",
+  "HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT",
+  "HOSTED_IMPORT_AUTHORITY_CONFLICT",
+  "HOSTED_IMPORT_WORK_THREAD_CONFLICT",
+  "HOSTED_CLAIM_OPERATION_INVALID",
+  "HOSTED_CLAIM_OPERATION_CONFLICT",
+  "HOSTED_CLAIM_OPERATION_NOT_PENDING",
+  "HOSTED_HEARTBEAT_OPERATION_INVALID",
+  "HOSTED_HEARTBEAT_OPERATION_CONFLICT"
+] as const;
+
+export type HostedImportErrorCode = (typeof HOSTED_IMPORT_ERROR_CODES)[number];
+
+export class HostedImportConflictError extends Error {
+  override readonly name = "HostedImportConflictError";
+
+  constructor(readonly code: HostedImportErrorCode) {
+    super(code);
+  }
+}
+
+export class HostedLifecycleOperationConflictError extends Error {
+  override readonly name = "HostedLifecycleOperationConflictError";
+
+  constructor(readonly code:
+    | "HOSTED_LIFECYCLE_OPERATION_INVALID"
+    | "HOSTED_LIFECYCLE_OPERATION_CONFLICT"
+    | "HOSTED_LIFECYCLE_PREDECESSOR_NOT_ACKNOWLEDGED"
+    | "HOSTED_LIFECYCLE_ATOMIC_API_REQUIRED") {
+    super(code);
+  }
+}
+
+export class GovernedCallbackConflictError extends Error {
+  constructor(readonly code:
+    | "GOVERNED_CALLBACK_INVALID"
+    | "GOVERNED_CALLBACK_CONFLICT"
+    | "GOVERNED_CALLBACK_AUTHORITY_CONFLICT"
+    | "GOVERNED_CALLBACK_STALE_LEASE"
+    | "GOVERNED_CALLBACK_RECONCILIATION_REQUIRED") {
+    super(code);
+  }
+}
+
+export type HostedImportAuthority = HostedClaimV1["authority"] & {
+  admissionId: string;
+  admissionOperationId: string;
+  claimOperationId: string;
+  admissionEnvelopeDigest: string;
+  sourceIdentityDigest: string;
+  deliveryPayloadDigest: string;
+  policyReceiptId: string;
+  policyPayloadDigest: string;
+  policyReceiptDigest: string;
+  eventDigest: string;
+  contextPacketDigest: string;
+  workThreadId?: string;
+  workThreadDigest?: string;
+  claimDigest: string;
+  authorityDigest: string;
+  importedAt: string;
+};
+
+export type HostedAssignedRun = OpenTagRunWithEvent & {
+  attemptId: string;
+  attemptNumber: number;
+  fencingToken: string;
+  executorId: string;
+};
+
+export type ImportHostedAssignedRunResult = {
+  outcome: "created" | "replayed";
+  executionState: "ready_to_start" | "already_started" | "superseded" | "terminal";
+  executionMayStart: false;
+  claimed: HostedAssignedRun | null;
+  hostedAuthority: HostedImportAuthority;
+};
+
+export type HostedSourceRefetchReceipt = {
+  provider: "github";
+  providerRepositoryId: string;
+  owner: string;
+  repo: string;
+  sourceThread: HostedClaimV1["hostedAdmission"]["sourceThread"];
+  sourceEvent: HostedClaimV1["hostedAdmission"]["sourceEvent"];
+  actor: { providerUserId: string; login: string };
+  sourceIdentityDigest: string;
+  eventDigest: string;
+  refetchedAt: string;
+};
+
+export type HostedClaimOperation = {
+  operationId: string;
+  requestId: string;
+  organizationId: string;
+  runnerId: string;
+  destinationId: string;
+  requestDigest: string;
+  request: HostedClaimRequestV1;
+  state: "pending" | "claimed" | "empty";
+  runId?: string;
+  createdAt: string;
+  updatedAt: string;
+  acknowledgedAt?: string;
+  executionStartedAt?: string;
+  terminalReasonCode?: "stale_control_authority" | "operation_digest_conflict";
+};
+
+export type HostedHeartbeatOperation = {
+  destinationId: string;
+  organizationId: string;
+  runnerId: string;
+  credentialId: string;
+  operationId: string;
+  requestId: string;
+  runId: string;
+  attemptId: string;
+  attemptNumber: number;
+  fencingTokenDigest: string;
+  expectedLeaseExpiresAt: string;
+  requestDigest: string;
+  request: HostedHeartbeatRequestV1;
+  state: "pending" | "acknowledged";
+  createdAt: string;
+  updatedAt: string;
+  receiptDigest?: string;
+  receipt?: HostedLifecycleReceiptEnvelopeV1;
+  acceptedLeaseExpiresAt?: string;
+  acknowledgedAt?: string;
+};
+
+export type HostedLifecycleOperationState = "pending" | "leased" | "acknowledged" | "attention";
+
+export type HostedLifecycleOperation = {
+  destinationId: string;
+  organizationId: string;
+  runnerId: string;
+  credentialId: string;
+  operationId: string;
+  requestId: string;
+  action: HostedLifecycleActionV1;
+  runId: string;
+  attemptId: string;
+  attemptNumber: number;
+  fencingTokenDigest: string;
+  requestDigest: string;
+  businessKeyDigest: string;
+  sequence: number;
+  request: HostedLifecycleRequestV1;
+  state: HostedLifecycleOperationState;
+  attemptCount: number;
+  nextAttemptAt?: string;
+  leaseOwner?: string;
+  leaseToken?: string;
+  leaseExpiresAt?: string;
+  receiptId?: string;
+  receiptDigest?: string;
+  receipt?: HostedLifecycleReceiptEnvelopeV1;
+  lastReasonCode?: string;
+  createdAt: string;
+  updatedAt: string;
+  acknowledgedAt?: string;
+};
+
 export type OpenTagAuditEvent = {
   id: number;
   runId: string;
@@ -276,7 +587,12 @@ export type AgentWorkLedger = {
 
 export type CallbackDeliveryKind = "acknowledgement" | "progress" | "final";
 export type CallbackDeliveryProvider = string;
-export type CallbackDeliveryStatus = "pending" | "delivering" | "delivered" | "failed";
+export type CallbackDeliveryStatus =
+  | "pending"
+  | "delivering"
+  | "delivered"
+  | "failed"
+  | "attention";
 
 export type CallbackDelivery = {
   id: number;
@@ -292,6 +608,8 @@ export type CallbackDelivery = {
   externalMessageId?: string;
   blocks?: unknown[];
   rich?: unknown;
+  dispatchMode: "legacy" | "governed";
+  governedState?: GovernedCallbackState;
   status: CallbackDeliveryStatus;
   attempts: number;
   lastError?: string;
@@ -303,6 +621,133 @@ export type CallbackDelivery = {
 export type EnqueuedCallbackDelivery = CallbackDelivery & {
   enqueueOutcome: "queued" | "duplicate";
 };
+
+export type GovernedCallbackState =
+  | "pending"
+  | "leased"
+  | "sending"
+  | "accepted"
+  | "rejected"
+  | "outcome_unknown"
+  | "attention";
+
+export type GovernedCallbackIntent = {
+  localIntentId: string;
+  idempotencyKey: string;
+  destinationId: string;
+  organizationId: string;
+  runnerId: string;
+  runId: string;
+  workThreadId: string;
+  provider: "github";
+  operationId: string;
+  payloadDigest: string;
+  targetIdentityDigest: string;
+  state: GovernedCallbackState;
+  currentAttemptId?: string;
+  currentAttemptNumber: number;
+  nextAttemptAt?: string;
+  leaseOwner?: string;
+  leaseToken?: string;
+  leaseExpiresAt?: string;
+  lastReasonCode?: string;
+  createdAt: string;
+  updatedAt: string;
+  terminalAt?: string;
+};
+
+export type GovernedCallbackAttempt = {
+  localAttemptId: string;
+  localIntentId: string;
+  attemptNumber: number;
+  previousAttemptId?: string;
+  retryAuthorizationId?: string;
+  requestDigest: string;
+  state: GovernedCallbackState;
+  leaseOwner?: string;
+  leaseToken?: string;
+  leaseExpiresAt?: string;
+  attemptedAt?: string;
+  observedAt?: string;
+  reasonCode?: string;
+  nextAction?: string;
+  owner?: string;
+  providerReceiptId?: string;
+  resourceIdentity?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ClaimedGovernedCallback = {
+  intent: GovernedCallbackIntent;
+  attempt: GovernedCallbackAttempt;
+  delivery: CallbackDelivery;
+  producer: {
+    kind: "local_opentag";
+    id: string;
+    credentialId: string;
+    registrationGeneration: number;
+  };
+  intentReceiptDigest: string;
+  targetIdentityDigest: string;
+  authority: {
+    attemptId: string;
+    attemptNumber: number;
+    epoch: number;
+    fencingTokenDigest: string;
+    completionOperationId: string;
+    assessmentReceiptId: string;
+    assessmentReceiptDigest: string;
+  };
+};
+
+export type GovernedCallbackEnqueueContext = {
+  outcome: "ready";
+  destinationId: string;
+  organizationId: string;
+  runnerId: string;
+  producer: {
+    kind: "local_opentag";
+    id: string;
+    credentialId: string;
+    registrationGeneration: number;
+  };
+  sourceThreadIdentityDigest: string;
+  assessmentReceipt: CompletionAssessmentReceiptEnvelopeV1;
+  completionOperationId: string;
+  authority: {
+    attemptId: string;
+    attemptNumber: number;
+    epoch: number;
+    fencingTokenDigest: string;
+    admissionId: string;
+    admissionOperationId: string;
+    claimOperationId: string;
+  };
+};
+
+export type GetGovernedCallbackEnqueueContextResult =
+  | GovernedCallbackEnqueueContext
+  | { outcome: "not_found" }
+  | { outcome: "authority_conflict" };
+
+export type GovernedCallbackScope = {
+  destinationId: string;
+  organizationId: string;
+};
+
+export type GovernedCallbackReconciliationEvidence =
+  typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+
+export type PriorAcceptedGovernedGitHubResource =
+  | { outcome: "not_found" }
+  | { outcome: "conflict" }
+  | {
+      outcome: "found";
+      providerReceiptId: string;
+      resourceIdentity: string;
+      targetIdentityDigest: string;
+    };
 
 export type RepoBinding = {
   provider: string;
@@ -636,6 +1081,243 @@ function sha256Json(value: unknown): string {
   return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 }
 
+const projectionEnvelopeSchemas = {
+  runner_readiness: RunnerReadinessReceiptEnvelopeV1Schema,
+  work_thread_ref: WorkThreadRefReceiptEnvelopeV1Schema,
+  completion_contract_ref: CompletionContractRefReceiptEnvelopeV1Schema,
+  completion_evidence_observation: CompletionEvidenceObservationReceiptEnvelopeV1Schema,
+  completion_assessment: CompletionAssessmentReceiptEnvelopeV1Schema,
+  callback_intent_observation: CallbackIntentObservationReceiptEnvelopeV1Schema,
+  callback_attempt_observation: CallbackAttemptObservationReceiptEnvelopeV1Schema,
+  callback_provider_observation: CallbackProviderObservationReceiptEnvelopeV1Schema
+} as const;
+
+const PROJECTION_SAFE_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._:@/#-]*$/u;
+const PROJECTION_FORBIDDEN_FIELD = /^(?:uri|url|body|headers?|comment|credential|path|command|context)$/iu;
+
+function isProjectionTimestamp(value: string): boolean {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+
+function isRfc3339Instant(value: string): boolean {
+  try {
+    return compareRfc3339Timestamps(value, value) === 0;
+  } catch {
+    return false;
+  }
+}
+
+function toControlTimestamp(value: string): string {
+  if (!isRfc3339Instant(value)) throw new Error("projection_timestamp_invalid");
+  return new Date(value).toISOString();
+}
+
+function assertProjectionMutableReference(value: string): void {
+  assertProjectionCustodySafe(value);
+}
+
+function parseControlPlaneProjectionEnvelope(input: unknown): ControlPlaneProjectionEnvelope {
+  const receiptKind = input && typeof input === "object"
+    ? (input as { receiptKind?: unknown }).receiptKind
+    : undefined;
+  if (typeof receiptKind !== "string" || !(receiptKind in projectionEnvelopeSchemas)) {
+    throw new ControlPlaneProjectionOutboxValidationError("projection_envelope_invalid");
+  }
+  const parsed = projectionEnvelopeSchemas[receiptKind as keyof typeof projectionEnvelopeSchemas].safeParse(input);
+  if (!parsed.success) throw new ControlPlaneProjectionOutboxValidationError("projection_envelope_invalid");
+  return parsed.data as ControlPlaneProjectionEnvelope;
+}
+
+function assertProjectionCustodySafe(value: unknown, path: string[] = []): void {
+  if (typeof value === "string") {
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code >= 0xd800 && code <= 0xdbff) {
+        const next = value.charCodeAt(index + 1);
+        if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff) {
+          throw new ControlPlaneProjectionOutboxValidationError("projection_invalid_unicode");
+        }
+        index += 1;
+      } else if (code >= 0xdc00 && code <= 0xdfff) {
+        throw new ControlPlaneProjectionOutboxValidationError("projection_invalid_unicode");
+      }
+    }
+    if (
+      containsCredentialLikeData(value)
+      || !PROJECTION_SAFE_REFERENCE.test(value)
+      || /^[a-z][a-z0-9+.-]*:\/\//iu.test(value)
+      || /^(?:\/|~\/|[A-Za-z]:[\\/])/u.test(value)
+      || /(?:^|[/\\])\.\.(?:[/\\]|$)/u.test(value)
+    ) {
+      throw new ControlPlaneProjectionOutboxValidationError("projection_custody_violation");
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((child, index) => assertProjectionCustodySafe(child, [...path, String(index)]));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const childPath = [...path, key];
+    const digestReference = /Digest$/u.test(key);
+    const allowedCredentialReference = childPath.join(".") === "producer.credentialId";
+    if (
+      PROJECTION_FORBIDDEN_FIELD.test(key)
+      || (isCredentialFieldName(key) && !digestReference && !allowedCredentialReference)
+    ) {
+      throw new ControlPlaneProjectionOutboxValidationError("projection_custody_violation");
+    }
+    assertProjectionCustodySafe(child, childPath);
+  }
+}
+
+function projectionIdentityKey(envelope: ControlPlaneProjectionEnvelope): string {
+  return canonicalSha256Json({
+    namespace: envelope.identity.namespace,
+    parts: envelope.identity.parts
+  });
+}
+
+function assertProjectionDigests(envelope: ControlPlaneProjectionEnvelope): void {
+  const payloadDigest = canonicalSha256Json(envelope.payload);
+  const { receiptDigest: _receiptDigest, ...receiptContent } = envelope;
+  const receiptDigest = canonicalSha256Json(receiptContent);
+  if (envelope.payloadDigest !== payloadDigest || envelope.receiptDigest !== receiptDigest) {
+    throw new ControlPlaneProjectionOutboxValidationError("projection_digest_mismatch");
+  }
+}
+
+function projectionOutboxEntryFromRow(
+  row: typeof controlPlaneProjectionOutbox.$inferSelect
+): ControlPlaneProjectionOutboxEntry {
+  const state = row.state as ControlPlaneProjectionOutboxState;
+  if (!["pending", "leased", "acknowledged", "attention"].includes(state)) {
+    throw new Error("control_plane_projection_outbox_state_invalid");
+  }
+  let envelope: ControlPlaneProjectionEnvelope;
+  try {
+    envelope = parseControlPlaneProjectionEnvelope(JSON.parse(row.envelopeJson));
+    assertProjectionCustodySafe(envelope);
+    assertProjectionDigests(envelope);
+  } catch {
+    throw new Error("control_plane_projection_outbox_row_invalid");
+  }
+  const runnerId = envelope.receiptKind === "runner_readiness"
+    ? envelope.payload.runnerId
+    : null;
+  const runId = "runId" in envelope ? envelope.runId : null;
+  const workThreadId = "workThreadId" in envelope ? envelope.workThreadId : null;
+  const timestampValues = [
+    row.createdAt,
+    row.updatedAt,
+    ...(row.nextAttemptAt ? [row.nextAttemptAt] : []),
+    ...(row.leaseExpiresAt ? [row.leaseExpiresAt] : []),
+    ...(row.acknowledgedAt ? [row.acknowledgedAt] : [])
+  ];
+  const validMutableShape = Number.isInteger(row.attemptCount)
+    && row.attemptCount >= 0
+    && timestampValues.every(isProjectionTimestamp)
+    && row.updatedAt >= row.createdAt
+    && (row.lastHttpStatus === null
+      || (Number.isInteger(row.lastHttpStatus) && row.lastHttpStatus >= 100 && row.lastHttpStatus <= 599))
+    && (state !== "pending" || (
+      row.nextAttemptAt !== null
+      && row.nextAttemptAt >= row.updatedAt
+      && row.leaseOwner === null
+      && row.leaseToken === null
+      && row.leaseExpiresAt === null
+      && row.acknowledgedAt === null
+    ))
+    && (state !== "leased" || (
+      row.nextAttemptAt !== null
+      && row.leaseOwner !== null
+      && row.leaseToken !== null
+      && row.leaseExpiresAt !== null
+      && row.leaseExpiresAt > row.updatedAt
+      && row.acknowledgedAt === null
+    ))
+    && (state !== "acknowledged" || (
+      row.nextAttemptAt === null
+      && row.leaseOwner === null
+      && row.leaseToken === null
+      && row.leaseExpiresAt === null
+      && row.acknowledgedAt !== null
+      && row.acknowledgedAt >= row.updatedAt
+    ))
+    && (state !== "attention" || (
+      row.nextAttemptAt === null
+      && row.leaseOwner === null
+      && row.leaseToken === null
+      && row.leaseExpiresAt === null
+      && row.acknowledgedAt === null
+      && row.lastReasonCode !== null
+    ));
+  try {
+    if (row.lastReasonCode !== null) assertProjectionMutableReference(row.lastReasonCode);
+    if (row.leaseOwner !== null) assertProjectionMutableReference(row.leaseOwner);
+    if (row.leaseToken !== null) assertProjectionMutableReference(row.leaseToken);
+    if (row.dependsOnReceiptId !== null) assertProjectionMutableReference(row.dependsOnReceiptId);
+    if (row.requiresLifecycleOperationId !== null) {
+      assertProjectionMutableReference(row.requiresLifecycleOperationId);
+    }
+  } catch {
+    throw new Error("control_plane_projection_outbox_row_invalid");
+  }
+  if (
+    !validMutableShape
+    || row.receiptId !== envelope.receiptId
+    || row.organizationId !== envelope.organizationId
+    || row.runnerId !== runnerId
+    || row.runId !== runId
+    || row.workThreadId !== workThreadId
+    || row.receiptKind !== envelope.receiptKind
+    || row.identityNamespace !== envelope.identity.namespace
+    || row.identityPartsJson !== JSON.stringify(envelope.identity.parts)
+    || row.identityKey !== projectionIdentityKey(envelope)
+    || row.operationId !== envelope.operationId
+    || row.payloadDigest !== envelope.payloadDigest
+    || row.receiptDigest !== envelope.receiptDigest
+    || row.envelopeJson !== canonicalJsonStringify(envelope)
+  ) {
+    throw new Error("control_plane_projection_outbox_row_invalid");
+  }
+  return {
+    receiptId: row.receiptId,
+    destinationId: row.destinationId,
+    organizationId: row.organizationId,
+    ...(row.runnerId ? { runnerId: row.runnerId } : {}),
+    ...(row.runId ? { runId: row.runId } : {}),
+    ...(row.workThreadId ? { workThreadId: row.workThreadId } : {}),
+    receiptKind: row.receiptKind as ControlPlaneProjectionEnvelope["receiptKind"],
+    identity: {
+      namespace: row.identityNamespace,
+      parts: JSON.parse(row.identityPartsJson) as string[],
+      key: row.identityKey
+    },
+    operationId: row.operationId,
+    ...(row.dependsOnReceiptId ? { dependsOnReceiptId: row.dependsOnReceiptId } : {}),
+    ...(row.requiresLifecycleOperationId
+      ? { requiresLifecycleOperationId: row.requiresLifecycleOperationId }
+      : {}),
+    payloadDigest: row.payloadDigest,
+    receiptDigest: row.receiptDigest,
+    envelope,
+    state,
+    attemptCount: row.attemptCount,
+    ...(row.nextAttemptAt ? { nextAttemptAt: row.nextAttemptAt } : {}),
+    ...(row.leaseOwner ? { leaseOwner: row.leaseOwner } : {}),
+    ...(row.leaseToken ? { leaseToken: row.leaseToken } : {}),
+    ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt } : {}),
+    ...(row.lastReasonCode ? { lastReasonCode: row.lastReasonCode } : {}),
+    ...(row.lastHttpStatus !== null ? { lastHttpStatus: row.lastHttpStatus } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    ...(row.acknowledgedAt ? { acknowledgedAt: row.acknowledgedAt } : {})
+  };
+}
+
 function workThreadCanonicalKey(thread: WorkThread): string {
   const workItem = thread.workItemReference;
   return JSON.stringify([
@@ -918,6 +1600,260 @@ function attemptFromRow(row: typeof attempts.$inferSelect): Attempt {
   };
 }
 
+function hostedClaimOperationFromRow(
+  row: typeof hostedClaimOperations.$inferSelect
+): HostedClaimOperation {
+  return {
+    operationId: row.operationId,
+    requestId: row.requestId,
+    organizationId: row.organizationId,
+    runnerId: row.runnerId,
+    destinationId: row.destinationId,
+    requestDigest: row.requestDigest,
+    request: HostedClaimRequestV1Schema.parse(JSON.parse(row.requestJson)),
+    state: row.state as HostedClaimOperation["state"],
+    ...(row.runId ? { runId: row.runId } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    ...(row.acknowledgedAt ? { acknowledgedAt: row.acknowledgedAt } : {}),
+    ...(row.executionStartedAt ? { executionStartedAt: row.executionStartedAt } : {}),
+    ...(row.terminalReasonCode
+      ? { terminalReasonCode: row.terminalReasonCode as "stale_control_authority" | "operation_digest_conflict" }
+      : {})
+  };
+}
+
+function hostedLifecycleOperationFromRow(
+  row: typeof hostedLifecycleOperations.$inferSelect
+): HostedLifecycleOperation {
+  return {
+    destinationId: row.destinationId,
+    organizationId: row.organizationId,
+    runnerId: row.runnerId,
+    credentialId: row.credentialId,
+    operationId: row.operationId,
+    requestId: row.requestId,
+    action: row.action as HostedLifecycleActionV1,
+    runId: row.runId,
+    attemptId: row.attemptId,
+    attemptNumber: row.attemptNumber,
+    fencingTokenDigest: row.fencingTokenDigest,
+    requestDigest: row.requestDigest,
+    businessKeyDigest: row.businessKeyDigest,
+    sequence: row.sequence,
+    request: HostedLifecycleRequestV1Schema.parse(JSON.parse(row.requestJson)),
+    state: row.state as HostedLifecycleOperationState,
+    attemptCount: row.attemptCount,
+    ...(row.nextAttemptAt ? { nextAttemptAt: row.nextAttemptAt } : {}),
+    ...(row.leaseOwner ? { leaseOwner: row.leaseOwner } : {}),
+    ...(row.leaseToken ? { leaseToken: row.leaseToken } : {}),
+    ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt } : {}),
+    ...(row.receiptId ? { receiptId: row.receiptId } : {}),
+    ...(row.receiptDigest ? { receiptDigest: row.receiptDigest } : {}),
+    ...(row.receiptJson
+      ? { receipt: HostedLifecycleReceiptEnvelopeV1Schema.parse(JSON.parse(row.receiptJson)) }
+      : {}),
+    ...(row.lastReasonCode ? { lastReasonCode: row.lastReasonCode } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    ...(row.acknowledgedAt ? { acknowledgedAt: row.acknowledgedAt } : {})
+  };
+}
+
+function hostedLifecycleRequestDigestSync(input: {
+  organizationId: string;
+  runnerId: string;
+  runId: string;
+  action: HostedLifecycleActionV1;
+  request: HostedLifecycleRequestV1;
+}): string {
+  const { request } = input;
+  const common = {
+    operation: input.action,
+    organizationId: input.organizationId,
+    runnerId: input.runnerId,
+    runId: input.runId,
+    schemaVersion: request.schemaVersion,
+    protocolVersion: request.protocolVersion,
+    requiredCapabilities: request.requiredCapabilities,
+    attempt: {
+      attemptId: request.attempt.attemptId,
+      attemptNumber: request.attempt.attemptNumber,
+      epoch: request.attempt.epoch,
+      fencingTokenDigest: request.attempt.fencingTokenDigest,
+    },
+    occurredAt: request.occurredAt,
+  };
+  const actionFields = input.action === "heartbeat"
+    ? {
+        expectedLeaseExpiresAt:
+          HostedHeartbeatRequestV1Schema.parse(request).expectedLeaseExpiresAt,
+      }
+    : input.action === "running"
+      ? (() => {
+          const value = request as Extract<HostedLifecycleRequestV1, { executorCapabilityDigest: string }>;
+          return {
+            executorId: value.executorId,
+            executorCapabilityDigest: value.executorCapabilityDigest,
+            ...(value.runTimeoutMs ? { runTimeoutMs: value.runTimeoutMs } : {}),
+          };
+        })()
+      : input.action === "reject-start"
+        ? (() => {
+            const value = request as Extract<HostedLifecycleRequestV1, { reasonCode: string; executorId: string }>;
+            return { executorId: value.executorId, reasonCode: value.reasonCode };
+          })()
+        : input.action === "progress"
+          ? (() => {
+              const value = request as Extract<HostedLifecycleRequestV1, { progressId: string }>;
+              return { progressId: value.progressId, progressDigest: value.progressDigest };
+            })()
+          : (() => {
+              const value = HostedCompleteRequestV1Schema.parse(request);
+              return {
+                conclusion: value.conclusion,
+                reasonCode: value.reasonCode,
+                resultDigest: value.resultDigest,
+                artifactDigests: value.artifactDigests,
+                evidenceDigests: value.evidenceDigests,
+              };
+            })();
+  return canonicalSha256Json({ ...common, ...actionFields });
+}
+
+function validAcknowledgedLifecycleDependency(
+  row: typeof hostedLifecycleOperations.$inferSelect,
+): boolean {
+  try {
+    if (row.state !== "acknowledged" || !row.receiptJson) return false;
+    const action = row.action as HostedLifecycleActionV1;
+    const request = HostedLifecycleRequestV1Schema.parse(JSON.parse(row.requestJson));
+    const receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(
+      JSON.parse(row.receiptJson),
+    );
+    const expectedOperation = action === "reject-start"
+      ? "reject_start"
+      : action === "complete"
+        ? "executor_result"
+        : action;
+    const expectedRequestDigest = hostedLifecycleRequestDigestSync({
+      organizationId: row.organizationId,
+      runnerId: row.runnerId,
+      runId: row.runId,
+      action,
+      request,
+    });
+    const expectedOperationId = computeHostedLifecycleOperationIdV1(
+      expectedRequestDigest,
+    );
+    const expectedRequestId = `req_${canonicalSha256Json({
+      purpose: "opentag-hosted-lifecycle-request-id-v1",
+      operationId: expectedOperationId,
+      requestDigest: expectedRequestDigest,
+    }).slice("sha256:".length)}`;
+    const expectedReceiptId = `lifecycle_${canonicalSha256Json({
+      organizationId: row.organizationId,
+      operationId: expectedOperationId,
+    }).slice("sha256:".length)}`;
+    const expectedPayload = action === "heartbeat"
+      ? {
+          operation: expectedOperation,
+          occurredAt: request.occurredAt,
+          leaseExpiresAt: (receipt.payload as { leaseExpiresAt: string }).leaseExpiresAt,
+        }
+      : action === "running"
+        ? (() => {
+            const value = request as Extract<HostedLifecycleRequestV1, { executorCapabilityDigest: string }>;
+            return {
+              operation: expectedOperation,
+              occurredAt: value.occurredAt,
+              executorId: value.executorId,
+              executorCapabilityDigest: value.executorCapabilityDigest,
+              ...(value.runTimeoutMs ? { runTimeoutMs: value.runTimeoutMs } : {}),
+            };
+          })()
+        : action === "reject-start"
+          ? (() => {
+              const value = request as Extract<HostedLifecycleRequestV1, { reasonCode: string; executorId: string }>;
+              return {
+                operation: expectedOperation,
+                occurredAt: value.occurredAt,
+                executorId: value.executorId,
+                reasonCode: value.reasonCode,
+              };
+            })()
+          : action === "progress"
+            ? (() => {
+                const value = request as Extract<HostedLifecycleRequestV1, { progressId: string }>;
+                return {
+                  operation: expectedOperation,
+                  occurredAt: value.occurredAt,
+                  progressId: value.progressId,
+                  progressDigest: value.progressDigest,
+                };
+              })()
+            : (() => {
+                const value = HostedCompleteRequestV1Schema.parse(request);
+                return {
+                  operation: expectedOperation,
+                  occurredAt: value.occurredAt,
+                  conclusion: value.conclusion,
+                  reasonCode: value.reasonCode,
+                  resultDigest: value.resultDigest,
+                  artifactDigests: value.artifactDigests,
+                  evidenceDigests: value.evidenceDigests,
+                };
+              })();
+    const { receiptDigest: _receiptDigest, ...receiptWithoutDigest } = receipt;
+    return row.requestJson === canonicalJsonStringify(request)
+      && row.receiptJson === canonicalJsonStringify(receipt)
+      && row.action === action
+      && row.operationId === expectedOperationId
+      && row.requestId === expectedRequestId
+      && row.requestDigest === expectedRequestDigest
+      && row.attemptId === request.attempt.attemptId
+      && row.attemptNumber === request.attempt.attemptNumber
+      && row.fencingTokenDigest === request.attempt.fencingTokenDigest
+      && request.requestDigest === expectedRequestDigest
+      && request.operationId === expectedOperationId
+      && request.requestId === expectedRequestId
+      && request.attempt.epoch === request.attempt.attemptNumber
+      && row.receiptId === expectedReceiptId
+      && row.receiptDigest === receipt.receiptDigest
+      && receipt.receiptId === expectedReceiptId
+      && receipt.organizationId === row.organizationId
+      && receipt.runId === row.runId
+      && receipt.operationId === row.operationId
+      && receipt.requestId === row.requestId
+      && receipt.requestDigest === row.requestDigest
+      && receipt.producer.id === row.runnerId
+      && receipt.producer.credentialId === row.credentialId
+      && receipt.attempt.attemptId === row.attemptId
+      && receipt.attempt.attemptNumber === row.attemptNumber
+      && receipt.attempt.epoch === row.attemptNumber
+      && receipt.attempt.fencingTokenDigest === row.fencingTokenDigest
+      && receipt.payload.operation === expectedOperation
+      && canonicalJsonStringify(receipt.payload)
+        === canonicalJsonStringify(expectedPayload)
+      && canonicalJsonStringify(receipt.identity.parts) === canonicalJsonStringify([
+        row.organizationId,
+        row.runId,
+        row.attemptId,
+        expectedOperation,
+        row.operationId,
+      ])
+      && receipt.payloadDigest === canonicalSha256Json(receipt.payload)
+      && receipt.receiptDigest === canonicalSha256Json(receiptWithoutDigest)
+      && (
+        action !== "heartbeat"
+        || Date.parse((receipt.payload as { leaseExpiresAt: string }).leaseExpiresAt)
+          > Date.parse(HostedHeartbeatRequestV1Schema.parse(request).expectedLeaseExpiresAt)
+      );
+  } catch {
+    return false;
+  }
+}
+
 function actionFromRow(row: typeof materialActions.$inferSelect): Action {
   return ActionSchema.parse({
     id: row.id,
@@ -960,6 +1896,158 @@ function stableActionJson(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const allowed = new Set(keys);
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function completionFactFromStoredEvidence(input: {
+  evidence: VerificationEvidence;
+  workThreadId: string;
+}): CompletionEvidenceFact | null {
+  const metadata = input.evidence.metadata;
+  const direct = metadata?.["completionFact"];
+  const template = metadata?.["completionFactTemplate"];
+  if (direct !== undefined && template !== undefined) return null;
+  const candidate = direct ?? (isPlainRecord(template)
+    ? { ...template, workThreadId: input.workThreadId }
+    : undefined);
+  if (!isPlainRecord(candidate) || !hasOnlyKeys(candidate, [
+    "id",
+    "workThreadId",
+    "cycle",
+    "kind",
+    "assurance",
+    "subject",
+    "claim",
+    "provenance",
+    "observedAt",
+    "receivedAt"
+  ])) return null;
+  const subject = candidate["subject"];
+  const claim = candidate["claim"];
+  const provenance = candidate["provenance"];
+  if (
+    typeof candidate["id"] !== "string"
+    || typeof candidate["workThreadId"] !== "string"
+    || !Number.isSafeInteger(candidate["cycle"])
+    || (candidate["cycle"] as number) <= 0
+    || typeof candidate["kind"] !== "string"
+    || !["verified", "reported", "unverifiable"].includes(
+      candidate["assurance"] as string
+    )
+    || typeof candidate["observedAt"] !== "string"
+    || typeof candidate["receivedAt"] !== "string"
+    || !isPlainRecord(subject)
+    || !hasOnlyKeys(subject, ["provider", "resourceRef", "resourceVersion"])
+    || typeof subject["provider"] !== "string"
+    || typeof subject["resourceRef"] !== "string"
+    || typeof subject["resourceVersion"] !== "string"
+    || !isPlainRecord(claim)
+    || !hasOnlyKeys(claim, ["predicate", "outcome", "observations"])
+    || typeof claim["predicate"] !== "string"
+    || typeof claim["outcome"] !== "string"
+    || !isPlainRecord(provenance)
+    || !hasOnlyKeys(provenance, [
+      "adapter",
+      "adapterVersion",
+      "payloadDigest",
+      "sourceEventId",
+      "providerDeliveryId"
+    ])
+    || typeof provenance["adapter"] !== "string"
+    || typeof provenance["adapterVersion"] !== "string"
+    || typeof provenance["payloadDigest"] !== "string"
+    || (provenance["sourceEventId"] !== undefined
+      && typeof provenance["sourceEventId"] !== "string")
+    || (provenance["providerDeliveryId"] !== undefined
+      && typeof provenance["providerDeliveryId"] !== "string")
+  ) return null;
+  const observations = claim["observations"];
+  if (
+    observations !== undefined
+    && (!isPlainRecord(observations)
+      || Object.values(observations).some((value) => typeof value !== "string"))
+  ) return null;
+  return {
+    id: candidate["id"],
+    workThreadId: candidate["workThreadId"],
+    cycle: candidate["cycle"] as number,
+    kind: candidate["kind"],
+    assurance: candidate["assurance"] as CompletionEvidenceFact["assurance"],
+    subject: {
+      provider: subject["provider"],
+      resourceRef: subject["resourceRef"],
+      resourceVersion: subject["resourceVersion"]
+    },
+    claim: {
+      predicate: claim["predicate"],
+      outcome: claim["outcome"],
+      ...(observations
+        ? { observations: observations as Record<string, string> }
+        : {})
+    },
+    provenance: {
+      adapter: provenance["adapter"],
+      adapterVersion: provenance["adapterVersion"],
+      payloadDigest: provenance["payloadDigest"],
+      ...(typeof provenance["sourceEventId"] === "string"
+        ? { sourceEventId: provenance["sourceEventId"] }
+        : {}),
+      ...(typeof provenance["providerDeliveryId"] === "string"
+        ? { providerDeliveryId: provenance["providerDeliveryId"] }
+        : {})
+    },
+    observedAt: candidate["observedAt"],
+    receivedAt: candidate["receivedAt"]
+  };
+}
+
+function storedEvidenceClaimsCompletionFact(
+  evidence: VerificationEvidence
+): boolean {
+  const metadata = evidence.metadata;
+  return metadata !== undefined
+    && (
+      Object.prototype.hasOwnProperty.call(metadata, "completionFact")
+      || Object.prototype.hasOwnProperty.call(metadata, "completionFactTemplate")
+    );
+}
+
+function completionAssuranceAccepted(
+  actual: CompletionEvidenceFact["assurance"],
+  minimum: "verified" | "reported"
+): boolean {
+  return minimum === "verified"
+    ? actual === "verified"
+    : actual === "verified" || actual === "reported";
+}
+
+function githubPullRequestResourceRef(input: {
+  uri: string;
+  owner: string;
+  repo: string;
+}): string | null {
+  let url: URL;
+  try {
+    url = new URL(input.uri);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com") return null;
+  const match = /^\/([^/]+)\/([^/]+)\/pull\/([1-9][0-9]*)\/?$/u.exec(url.pathname);
+  if (
+    !match
+    || match[1]!.toLowerCase() !== input.owner.toLowerCase()
+    || match[2]!.toLowerCase() !== input.repo.toLowerCase()
+  ) return null;
+  return `github:${input.owner}/${input.repo}:pull_request:${match[3]}`;
 }
 
 function isAutomaticWorkstreamContinuationActionJson(value: string | null): boolean {
@@ -1010,8 +2098,9 @@ function currentAssessmentIsAccepted(row: CurrentAssessmentAuthorityRow, evaluat
       || row.waiverContractId !== assessment.contractId
       || row.waiverContractVersion !== assessment.contractVersion
       || row.waiverCycle !== assessment.cycle
-      || waiver.waivedAt > evaluatedAt
-      || (waiver.expiresAt !== undefined && waiver.expiresAt <= evaluatedAt)
+      || compareRfc3339Timestamps(waiver.waivedAt, evaluatedAt) > 0
+      || (waiver.expiresAt !== undefined
+        && compareRfc3339Timestamps(waiver.expiresAt, evaluatedAt) <= 0)
       || (waiver.runId !== undefined && waiver.runId !== assessment.triggeredByRunId)
     ) {
       return false;
@@ -1103,6 +2192,66 @@ type AttemptLease = {
 };
 
 class StaleActionTransitionError extends Error {}
+
+class GovernedCallbackEnqueueValidationError extends Error {}
+
+function governedCallbackEnqueueConflict(): never {
+  throw new GovernedCallbackEnqueueValidationError();
+}
+
+function parseGovernedCallbackEnqueueJson(json: string): unknown {
+  try {
+    return JSON.parse(json);
+  } catch (error) {
+    if (error instanceof SyntaxError) governedCallbackEnqueueConflict();
+    throw error;
+  }
+}
+
+function parseGovernedCallbackEnqueueSchema<T>(
+  schema: {
+    safeParse(value: unknown):
+      | { success: true; data: T }
+      | { success: false };
+  },
+  json: string
+): T {
+  const parsed = schema.safeParse(parseGovernedCallbackEnqueueJson(json));
+  if (!parsed.success) governedCallbackEnqueueConflict();
+  return parsed.data;
+}
+
+function governedCallbackEnqueueAuthorityFromJson(
+  authorityJson: string
+): HostedClaimV1["authority"] {
+  try {
+    return hostedClaimAuthoritySnapshotFromJson(authorityJson);
+  } catch (error) {
+    if (
+      error instanceof SyntaxError
+      || (error instanceof Error
+        && error.message === "hosted claim authority snapshot invalid")
+    ) governedCallbackEnqueueConflict();
+    throw error;
+  }
+}
+
+function governedCallbackEnqueueProjectionFromRow(
+  row: typeof controlPlaneProjectionOutbox.$inferSelect
+): ControlPlaneProjectionOutboxEntry {
+  try {
+    return projectionOutboxEntryFromRow(row);
+  } catch (error) {
+    if (
+      error instanceof Error
+      && (
+        error.message === "control_plane_projection_outbox_state_invalid"
+        || error.message === "control_plane_projection_outbox_row_invalid"
+      )
+    ) governedCallbackEnqueueConflict();
+    throw error;
+  }
+}
 
 function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
   const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
@@ -1211,10 +2360,176 @@ function callbackDeliveryFromRow(row: typeof callbackDeliveries.$inferSelect): C
     ...(metadata?.externalMessageId ? { externalMessageId: metadata.externalMessageId } : {}),
     ...(metadata?.blocks ? { blocks: metadata.blocks } : {}),
     ...(metadata && "rich" in metadata ? { rich: metadata.rich } : {}),
+    dispatchMode: row.dispatchMode as "legacy" | "governed",
+    ...(row.governedState ? { governedState: row.governedState as GovernedCallbackState } : {}),
     status: row.status as CallbackDeliveryStatus,
     attempts: row.attempts,
     ...(row.lastError ? { lastError: row.lastError } : {}),
     ...(row.nextAttemptAt ? { nextAttemptAt: row.nextAttemptAt } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+function governedCallbackCanonicalPayload(row: typeof callbackDeliveries.$inferSelect) {
+  const metadata = callbackDeliveryMetadataFromJson(row.metadataJson);
+  return {
+    method: "POST",
+    mode: row.kind,
+    target: row.uri,
+    body: row.body,
+    threadKey: row.threadKey,
+    agentId: metadata?.agentId ?? null,
+    statusMessageKey: metadata?.statusMessageKey ?? null,
+    blocks: metadata?.blocks ?? null,
+    rich: metadata && "rich" in metadata ? metadata.rich : null
+  };
+}
+
+function governedCallbackPayloadDigest(
+  row: typeof callbackDeliveries.$inferSelect
+): string {
+  return canonicalSha256Json(governedCallbackCanonicalPayload(row));
+}
+
+const HOSTED_CLAIM_AUTHORITY_KEYS = [
+  "organizationId", "runnerId", "runId", "credentialId",
+  "registrationGeneration", "credentialGeneration", "projectTargetId",
+  "bindingId", "targetBindingDigest", "admissionPolicyReceiptId",
+  "admissionPolicySnapshotId", "admissionPolicySnapshotDigest",
+  "runnerReadinessReceiptId", "runnerReadinessReceiptDigest",
+  "targetReadinessReceiptId", "targetReadinessReceiptDigest", "executorId",
+  "executorCapabilityDigest", "attemptId", "attemptNumber", "epoch",
+  "fencingTokenDigest"
+] as const;
+
+function hostedClaimAuthoritySnapshotFromJson(
+  authorityJson: string
+): HostedClaimV1["authority"] {
+  const value = JSON.parse(authorityJson) as Record<string, unknown>;
+  const keys = Object.keys(value).sort();
+  const expectedKeys = [...HOSTED_CLAIM_AUTHORITY_KEYS].sort();
+  const integerKeys = [
+    "registrationGeneration", "credentialGeneration", "attemptNumber", "epoch"
+  ] as const;
+  const digestKeys = [
+    "targetBindingDigest", "admissionPolicySnapshotDigest",
+    "runnerReadinessReceiptDigest", "targetReadinessReceiptDigest",
+    "executorCapabilityDigest", "fencingTokenDigest"
+  ] as const;
+  const stringKeys = HOSTED_CLAIM_AUTHORITY_KEYS.filter(
+    (key) => !(integerKeys as readonly string[]).includes(key)
+  );
+  if (
+    canonicalJsonStringify(keys) !== canonicalJsonStringify(expectedKeys)
+    || stringKeys.some((key) => typeof value[key] !== "string" || value[key] === "")
+    || digestKeys.some((key) => !/^sha256:[0-9a-f]{64}$/u.test(value[key] as string))
+    || integerKeys.some((key) => !Number.isInteger(value[key]) || (value[key] as number) <= 0)
+    || value.epoch !== value.attemptNumber
+    || value.runnerReadinessReceiptId !== value.targetReadinessReceiptId
+    || value.runnerReadinessReceiptDigest !== value.targetReadinessReceiptDigest
+  ) throw new Error("hosted claim authority snapshot invalid");
+  return value as HostedClaimV1["authority"];
+}
+
+function governedCallbackIntentFromRow(
+  row: typeof governedCallbackIntents.$inferSelect
+): GovernedCallbackIntent {
+  return {
+    localIntentId: row.localIntentId,
+    idempotencyKey: row.idempotencyKey,
+    destinationId: row.destinationId,
+    organizationId: row.organizationId,
+    runnerId: row.runnerId,
+    runId: row.runId,
+    workThreadId: row.workThreadId,
+    provider: "github",
+    operationId: row.operationId,
+    payloadDigest: row.payloadDigest,
+    targetIdentityDigest: row.targetIdentityDigest,
+    state: row.state as GovernedCallbackState,
+    currentAttemptNumber: row.currentAttemptNumber,
+    ...(row.currentAttemptId ? { currentAttemptId: row.currentAttemptId } : {}),
+    ...(row.nextAttemptAt ? { nextAttemptAt: row.nextAttemptAt } : {}),
+    ...(row.leaseOwner ? { leaseOwner: row.leaseOwner } : {}),
+    ...(row.leaseToken ? { leaseToken: row.leaseToken } : {}),
+    ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt } : {}),
+    ...(row.lastReasonCode ? { lastReasonCode: row.lastReasonCode } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    ...(row.terminalAt ? { terminalAt: row.terminalAt } : {})
+  };
+}
+
+function governedCallbackEventTarget(input: {
+  eventJson: string;
+  eventDigest: string;
+  deliveryTarget: string;
+  targetIdentityDigest: string;
+}): { issueNumber: number; resourceIdentity: string } {
+  const event = OpenTagEventSchema.parse(JSON.parse(input.eventJson));
+  if (canonicalSha256Json(event) !== input.eventDigest) {
+    throw new Error("governed callback event digest mismatch");
+  }
+  const project = projectTargetRefFromEvent(event);
+  const issueNumber = event.metadata?.["issueNumber"]
+    ?? event.metadata?.["pullRequestNumber"];
+  const match = /^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)\/issues\/([1-9][0-9]*)\/comments$/u
+    .exec(input.deliveryTarget);
+  if (
+    !project || project.provider !== "github" || !match
+    || project.owner.toLowerCase() !== match[1]!.toLowerCase()
+    || project.repo.toLowerCase() !== match[2]!.toLowerCase()
+    || typeof issueNumber !== "number" || !Number.isSafeInteger(issueNumber)
+    || issueNumber !== Number(match[3])
+  ) throw new Error("governed callback target lineage mismatch");
+  const targetIdentityDigest = canonicalSha256Json({
+    provider: "github",
+    owner: match[1]!.toLowerCase(),
+    repo: match[2]!.toLowerCase(),
+    issueNumber
+  });
+  if (targetIdentityDigest !== input.targetIdentityDigest) {
+    throw new Error("governed callback target digest mismatch");
+  }
+  return { issueNumber, resourceIdentity: `github:issue:${issueNumber}` };
+}
+
+function governedProviderIdentityMatches(input: {
+  receipt: typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+  targetIdentityDigest: string;
+  issueNumber: number;
+}): boolean {
+  const payload = input.receipt.payload;
+  if (payload.targetIdentityDigest !== input.targetIdentityDigest) return false;
+  if (payload.outcome === "failed") {
+    return payload.resourceIdentity === `github:issue:${input.issueNumber}`;
+  }
+  const match = /^comment_([1-9][0-9]*)$/u.exec(payload.providerReceiptId);
+  return !!match && payload.resourceIdentity === `github:comment:${match[1]}`;
+}
+
+function governedCallbackAttemptFromRow(
+  row: typeof governedCallbackAttempts.$inferSelect
+): GovernedCallbackAttempt {
+  return {
+    localAttemptId: row.localAttemptId,
+    localIntentId: row.localIntentId,
+    attemptNumber: row.attemptNumber,
+    requestDigest: row.requestDigest,
+    state: row.state as GovernedCallbackState,
+    ...(row.previousAttemptId ? { previousAttemptId: row.previousAttemptId } : {}),
+    ...(row.retryAuthorizationId ? { retryAuthorizationId: row.retryAuthorizationId } : {}),
+    ...(row.leaseOwner ? { leaseOwner: row.leaseOwner } : {}),
+    ...(row.leaseToken ? { leaseToken: row.leaseToken } : {}),
+    ...(row.leaseExpiresAt ? { leaseExpiresAt: row.leaseExpiresAt } : {}),
+    ...(row.attemptedAt ? { attemptedAt: row.attemptedAt } : {}),
+    ...(row.observedAt ? { observedAt: row.observedAt } : {}),
+    ...(row.reasonCode ? { reasonCode: row.reasonCode } : {}),
+    ...(row.nextAction ? { nextAction: row.nextAction } : {}),
+    ...(row.owner ? { owner: row.owner } : {}),
+    ...(row.providerReceiptId ? { providerReceiptId: row.providerReceiptId } : {}),
+    ...(row.resourceIdentity ? { resourceIdentity: row.resourceIdentity } : {}),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   };
@@ -2612,7 +3927,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const artifacts = artifactsByWorkThread.get(row.workThreadId) ?? [];
       if (parsedResult.data.createdPullRequestUrl) {
         artifacts.push({
-          id: `${row.id}:created-pull-request`,
+          id: runResultCreatedPullRequestArtifactId(row.id),
           kind: "pull_request",
           sourceRunId: row.id,
           uri: parsedResult.data.createdPullRequestUrl,
@@ -2621,7 +3936,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       }
       for (const [index, artifact] of (parsedResult.data.artifacts ?? []).entries()) {
         artifacts.push({
-          id: artifact.id ?? `${row.id}:artifact:${index + 1}`,
+          id: artifact.id ?? runResultArtifactId(row.id, index),
           kind: artifact.kind ?? artifact.type ?? "custom",
           sourceRunId: row.id,
           ...(artifact.uri ? { uri: artifact.uri } : {}),
@@ -2673,8 +3988,2971 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     };
   }
 
+  type ProjectionTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+  type PreparedHostedLifecycleOperation = {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+    credentialId: string;
+    runId: string;
+    action: HostedLifecycleActionV1;
+    request: HostedLifecycleRequestV1;
+    requestJson: string;
+    businessKeyDigest: string;
+    createdAt: string;
+  };
+
+  async function prepareHostedLifecycleOperation(input: {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+    credentialId: string;
+    runId: string;
+    action: HostedLifecycleActionV1;
+    request: HostedLifecycleRequestV1;
+    now?: Date;
+  }): Promise<PreparedHostedLifecycleOperation> {
+    let request: HostedLifecycleRequestV1;
+    try {
+      request = HostedLifecycleRequestV1Schema.parse(input.request);
+    } catch {
+      throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_INVALID");
+    }
+    const requestDigest = await computeHostedLifecycleRequestDigestV1({
+      organizationId: input.organizationId,
+      runnerId: input.runnerId,
+      runId: input.runId,
+      action: input.action,
+      request
+    });
+    const requestId = await computeHostedLifecycleRequestIdV1({
+      operationId: request.operationId,
+      requestDigest: request.requestDigest
+    });
+    if (
+      request.requestDigest !== requestDigest
+      || request.requestId !== requestId
+      || request.operationId !== computeHostedLifecycleOperationIdV1(request.requestDigest)
+      || request.attempt.attemptId.length === 0
+      || request.attempt.attemptNumber !== request.attempt.epoch
+    ) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_INVALID");
+    const businessKeyDigest = canonicalSha256Json({
+      destinationId: input.destinationId,
+      organizationId: input.organizationId,
+      runnerId: input.runnerId,
+      credentialId: input.credentialId,
+      runId: input.runId,
+      attemptId: request.attempt.attemptId,
+      attemptNumber: request.attempt.attemptNumber,
+      action: input.action,
+      discriminator: input.action === "heartbeat"
+        ? (request as HostedHeartbeatRequestV1).expectedLeaseExpiresAt
+        : input.action === "progress"
+          ? (request as HostedProgressRequestV1).progressId
+          : "single_action_per_attempt"
+    });
+    return {
+      ...input,
+      request,
+      requestJson: canonicalJsonStringify(request),
+      businessKeyDigest,
+      createdAt: (input.now ?? new Date()).toISOString()
+    };
+  }
+
+  function enqueueHostedLifecycleOperationTx(
+    tx: ProjectionTransaction,
+    input: PreparedHostedLifecycleOperation
+  ): { outcome: "created" | "replayed"; operation: HostedLifecycleOperation } {
+    const scope = [
+      eq(hostedLifecycleOperations.destinationId, input.destinationId),
+      eq(hostedLifecycleOperations.organizationId, input.organizationId),
+      eq(hostedLifecycleOperations.runnerId, input.runnerId),
+      eq(hostedLifecycleOperations.credentialId, input.credentialId)
+    ];
+    const existing = tx.select().from(hostedLifecycleOperations).where(or(
+      and(...scope, eq(hostedLifecycleOperations.operationId, input.request.operationId)),
+      and(...scope, eq(hostedLifecycleOperations.requestId, input.request.requestId)),
+      and(...scope, eq(hostedLifecycleOperations.businessKeyDigest, input.businessKeyDigest))
+    )).limit(1).get();
+    if (existing) {
+      const exact = existing.operationId === input.request.operationId
+        && existing.requestId === input.request.requestId
+        && existing.action === input.action
+        && existing.runId === input.runId
+        && existing.attemptId === input.request.attempt.attemptId
+        && existing.attemptNumber === input.request.attempt.attemptNumber
+        && existing.fencingTokenDigest === input.request.attempt.fencingTokenDigest
+        && existing.requestDigest === input.request.requestDigest
+        && existing.businessKeyDigest === input.businessKeyDigest
+        && existing.requestJson === input.requestJson;
+      if (!exact) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_CONFLICT");
+      return { outcome: "replayed", operation: hostedLifecycleOperationFromRow(existing) };
+    }
+    const terminal = tx.select({ operationId: hostedLifecycleOperations.operationId })
+      .from(hostedLifecycleOperations).where(and(
+        eq(hostedLifecycleOperations.destinationId, input.destinationId),
+        eq(hostedLifecycleOperations.organizationId, input.organizationId),
+        eq(hostedLifecycleOperations.runId, input.runId),
+        eq(hostedLifecycleOperations.attemptId, input.request.attempt.attemptId),
+        inArray(hostedLifecycleOperations.action, ["complete", "reject-start"])
+      )).limit(1).get();
+    if (terminal) {
+      throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_CONFLICT");
+    }
+    if (["heartbeat", "progress", "complete"].includes(input.action)) {
+      const running = tx.select().from(hostedLifecycleOperations).where(and(
+        eq(hostedLifecycleOperations.destinationId, input.destinationId),
+        eq(hostedLifecycleOperations.organizationId, input.organizationId),
+        eq(hostedLifecycleOperations.runnerId, input.runnerId),
+        eq(hostedLifecycleOperations.credentialId, input.credentialId),
+        eq(hostedLifecycleOperations.runId, input.runId),
+        eq(hostedLifecycleOperations.attemptId, input.request.attempt.attemptId),
+        eq(hostedLifecycleOperations.action, "running"),
+        eq(hostedLifecycleOperations.state, "acknowledged")
+      )).limit(1).get();
+      if (!running || !validAcknowledgedLifecycleDependency(running)) {
+        throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_PREDECESSOR_NOT_ACKNOWLEDGED");
+      }
+    }
+    const sequenceRow = tx.select({
+      value: sql<number>`coalesce(max(${hostedLifecycleOperations.sequence}), 0)`
+    }).from(hostedLifecycleOperations).where(and(
+      eq(hostedLifecycleOperations.destinationId, input.destinationId),
+      eq(hostedLifecycleOperations.organizationId, input.organizationId),
+      eq(hostedLifecycleOperations.runId, input.runId),
+      eq(hostedLifecycleOperations.attemptId, input.request.attempt.attemptId)
+    )).get();
+    tx.insert(hostedLifecycleOperations).values({
+      destinationId: input.destinationId,
+      organizationId: input.organizationId,
+      runnerId: input.runnerId,
+      credentialId: input.credentialId,
+      operationId: input.request.operationId,
+      requestId: input.request.requestId,
+      action: input.action,
+      runId: input.runId,
+      attemptId: input.request.attempt.attemptId,
+      attemptNumber: input.request.attempt.attemptNumber,
+      fencingTokenDigest: input.request.attempt.fencingTokenDigest,
+      requestDigest: input.request.requestDigest,
+      businessKeyDigest: input.businessKeyDigest,
+      sequence: Number(sequenceRow?.value ?? 0) + 1,
+      requestJson: input.requestJson,
+      state: "pending",
+      attemptCount: 0,
+      nextAttemptAt: input.createdAt,
+      createdAt: input.createdAt,
+      updatedAt: input.createdAt
+    }).run();
+    const created = tx.select().from(hostedLifecycleOperations).where(and(
+      ...scope,
+      eq(hostedLifecycleOperations.operationId, input.request.operationId)
+    )).limit(1).get();
+    if (!created) throw new Error("hosted_lifecycle_operation_insert_lost");
+    return { outcome: "created", operation: hostedLifecycleOperationFromRow(created) };
+  }
+
+  function projectionDestination(value: string): string {
+    if (
+      !PROJECTION_SAFE_REFERENCE.test(value)
+      || containsCredentialLikeData(value)
+      || /^[a-z][a-z0-9+.-]*:\/\//iu.test(value)
+      || /(?:^|[/\\])\.\.(?:[/\\]|$)/u.test(value)
+    ) {
+      throw new ControlPlaneProjectionOutboxValidationError("projection_destination_invalid");
+    }
+    return value;
+  }
+
+  function projectionOrganization(value: string): string {
+    return projectionDestination(value);
+  }
+
+  function enqueueControlPlaneProjectionTx(
+    tx: ProjectionTransaction,
+    input: EnqueueControlPlaneProjectionInput
+  ): EnqueueControlPlaneProjectionResult {
+    const destinationId = projectionDestination(input.destinationId);
+    const envelope = parseControlPlaneProjectionEnvelope(input.envelope);
+    assertProjectionCustodySafe(envelope);
+    assertProjectionDigests(envelope);
+    const at = (input.now ?? new Date()).toISOString();
+    const identityKey = projectionIdentityKey(envelope);
+    const envelopeJson = canonicalJsonStringify(envelope);
+    const runnerId = envelope.receiptKind === "runner_readiness" ? envelope.payload.runnerId : null;
+    const runId = "runId" in envelope ? envelope.runId : null;
+    const workThreadId = "workThreadId" in envelope ? envelope.workThreadId : null;
+    const values: typeof controlPlaneProjectionOutbox.$inferInsert = {
+      receiptId: envelope.receiptId,
+      destinationId,
+      organizationId: envelope.organizationId,
+      runnerId,
+      runId,
+      workThreadId,
+      receiptKind: envelope.receiptKind,
+      identityNamespace: envelope.identity.namespace,
+      identityPartsJson: JSON.stringify(envelope.identity.parts),
+      identityKey,
+      operationId: envelope.operationId,
+      dependsOnReceiptId: input.dependsOnReceiptId ?? null,
+      requiresLifecycleOperationId: input.requiresLifecycleOperationId ?? null,
+      payloadDigest: envelope.payloadDigest,
+      receiptDigest: envelope.receiptDigest,
+      envelopeJson,
+      state: "pending",
+      attemptCount: 0,
+      nextAttemptAt: at,
+      createdAt: at,
+      updatedAt: at
+    };
+    const byReceipt = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, envelope.organizationId),
+      eq(controlPlaneProjectionOutbox.receiptId, envelope.receiptId)
+    )).limit(1).get();
+    const byIdentity = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, envelope.organizationId),
+      eq(controlPlaneProjectionOutbox.identityKey, identityKey)
+    )).limit(1).get();
+    const byOperation = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, envelope.organizationId),
+      eq(controlPlaneProjectionOutbox.operationId, envelope.operationId)
+    )).limit(1).get();
+    const conflict = byReceipt ?? byIdentity ?? byOperation;
+    if (conflict) {
+      const exact = conflict.receiptId === values.receiptId
+        && conflict.destinationId === values.destinationId
+        && conflict.organizationId === values.organizationId
+        && conflict.runnerId === values.runnerId
+        && conflict.runId === values.runId
+        && conflict.workThreadId === values.workThreadId
+        && conflict.receiptKind === values.receiptKind
+        && conflict.identityNamespace === values.identityNamespace
+        && conflict.identityPartsJson === values.identityPartsJson
+        && conflict.identityKey === values.identityKey
+        && conflict.operationId === values.operationId
+        && conflict.dependsOnReceiptId === values.dependsOnReceiptId
+        && conflict.requiresLifecycleOperationId === values.requiresLifecycleOperationId
+        && conflict.payloadDigest === values.payloadDigest
+        && conflict.receiptDigest === values.receiptDigest
+        && conflict.envelopeJson === values.envelopeJson;
+      if (exact) return { outcome: "replay", entry: projectionOutboxEntryFromRow(conflict) };
+      return {
+        outcome: "conflict",
+        conflictOn: byReceipt ? "receipt_id" : byIdentity ? "identity" : "operation",
+        existingReceiptId: conflict.receiptId
+      };
+    }
+    tx.insert(controlPlaneProjectionOutbox).values(values).run();
+    const created = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, envelope.organizationId),
+      eq(controlPlaneProjectionOutbox.receiptId, envelope.receiptId)
+    )).limit(1).get();
+    if (!created) throw new Error("control_plane_projection_outbox_insert_lost");
+    return { outcome: "created", entry: projectionOutboxEntryFromRow(created) };
+  }
+
+  function ensureCompletionAssessmentProjectionTx(
+    tx: ProjectionTransaction,
+    input: { workThreadId: string; runId: string; assessmentId: string }
+  ): void {
+    const importedRuns = tx.select().from(hostedRunImports)
+      .where(eq(hostedRunImports.runId, input.runId)).all();
+    if (importedRuns.length === 0) return;
+    if (importedRuns.length !== 1) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const importedRun = importedRuns[0]!;
+    if (importedRun.workThreadId !== input.workThreadId) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const thread = tx.select().from(workThreads).where(and(
+      eq(workThreads.id, input.workThreadId),
+      eq(workThreads.id, importedRun.workThreadId)
+    )).limit(1).get();
+    if (!thread?.currentAssessmentId) return;
+    const currentAssessmentRow = tx.select().from(completionAssessments).where(and(
+      eq(completionAssessments.id, thread.currentAssessmentId),
+      eq(completionAssessments.workThreadId, input.workThreadId)
+    )).limit(1).get();
+    if (!currentAssessmentRow) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const currentAssessment = CompletionAssessmentSchema.parse(
+      JSON.parse(currentAssessmentRow.assessmentJson)
+    );
+    if (
+      currentAssessmentRow.assessmentJson !== JSON.stringify(currentAssessment)
+      || currentAssessmentRow.id !== currentAssessment.id
+      || currentAssessmentRow.workThreadId !== currentAssessment.workThreadId
+      || currentAssessmentRow.contractId !== currentAssessment.contractId
+      || currentAssessmentRow.contractVersion !== currentAssessment.contractVersion
+      || currentAssessmentRow.cycle !== currentAssessment.cycle
+      || currentAssessmentRow.sequence !== currentAssessment.sequence
+      || currentAssessmentRow.supersedesAssessmentId
+        !== (currentAssessment.supersedesAssessmentId ?? null)
+      || currentAssessmentRow.inputDigest !== currentAssessment.inputDigest
+      || currentAssessmentRow.state !== currentAssessment.state
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+    const assessmentRow = tx.select().from(completionAssessments).where(and(
+      eq(completionAssessments.id, input.assessmentId),
+      eq(completionAssessments.workThreadId, input.workThreadId)
+    )).limit(1).get();
+    if (!assessmentRow) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const assessment = CompletionAssessmentSchema.parse(
+      JSON.parse(assessmentRow.assessmentJson)
+    );
+    if (
+      assessmentRow.assessmentJson !== JSON.stringify(assessment)
+      || assessmentRow.id !== assessment.id
+      || assessmentRow.workThreadId !== assessment.workThreadId
+      || assessmentRow.contractId !== assessment.contractId
+      || assessmentRow.contractVersion !== assessment.contractVersion
+      || assessmentRow.cycle !== assessment.cycle
+      || assessmentRow.sequence !== assessment.sequence
+      || assessmentRow.supersedesAssessmentId !== (assessment.supersedesAssessmentId ?? null)
+      || assessmentRow.inputDigest !== assessment.inputDigest
+      || assessmentRow.state !== assessment.state
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+    if (assessment.triggeredByRunId !== input.runId) return;
+
+    const importedAttempts = tx.select().from(hostedAttemptImports).where(and(
+      eq(hostedAttemptImports.attemptId, importedRun.attemptId),
+      eq(hostedAttemptImports.runId, importedRun.runId),
+      eq(hostedAttemptImports.claimOperationId, importedRun.claimOperationId),
+      eq(hostedAttemptImports.fencingTokenDigest, importedRun.fencingTokenDigest)
+    )).all();
+    const claims = tx.select().from(hostedClaimOperations).where(and(
+      eq(hostedClaimOperations.operationId, importedRun.claimOperationId),
+      eq(hostedClaimOperations.runId, importedRun.runId),
+      eq(hostedClaimOperations.attemptId, importedRun.attemptId),
+      eq(hostedClaimOperations.fencingTokenDigest, importedRun.fencingTokenDigest)
+    )).all();
+    if (importedAttempts.length !== 1 || claims.length !== 1) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const importedAttempt = importedAttempts[0]!;
+    const claim = claims[0]!;
+    let authority: HostedClaimV1["authority"];
+    try {
+      authority = hostedClaimAuthoritySnapshotFromJson(importedRun.authorityJson);
+    } catch {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    if (
+      importedRun.workThreadId !== input.workThreadId
+      || importedRun.authorityJson !== importedAttempt.authorityJson
+      || importedRun.authorityJson !== claim.authorityJson
+      || importedRun.authorityDigest !== importedAttempt.authorityDigest
+      || importedRun.authorityDigest !== claim.authorityDigest
+      || importedRun.claimDigest !== importedAttempt.claimDigest
+      || importedRun.claimDigest !== claim.claimDigest
+      || canonicalSha256Json(authority) !== importedRun.authorityDigest
+      || authority.organizationId !== claim.organizationId
+      || authority.runnerId !== claim.runnerId
+      || authority.runId !== importedRun.runId
+      || authority.credentialId !== claim.credentialId
+      || authority.attemptId !== importedRun.attemptId
+      || authority.attemptNumber !== importedAttempt.attemptNumber
+      || authority.attemptId !== claim.attemptId
+      || authority.attemptNumber !== claim.attemptNumber
+      || authority.epoch !== importedAttempt.attemptNumber
+      || authority.fencingTokenDigest !== importedRun.fencingTokenDigest
+      || claim.state !== "claimed"
+      || claim.executionStartedAt === null
+      || claim.terminalReasonCode !== null
+      || claim.destinationId.length === 0
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+
+    const completionRows = tx.select().from(hostedLifecycleOperations).where(and(
+      eq(hostedLifecycleOperations.destinationId, claim.destinationId),
+      eq(hostedLifecycleOperations.organizationId, authority.organizationId),
+      eq(hostedLifecycleOperations.action, "complete"),
+      eq(hostedLifecycleOperations.runId, input.runId)
+    )).all();
+    if (completionRows.length === 0) return;
+    if (completionRows.length !== 1) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const completion = completionRows[0]!;
+    if (completion.state !== "acknowledged") return;
+    if (
+      completion.runnerId !== authority.runnerId
+      || completion.credentialId !== authority.credentialId
+      || completion.attemptId !== authority.attemptId
+      || completion.attemptNumber !== authority.attemptNumber
+      || completion.fencingTokenDigest !== authority.fencingTokenDigest
+      || !validAcknowledgedLifecycleDependency(completion)
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+
+    const contractRow = tx.select().from(completionContracts).where(and(
+      eq(completionContracts.id, assessment.contractId),
+      eq(completionContracts.version, assessment.contractVersion),
+      eq(completionContracts.workThreadId, assessment.workThreadId),
+      eq(completionContracts.cycle, assessment.cycle)
+    )).limit(1).get();
+    if (!contractRow) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const contract = CompletionContractSchema.parse(JSON.parse(contractRow.contractJson));
+    if (
+      contractRow.contractJson !== JSON.stringify(contract)
+      || contractRow.contentDigest !== sha256Json(contract)
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+    const contractGateIds = new Set(contract.gates.map((gate) => gate.id));
+    const assessmentGateIds = new Set(assessment.gateResults.map((gate) => gate.gateId));
+    if (
+      [...contractGateIds].some((gateId) => !assessmentGateIds.has(gateId))
+      || [...assessmentGateIds].some((gateId) =>
+        !contractGateIds.has(gateId) && !/^human_escalation:/u.test(gateId)
+      )
+    ) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+
+    const completionRequest = HostedCompleteRequestV1Schema.parse(
+      JSON.parse(completion.requestJson)
+    );
+    const completionReceipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(
+      JSON.parse(completion.receiptJson!)
+    );
+    const run = tx.select().from(runs).where(and(
+      eq(runs.id, input.runId),
+      eq(runs.workThreadId, input.workThreadId)
+    )).limit(1).get();
+    const attempt = tx.select().from(attempts).where(and(
+      eq(attempts.id, authority.attemptId),
+      eq(attempts.runId, input.runId),
+      eq(attempts.number, authority.attemptNumber),
+      eq(attempts.runnerId, authority.runnerId)
+    )).limit(1).get();
+    const runResult = run?.resultJson
+      ? OpenTagRunResultSchema.parse(JSON.parse(run.resultJson))
+      : undefined;
+    const attemptResult = attempt?.resultJson
+      ? OpenTagRunResultSchema.parse(JSON.parse(attempt.resultJson))
+      : undefined;
+    const expectedRunStatus = runResult?.conclusion === "success"
+      ? "succeeded"
+      : runResult?.conclusion === "failure"
+        ? "failed"
+        : runResult?.conclusion === "needs_human"
+          ? "needs_approval"
+          : runResult?.conclusion;
+    const expectedAttemptStatus = runResult?.conclusion === "success"
+      ? "succeeded"
+      : runResult?.conclusion === "failure"
+        ? "failed"
+        : runResult?.conclusion === "needs_human"
+          ? "needs_human"
+          : runResult?.conclusion;
+    if (
+      !run?.resultJson || !attempt?.resultJson
+      || `sha256:${createHash("sha256").update(attempt.fencingToken).digest("hex")}`
+        !== authority.fencingTokenDigest
+      || !releasedTerminalAttemptMatchesRun(attempt, run)
+      || run.status !== expectedRunStatus
+      || attempt.status !== expectedAttemptStatus
+      || completionRequest.conclusion !== runResult?.conclusion
+      || canonicalJsonStringify(runResult) !== canonicalJsonStringify(attemptResult)
+      || canonicalSha256Json(runResult) !== completionRequest.resultDigest
+      || canonicalSha256Json(attemptResult) !== completionRequest.resultDigest
+      || completionReceipt.receiptId !== completion.receiptId
+      || completionReceipt.receiptDigest !== completion.receiptDigest
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+
+    const projectionAttempt = {
+      attemptId: authority.attemptId,
+      attemptNumber: authority.attemptNumber,
+      epoch: authority.epoch,
+      fencingTokenDigest: authority.fencingTokenDigest
+    };
+    const projectionProducer = {
+      kind: "local_opentag" as const,
+      id: authority.runnerId,
+      credentialId: authority.credentialId,
+      registrationGeneration: authority.registrationGeneration
+    };
+    const evidenceIdentity = (
+      payload: CompletionEvidenceObservationPayloadV1,
+      contractReceiptDigest: string
+    ) => ({
+      namespace: "opentag.control.receipt/completion-evidence-observation/v1" as const,
+      parts: [
+        authority.organizationId,
+        input.workThreadId,
+        input.runId,
+        payload.evidenceType,
+        payload.evidenceId,
+        payload.authorityDigest,
+        contractReceiptDigest
+      ]
+    });
+    const evidenceSelectionKey = (
+      payload: CompletionEvidenceObservationPayloadV1
+    ): string => canonicalSha256Json({
+      purpose: "opentag-completion-evidence-selection-v1",
+      organizationId: authority.organizationId,
+      workThreadId: input.workThreadId,
+      runId: input.runId,
+      evidenceType: payload.evidenceType,
+      evidenceId: payload.evidenceId,
+      authorityDigest: payload.authorityDigest
+    });
+    const evidenceReceiptId = (
+      payload: CompletionEvidenceObservationPayloadV1,
+      contractReceiptDigest: string
+    ): string => {
+      const identity = evidenceIdentity(payload, contractReceiptDigest);
+      const projectionKey = canonicalSha256Json({
+        purpose: "opentag-completion-evidence-projection-v1",
+        identity
+      }).slice("sha256:".length);
+      return `completion_evidence_receipt_${projectionKey}`;
+    };
+    const evidenceEnvelope = (
+      payload: CompletionEvidenceObservationPayloadV1,
+      contractReceiptDigest: string,
+      predecessorReceiptDigests: string[]
+    ): CompletionEvidenceObservationReceiptEnvelopeV1 => {
+      const identity = evidenceIdentity(payload, contractReceiptDigest);
+      const receiptId = evidenceReceiptId(payload, contractReceiptDigest);
+      const projectionKey = receiptId.slice("completion_evidence_receipt_".length);
+      const observedAt = payload.evidenceType === "completion_waiver"
+        ? payload.waivedAt
+        : payload.observedAt;
+      const base = {
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        receiptKind: "completion_evidence_observation" as const,
+        receiptId,
+        organizationId: authority.organizationId,
+        operationId: `completion_evidence_operation_${projectionKey}`,
+        requiredCapabilities: ["relay.completion-evidence.v1" as const],
+        producer: projectionProducer,
+        identity,
+        predecessorReceiptDigests: [...new Set(predecessorReceiptDigests)].sort(),
+        observedAt,
+        runId: input.runId,
+        workThreadId: input.workThreadId,
+        attempt: projectionAttempt,
+        payload,
+        payloadDigest: canonicalSha256Json(payload)
+      };
+      return CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse({
+        ...base,
+        receiptDigest: canonicalSha256Json(base)
+      });
+    };
+    const verificationById = new Map<string, {
+      fact: CompletionEvidenceFact;
+      payload: CompletionEvidenceObservationPayloadV1;
+    }>();
+    for (const row of tx.select().from(verificationEvidenceRecords).where(
+      eq(verificationEvidenceRecords.workThreadId, input.workThreadId)
+    ).all()) {
+      const evidence = VerificationEvidenceSchema.parse(JSON.parse(row.evidenceJson));
+      if (!storedEvidenceClaimsCompletionFact(evidence)) continue;
+      const fact = completionFactFromStoredEvidence({
+        evidence,
+        workThreadId: input.workThreadId
+      });
+      if (
+        !fact
+        || row.id !== evidence.id
+        || row.id !== fact.id
+        || fact.workThreadId !== input.workThreadId
+        || evidence.kind !== row.kind
+        || evidence.kind !== fact.kind
+        || evidence.assurance !== row.assurance
+        || evidence.assurance !== fact.assurance
+        || evidence.subjectRef !== `${fact.subject.resourceRef}@${fact.subject.resourceVersion}`
+        || evidence.createdAt !== fact.observedAt
+        || row.provider !== fact.subject.provider
+        || row.subjectRef !== fact.subject.resourceRef
+        || row.subjectVersion !== fact.subject.resourceVersion
+        || row.payloadDigest !== fact.provenance.payloadDigest
+        || row.observedAt !== fact.observedAt
+        || row.receivedAt !== fact.receivedAt
+        || (fact.provenance.providerDeliveryId !== undefined
+          && fact.provenance.providerDeliveryId !== row.deliveryId)
+        || row.evidenceJson !== JSON.stringify(evidence)
+        || !/^sha256:[0-9a-f]{64}$/u.test(row.payloadDigest)
+        || !isRfc3339Instant(row.observedAt)
+        || !isRfc3339Instant(row.receivedAt)
+        || compareRfc3339Timestamps(row.receivedAt, row.observedAt) < 0
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      if (fact.cycle !== assessment.cycle) continue;
+      if (
+        compareRfc3339Timestamps(row.receivedAt, run.createdAt) < 0
+        || compareRfc3339Timestamps(row.receivedAt, assessment.assessedAt) > 0
+      ) continue;
+      const payload = CompletionEvidenceObservationPayloadV1Schema.parse({
+        evidenceType: "verification_evidence",
+        evidenceId: fact.id,
+        authorityDigest: canonicalSha256Json(fact),
+        evidenceKind: fact.kind,
+        assurance: fact.assurance,
+        subject: fact.subject,
+        claim: {
+          predicate: fact.claim.predicate,
+          outcome: fact.claim.outcome,
+          ...(fact.claim.observations
+            ? { observationsDigest: canonicalSha256Json(fact.claim.observations) }
+            : {})
+        },
+        provenancePayloadDigest: fact.provenance.payloadDigest,
+        observedAt: toControlTimestamp(fact.observedAt),
+        receivedAt: toControlTimestamp(fact.receivedAt)
+      });
+      const existing = verificationById.get(fact.id);
+      if (existing && canonicalJsonStringify(existing.payload) !== canonicalJsonStringify(payload)) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      verificationById.set(fact.id, { fact, payload });
+    }
+
+    const materialById = new Map<string, {
+      receipt: MaterialActionReceipt;
+      actionFamily: string;
+      payload: CompletionEvidenceObservationPayloadV1;
+    }>();
+    for (const row of tx.select().from(materialActions).where(and(
+      eq(materialActions.runId, input.runId),
+      isNotNull(materialActions.receiptJson)
+    )).all()) {
+      const receipt = MaterialActionReceiptSchema.parse(JSON.parse(row.receiptJson!));
+      if (
+        receipt.actionId !== row.id
+        || row.attemptId !== authority.attemptId
+        || row.attemptFenceDigest
+          !== authority.fencingTokenDigest.slice("sha256:".length)
+        || row.receiptJson !== JSON.stringify(receipt)
+        || row.status !== receipt.outcome
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      if (compareRfc3339Timestamps(receipt.observedAt, assessment.assessedAt) > 0) {
+        continue;
+      }
+      const payload = CompletionEvidenceObservationPayloadV1Schema.parse({
+        evidenceType: "material_action",
+        evidenceId: receipt.id,
+        authorityDigest: canonicalSha256Json(receipt),
+        actionId: receipt.actionId,
+        actionFamily: row.actionFamily,
+        outcome: receipt.outcome,
+        observedAt: toControlTimestamp(receipt.observedAt)
+      });
+      const existing = materialById.get(receipt.id);
+      if (existing && canonicalJsonStringify(existing.payload) !== canonicalJsonStringify(payload)) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      materialById.set(receipt.id, { receipt, actionFamily: row.actionFamily, payload });
+    }
+
+    const waiverById = new Map<string, {
+      waiver: CompletionWaiver;
+      payload: CompletionEvidenceObservationPayloadV1;
+    }>();
+    for (const row of tx.select().from(completionWaivers).where(
+      eq(completionWaivers.workThreadId, input.workThreadId)
+    ).all()) {
+      const storedWaiver = CompletionWaiverSchema.parse(JSON.parse(row.waiverJson));
+      const { id: _waiverId, ...semanticWaiver } = storedWaiver;
+      const authorityDigest = `sha256:${sha256(stableActionJson(semanticWaiver))}`;
+      if (
+        storedWaiver.id !== row.id
+        || storedWaiver.contractId !== row.contractId
+        || storedWaiver.contractVersion !== row.contractVersion
+        || storedWaiver.cycle !== row.cycle
+        || row.waiverJson !== JSON.stringify(storedWaiver)
+        || row.contentDigest !== authorityDigest
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      if (
+        storedWaiver.contractId !== assessment.contractId
+        || storedWaiver.contractVersion !== assessment.contractVersion
+        || storedWaiver.cycle !== assessment.cycle
+        || (storedWaiver.runId !== undefined && storedWaiver.runId !== input.runId)
+      ) continue;
+      const payload = CompletionEvidenceObservationPayloadV1Schema.parse({
+        evidenceType: "completion_waiver",
+        evidenceId: storedWaiver.id,
+        authorityDigest,
+        contractId: storedWaiver.contractId,
+        version: storedWaiver.contractVersion,
+        cycle: storedWaiver.cycle,
+        runId: input.runId,
+        gateIds: [...storedWaiver.gateIds].sort(compareCompletionGateIds),
+        actorRef: `actor_${canonicalSha256Json(storedWaiver.actor).slice("sha256:".length)}`,
+        reasonDigest: canonicalSha256Json(storedWaiver.reason),
+        waivedAt: toControlTimestamp(storedWaiver.waivedAt),
+        ...(storedWaiver.expiresAt
+          ? { expiresAt: toControlTimestamp(storedWaiver.expiresAt) }
+          : {})
+      });
+      waiverById.set(storedWaiver.id, { waiver: storedWaiver, payload });
+    }
+
+    const event = OpenTagEventSchema.parse(JSON.parse(run.eventJson));
+    const eventOwner = event.metadata["owner"];
+    const eventRepo = event.metadata["repo"];
+    if (
+      canonicalSha256Json(event) !== importedRun.eventDigest
+      || typeof eventOwner !== "string"
+      || typeof eventRepo !== "string"
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+    const artifactById = new Map<string, {
+      authority: CompletionArtifact;
+      payload: CompletionEvidenceObservationPayloadV1;
+    }>();
+    const artifactCandidates = [
+      ...(runResult.createdPullRequestUrl
+        ? [{
+            id: runResultCreatedPullRequestArtifactId(input.runId),
+            kind: "pull_request",
+            uri: runResult.createdPullRequestUrl,
+            sourceRunId: input.runId
+          }]
+        : []),
+      ...(runResult.artifacts ?? []).map((artifact, index) => ({
+        id: artifact.id ?? runResultArtifactId(input.runId, index),
+        kind: artifact.kind ?? artifact.type ?? "custom",
+        uri: artifact.uri,
+        sourceRunId: artifact.sourceRunId ?? input.runId
+      }))
+    ];
+    for (const candidate of artifactCandidates) {
+      const binding = assessment.targetBindings.find((target) => target.artifactId === candidate.id);
+      if (!binding) continue;
+      const resourceRef = githubPullRequestResourceRef({
+        uri: candidate.uri,
+        owner: eventOwner,
+        repo: eventRepo
+      });
+      if (
+        candidate.kind !== "pull_request"
+        || candidate.sourceRunId !== input.runId
+        || binding.key !== "primary_change"
+        || binding.provider !== "github"
+        || resourceRef !== binding.resourceRef
+        || (binding.resourceVersion !== "unverified"
+          && ![...verificationById.values()].some(({ fact }) =>
+            fact.assurance === "verified"
+            && fact.subject.provider === "github"
+            && fact.subject.resourceRef === binding.resourceRef
+            && fact.subject.resourceVersion === binding.resourceVersion
+          ))
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      const artifactAuthority: CompletionArtifact = {
+        id: candidate.id,
+        kind: candidate.kind,
+        sourceRunId: input.runId,
+        uri: candidate.uri,
+        target: {
+          key: binding.key,
+          provider: binding.provider,
+          resourceRef: binding.resourceRef,
+          resourceVersion: binding.resourceVersion
+        },
+        recordedAt: run.updatedAt
+      };
+      const payload = CompletionEvidenceObservationPayloadV1Schema.parse({
+        evidenceType: "run_artifact",
+        evidenceId: candidate.id,
+        authorityDigest: canonicalSha256Json(artifactAuthority),
+        artifactKind: candidate.kind,
+        sourceRunId: input.runId,
+        target: {
+          provider: binding.provider,
+          resourceRef: binding.resourceRef,
+          resourceVersion: binding.resourceVersion
+        },
+        observedAt: toControlTimestamp(run.updatedAt)
+      });
+      const existing = artifactById.get(candidate.id);
+      if (existing && canonicalJsonStringify(existing.payload) !== canonicalJsonStringify(payload)) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      artifactById.set(candidate.id, { authority: artifactAuthority, payload });
+    }
+
+    const escalationById = new Map<string, {
+      escalation: HumanEscalation;
+      payload: CompletionEvidenceObservationPayloadV1;
+    }>();
+    for (const row of tx.select().from(humanEscalations).where(
+      eq(humanEscalations.workThreadId, input.workThreadId)
+    ).all()) {
+      const escalation = HumanEscalationSchema.parse(JSON.parse(row.escalationJson));
+      if (
+        row.escalationJson !== JSON.stringify(escalation)
+        || escalation.id !== row.id
+        || escalation.workThreadId !== row.workThreadId
+        || escalation.class !== row.class
+        || escalation.state !== row.state
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      if (
+        escalation.runId !== input.runId
+        || escalation.attemptId !== authority.attemptId
+        || !escalation.blocking
+        || compareRfc3339Timestamps(escalation.openedAt, assessment.assessedAt) > 0
+        || (escalation.state !== "open" && escalation.state !== "acknowledged")
+      ) continue;
+      escalationById.set(escalation.id, {
+        escalation,
+        payload: CompletionEvidenceObservationPayloadV1Schema.parse({
+          evidenceType: "human_escalation",
+          evidenceId: escalation.id,
+          authorityDigest: canonicalSha256Json(escalation),
+          class: escalation.class,
+          state: escalation.state,
+          blocking: true,
+          reasonDigest: canonicalSha256Json(escalation.reason),
+          observedAt: toControlTimestamp(escalation.openedAt)
+        })
+      });
+    }
+
+    const selectedEvidence = new Map<string, CompletionEvidenceObservationPayloadV1>();
+    const selectEvidence = (
+      payload: CompletionEvidenceObservationPayloadV1
+    ): string => {
+      const selectionKey = evidenceSelectionKey(payload);
+      const existing = selectedEvidence.get(selectionKey);
+      if (existing && canonicalJsonStringify(existing) !== canonicalJsonStringify(payload)) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      selectedEvidence.set(selectionKey, payload);
+      return selectionKey;
+    };
+    type GateAuthority = {
+      state: "passed" | "failed" | "missing" | "unknown" | "waived";
+      reasonCode: string;
+      evidenceIds: string[];
+      evidenceKind?: "verification" | "material" | "artifact";
+      waiverId?: string;
+    };
+    const authoritativeFacts = (
+      records: Array<{ fact: CompletionEvidenceFact }>
+    ): { records: Array<{ fact: CompletionEvidenceFact }>; conflicted: boolean } => {
+      const ordered = [...records].sort((left, right) =>
+        compareRfc3339Timestamps(right.fact.observedAt, left.fact.observedAt)
+        || compareRfc3339Timestamps(right.fact.receivedAt, left.fact.receivedAt)
+        || compareCompletionGateIds(left.fact.id, right.fact.id)
+      );
+      const latest = ordered[0];
+      if (!latest) return { records: [], conflicted: false };
+      const current = ordered.filter((item) =>
+        compareRfc3339Timestamps(item.fact.observedAt, latest.fact.observedAt) === 0
+        && compareRfc3339Timestamps(item.fact.receivedAt, latest.fact.receivedAt) === 0
+      );
+      const claims = new Set(current.map(({ fact }) => canonicalJsonStringify({
+        assurance: fact.assurance,
+        claim: fact.claim
+      })));
+      return { records: current, conflicted: claims.size > 1 };
+    };
+    const currentMaterialReceipts = (
+      actionFamily: string
+    ): {
+      records: Array<{ receipt: MaterialActionReceipt; actionFamily: string }>;
+      conflicted: boolean;
+    } => {
+      const ordered = [...materialById.values()]
+        .filter((item) => item.actionFamily === actionFamily)
+        .sort((left, right) =>
+          compareRfc3339Timestamps(
+            right.receipt.observedAt,
+            left.receipt.observedAt
+          )
+          || compareCompletionGateIds(left.receipt.id, right.receipt.id)
+        );
+      const latest = ordered[0];
+      if (!latest) return { records: [], conflicted: false };
+      const current = ordered.filter((item) =>
+        compareRfc3339Timestamps(
+          item.receipt.observedAt,
+          latest.receipt.observedAt
+        ) === 0
+      );
+      return {
+        records: current,
+        conflicted: new Set(current.map((item) => item.receipt.outcome)).size > 1
+      };
+    };
+    const exactIds = (left: string[], right: string[]): boolean =>
+      canonicalJsonStringify([...new Set(left)].sort())
+        === canonicalJsonStringify([...new Set(right)].sort());
+    const canonicalActiveWaiver = [...waiverById.values()]
+      .filter(({ waiver: candidate }) =>
+        candidate.contractId === contract.id
+        && candidate.contractVersion === contract.version
+        && candidate.cycle === contract.cycle
+        && (candidate.runId === undefined || candidate.runId === input.runId)
+        && candidate.gateIds.every((gateId) => contractGateIds.has(gateId))
+        && compareRfc3339Timestamps(
+          candidate.waivedAt,
+          assessment.assessedAt
+        ) <= 0
+        && (candidate.expiresAt === undefined
+          || compareRfc3339Timestamps(
+            candidate.expiresAt,
+            assessment.assessedAt
+          ) > 0)
+      )
+      .sort((left, right) => {
+        const timeOrder = compareRfc3339Timestamps(
+          left.waiver.waivedAt,
+          right.waiver.waivedAt
+        );
+        if (timeOrder !== 0) return -timeOrder;
+        return compareCompletionGateIds(left.waiver.id, right.waiver.id);
+      })[0];
+    const authorityForGate = (
+      gate: CompletionAssessment["gateResults"][number]
+    ): GateAuthority => {
+      const syntheticEscalationId = gate.gateId.startsWith("human_escalation:")
+        ? gate.gateId.slice("human_escalation:".length)
+        : undefined;
+      if (syntheticEscalationId) {
+        if (!escalationById.has(syntheticEscalationId)) {
+          throw new Error("completion_assessment_projection_authority_conflict");
+        }
+        return {
+          state: "unknown",
+          reasonCode: "human_acceptance_missing",
+          evidenceIds: [syntheticEscalationId],
+          evidenceKind: "verification"
+        };
+      }
+      const contractGate = contract.gates.find((candidate) => candidate.id === gate.gateId);
+      if (!contractGate) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      if (canonicalActiveWaiver?.waiver.gateIds.includes(gate.gateId)) {
+        return {
+          state: "waived",
+          reasonCode: "gate_waived",
+          evidenceIds: [],
+          waiverId: canonicalActiveWaiver.waiver.id
+        };
+      }
+      if (contract.mode === "execution_compat") {
+        const exactCompatibilityContract = contract.gates.length === 1
+          && contractGate.kind === "material_action"
+          && contractGate.actionFamily === "executor_run"
+          && contractGate.requiredOutcome === "succeeded"
+          && assessment.targetBindings.length === 0;
+        if (!exactCompatibilityContract) {
+          throw new Error("completion_assessment_projection_authority_conflict");
+        }
+        return runResult.conclusion === "success"
+          ? {
+              state: "passed",
+              reasonCode: "execution_succeeded",
+              evidenceIds: [input.runId]
+            }
+          : {
+              state: "failed",
+              reasonCode: "execution_not_succeeded",
+              evidenceIds: []
+            };
+      }
+      if (contractGate.kind === "artifact") {
+        const candidates = [...artifactById.values()].filter((item) =>
+          item.authority.target?.key === contractGate.targetKey
+        );
+        const identities = new Set(candidates.map((item) => canonicalJsonStringify([
+          item.authority.target?.provider,
+          item.authority.target?.resourceRef,
+          item.authority.target?.resourceVersion
+        ])));
+        if (identities.size > 1) {
+          return { state: "unknown", reasonCode: "artifact_ambiguous", evidenceIds: [] };
+        }
+        const matching = candidates.filter((item) =>
+          item.authority.kind === contractGate.artifactKind
+        );
+        return identities.size === 0 || matching.length < contractGate.minimum
+          ? { state: "missing", reasonCode: "artifact_missing", evidenceIds: [] }
+          : {
+              state: "passed",
+              reasonCode: "artifact_requirement_satisfied",
+              evidenceIds: matching.map((item) => item.authority.id).sort(),
+              evidenceKind: "artifact"
+            };
+      }
+      if (contractGate.kind === "material_action") {
+        const current = currentMaterialReceipts(contractGate.actionFamily);
+        if (current.conflicted) {
+          return {
+            state: "unknown",
+            reasonCode: "material_action_unknown",
+            evidenceIds: current.records.map((item) => item.receipt.id).sort(),
+            evidenceKind: "material"
+          };
+        }
+        const required = current.records.filter((item) =>
+          item.receipt.outcome === contractGate.requiredOutcome
+        );
+        if (required.length > 0) {
+          return {
+            state: "passed",
+            reasonCode: "material_action_succeeded",
+            evidenceIds: [required[0]!.receipt.id],
+            evidenceKind: "material"
+          };
+        }
+        const unknown = current.records.filter((item) => item.receipt.outcome === "unknown");
+        if (unknown.length > 0) {
+          return {
+            state: "unknown",
+            reasonCode: "material_action_unknown",
+            evidenceIds: [unknown[0]!.receipt.id],
+            evidenceKind: "material"
+          };
+        }
+        const failed = current.records.filter((item) => item.receipt.outcome === "failed");
+        return failed.length > 0
+          ? {
+              state: "failed",
+              reasonCode: "material_action_failed",
+              evidenceIds: [failed[0]!.receipt.id],
+              evidenceKind: "material"
+            }
+          : { state: "missing", reasonCode: "material_action_missing", evidenceIds: [] };
+      }
+      if (contractGate.kind === "human_acceptance") {
+        const authoritative = authoritativeFacts([...verificationById.values()].filter(
+          ({ fact }) => fact.kind === "human.acceptance" && fact.claim.predicate === "role"
+        ));
+        const accepted = !authoritative.conflicted
+          ? authoritative.records.filter(({ fact }) =>
+              fact.assurance === "verified"
+              && fact.claim.outcome === contractGate.requiredRole
+            )
+          : [];
+        return accepted.length > 0
+          ? {
+              state: "passed",
+              reasonCode: "human_acceptance_recorded",
+              evidenceIds: [accepted[0]!.fact.id],
+              evidenceKind: "verification"
+            }
+          : {
+              state: "missing",
+              reasonCode: "human_acceptance_missing",
+              evidenceIds: []
+            };
+      }
+      const binding = assessment.targetBindings.find((candidate) =>
+        candidate.key === contractGate.targetKey
+      );
+      if (!binding) {
+        return {
+          state: "missing",
+          reasonCode: contractGate.kind === "verification"
+            ? "verification_missing"
+            : "external_state_missing",
+          evidenceIds: []
+        };
+      }
+      if (contractGate.kind === "external_state" && binding.provider !== contractGate.provider) {
+        return {
+          state: "unknown",
+          reasonCode: "external_state_subject_mismatch",
+          evidenceIds: []
+        };
+      }
+      const relevant = [...verificationById.values()].filter(({ fact }) =>
+        fact.subject.provider === binding.provider
+        && fact.subject.resourceRef === binding.resourceRef
+        && fact.subject.resourceVersion === binding.resourceVersion
+        && (contractGate.kind === "verification"
+          ? fact.kind === contractGate.evidenceKind
+          : fact.claim.predicate === "state")
+      );
+      if (relevant.length === 0) {
+        const stale = [...verificationById.values()].filter(({ fact }) =>
+          fact.subject.provider === binding.provider
+          && fact.subject.resourceRef === binding.resourceRef
+          && fact.subject.resourceVersion !== binding.resourceVersion
+          && (contractGate.kind === "verification"
+            ? fact.kind === contractGate.evidenceKind
+            : fact.claim.predicate === "state")
+        );
+        return {
+          state: "missing",
+          reasonCode: stale.length > 0
+            ? contractGate.kind === "verification"
+              ? "verification_stale"
+              : "external_state_stale"
+            : contractGate.kind === "verification"
+              ? "verification_missing"
+              : "external_state_missing",
+          evidenceIds: stale.map(({ fact }) => fact.id).sort(),
+          ...(stale.length > 0 ? { evidenceKind: "verification" as const } : {})
+        };
+      }
+      const authoritative = authoritativeFacts(relevant);
+      if (authoritative.conflicted) {
+        return {
+          state: "unknown",
+          reasonCode: contractGate.kind === "verification"
+            ? "verification_assurance_insufficient"
+            : "external_state_assurance_insufficient",
+          evidenceIds: authoritative.records.map(({ fact }) => fact.id).sort(),
+          evidenceKind: "verification"
+        };
+      }
+      const assured = authoritative.records.filter(({ fact }) =>
+        completionAssuranceAccepted(fact.assurance, contractGate.minimumAssurance)
+      );
+      if (assured.length === 0) {
+        return {
+          state: "unknown",
+          reasonCode: contractGate.kind === "verification"
+            ? "verification_assurance_insufficient"
+            : "external_state_assurance_insufficient",
+          evidenceIds: authoritative.records.map(({ fact }) => fact.id).sort(),
+          evidenceKind: "verification"
+        };
+      }
+      const satisfied = assured.filter(({ fact }) =>
+        fact.claim.outcome === (
+          contractGate.kind === "verification"
+            ? contractGate.requiredOutcome
+            : contractGate.requiredState
+        )
+        && (contractGate.kind !== "verification"
+          || (contractGate.requiredObservations ?? []).every((name) =>
+            fact.claim.observations?.[name] === "passed"
+          ))
+      );
+      return satisfied.length > 0
+        ? {
+            state: "passed",
+            reasonCode: contractGate.kind === "verification"
+              ? "verification_passed"
+              : "external_state_satisfied",
+            evidenceIds: [satisfied[0]!.fact.id],
+            evidenceKind: "verification"
+          }
+        : {
+            state: "failed",
+            reasonCode: contractGate.kind === "verification"
+              ? "verification_failed"
+              : "external_state_mismatch",
+            evidenceIds: assured.map(({ fact }) => fact.id).sort(),
+            evidenceKind: "verification"
+          };
+    };
+    const selectedGateResults = [...assessment.gateResults]
+      .sort((left, right) => compareCompletionGateIds(left.gateId, right.gateId))
+      .map((gate) => {
+        const expected = authorityForGate(gate);
+        if (
+          gate.state !== expected.state
+          || gate.reasonCode !== expected.reasonCode
+          || !exactIds(gate.evidenceIds, expected.evidenceIds)
+        ) throw new Error("completion_assessment_projection_authority_conflict");
+        let evidenceReceiptIds: string[] = [];
+        if (expected.waiverId) {
+          if (assessment.waiver?.id !== expected.waiverId) {
+            throw new Error("completion_assessment_projection_authority_conflict");
+          }
+          evidenceReceiptIds = [selectEvidence(
+            waiverById.get(expected.waiverId)!.payload
+          )];
+        } else if (expected.evidenceKind === "verification") {
+          evidenceReceiptIds = expected.evidenceIds.map((id) => {
+            const record = verificationById.get(id) ?? escalationById.get(id);
+            if (!record) {
+              throw new Error("completion_assessment_projection_authority_conflict");
+            }
+            return selectEvidence(record.payload);
+          });
+        } else if (expected.evidenceKind === "material") {
+          evidenceReceiptIds = expected.evidenceIds.map((id) => {
+            const record = materialById.get(id);
+            if (!record) {
+              throw new Error("completion_assessment_projection_authority_conflict");
+            }
+            return selectEvidence(record.payload);
+          });
+        } else if (expected.evidenceKind === "artifact") {
+          evidenceReceiptIds = expected.evidenceIds.map((id) => {
+            const record = artifactById.get(id);
+            if (!record) {
+              throw new Error("completion_assessment_projection_authority_conflict");
+            }
+            return selectEvidence(record.payload);
+          });
+        }
+        return {
+          gateId: gate.gateId,
+          state: gate.state === "passed"
+          ? "satisfied" as const
+          : gate.state === "failed"
+            ? "unsatisfied" as const
+            : gate.state === "missing"
+              ? "pending" as const
+              : gate.state === "unknown"
+                ? "blocked" as const
+                : "waived" as const,
+          reasonCode: gate.reasonCode,
+          evidenceReceiptIds: [...new Set(evidenceReceiptIds)].sort()
+        };
+      });
+    const activeEscalationGateIds = [...escalationById.keys()]
+      .map((id) => `human_escalation:${id}`)
+      .sort();
+    const projectedEscalationGateIds = assessment.gateResults
+      .filter((gate) => gate.gateId.startsWith("human_escalation:"))
+      .map((gate) => gate.gateId)
+      .sort();
+    const uniqueAssessmentGateIds = new Set(
+      assessment.gateResults.map((gate) => gate.gateId)
+    );
+    const contractGateStates = assessment.gateResults.filter((gate) =>
+      contractGateIds.has(gate.gateId)
+    );
+    const effectiveGateStates = selectedGateResults.map((gate) => gate.state);
+    const expectedAssessmentState = reduceCompletionGateStates(
+      effectiveGateStates
+    );
+    let supersededAssessment: CompletionAssessment | undefined;
+    if (assessment.supersedesAssessmentId) {
+      const supersededRow = tx.select().from(completionAssessments).where(and(
+        eq(completionAssessments.id, assessment.supersedesAssessmentId),
+        eq(completionAssessments.workThreadId, assessment.workThreadId)
+      )).limit(1).get();
+      if (!supersededRow) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      supersededAssessment = CompletionAssessmentSchema.parse(
+        JSON.parse(supersededRow.assessmentJson)
+      );
+      if (
+        supersededRow.assessmentJson !== JSON.stringify(supersededAssessment)
+        || supersededAssessment.id !== assessment.supersedesAssessmentId
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    const assessmentAccepted = assessment.state === "satisfied"
+      || assessment.state === "waived";
+    const supersededAccepted = supersededAssessment?.state === "satisfied"
+      || supersededAssessment?.state === "waived";
+    const acceptedAtLineageMismatch = assessmentAccepted
+      && (
+        assessment.acceptedAt === undefined
+        || (supersededAccepted
+          ? supersededAssessment?.acceptedAt === undefined
+            || compareRfc3339Timestamps(
+              assessment.acceptedAt,
+              supersededAssessment.acceptedAt
+            ) !== 0
+          : compareRfc3339Timestamps(
+              assessment.acceptedAt,
+              assessment.assessedAt
+            ) !== 0)
+      );
+    if (
+      uniqueAssessmentGateIds.size !== assessment.gateResults.length
+      || !exactIds(activeEscalationGateIds, projectedEscalationGateIds)
+      || contractGateStates.length !== contract.gates.length
+      || assessment.state !== expectedAssessmentState
+      || (contract.mode === "execution_compat"
+        && assessment.state !== "waived"
+        && assessment.evidenceBacked)
+      || (contract.mode === "governed"
+        && (assessment.state === "satisfied" || assessment.state === "waived")
+        && !assessment.evidenceBacked)
+      || acceptedAtLineageMismatch
+      || selectedGateResults.some((gate) =>
+        (gate.state === "waived"
+          || (contract.mode === "governed" && gate.state === "satisfied"))
+        && gate.evidenceReceiptIds.length === 0
+      )
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+    let waiver: {
+      ref: string;
+      actorRef: string;
+      reasonDigest: string;
+    } | undefined;
+    const hasWaivedGate = selectedGateResults.some((gate) => gate.state === "waived");
+    if (
+      hasWaivedGate !== Boolean(assessment.waiver)
+      || (assessment.waiver
+        ? assessment.assessedBy !== "human"
+        : assessment.assessedBy !== "opentag")
+    ) {
+      throw new Error("completion_assessment_projection_authority_conflict");
+    }
+    if (assessment.waiver) {
+      const waiverRow = tx.select().from(completionWaivers).where(and(
+        eq(completionWaivers.id, assessment.waiver.id),
+        eq(completionWaivers.workThreadId, assessment.workThreadId),
+        eq(completionWaivers.contractId, assessment.contractId),
+        eq(completionWaivers.contractVersion, assessment.contractVersion),
+        eq(completionWaivers.cycle, assessment.cycle)
+      )).limit(1).get();
+      if (!waiverRow || waiverRow.waiverJson !== JSON.stringify(assessment.waiver)) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      waiver = {
+        ref: assessment.waiver.id,
+        actorRef: `actor_${canonicalSha256Json(assessment.waiver.actor)
+          .slice("sha256:".length)}`,
+        reasonDigest: canonicalSha256Json(assessment.waiver.reason)
+      };
+    }
+
+    const projectionLifecycleDependency = (
+      row: typeof controlPlaneProjectionOutbox.$inferSelect
+    ): typeof hostedLifecycleOperations.$inferSelect => {
+      if (!row.requiresLifecycleOperationId) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      const lifecycleRows = tx.select().from(hostedLifecycleOperations).where(and(
+        eq(hostedLifecycleOperations.destinationId, row.destinationId),
+        eq(hostedLifecycleOperations.organizationId, row.organizationId),
+        eq(hostedLifecycleOperations.operationId, row.requiresLifecycleOperationId)
+      )).all();
+      if (
+        lifecycleRows.length !== 1
+        || lifecycleRows[0]!.action !== "complete"
+        || lifecycleRows[0]!.runId !== row.runId
+        || !validAcknowledgedLifecycleDependency(lifecycleRows[0]!)
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      return lifecycleRows[0]!;
+    };
+
+    let predecessorAssessmentRow: typeof controlPlaneProjectionOutbox.$inferSelect
+      | undefined;
+    let predecessorAssessmentEnvelope: ReturnType<
+      typeof CompletionAssessmentReceiptEnvelopeV1Schema.parse
+    > | undefined;
+    if (assessment.supersedesAssessmentId) {
+      const predecessorRows = tx.select().from(controlPlaneProjectionOutbox).where(and(
+        eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+        eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+        eq(controlPlaneProjectionOutbox.workThreadId, input.workThreadId),
+        eq(controlPlaneProjectionOutbox.receiptKind, "completion_assessment")
+      )).all().filter((row) => {
+        try {
+          const predecessor = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+            JSON.parse(row.envelopeJson)
+          );
+          return predecessor.payload.assessmentId === assessment.supersedesAssessmentId;
+        } catch {
+          throw new Error("completion_assessment_projection_authority_conflict");
+        }
+      });
+      if (predecessorRows.length !== 1) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      predecessorAssessmentRow = predecessorRows[0]!;
+      predecessorAssessmentEnvelope = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+        JSON.parse(predecessorAssessmentRow.envelopeJson)
+      );
+      const predecessorLifecycle = projectionLifecycleDependency(
+        predecessorAssessmentRow
+      );
+      const predecessorCompletionRequest = HostedCompleteRequestV1Schema.parse(
+        JSON.parse(predecessorLifecycle.requestJson)
+      );
+      if (
+        predecessorAssessmentRow.envelopeJson
+          !== canonicalJsonStringify(predecessorAssessmentEnvelope)
+        || predecessorAssessmentRow.receiptDigest
+          !== predecessorAssessmentEnvelope.receiptDigest
+        || predecessorAssessmentRow.runId !== predecessorAssessmentEnvelope.runId
+        || predecessorAssessmentRow.workThreadId
+          !== predecessorAssessmentEnvelope.workThreadId
+        || predecessorAssessmentEnvelope.workThreadId !== input.workThreadId
+        || predecessorAssessmentEnvelope.payload.executorResultReceiptRef.receiptId
+          !== predecessorLifecycle.receiptId
+        || predecessorAssessmentEnvelope.payload.executorResultReceiptRef.operationId
+          !== predecessorLifecycle.operationId
+        || predecessorAssessmentEnvelope.payload.executorResultReceiptRef.requestId
+          !== predecessorLifecycle.requestId
+        || predecessorAssessmentEnvelope.payload.executorResultReceiptRef.requestDigest
+          !== predecessorLifecycle.requestDigest
+        || predecessorAssessmentEnvelope.payload.executorResultReceiptRef.resultDigest
+          !== predecessorCompletionRequest.resultDigest
+        || !(predecessorAssessmentEnvelope.predecessorReceiptDigests ?? []).includes(
+          predecessorLifecycle.receiptDigest!
+        )
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      assertProjectionCustodySafe(predecessorAssessmentEnvelope);
+      assertProjectionDigests(predecessorAssessmentEnvelope);
+    }
+    const sameRunPredecessor = predecessorAssessmentEnvelope?.runId === input.runId;
+    const crossRunPredecessor = predecessorAssessmentEnvelope !== undefined
+      && !sameRunPredecessor;
+
+    const localCreationAuthority = {
+      schemaVersion: 1 as const,
+      kind: "work_thread_created" as const,
+      workThreadId: thread.id,
+      scopeId: thread.scopeId,
+      canonicalKey: thread.canonicalKey,
+      provider: thread.provider,
+      ownerContainerId: thread.ownerContainerId,
+      workItemKind: thread.workItemKind,
+      externalId: thread.externalId,
+      createdAt: thread.createdAt
+    };
+    const localCreationReceiptDigest = canonicalSha256Json(localCreationAuthority);
+    const localCreationReceiptId = `local_work_thread_creation_${localCreationReceiptDigest
+      .slice("sha256:".length)}`;
+    const workThreadIdentity = {
+      namespace: "opentag.control.receipt/work-thread-ref/v1" as const,
+      parts: [authority.organizationId, input.runId, input.workThreadId]
+    };
+    const workThreadProjectionKey = canonicalSha256Json({
+      purpose: "opentag-work-thread-ref-projection-v1",
+      identity: workThreadIdentity
+    }).slice("sha256:".length);
+    const workThreadObservedAt = [
+      thread.createdAt,
+      importedRun.importedAt,
+      ...(crossRunPredecessor && predecessorAssessmentEnvelope
+        ? [predecessorAssessmentEnvelope.observedAt]
+        : [])
+    ].sort(compareRfc3339Timestamps).at(-1)!;
+    const workThreadPayload = {
+      workThreadId: input.workThreadId,
+      sourceIdentityDigest: importedRun.sourceIdentityDigest,
+      localCreationReceiptId,
+      localCreationReceiptDigest,
+      lineageKind: "hosted_source_identity",
+      hostedAuthorityRef: {
+        claimOperationId: importedRun.claimOperationId,
+        authorityDigest: importedRun.authorityDigest,
+        attempt: projectionAttempt,
+        admissionPolicySnapshot: {
+          receiptId: authority.admissionPolicyReceiptId,
+          snapshotId: authority.admissionPolicySnapshotId,
+          digest: authority.admissionPolicySnapshotDigest
+        }
+      },
+      createdAt: toControlTimestamp(thread.createdAt)
+    };
+    const workThreadBase = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      receiptKind: "work_thread_ref" as const,
+      receiptId: `work_thread_receipt_${workThreadProjectionKey}`,
+      organizationId: authority.organizationId,
+      operationId: `work_thread_operation_${workThreadProjectionKey}`,
+      requiredCapabilities: ["relay.work-thread-ref.v1" as const],
+      producer: projectionProducer,
+      identity: workThreadIdentity,
+      predecessorReceiptDigests: [...new Set([
+        importedRun.authorityDigest,
+        authority.admissionPolicySnapshotDigest,
+        ...(crossRunPredecessor && predecessorAssessmentEnvelope
+          ? [predecessorAssessmentEnvelope.receiptDigest]
+          : [])
+      ])].sort(),
+      observedAt: toControlTimestamp(workThreadObservedAt),
+      runId: input.runId,
+      workThreadId: input.workThreadId,
+      payload: workThreadPayload,
+      payloadDigest: canonicalSha256Json(workThreadPayload)
+    };
+    const workThreadEnvelope = WorkThreadRefReceiptEnvelopeV1Schema.parse({
+      ...workThreadBase,
+      receiptDigest: canonicalSha256Json(workThreadBase)
+    });
+    assertProjectionCustodySafe(workThreadEnvelope);
+    assertProjectionDigests(workThreadEnvelope);
+    const existingWorkThreadRow = tx.select().from(controlPlaneProjectionOutbox)
+      .where(and(
+        eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+        eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+        eq(controlPlaneProjectionOutbox.receiptId, workThreadEnvelope.receiptId)
+      )).limit(1).get();
+    const workThreadDependsOnReceiptId = crossRunPredecessor
+      ? predecessorAssessmentRow!.receiptId
+      : undefined;
+    if (existingWorkThreadRow) {
+      const existingWorkThreadLifecycle = projectionLifecycleDependency(
+        existingWorkThreadRow
+      );
+      if (
+        existingWorkThreadRow.envelopeJson !== canonicalJsonStringify(workThreadEnvelope)
+        || existingWorkThreadRow.receiptDigest !== workThreadEnvelope.receiptDigest
+        || existingWorkThreadRow.dependsOnReceiptId
+          !== (workThreadDependsOnReceiptId ?? null)
+        || (!sameRunPredecessor
+          && existingWorkThreadLifecycle.operationId !== completion.operationId)
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+    } else {
+      if (sameRunPredecessor) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+        destinationId: claim.destinationId,
+        envelope: workThreadEnvelope,
+        ...(workThreadDependsOnReceiptId
+          ? { dependsOnReceiptId: workThreadDependsOnReceiptId }
+          : {}),
+        requiresLifecycleOperationId: completion.operationId,
+        now: new Date(workThreadObservedAt)
+      }));
+    }
+
+    let chainParentReceiptId = sameRunPredecessor
+      ? predecessorAssessmentRow!.receiptId
+      : workThreadEnvelope.receiptId;
+    let chainParentReceiptDigest = sameRunPredecessor
+      ? predecessorAssessmentEnvelope!.receiptDigest
+      : workThreadEnvelope.receiptDigest;
+
+    const contractIdentity = {
+      namespace: "opentag.control.receipt/completion-contract-ref/v1" as const,
+      parts: [
+        authority.organizationId,
+        input.runId,
+        input.workThreadId,
+        contract.id,
+        String(contract.version),
+        String(contract.cycle)
+      ]
+    };
+    const contractProjectionKey = canonicalSha256Json({
+      purpose: "opentag-completion-contract-ref-projection-v1",
+      identity: contractIdentity
+    }).slice("sha256:".length);
+    const predecessorContract = predecessorAssessmentEnvelope?.payload.contract;
+    const sameContractTuple = predecessorContract !== undefined
+      && predecessorContract.contractId === contract.id
+      && predecessorContract.version === contract.version
+      && predecessorContract.cycle === contract.cycle;
+    const sameRunContractEvolution = sameRunPredecessor && !sameContractTuple;
+    if (
+      sameRunContractEvolution
+      && predecessorContract
+      && !(
+        contract.cycle > predecessorContract.cycle
+        || (
+          contract.cycle === predecessorContract.cycle
+          && contract.version > predecessorContract.version
+        )
+      )
+    ) throw new Error("completion_assessment_projection_authority_conflict");
+    const contractPayload = {
+      contractId: contract.id,
+      version: contract.version,
+      cycle: contract.cycle,
+      mode: contract.mode,
+      contentDigest: contractRow.contentDigest,
+      resolvedTargetDigests: [] as [],
+      requiredGateIds: contract.gates.map((gate) => gate.id)
+        .sort(compareCompletionGateIds),
+      createdAt: toControlTimestamp(contract.createdAt),
+      ...(sameRunContractEvolution && predecessorContract
+        ? { supersedesContractId: predecessorContract.contractId }
+        : {})
+    };
+    const contractReceiptId = `completion_contract_receipt_${contractProjectionKey}`;
+    const existingContractRow = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+      eq(controlPlaneProjectionOutbox.receiptId, contractReceiptId)
+    )).limit(1).get();
+    let contractEnvelope: ReturnType<typeof CompletionContractRefReceiptEnvelopeV1Schema.parse>;
+    if (existingContractRow) {
+      const existingContractLifecycle = projectionLifecycleDependency(existingContractRow);
+      contractEnvelope = CompletionContractRefReceiptEnvelopeV1Schema.parse(
+        JSON.parse(existingContractRow.envelopeJson)
+      );
+      const contractParentRow = existingContractRow.dependsOnReceiptId
+        ? tx.select().from(controlPlaneProjectionOutbox).where(and(
+            eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+            eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+            eq(controlPlaneProjectionOutbox.receiptId, existingContractRow.dependsOnReceiptId)
+          )).limit(1).get()
+        : undefined;
+      if (
+        existingContractRow.envelopeJson !== canonicalJsonStringify(contractEnvelope)
+        || existingContractRow.receiptDigest !== contractEnvelope.receiptDigest
+        || contractEnvelope.receiptId !== contractReceiptId
+        || contractEnvelope.operationId
+          !== `completion_contract_operation_${contractProjectionKey}`
+        || contractEnvelope.organizationId !== authority.organizationId
+        || canonicalJsonStringify(contractEnvelope.producer)
+          !== canonicalJsonStringify(projectionProducer)
+        || canonicalJsonStringify(contractEnvelope.identity)
+          !== canonicalJsonStringify(contractIdentity)
+        || contractEnvelope.runId !== input.runId
+        || contractEnvelope.workThreadId !== input.workThreadId
+        || canonicalJsonStringify(contractEnvelope.payload)
+          !== canonicalJsonStringify(contractPayload)
+        || compareRfc3339Timestamps(
+          contractEnvelope.observedAt,
+          contractPayload.createdAt
+        ) < 0
+        || compareRfc3339Timestamps(
+          contractEnvelope.observedAt,
+          workThreadEnvelope.observedAt
+        ) < 0
+        || !contractParentRow
+        || !(contractEnvelope.predecessorReceiptDigests ?? []).includes(
+          contractParentRow.receiptDigest
+        )
+        || !(contractEnvelope.predecessorReceiptDigests ?? []).includes(
+          workThreadEnvelope.receiptDigest
+        )
+        || (!sameRunPredecessor || !sameContractTuple)
+          && (
+            existingContractLifecycle.operationId !== completion.operationId
+            || existingContractRow.dependsOnReceiptId !== chainParentReceiptId
+          )
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      assertProjectionCustodySafe(contractEnvelope);
+      assertProjectionDigests(contractEnvelope);
+      if (!sameRunPredecessor || !sameContractTuple) {
+        chainParentReceiptId = contractEnvelope.receiptId;
+        chainParentReceiptDigest = contractEnvelope.receiptDigest;
+      }
+    } else {
+      if (sameRunPredecessor && sameContractTuple) {
+        throw new Error("completion_assessment_projection_authority_conflict");
+      }
+      const contractObservedAt = [
+        contract.createdAt,
+        workThreadEnvelope.observedAt,
+        ...(predecessorAssessmentEnvelope
+          ? [predecessorAssessmentEnvelope.observedAt]
+          : [])
+      ].sort(compareRfc3339Timestamps).at(-1)!;
+      const contractBase = {
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        receiptKind: "completion_contract_ref" as const,
+        receiptId: contractReceiptId,
+        organizationId: authority.organizationId,
+        operationId: `completion_contract_operation_${contractProjectionKey}`,
+        requiredCapabilities: ["relay.completion-contract-ref.v1" as const],
+        producer: projectionProducer,
+        identity: contractIdentity,
+        predecessorReceiptDigests: [...new Set([
+          workThreadEnvelope.receiptDigest,
+          chainParentReceiptDigest
+        ])].sort(),
+        observedAt: toControlTimestamp(contractObservedAt),
+        runId: input.runId,
+        workThreadId: input.workThreadId,
+        payload: contractPayload,
+        payloadDigest: canonicalSha256Json(contractPayload)
+      };
+      contractEnvelope = CompletionContractRefReceiptEnvelopeV1Schema.parse({
+        ...contractBase,
+        receiptDigest: canonicalSha256Json(contractBase)
+      });
+      assertProjectionCustodySafe(contractEnvelope);
+      assertProjectionDigests(contractEnvelope);
+      assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+        destinationId: claim.destinationId,
+        envelope: contractEnvelope,
+        dependsOnReceiptId: chainParentReceiptId,
+        requiresLifecycleOperationId: completion.operationId,
+        now: new Date(contractObservedAt)
+      }));
+      chainParentReceiptId = contractEnvelope.receiptId;
+      chainParentReceiptDigest = contractEnvelope.receiptDigest;
+    }
+
+    const finalEvidenceBySelectionKey = new Map<
+      string,
+      CompletionEvidenceObservationReceiptEnvelopeV1
+    >();
+    const orderedEvidence = [...selectedEvidence.entries()].sort(
+      ([leftSelectionKey, left], [rightSelectionKey, right]) =>
+        left.evidenceType.localeCompare(right.evidenceType)
+        || left.evidenceId.localeCompare(right.evidenceId)
+        || leftSelectionKey.localeCompare(rightSelectionKey)
+    );
+    for (const [selectionKey, evidencePayload] of orderedEvidence) {
+      const receiptId = evidenceReceiptId(
+        evidencePayload,
+        contractEnvelope.receiptDigest
+      );
+      const existing = tx.select().from(controlPlaneProjectionOutbox).where(and(
+        eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+        eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+        eq(controlPlaneProjectionOutbox.receiptId, receiptId)
+      )).limit(1).get();
+      if (existing) {
+        projectionLifecycleDependency(existing);
+        const persistedEnvelope = CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+          JSON.parse(existing.envelopeJson)
+        );
+        const persistedParent = existing.dependsOnReceiptId
+          ? tx.select().from(controlPlaneProjectionOutbox).where(and(
+              eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+              eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+              eq(controlPlaneProjectionOutbox.receiptId, existing.dependsOnReceiptId)
+            )).limit(1).get()
+          : undefined;
+        const isCurrentChainEvidence = existing.dependsOnReceiptId
+          === chainParentReceiptId;
+        if (
+          existing.envelopeJson !== canonicalJsonStringify(persistedEnvelope)
+          || existing.receiptDigest !== persistedEnvelope.receiptDigest
+          || persistedEnvelope.receiptId !== receiptId
+          || persistedEnvelope.organizationId !== authority.organizationId
+          || canonicalJsonStringify(persistedEnvelope.producer)
+            !== canonicalJsonStringify(projectionProducer)
+          || canonicalJsonStringify(persistedEnvelope.identity)
+            !== canonicalJsonStringify(evidenceIdentity(
+              evidencePayload,
+              contractEnvelope.receiptDigest
+            ))
+          || persistedEnvelope.runId !== input.runId
+          || persistedEnvelope.workThreadId !== input.workThreadId
+          || canonicalJsonStringify(persistedEnvelope.attempt)
+            !== canonicalJsonStringify(projectionAttempt)
+          || canonicalJsonStringify(persistedEnvelope.payload)
+            !== canonicalJsonStringify(evidencePayload)
+          || !persistedParent
+          || !(persistedEnvelope.predecessorReceiptDigests ?? []).includes(
+            persistedParent.receiptDigest
+          )
+          || !(persistedEnvelope.predecessorReceiptDigests ?? []).includes(
+            completionReceipt.receiptDigest
+          )
+          || !(persistedEnvelope.predecessorReceiptDigests ?? []).includes(
+            contractEnvelope.receiptDigest
+          )
+          || ((!sameRunPredecessor || !sameContractTuple)
+            && !isCurrentChainEvidence)
+        ) throw new Error("completion_assessment_projection_authority_conflict");
+        assertProjectionCustodySafe(persistedEnvelope);
+        assertProjectionDigests(persistedEnvelope);
+        finalEvidenceBySelectionKey.set(selectionKey, persistedEnvelope);
+        if (isCurrentChainEvidence) {
+          chainParentReceiptId = persistedEnvelope.receiptId;
+          chainParentReceiptDigest = persistedEnvelope.receiptDigest;
+        }
+        continue;
+      }
+      const evidence = evidenceEnvelope(
+        evidencePayload,
+        contractEnvelope.receiptDigest,
+        [
+        completionReceipt.receiptDigest,
+        contractEnvelope.receiptDigest,
+        chainParentReceiptDigest
+        ]
+      );
+      assertProjectionCustodySafe(evidence);
+      assertProjectionDigests(evidence);
+      assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+        destinationId: claim.destinationId,
+        envelope: evidence,
+        dependsOnReceiptId: chainParentReceiptId,
+        requiresLifecycleOperationId: completion.operationId,
+        now: new Date(evidence.observedAt)
+      }));
+      finalEvidenceBySelectionKey.set(selectionKey, evidence);
+      chainParentReceiptId = evidence.receiptId;
+      chainParentReceiptDigest = evidence.receiptDigest;
+    }
+
+    const gateResults = selectedGateResults.map((gate) => ({
+      gateId: gate.gateId,
+      state: gate.state,
+      reasonCode: gate.reasonCode,
+      evidenceReceiptDigests: gate.evidenceReceiptIds.map((selectionKey) => {
+        const evidence = finalEvidenceBySelectionKey.get(selectionKey);
+        if (!evidence) throw new Error("completion_assessment_projection_authority_conflict");
+        return evidence.receiptDigest;
+      }).sort()
+    }));
+    const evidenceReceiptDigests = [...new Set(
+      gateResults.flatMap((gate) => gate.evidenceReceiptDigests)
+    )].sort();
+
+    const identity = {
+      namespace: "opentag.control.receipt/completion-assessment/v1" as const,
+      parts: [authority.organizationId, input.workThreadId, assessment.id]
+    };
+    const projectionKey = canonicalSha256Json({
+      purpose: "opentag-completion-assessment-projection-v1",
+      identity
+    }).slice("sha256:".length);
+    const payload = {
+      assessmentId: assessment.id,
+      workThreadId: assessment.workThreadId,
+      contract: {
+        contractId: contract.id,
+        version: contract.version,
+        cycle: contract.cycle,
+        mode: contract.mode,
+        contentDigest: contractRow.contentDigest
+      },
+      admissionPolicySnapshot: {
+        snapshotId: authority.admissionPolicySnapshotId,
+        digest: authority.admissionPolicySnapshotDigest
+      },
+      runId: input.runId,
+      attempt: {
+        attemptId: authority.attemptId,
+        attemptNumber: authority.attemptNumber,
+        epoch: authority.epoch,
+        fencingTokenDigest: authority.fencingTokenDigest
+      },
+      executorResultReceiptRef: {
+        receiptId: completionReceipt.receiptId,
+        operationId: completion.operationId,
+        requestId: completion.requestId,
+        requestDigest: completion.requestDigest,
+        resultDigest: completionRequest.resultDigest
+      },
+      assessmentInputDigest: assessment.inputDigest,
+      evidenceReceiptDigests,
+      gateResults,
+      conclusion: assessment.state,
+      assessedAt: toControlTimestamp(assessment.assessedAt),
+      assessedBy: assessment.assessedBy === "opentag" ? "local_opentag" : "human",
+      ...(assessment.supersedesAssessmentId
+        ? { supersedesAssessmentId: assessment.supersedesAssessmentId }
+        : {}),
+      ...(waiver ? { waiver } : {})
+    };
+    const base = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      receiptKind: "completion_assessment" as const,
+      receiptId: `assessment_receipt_${projectionKey}`,
+      organizationId: authority.organizationId,
+      operationId: `assessment_operation_${projectionKey}`,
+      requiredCapabilities: ["relay.completion-assessment.v1" as const],
+      producer: projectionProducer,
+      identity,
+      predecessorReceiptDigests: [...new Set([
+        completionReceipt.receiptDigest,
+        contractEnvelope.receiptDigest,
+        ...evidenceReceiptDigests,
+        ...(predecessorAssessmentEnvelope
+          ? [predecessorAssessmentEnvelope.receiptDigest]
+          : [])
+      ])].sort(),
+      observedAt: toControlTimestamp(assessment.assessedAt),
+      runId: input.runId,
+      workThreadId: input.workThreadId,
+      attempt: projectionAttempt,
+      payload,
+      payloadDigest: canonicalSha256Json(payload)
+    };
+    const envelope = CompletionAssessmentReceiptEnvelopeV1Schema.parse({
+      ...base,
+      receiptDigest: canonicalSha256Json(base)
+    });
+    assertProjectionCustodySafe(envelope);
+    assertProjectionDigests(envelope);
+    const existingAssessment = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+      eq(controlPlaneProjectionOutbox.receiptId, envelope.receiptId)
+    )).limit(1).get();
+    if (existingAssessment) {
+      if (
+        existingAssessment.receiptDigest !== envelope.receiptDigest
+        || existingAssessment.envelopeJson !== canonicalJsonStringify(envelope)
+        || existingAssessment.requiresLifecycleOperationId !== completion.operationId
+        || existingAssessment.dependsOnReceiptId !== chainParentReceiptId
+      ) throw new Error("completion_assessment_projection_authority_conflict");
+      return;
+    }
+    assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+      destinationId: claim.destinationId,
+      envelope,
+      dependsOnReceiptId: chainParentReceiptId,
+      requiresLifecycleOperationId: completion.operationId,
+      now: new Date(assessment.assessedAt)
+    }));
+  }
+
+  function assertGovernedCallbackAuthorityTx(
+    tx: ProjectionTransaction,
+    intent: typeof governedCallbackIntents.$inferSelect,
+    options: { requireCurrentAssessment?: boolean } = {}
+  ): typeof callbackDeliveries.$inferSelect {
+    if (
+      intent.completionOperationId === null
+      || intent.assessmentReceiptId === null
+      || intent.assessmentReceiptDigest === null
+      || intent.localDeliveryId === null
+      || intent.targetIdentityDigest === null
+    ) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+    let intentEnvelope: typeof CallbackIntentObservationReceiptEnvelopeV1Schema._output;
+    try {
+      intentEnvelope = CallbackIntentObservationReceiptEnvelopeV1Schema.parse(
+        JSON.parse(intent.intentReceiptJson)
+      );
+    } catch {
+      throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+    }
+    const assessmentRef = intentEnvelope.payload.assessmentRef;
+    const importedRun = tx.select().from(hostedRunImports).where(and(
+      eq(hostedRunImports.runId, intent.runId),
+      eq(hostedRunImports.admissionId, intent.admissionId),
+      eq(hostedRunImports.admissionOperationId, intent.admissionOperationId),
+      eq(hostedRunImports.claimOperationId, intent.claimOperationId),
+      eq(hostedRunImports.attemptId, intent.runAttemptId),
+      eq(hostedRunImports.fencingTokenDigest, intent.fencingTokenDigest),
+      eq(hostedRunImports.workThreadId, intent.workThreadId),
+      eq(hostedRunImports.sourceIdentityDigest,
+        intentEnvelope.payload.sourceThreadIdentityDigest)
+    )).limit(1).get();
+    const importedAttempt = tx.select().from(hostedAttemptImports).where(and(
+      eq(hostedAttemptImports.attemptId, intent.runAttemptId),
+      eq(hostedAttemptImports.runId, intent.runId),
+      eq(hostedAttemptImports.attemptNumber, intent.runAttemptNumber),
+      eq(hostedAttemptImports.claimOperationId, intent.claimOperationId),
+      eq(hostedAttemptImports.fencingTokenDigest, intent.fencingTokenDigest)
+    )).limit(1).get();
+    const claim = tx.select().from(hostedClaimOperations).where(and(
+      eq(hostedClaimOperations.operationId, intent.claimOperationId),
+      eq(hostedClaimOperations.destinationId, intent.destinationId),
+      eq(hostedClaimOperations.organizationId, intent.organizationId),
+      eq(hostedClaimOperations.runnerId, intent.runnerId),
+      eq(hostedClaimOperations.runId, intent.runId),
+      eq(hostedClaimOperations.credentialId, intent.credentialId),
+      eq(hostedClaimOperations.attemptId, intent.runAttemptId),
+      eq(hostedClaimOperations.attemptNumber, intent.runAttemptNumber),
+      eq(hostedClaimOperations.fencingTokenDigest, intent.fencingTokenDigest),
+      eq(hostedClaimOperations.state, "claimed"),
+      isNotNull(hostedClaimOperations.executionStartedAt),
+      isNull(hostedClaimOperations.terminalReasonCode)
+    )).limit(1).get();
+    const completion = tx.select().from(hostedLifecycleOperations).where(and(
+      eq(hostedLifecycleOperations.destinationId, intent.destinationId),
+      eq(hostedLifecycleOperations.organizationId, intent.organizationId),
+      eq(hostedLifecycleOperations.runnerId, intent.runnerId),
+      eq(hostedLifecycleOperations.credentialId, intent.credentialId),
+      eq(hostedLifecycleOperations.operationId, intent.completionOperationId),
+      eq(hostedLifecycleOperations.action, "complete"),
+      eq(hostedLifecycleOperations.runId, intent.runId),
+      eq(hostedLifecycleOperations.attemptId, intent.runAttemptId),
+      eq(hostedLifecycleOperations.attemptNumber, intent.runAttemptNumber),
+      eq(hostedLifecycleOperations.fencingTokenDigest, intent.fencingTokenDigest)
+    )).limit(1).get();
+    const delivery = tx.select().from(callbackDeliveries).where(and(
+      eq(callbackDeliveries.id, intent.localDeliveryId),
+      eq(callbackDeliveries.runId, intent.runId),
+      eq(callbackDeliveries.provider, "github"),
+      eq(callbackDeliveries.dispatchMode, "governed")
+    )).limit(1).get();
+    const run = tx.select().from(runs).where(eq(runs.id, intent.runId)).limit(1).get();
+    const thread = tx.select().from(workThreads)
+      .where(eq(workThreads.id, intent.workThreadId)).limit(1).get();
+    const assessmentRow = tx.select().from(completionAssessments).where(and(
+      eq(completionAssessments.id, assessmentRef),
+      eq(completionAssessments.workThreadId, intent.workThreadId)
+    )).limit(1).get();
+    const assessmentProjection = tx.select().from(controlPlaneProjectionOutbox).where(and(
+      eq(controlPlaneProjectionOutbox.destinationId, intent.destinationId),
+      eq(controlPlaneProjectionOutbox.organizationId, intent.organizationId),
+      eq(controlPlaneProjectionOutbox.receiptId, intent.assessmentReceiptId),
+      eq(controlPlaneProjectionOutbox.receiptDigest, intent.assessmentReceiptDigest),
+      eq(controlPlaneProjectionOutbox.receiptKind, "completion_assessment")
+    )).limit(1).get();
+    try {
+      if (!importedRun || !importedAttempt || !claim || !completion || !delivery || !run
+        || !thread || !assessmentRow || !assessmentProjection
+        || importedRun.authorityDigest !== importedAttempt.authorityDigest
+        || importedRun.authorityDigest !== claim.authorityDigest
+        || importedRun.authorityJson !== importedAttempt.authorityJson
+        || importedRun.authorityJson !== claim.authorityJson
+        || importedRun.claimDigest !== importedAttempt.claimDigest
+        || importedRun.claimDigest !== claim.claimDigest
+        || !validAcknowledgedLifecycleDependency(completion)
+        || (options.requireCurrentAssessment !== false
+          && thread.currentAssessmentId !== assessmentRef)
+        || delivery.governedState !== intent.state
+        || governedCallbackPayloadDigest(delivery) !== intent.payloadDigest
+        || assessmentProjection.requiresLifecycleOperationId
+          !== intent.completionOperationId
+      ) throw new Error("invalid frozen lineage");
+      governedCallbackEventTarget({
+        eventJson: run.eventJson,
+        eventDigest: importedRun.eventDigest,
+        deliveryTarget: delivery.uri,
+        targetIdentityDigest: intent.targetIdentityDigest
+      });
+      const authority = hostedClaimAuthoritySnapshotFromJson(importedAttempt.authorityJson);
+      if (
+        !authority || typeof authority !== "object"
+        || canonicalSha256Json(authority) !== importedAttempt.authorityDigest
+        || authority.organizationId !== intent.organizationId
+        || authority.runnerId !== intent.runnerId
+        || authority.runId !== intent.runId
+        || authority.credentialId !== intent.credentialId
+        || authority.registrationGeneration !== intent.registrationGeneration
+        || authority.attemptId !== intent.runAttemptId
+        || authority.attemptNumber !== intent.runAttemptNumber
+        || authority.epoch !== intent.runAttemptNumber
+        || authority.fencingTokenDigest !== intent.fencingTokenDigest
+      ) throw new Error("invalid frozen authority");
+      const assessment = CompletionAssessmentSchema.parse(JSON.parse(assessmentRow.assessmentJson));
+      const envelope = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+        JSON.parse(assessmentProjection.envelopeJson)
+      );
+      const completionRequest = HostedCompleteRequestV1Schema.parse(
+        JSON.parse(completion.requestJson)
+      );
+      const executorResultRef = envelope.payload.executorResultReceiptRef;
+      assertProjectionCustodySafe(envelope);
+      assertProjectionDigests(envelope);
+      if (
+        assessment.id !== assessmentRef
+        || assessment.workThreadId !== intent.workThreadId
+        || assessment.triggeredByRunId !== intent.runId
+        || envelope.receiptId !== intent.assessmentReceiptId
+        || envelope.receiptDigest !== intent.assessmentReceiptDigest
+        || envelope.organizationId !== intent.organizationId
+        || envelope.runId !== intent.runId
+        || envelope.workThreadId !== intent.workThreadId
+        || envelope.attempt.attemptId !== intent.runAttemptId
+        || envelope.attempt.attemptNumber !== intent.runAttemptNumber
+        || envelope.attempt.epoch !== intent.runAttemptNumber
+        || envelope.attempt.fencingTokenDigest !== intent.fencingTokenDigest
+        || envelope.producer.id !== intent.producerId
+        || envelope.producer.credentialId !== intent.credentialId
+        || envelope.producer.registrationGeneration !== intent.registrationGeneration
+        || envelope.payload.assessmentId !== assessmentRef
+        || !intentEnvelope.predecessorReceiptDigests?.includes(
+          intent.assessmentReceiptDigest
+        )
+        || envelope.payload.workThreadId !== intent.workThreadId
+        || envelope.payload.runId !== intent.runId
+        || envelope.payload.attempt.attemptId !== intent.runAttemptId
+        || envelope.payload.attempt.attemptNumber !== intent.runAttemptNumber
+        || envelope.payload.attempt.epoch !== intent.runAttemptNumber
+        || envelope.payload.attempt.fencingTokenDigest !== intent.fencingTokenDigest
+        || executorResultRef.receiptId !== completion.receiptId
+        || executorResultRef.operationId !== completion.operationId
+        || executorResultRef.requestId !== completion.requestId
+        || executorResultRef.requestDigest !== completion.requestDigest
+        || executorResultRef.resultDigest !== completionRequest.resultDigest
+        || !envelope.predecessorReceiptDigests?.includes(completion.receiptDigest!)
+        || envelope.payload.admissionPolicySnapshot.snapshotId
+          !== authority.admissionPolicySnapshotId
+        || envelope.payload.admissionPolicySnapshot.digest
+          !== authority.admissionPolicySnapshotDigest
+        || envelope.payload.contract.contractId !== assessment.contractId
+        || envelope.payload.contract.version !== assessment.contractVersion
+        || envelope.payload.contract.cycle !== assessment.cycle
+        || envelope.payload.assessmentInputDigest !== assessment.inputDigest
+        || envelope.payload.conclusion !== assessment.state
+        || envelope.payload.assessedAt !== assessment.assessedAt
+        || envelope.payload.assessedBy !== (assessment.assessedBy === "opentag"
+          ? "local_opentag"
+          : "human")
+        || (envelope.payload.supersedesAssessmentId ?? null)
+          !== (assessment.supersedesAssessmentId ?? null)
+      ) throw new Error("invalid completion assessment");
+    } catch {
+      throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+    }
+    return delivery;
+  }
+
+  function updateGovernedDeliveryStateTx(
+    tx: ProjectionTransaction,
+    input: { deliveryId: number; from: GovernedCallbackState | GovernedCallbackState[]; to: GovernedCallbackState; updatedAt: string }
+  ): void {
+    const from = Array.isArray(input.from) ? input.from : [input.from];
+    const updated = tx.update(callbackDeliveries).set({
+      governedState: input.to,
+      updatedAt: input.updatedAt
+    }).where(and(
+      eq(callbackDeliveries.id, input.deliveryId),
+      eq(callbackDeliveries.dispatchMode, "governed"),
+      inArray(callbackDeliveries.governedState, from)
+    )).run();
+    if (updated.changes !== 1) throw new Error("governed_callback_delivery_state_update_lost");
+  }
+
+  function validateCallbackProjectionEnvelope<T extends ControlPlaneProjectionEnvelope>(
+    schema: { parse(value: unknown): T },
+    value: unknown
+  ): T {
+    let envelope: T;
+    try {
+      envelope = schema.parse(value);
+      assertProjectionCustodySafe(envelope);
+      assertProjectionDigests(envelope);
+    } catch {
+      throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
+    }
+    return envelope;
+  }
+
+  function assertProjectionCreatedOrReplayed(result: EnqueueControlPlaneProjectionResult): void {
+    if (result.outcome === "conflict") {
+      throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_CONFLICT");
+    }
+  }
+
+  function buildExpiredSendingAttemptObservation(
+    intent: typeof governedCallbackIntents.$inferSelect,
+    attempt: typeof governedCallbackAttempts.$inferSelect,
+    observedAt: string
+  ): typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output {
+    if (!attempt.attemptedAt) throw new Error("governed_callback_attempted_at_missing");
+    const payload = {
+      localIntentId: intent.localIntentId,
+      localAttemptId: attempt.localAttemptId,
+      attemptNumber: attempt.attemptNumber,
+      requestDigest: attempt.requestDigest,
+      outcome: "outcome_unknown" as const,
+      reasonCode: "provider_receipt_missing" as const,
+      nextAction: "reconcile-provider" as const,
+      owner: intent.producerId,
+      attemptedAt: attempt.attemptedAt,
+      observedAt
+    };
+    const base = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      receiptKind: "callback_attempt_observation" as const,
+      receiptId: `receipt_${attempt.localAttemptId}`,
+      organizationId: intent.organizationId,
+      operationId: `operation_${attempt.localAttemptId}`,
+      requiredCapabilities: ["relay.callback-observation.v1"] as const,
+      producer: {
+        kind: "local_opentag" as const,
+        id: intent.producerId,
+        credentialId: intent.credentialId,
+        registrationGeneration: intent.registrationGeneration
+      },
+      identity: {
+        namespace: "opentag.control.receipt/callback-attempt-observation/v1" as const,
+        parts: [
+          intent.organizationId,
+          intent.workThreadId,
+          intent.localIntentId,
+          attempt.localAttemptId
+        ]
+      },
+      observedAt,
+      runId: intent.runId,
+      workThreadId: intent.workThreadId,
+      predecessorReceiptDigests: [intent.intentReceiptDigest],
+      payload,
+      payloadDigest: canonicalSha256Json(payload)
+    };
+    return validateCallbackProjectionEnvelope(
+      CallbackAttemptObservationReceiptEnvelopeV1Schema,
+      { ...base, receiptDigest: canonicalSha256Json(base) }
+    );
+  }
+
+  function buildLocalAttentionAttemptObservation(
+    intent: typeof governedCallbackIntents.$inferSelect,
+    attempt: typeof governedCallbackAttempts.$inferSelect,
+    observedAt: string
+  ): typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output {
+    const payload = {
+      localIntentId: intent.localIntentId,
+      localAttemptId: attempt.localAttemptId,
+      attemptNumber: attempt.attemptNumber,
+      requestDigest: attempt.requestDigest,
+      outcome: "attention" as const,
+      reasonCode: "callback_local_error" as const,
+      nextAction: "repair-local-callback" as const,
+      owner: intent.producerId,
+      attemptedAt: attempt.attemptedAt ?? observedAt,
+      observedAt
+    };
+    const base = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      receiptKind: "callback_attempt_observation" as const,
+      receiptId: `receipt_${attempt.localAttemptId}`,
+      organizationId: intent.organizationId,
+      operationId: `operation_${attempt.localAttemptId}`,
+      requiredCapabilities: ["relay.callback-observation.v1"] as const,
+      producer: {
+        kind: "local_opentag" as const,
+        id: intent.producerId,
+        credentialId: intent.credentialId,
+        registrationGeneration: intent.registrationGeneration
+      },
+      identity: {
+        namespace: "opentag.control.receipt/callback-attempt-observation/v1" as const,
+        parts: [
+          intent.organizationId,
+          intent.workThreadId,
+          intent.localIntentId,
+          attempt.localAttemptId
+        ]
+      },
+      observedAt,
+      runId: intent.runId,
+      workThreadId: intent.workThreadId,
+      predecessorReceiptDigests: [intent.intentReceiptDigest],
+      payload,
+      payloadDigest: canonicalSha256Json(payload)
+    };
+    return validateCallbackProjectionEnvelope(
+      CallbackAttemptObservationReceiptEnvelopeV1Schema,
+      { ...base, receiptDigest: canonicalSha256Json(base) }
+    );
+  }
+
+  function validProjectionLimit(value: number | undefined): number {
+    if (value !== undefined && (!Number.isFinite(value) || value <= 0)) throw new Error("projection_limit_invalid");
+    return Math.min(100, Math.max(1, Math.trunc(value ?? 50)));
+  }
+
+  function validProjectionReason(value: string): string {
+    try {
+      assertProjectionMutableReference(value);
+    } catch {
+      throw new ControlPlaneProjectionOutboxValidationError("projection_custody_violation");
+    }
+    return value;
+  }
+
+  function validProjectionHttpStatus(value: number | undefined): number | undefined {
+    if (value !== undefined && (!Number.isInteger(value) || value < 100 || value > 599)) {
+      throw new Error("projection_http_status_invalid");
+    }
+    return value;
+  }
+
+  function validProjectionTimestamp(value: string): string {
+    if (!isProjectionTimestamp(value)) {
+      throw new Error("projection_timestamp_invalid");
+    }
+    return value;
+  }
+
+  function acknowledgeHostedLifecycleOperationTx(input: {
+    tx: ProjectionTransaction;
+    row: typeof hostedLifecycleOperations.$inferSelect;
+    receipt: HostedLifecycleReceiptEnvelopeV1;
+    acknowledgedAt: string;
+    expectedState: "pending" | "leased";
+    leaseToken?: string;
+  }): boolean {
+    const { tx, row, receipt, acknowledgedAt } = input;
+    let preImportRejectClaim: typeof hostedClaimOperations.$inferSelect | undefined;
+    if (row.action === "reject-start") {
+      const importedAttempt = tx.select().from(hostedAttemptImports).where(and(
+        eq(hostedAttemptImports.attemptId, row.attemptId),
+        eq(hostedAttemptImports.runId, row.runId),
+        eq(hostedAttemptImports.attemptNumber, row.attemptNumber),
+        eq(hostedAttemptImports.fencingTokenDigest, row.fencingTokenDigest)
+      )).limit(1).get();
+      if (!importedAttempt) {
+        preImportRejectClaim = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.destinationId, row.destinationId),
+          eq(hostedClaimOperations.organizationId, row.organizationId),
+          eq(hostedClaimOperations.runnerId, row.runnerId),
+          eq(hostedClaimOperations.credentialId, row.credentialId),
+          eq(hostedClaimOperations.runId, row.runId),
+          eq(hostedClaimOperations.attemptId, row.attemptId),
+          eq(hostedClaimOperations.attemptNumber, row.attemptNumber),
+          eq(hostedClaimOperations.fencingTokenDigest, row.fencingTokenDigest),
+          eq(hostedClaimOperations.state, "claimed"),
+          isNotNull(hostedClaimOperations.activeKey),
+          isNull(hostedClaimOperations.terminalReasonCode)
+        )).limit(1).get();
+        if (!preImportRejectClaim) {
+          throw new Error("hosted_reject_start_claim_authority_missing");
+        }
+      }
+    }
+    if (row.action === "heartbeat") {
+      if (receipt.payload.operation !== "heartbeat") return false;
+      const request = HostedHeartbeatRequestV1Schema.parse(JSON.parse(row.requestJson));
+      const run = tx.select().from(runs).where(eq(runs.id, row.runId)).limit(1).get();
+      const attempt = tx.select().from(attempts).where(and(
+        eq(attempts.id, row.attemptId),
+        eq(attempts.runId, row.runId),
+        eq(attempts.fencingToken, request.attempt.fencingToken)
+      )).limit(1).get();
+      const importedAttempt = tx.select().from(hostedAttemptImports)
+        .where(eq(hostedAttemptImports.attemptId, row.attemptId)).limit(1).get();
+      const claimOperation = importedAttempt
+        ? tx.select().from(hostedClaimOperations).where(and(
+            eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
+            eq(hostedClaimOperations.state, "claimed"),
+            isNull(hostedClaimOperations.terminalReasonCode)
+          )).limit(1).get()
+        : undefined;
+      const oldExpiry = Date.parse(request.expectedLeaseExpiresAt);
+      const newExpiry = Date.parse(receipt.payload.leaseExpiresAt);
+      if (
+        !run || !attempt || !claimOperation
+        || run.currentAttemptId !== row.attemptId
+        || run.assignedRunnerId !== row.runnerId
+        || run.leaseExpiresAt !== request.expectedLeaseExpiresAt
+        || attempt.runnerId !== row.runnerId
+        || attempt.number !== request.attempt.attemptNumber
+        || importedAttempt?.attemptNumber !== request.attempt.attemptNumber
+        || request.attempt.epoch !== request.attempt.attemptNumber
+        || attempt.leaseExpiresAt !== request.expectedLeaseExpiresAt
+        || !["assigned", "running"].includes(attempt.status)
+        || !Number.isFinite(oldExpiry) || !Number.isFinite(newExpiry)
+        || oldExpiry <= Date.parse(acknowledgedAt)
+        || newExpiry <= oldExpiry || newExpiry <= Date.parse(acknowledgedAt)
+      ) return false;
+      const attemptUpdated = tx.update(attempts).set({
+        heartbeatAt: acknowledgedAt,
+        leaseExpiresAt: receipt.payload.leaseExpiresAt,
+        updatedAt: acknowledgedAt
+      }).where(and(
+        eq(attempts.id, row.attemptId),
+        eq(attempts.leaseExpiresAt, request.expectedLeaseExpiresAt)
+      )).run();
+      const runUpdated = tx.update(runs).set({
+        heartbeatAt: acknowledgedAt,
+        leaseExpiresAt: receipt.payload.leaseExpiresAt,
+        updatedAt: acknowledgedAt
+      }).where(and(
+        eq(runs.id, row.runId),
+        eq(runs.currentAttemptId, row.attemptId),
+        eq(runs.leaseExpiresAt, request.expectedLeaseExpiresAt)
+      )).run();
+      if (attemptUpdated.changes !== 1 || runUpdated.changes !== 1) {
+        throw new Error("hosted_heartbeat_lease_update_lost");
+      }
+    }
+    const receiptJson = canonicalJsonStringify(receipt);
+    const conditions = [
+      eq(hostedLifecycleOperations.destinationId, row.destinationId),
+      eq(hostedLifecycleOperations.organizationId, row.organizationId),
+      eq(hostedLifecycleOperations.runnerId, row.runnerId),
+      eq(hostedLifecycleOperations.credentialId, row.credentialId),
+      eq(hostedLifecycleOperations.operationId, row.operationId),
+      eq(hostedLifecycleOperations.state, input.expectedState)
+    ];
+    if (input.expectedState === "leased" && input.leaseToken) {
+      conditions.push(eq(hostedLifecycleOperations.leaseToken, input.leaseToken));
+      conditions.push(gt(hostedLifecycleOperations.leaseExpiresAt, acknowledgedAt));
+    }
+    const acknowledged = tx.update(hostedLifecycleOperations).set({
+      state: "acknowledged",
+      nextAttemptAt: null,
+      leaseOwner: null,
+      leaseToken: null,
+      leaseExpiresAt: null,
+      receiptId: receipt.receiptId,
+      receiptDigest: receipt.receiptDigest,
+      receiptJson,
+      updatedAt: acknowledgedAt,
+      acknowledgedAt
+    }).where(and(...conditions)).run().changes === 1;
+    if (!acknowledged && row.action === "heartbeat") {
+      throw new Error("hosted_heartbeat_journal_update_lost");
+    }
+    if (acknowledged && preImportRejectClaim?.activeKey) {
+      const claimUpdated = tx.update(hostedClaimOperations).set({
+        activeKey: null,
+        updatedAt: acknowledgedAt
+      }).where(and(
+        eq(hostedClaimOperations.operationId, preImportRejectClaim.operationId),
+        eq(hostedClaimOperations.destinationId, preImportRejectClaim.destinationId),
+        eq(hostedClaimOperations.organizationId, preImportRejectClaim.organizationId),
+        eq(hostedClaimOperations.runnerId, preImportRejectClaim.runnerId),
+        eq(hostedClaimOperations.credentialId, preImportRejectClaim.credentialId!),
+        eq(hostedClaimOperations.runId, preImportRejectClaim.runId!),
+        eq(hostedClaimOperations.attemptId, preImportRejectClaim.attemptId!),
+        eq(hostedClaimOperations.attemptNumber, preImportRejectClaim.attemptNumber!),
+        eq(hostedClaimOperations.fencingTokenDigest, preImportRejectClaim.fencingTokenDigest!),
+        eq(hostedClaimOperations.activeKey, preImportRejectClaim.activeKey),
+        eq(hostedClaimOperations.state, "claimed"),
+        isNull(hostedClaimOperations.terminalReasonCode)
+      )).run();
+      if (claimUpdated.changes !== 1) {
+        throw new Error("hosted_reject_start_claim_update_lost");
+      }
+    }
+    if (acknowledged && row.action === "complete") {
+      const importedRun = tx.select({ workThreadId: hostedRunImports.workThreadId })
+        .from(hostedRunImports)
+        .where(eq(hostedRunImports.runId, row.runId))
+        .limit(1)
+        .get();
+      if (importedRun?.workThreadId) {
+        const assessmentRows = tx.select().from(completionAssessments).where(
+          eq(completionAssessments.workThreadId, importedRun.workThreadId)
+        ).orderBy(
+          asc(completionAssessments.cycle),
+          asc(completionAssessments.sequence),
+          asc(completionAssessments.id)
+        ).all();
+        for (const assessmentRow of assessmentRows) {
+          const assessment = CompletionAssessmentSchema.parse(
+            JSON.parse(assessmentRow.assessmentJson)
+          );
+          if (assessment.triggeredByRunId !== row.runId) continue;
+          ensureCompletionAssessmentProjectionTx(tx, {
+            workThreadId: importedRun.workThreadId,
+            runId: row.runId,
+            assessmentId: assessment.id
+          });
+        }
+      }
+    }
+    return acknowledged;
+  }
+
+  type CompleteRunInput = {
+    runId: string;
+    result: OpenTagRunResult;
+    humanEscalation?: HumanEscalation;
+    runnerId?: string;
+    attemptId?: string;
+    fencingToken?: string;
+    idempotencyKey?: string;
+  };
+  type HostedCompletionLifecycleOperation = {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+    credentialId: string;
+    request: HostedCompleteRequestV1;
+    requestJson: string;
+    businessKeyDigest: string;
+  };
+  let completeRunWithHostedLifecycle: (
+    input: CompleteRunInput,
+    lifecycle: HostedCompletionLifecycleOperation,
+  ) => Promise<CompleteRunOutcome>;
+
   return {
     appendRunEvent,
+
+    async enqueueControlPlaneProjection(input: EnqueueControlPlaneProjectionInput): Promise<EnqueueControlPlaneProjectionResult> {
+      return db.transaction((tx) => enqueueControlPlaneProjectionTx(tx, input), { behavior: "immediate" });
+    },
+
+    async getControlPlaneProjection(input: {
+      destinationId: string;
+      organizationId: string;
+      receiptId: string;
+    }): Promise<ControlPlaneProjectionOutboxEntry | null> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const row = await db.select().from(controlPlaneProjectionOutbox).where(and(
+        eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+        eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+        eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+      )).limit(1).get();
+      return row ? projectionOutboxEntryFromRow(row) : null;
+    },
+
+    async getLatestRunnerReadinessProjection(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+    }): Promise<ControlPlaneProjectionOutboxEntry | null> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const runnerId = projectionDestination(input.runnerId);
+      const row = await db.select().from(controlPlaneProjectionOutbox).where(and(
+        eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+        eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+        eq(controlPlaneProjectionOutbox.runnerId, runnerId),
+        eq(controlPlaneProjectionOutbox.receiptKind, "runner_readiness")
+      )).orderBy(
+        desc(sql<string>`json_extract(${controlPlaneProjectionOutbox.envelopeJson}, '$.payload.observedAt')`),
+        desc(controlPlaneProjectionOutbox.createdAt),
+        desc(controlPlaneProjectionOutbox.receiptId)
+      ).limit(1).get();
+      return row ? projectionOutboxEntryFromRow(row) : null;
+    },
+
+    async listControlPlaneProjections(input: {
+      destinationId: string;
+      organizationId: string;
+      state?: ControlPlaneProjectionOutboxState;
+      limit?: number;
+    }): Promise<ControlPlaneProjectionOutboxEntry[]> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const condition = input.state
+        ? and(
+            eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+            eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+            eq(controlPlaneProjectionOutbox.state, input.state)
+          )
+        : and(
+            eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+            eq(controlPlaneProjectionOutbox.organizationId, organizationId)
+          );
+      const rows = await db.select().from(controlPlaneProjectionOutbox).where(condition)
+        .orderBy(asc(controlPlaneProjectionOutbox.createdAt), asc(controlPlaneProjectionOutbox.receiptId))
+        .limit(validProjectionLimit(input.limit));
+      return rows.map(projectionOutboxEntryFromRow);
+    },
+
+    async claimDueControlPlaneProjections(input: {
+      destinationId: string;
+      organizationId: string;
+      leaseOwner: string;
+      leaseSeconds: number;
+      limit?: number;
+      now?: Date;
+    }): Promise<ClaimControlPlaneProjectionsResult> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const leaseOwner = projectionDestination(input.leaseOwner);
+      if (!Number.isFinite(input.leaseSeconds) || input.leaseSeconds <= 0) throw new Error("projection_lease_seconds_invalid");
+      const limit = validProjectionLimit(input.limit);
+      const now = input.now ?? new Date();
+      const at = now.toISOString();
+      const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000).toISOString();
+      return db.transaction((tx) => {
+        const claimed: ControlPlaneProjectionOutboxEntry[] = [];
+        const rejected: ClaimControlPlaneProjectionsResult["rejected"] = [];
+        let cursor: {
+          nextAttemptAt: string;
+          createdAt: string;
+          receiptId: string;
+        } | undefined;
+        while (claimed.length < limit) {
+          const cursorCondition = cursor
+            ? or(
+                gt(controlPlaneProjectionOutbox.nextAttemptAt, cursor.nextAttemptAt),
+                and(
+                  eq(controlPlaneProjectionOutbox.nextAttemptAt, cursor.nextAttemptAt),
+                  gt(controlPlaneProjectionOutbox.createdAt, cursor.createdAt)
+                ),
+                and(
+                  eq(controlPlaneProjectionOutbox.nextAttemptAt, cursor.nextAttemptAt),
+                  eq(controlPlaneProjectionOutbox.createdAt, cursor.createdAt),
+                  gt(controlPlaneProjectionOutbox.receiptId, cursor.receiptId)
+                )
+              )
+            : undefined;
+          const due = tx.select().from(controlPlaneProjectionOutbox).where(and(
+            eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+            eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+            eq(controlPlaneProjectionOutbox.state, "pending"),
+            lte(controlPlaneProjectionOutbox.nextAttemptAt, at),
+            cursorCondition
+          )).orderBy(
+            asc(controlPlaneProjectionOutbox.nextAttemptAt),
+            asc(controlPlaneProjectionOutbox.createdAt),
+            asc(controlPlaneProjectionOutbox.receiptId)
+          ).limit(100).all();
+          if (due.length === 0) break;
+          for (const row of due) {
+            cursor = {
+              nextAttemptAt: row.nextAttemptAt!,
+              createdAt: row.createdAt,
+              receiptId: row.receiptId
+            };
+            if (claimed.length >= limit) break;
+            let currentEntry: ControlPlaneProjectionOutboxEntry;
+            try {
+              currentEntry = projectionOutboxEntryFromRow(row);
+            } catch {
+              if (rejected.length < 100) {
+                const safeReceiptId = PROJECTION_SAFE_REFERENCE.test(row.receiptId)
+                  && !containsCredentialLikeData(row.receiptId)
+                  && !/(?:^|[/\\])\.\.(?:[/\\]|$)/u.test(row.receiptId);
+                rejected.push({
+                  ...(safeReceiptId ? { receiptId: row.receiptId } : {}),
+                  rowIdentityDigest: canonicalSha256Json({
+                    destinationId: row.destinationId,
+                    organizationId: row.organizationId,
+                    receiptId: row.receiptId
+                  }),
+                  reasonCode: "stored_row_invalid"
+                });
+              }
+              continue;
+            }
+            let dependencyReason:
+              | "dependency_missing"
+              | "dependency_cross_destination"
+              | "dependency_invalid"
+              | undefined;
+            let dependencyPending = false;
+            if (row.dependsOnReceiptId) {
+              const parent = tx.select().from(controlPlaneProjectionOutbox).where(and(
+                eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+                eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+                eq(controlPlaneProjectionOutbox.receiptId, row.dependsOnReceiptId)
+              )).limit(1).get();
+              if (!parent) {
+                const elsewhere = tx.select({ receiptId: controlPlaneProjectionOutbox.receiptId })
+                  .from(controlPlaneProjectionOutbox)
+                  .where(eq(controlPlaneProjectionOutbox.receiptId, row.dependsOnReceiptId))
+                  .limit(1).get();
+                dependencyReason = elsewhere ? "dependency_cross_destination" : "dependency_missing";
+              } else if (parent.state !== "acknowledged") {
+                dependencyPending = true;
+              } else {
+                try {
+                  projectionOutboxEntryFromRow(parent);
+                } catch {
+                  dependencyReason = "dependency_invalid";
+                }
+              }
+            }
+            if (!dependencyReason && !dependencyPending && row.requiresLifecycleOperationId) {
+              const lifecycle = tx.select().from(hostedLifecycleOperations).where(and(
+                eq(hostedLifecycleOperations.destinationId, destinationId),
+                eq(hostedLifecycleOperations.organizationId, organizationId),
+                eq(hostedLifecycleOperations.operationId, row.requiresLifecycleOperationId)
+              )).limit(1).get();
+              if (!lifecycle) {
+                const elsewhere = tx.select({ operationId: hostedLifecycleOperations.operationId })
+                  .from(hostedLifecycleOperations)
+                  .where(eq(hostedLifecycleOperations.operationId, row.requiresLifecycleOperationId))
+                  .limit(1).get();
+                dependencyReason = elsewhere ? "dependency_cross_destination" : "dependency_missing";
+              } else if (lifecycle.state !== "acknowledged") {
+                dependencyPending = true;
+              } else if (!validAcknowledgedLifecycleDependency(lifecycle)) {
+                dependencyReason = "dependency_invalid";
+              } else if (currentEntry.receiptKind === "completion_assessment") {
+                const reference = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+                  currentEntry.envelope,
+                ).payload.executorResultReceiptRef;
+                if (lifecycle.action !== "complete") {
+                  dependencyReason = "dependency_invalid";
+                } else {
+                  const request = HostedCompleteRequestV1Schema.parse(
+                    JSON.parse(lifecycle.requestJson),
+                  );
+                  if (
+                    reference.receiptId !== lifecycle.receiptId
+                  || reference.operationId !== lifecycle.operationId
+                  || reference.requestId !== lifecycle.requestId
+                  || reference.requestDigest !== lifecycle.requestDigest
+                  || reference.resultDigest !== request.resultDigest
+                  ) {
+                    dependencyReason = "dependency_invalid";
+                  }
+                }
+              }
+            }
+            if (dependencyPending) continue;
+            const leaseToken = randomUUID();
+            const updated = tx.update(controlPlaneProjectionOutbox).set({
+              state: "leased",
+              leaseOwner,
+              leaseToken,
+              leaseExpiresAt,
+              attemptCount: row.attemptCount + 1,
+              updatedAt: at
+            }).where(and(
+              eq(controlPlaneProjectionOutbox.receiptId, row.receiptId),
+              eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+              eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+              eq(controlPlaneProjectionOutbox.state, "pending"),
+              lte(controlPlaneProjectionOutbox.nextAttemptAt, at)
+            )).run();
+            if (updated.changes !== 1) continue;
+            if (dependencyReason) {
+              tx.update(controlPlaneProjectionOutbox).set({
+                state: "attention",
+                nextAttemptAt: null,
+                leaseOwner: null,
+                leaseToken: null,
+                leaseExpiresAt: null,
+                lastReasonCode: dependencyReason,
+                updatedAt: at
+              }).where(and(
+                eq(controlPlaneProjectionOutbox.receiptId, row.receiptId),
+                eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+                eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+                eq(controlPlaneProjectionOutbox.state, "leased"),
+                eq(controlPlaneProjectionOutbox.leaseToken, leaseToken)
+              )).run();
+              rejected.push({
+                receiptId: row.receiptId,
+                rowIdentityDigest: canonicalSha256Json({
+                  destinationId,
+                  organizationId,
+                  receiptId: row.receiptId
+                }),
+                reasonCode: dependencyReason
+              });
+              continue;
+            }
+            claimed.push(projectionOutboxEntryFromRow({
+              ...row,
+              state: "leased",
+              leaseOwner,
+              leaseToken,
+              leaseExpiresAt,
+              attemptCount: row.attemptCount + 1,
+              updatedAt: at
+            }));
+          }
+          if (due.length < 100) break;
+        }
+        return { entries: claimed, rejected };
+      }, { behavior: "immediate" });
+    },
+
+    async acknowledgeControlPlaneProjection(input: {
+      destinationId: string;
+      organizationId: string;
+      receiptId: string;
+      leaseToken: string;
+      httpStatus?: number;
+      now?: Date;
+    }): Promise<{ outcome: "acknowledged" | "stale_lease" | "not_found"; entry?: ControlPlaneProjectionOutboxEntry }> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const at = (input.now ?? new Date()).toISOString();
+      const httpStatus = validProjectionHttpStatus(input.httpStatus);
+      return db.transaction((tx) => {
+        const row = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+        )).limit(1).get();
+        if (!row) return { outcome: "not_found" as const };
+        projectionOutboxEntryFromRow(row);
+        if (row.state !== "leased" || row.leaseToken !== input.leaseToken || !row.leaseExpiresAt || row.leaseExpiresAt <= at) {
+          return { outcome: "stale_lease" as const };
+        }
+        const updated = tx.update(controlPlaneProjectionOutbox).set({
+          state: "acknowledged",
+          nextAttemptAt: null,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          lastHttpStatus: httpStatus ?? null,
+          updatedAt: at,
+          acknowledgedAt: at
+        }).where(and(
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId),
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.state, "leased"),
+          eq(controlPlaneProjectionOutbox.leaseToken, input.leaseToken),
+          gt(controlPlaneProjectionOutbox.leaseExpiresAt, at)
+        )).run();
+        if (updated.changes !== 1) return { outcome: "stale_lease" as const };
+        const acknowledged = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+        )).limit(1).get();
+        return { outcome: "acknowledged" as const, entry: projectionOutboxEntryFromRow(acknowledged!) };
+      }, { behavior: "immediate" });
+    },
+
+    async retryControlPlaneProjection(input: {
+      destinationId: string;
+      organizationId: string;
+      receiptId: string;
+      leaseToken: string;
+      nextAttemptAt: string;
+      reasonCode: string;
+      httpStatus?: number;
+      now?: Date;
+    }): Promise<{ outcome: "retried" | "stale_lease" | "not_found"; entry?: ControlPlaneProjectionOutboxEntry }> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const at = (input.now ?? new Date()).toISOString();
+      const nextAttemptAt = validProjectionTimestamp(input.nextAttemptAt);
+      if (nextAttemptAt < at) throw new Error("projection_retry_time_in_past");
+      const reasonCode = validProjectionReason(input.reasonCode);
+      const httpStatus = validProjectionHttpStatus(input.httpStatus);
+      return db.transaction((tx) => {
+        const row = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+        )).limit(1).get();
+        if (!row) return { outcome: "not_found" as const };
+        projectionOutboxEntryFromRow(row);
+        if (row.state !== "leased" || row.leaseToken !== input.leaseToken || !row.leaseExpiresAt || row.leaseExpiresAt <= at) {
+          return { outcome: "stale_lease" as const };
+        }
+        const updated = tx.update(controlPlaneProjectionOutbox).set({
+          state: "pending",
+          nextAttemptAt,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          lastReasonCode: reasonCode,
+          lastHttpStatus: httpStatus ?? null,
+          updatedAt: at
+        }).where(and(
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId),
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.state, "leased"),
+          eq(controlPlaneProjectionOutbox.leaseToken, input.leaseToken),
+          gt(controlPlaneProjectionOutbox.leaseExpiresAt, at)
+        )).run();
+        if (updated.changes !== 1) return { outcome: "stale_lease" as const };
+        const retried = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+        )).limit(1).get();
+        return { outcome: "retried" as const, entry: projectionOutboxEntryFromRow(retried!) };
+      }, { behavior: "immediate" });
+    },
+
+    async markControlPlaneProjectionAttention(input: {
+      destinationId: string;
+      organizationId: string;
+      receiptId: string;
+      leaseToken: string;
+      reasonCode: string;
+      httpStatus?: number;
+      now?: Date;
+    }): Promise<{ outcome: "attention" | "stale_lease" | "not_found"; entry?: ControlPlaneProjectionOutboxEntry }> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const at = (input.now ?? new Date()).toISOString();
+      const reasonCode = validProjectionReason(input.reasonCode);
+      const httpStatus = validProjectionHttpStatus(input.httpStatus);
+      return db.transaction((tx) => {
+        const row = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+        )).limit(1).get();
+        if (!row) return { outcome: "not_found" as const };
+        projectionOutboxEntryFromRow(row);
+        if (row.state !== "leased" || row.leaseToken !== input.leaseToken || !row.leaseExpiresAt || row.leaseExpiresAt <= at) {
+          return { outcome: "stale_lease" as const };
+        }
+        const updated = tx.update(controlPlaneProjectionOutbox).set({
+          state: "attention",
+          nextAttemptAt: null,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          lastReasonCode: reasonCode,
+          lastHttpStatus: httpStatus ?? null,
+          updatedAt: at
+        }).where(and(
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId),
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.state, "leased"),
+          eq(controlPlaneProjectionOutbox.leaseToken, input.leaseToken),
+          gt(controlPlaneProjectionOutbox.leaseExpiresAt, at)
+        )).run();
+        if (updated.changes !== 1) return { outcome: "stale_lease" as const };
+        const attention = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+          eq(controlPlaneProjectionOutbox.receiptId, input.receiptId)
+        )).limit(1).get();
+        return { outcome: "attention" as const, entry: projectionOutboxEntryFromRow(attention!) };
+      }, { behavior: "immediate" });
+    },
+
+    async recoverExpiredControlPlaneProjectionLeases(input: {
+      destinationId: string;
+      organizationId: string;
+      limit?: number;
+      now?: Date;
+    }): Promise<{ recovered: number; entries: ControlPlaneProjectionOutboxEntry[] }> {
+      const destinationId = projectionDestination(input.destinationId);
+      const organizationId = projectionOrganization(input.organizationId);
+      const limit = validProjectionLimit(input.limit);
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const entries: ControlPlaneProjectionOutboxEntry[] = [];
+        let cursor: {
+          leaseExpiresAt: string;
+          createdAt: string;
+          receiptId: string;
+        } | undefined;
+        while (entries.length < limit) {
+          const cursorCondition = cursor
+            ? or(
+                gt(controlPlaneProjectionOutbox.leaseExpiresAt, cursor.leaseExpiresAt),
+                and(
+                  eq(controlPlaneProjectionOutbox.leaseExpiresAt, cursor.leaseExpiresAt),
+                  gt(controlPlaneProjectionOutbox.createdAt, cursor.createdAt)
+                ),
+                and(
+                  eq(controlPlaneProjectionOutbox.leaseExpiresAt, cursor.leaseExpiresAt),
+                  eq(controlPlaneProjectionOutbox.createdAt, cursor.createdAt),
+                  gt(controlPlaneProjectionOutbox.receiptId, cursor.receiptId)
+                )
+              )
+            : undefined;
+          const expired = tx.select().from(controlPlaneProjectionOutbox).where(and(
+            eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+            eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+            eq(controlPlaneProjectionOutbox.state, "leased"),
+            lte(controlPlaneProjectionOutbox.leaseExpiresAt, at),
+            cursorCondition
+          )).orderBy(
+            asc(controlPlaneProjectionOutbox.leaseExpiresAt),
+            asc(controlPlaneProjectionOutbox.createdAt),
+            asc(controlPlaneProjectionOutbox.receiptId)
+          ).limit(100).all();
+          if (expired.length === 0) break;
+          for (const row of expired) {
+            cursor = {
+              leaseExpiresAt: row.leaseExpiresAt!,
+              createdAt: row.createdAt,
+              receiptId: row.receiptId
+            };
+            if (entries.length >= limit) break;
+            try {
+              projectionOutboxEntryFromRow(row);
+            } catch {
+              continue;
+            }
+            const updated = tx.update(controlPlaneProjectionOutbox).set({
+              state: "pending",
+              nextAttemptAt: at,
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              lastReasonCode: "lease_expired",
+              updatedAt: at
+            }).where(and(
+              eq(controlPlaneProjectionOutbox.receiptId, row.receiptId),
+              eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+              eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+              eq(controlPlaneProjectionOutbox.state, "leased"),
+              lte(controlPlaneProjectionOutbox.leaseExpiresAt, at)
+            )).run();
+            if (updated.changes !== 1) continue;
+            entries.push(projectionOutboxEntryFromRow({
+              ...row,
+              state: "pending",
+              nextAttemptAt: at,
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              lastReasonCode: "lease_expired",
+              updatedAt: at
+            }));
+          }
+          if (expired.length < 100) break;
+        }
+        return { recovered: entries.length, entries };
+      }, { behavior: "immediate" });
+    },
 
     async getFactoryRecipeSnapshot(input: { id: string; version: number }): Promise<StoredFactoryRecipeSnapshot | null> {
       const row = await db.select().from(factoryRecipeSnapshots)
@@ -3748,7 +8026,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           if (duplicateById.assessmentJson !== assessmentJson) {
             throw new Error(`CompletionAssessment ${assessment.id} is immutable.`);
           }
-          return { outcome: "duplicate" as const, assessment: completionAssessmentFromRow(duplicateById) };
+          const duplicate = completionAssessmentFromRow(duplicateById);
+          if (duplicate.triggeredByRunId) {
+            ensureCompletionAssessmentProjectionTx(tx, {
+              workThreadId: duplicate.workThreadId,
+              runId: duplicate.triggeredByRunId,
+              assessmentId: duplicate.id
+            });
+          }
+          return { outcome: "duplicate" as const, assessment: duplicate };
         }
         const duplicateByInput = tx.select().from(completionAssessments).where(and(
           eq(completionAssessments.workThreadId, assessment.workThreadId),
@@ -3759,7 +8045,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           if (duplicateByInput.assessmentJson !== assessmentJson) {
             throw new Error(`CompletionAssessment input digest ${assessment.inputDigest} is immutable.`);
           }
-          return { outcome: "duplicate" as const, assessment: completionAssessmentFromRow(duplicateByInput) };
+          const duplicate = completionAssessmentFromRow(duplicateByInput);
+          if (duplicate.triggeredByRunId) {
+            ensureCompletionAssessmentProjectionTx(tx, {
+              workThreadId: duplicate.workThreadId,
+              runId: duplicate.triggeredByRunId,
+              assessmentId: duplicate.id
+            });
+          }
+          return { outcome: "duplicate" as const, assessment: duplicate };
         }
         const thread = tx.select().from(workThreads).where(eq(workThreads.id, assessment.workThreadId)).limit(1).get();
         if (!thread) throw new Error(`WorkThread ${assessment.workThreadId} does not exist.`);
@@ -3828,6 +8122,13 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             }),
             createdAt: assessment.acceptedAt
           }).run();
+        }
+        if (assessment.triggeredByRunId) {
+          ensureCompletionAssessmentProjectionTx(tx, {
+            workThreadId: assessment.workThreadId,
+            runId: assessment.triggeredByRunId,
+            assessmentId: assessment.id
+          });
         }
         return { outcome: "recorded" as const, assessment };
       });
@@ -5194,6 +9495,1830 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       });
     },
 
+    async beginHostedClaimOperation(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      request: HostedClaimRequestV1;
+    }): Promise<{ outcome: "created" | "replayed"; operation: HostedClaimOperation }> {
+      let request: HostedClaimRequestV1;
+      try {
+        request = HostedClaimRequestV1Schema.parse(input.request);
+      } catch {
+        throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_INVALID");
+      }
+      if (!input.destinationId || !input.organizationId || !input.runnerId) {
+        throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_INVALID");
+      }
+      const requestDigest = canonicalSha256Json(request);
+      const activeKey = canonicalSha256Json({
+        destinationId: input.destinationId,
+        organizationId: input.organizationId,
+        runnerId: input.runnerId
+      });
+      const createdAt = nowIso();
+      return db.transaction((tx) => {
+        const pending = tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.activeKey, activeKey)).limit(1).get();
+        if (pending) {
+          return { outcome: "replayed" as const, operation: hostedClaimOperationFromRow(pending) };
+        }
+        const sameOperation = tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.operationId, request.operationId)).limit(1).get();
+        if (sameOperation) {
+          if (
+            sameOperation.requestDigest !== requestDigest
+            || sameOperation.requestId !== request.requestId
+            || sameOperation.destinationId !== input.destinationId
+            || sameOperation.organizationId !== input.organizationId
+            || sameOperation.runnerId !== input.runnerId
+          ) {
+            throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+          }
+          return { outcome: "replayed" as const, operation: hostedClaimOperationFromRow(sameOperation) };
+        }
+        const sameRequest = tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.requestId, request.requestId)).limit(1).get();
+        if (sameRequest) throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+        tx.insert(hostedClaimOperations).values({
+          operationId: request.operationId,
+          requestId: request.requestId,
+          organizationId: input.organizationId,
+          runnerId: input.runnerId,
+          destinationId: input.destinationId,
+          activeKey,
+          requestDigest,
+          requestJson: JSON.stringify(request),
+          state: "pending",
+          createdAt,
+          updatedAt: createdAt
+        }).run();
+        const row = tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.operationId, request.operationId)).limit(1).get()!;
+        return { outcome: "created" as const, operation: hostedClaimOperationFromRow(row) };
+      });
+    },
+
+    async getHostedClaimOperationForRetry(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+    }): Promise<HostedClaimOperation | null> {
+      const activeKey = canonicalSha256Json(input);
+      const row = await db.select().from(hostedClaimOperations)
+        .where(eq(hostedClaimOperations.activeKey, activeKey)).limit(1).get();
+      return row ? hostedClaimOperationFromRow(row) : null;
+    },
+
+    async getHostedPreImportAuthorityRecovery(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+    }): Promise<
+      | { state: "claim_retry"; operation: HostedClaimOperation }
+      | {
+          state: "reject_pending" | "reject_attention";
+          operation: HostedClaimOperation;
+          lifecycleOperation: HostedLifecycleOperation;
+        }
+      | null
+    > {
+      const activeKey = canonicalSha256Json(input);
+      const shell = await db.select().from(hostedClaimOperations).where(and(
+        eq(hostedClaimOperations.activeKey, activeKey),
+        eq(hostedClaimOperations.state, "claimed")
+      )).limit(1).get();
+      if (!shell || !shell.runId || !shell.attemptId || !shell.claimDigest || !shell.authorityDigest) return null;
+      const imported = await db.select({ attemptId: hostedAttemptImports.attemptId })
+        .from(hostedAttemptImports)
+        .where(eq(hostedAttemptImports.claimOperationId, shell.operationId)).limit(1).get();
+      if (imported) return null;
+      const rejection = await db.select().from(hostedLifecycleOperations).where(and(
+        eq(hostedLifecycleOperations.destinationId, input.destinationId),
+        eq(hostedLifecycleOperations.organizationId, input.organizationId),
+        eq(hostedLifecycleOperations.runnerId, input.runnerId),
+        eq(hostedLifecycleOperations.credentialId, shell.credentialId ?? ""),
+        eq(hostedLifecycleOperations.runId, shell.runId),
+        eq(hostedLifecycleOperations.attemptId, shell.attemptId),
+        eq(hostedLifecycleOperations.action, "reject-start")
+      )).limit(1).get();
+      if (!rejection) return { state: "claim_retry", operation: hostedClaimOperationFromRow(shell) };
+      if (rejection.state === "acknowledged") return null;
+      return {
+        state: rejection.state === "attention" ? "reject_attention" : "reject_pending",
+        operation: hostedClaimOperationFromRow(shell),
+        lifecycleOperation: hostedLifecycleOperationFromRow(rejection)
+      };
+    },
+
+    async persistHostedClaimAuthorityShell(input: {
+      destinationId: string;
+      credentialId: string;
+      request: HostedClaimRequestV1;
+      claim: HostedClaimV1;
+    }): Promise<{ outcome: "created" | "replayed"; operation: HostedClaimOperation }> {
+      const request = HostedClaimRequestV1Schema.parse(input.request);
+      const claim = HostedClaimV1Schema.parse(input.claim);
+      if (
+        claim.operationId !== request.operationId
+        || claim.requestId !== request.requestId
+        || claim.authority.credentialId !== input.credentialId
+        || !(await verifyHostedClaimFencingTokenDigestV1(claim))
+      ) throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+      const claimDigest = canonicalSha256Json(claim);
+      const authorityDigest = canonicalSha256Json(claim.authority);
+      const authorityJson = canonicalJsonStringify(claim.authority);
+      const acknowledgedAt = nowIso();
+      return db.transaction((tx) => {
+        const current = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.operationId, request.operationId),
+          eq(hostedClaimOperations.requestId, request.requestId),
+          eq(hostedClaimOperations.destinationId, input.destinationId),
+          eq(hostedClaimOperations.organizationId, claim.organizationId),
+          eq(hostedClaimOperations.runnerId, claim.runnerId)
+        )).limit(1).get();
+        if (!current) throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+        const exact = current.state === "claimed"
+          && current.runId === claim.runId
+          && current.claimDigest === claimDigest
+          && current.authorityDigest === authorityDigest
+          && current.authorityJson === authorityJson
+          && current.attemptId === claim.attempt.id
+          && current.attemptNumber === claim.attempt.number
+          && current.fencingTokenDigest === claim.attempt.fencingTokenDigest
+          && current.credentialId === input.credentialId
+          && current.leaseExpiresAt === claim.attempt.leaseExpiresAt
+          && current.executorId === claim.executorId;
+        if (exact) return { outcome: "replayed" as const, operation: hostedClaimOperationFromRow(current) };
+        if (current.state !== "pending") {
+          throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+        }
+        const updated = tx.update(hostedClaimOperations).set({
+          state: "claimed",
+          runId: claim.runId,
+          claimDigest,
+          authorityDigest,
+          authorityJson,
+          attemptId: claim.attempt.id,
+          attemptNumber: claim.attempt.number,
+          fencingTokenDigest: claim.attempt.fencingTokenDigest,
+          credentialId: input.credentialId,
+          leaseExpiresAt: claim.attempt.leaseExpiresAt,
+          executorId: claim.executorId,
+          updatedAt: acknowledgedAt,
+          acknowledgedAt
+        }).where(and(
+          eq(hostedClaimOperations.operationId, request.operationId),
+          eq(hostedClaimOperations.state, "pending")
+        )).run();
+        if (updated.changes !== 1) throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+        const row = tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.operationId, request.operationId)).limit(1).get()!;
+        return { outcome: "created" as const, operation: hostedClaimOperationFromRow(row) };
+      }, { behavior: "immediate" });
+    },
+
+    async getHostedAssignedRunForRecovery(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+    }): Promise<{
+      claimed: HostedAssignedRun;
+      hostedAuthority: HostedImportAuthority;
+      leaseExpiresAt: string;
+    } | null> {
+      const recoveredAt = Date.now();
+      const operations = await db.select().from(hostedClaimOperations).where(and(
+        eq(hostedClaimOperations.destinationId, input.destinationId),
+        eq(hostedClaimOperations.organizationId, input.organizationId),
+        eq(hostedClaimOperations.runnerId, input.runnerId),
+        eq(hostedClaimOperations.state, "claimed")
+      )).orderBy(desc(hostedClaimOperations.acknowledgedAt), desc(hostedClaimOperations.operationId));
+      for (const operation of operations) {
+        if (!operation.runId || operation.executionStartedAt) continue;
+        const runRow = await db.select().from(runs).where(and(
+          eq(runs.id, operation.runId),
+          inArray(runs.status, ["assigned", "running"]),
+          eq(runs.assignedRunnerId, input.runnerId)
+        )).limit(1).get();
+        if (!runRow?.currentAttemptId) continue;
+        const attemptRow = await db.select().from(attempts).where(and(
+          eq(attempts.id, runRow.currentAttemptId),
+          eq(attempts.runId, runRow.id),
+          inArray(attempts.status, ["assigned", "running"])
+        )).limit(1).get();
+        const importRow = await db.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, runRow.id)).limit(1).get();
+        const attemptImportRow = attemptRow
+          ? await db.select().from(hostedAttemptImports)
+              .where(eq(hostedAttemptImports.attemptId, attemptRow.id)).limit(1).get()
+          : undefined;
+        if (
+          !attemptRow || !importRow || !attemptImportRow || !attemptRow.selectedExecutorId
+          || operation.operationId !== attemptImportRow.claimOperationId
+        ) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
+        const leaseExpiresAt = Date.parse(attemptRow.leaseExpiresAt);
+        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= recoveredAt) continue;
+        const hostedAuthority: HostedImportAuthority = {
+          ...(JSON.parse(attemptImportRow.authorityJson) as HostedClaimV1["authority"]),
+          admissionId: importRow.admissionId,
+          admissionOperationId: importRow.admissionOperationId,
+          claimOperationId: attemptImportRow.claimOperationId,
+          admissionEnvelopeDigest: importRow.admissionEnvelopeDigest,
+          sourceIdentityDigest: importRow.sourceIdentityDigest,
+          deliveryPayloadDigest: importRow.deliveryPayloadDigest,
+          policyReceiptId: importRow.policyReceiptId,
+          policyPayloadDigest: importRow.policyPayloadDigest,
+          policyReceiptDigest: importRow.policyReceiptDigest,
+          eventDigest: importRow.eventDigest,
+          contextPacketDigest: importRow.contextPacketDigest,
+          ...(importRow.workThreadId ? { workThreadId: importRow.workThreadId } : {}),
+          ...(importRow.workThreadDigest ? { workThreadDigest: importRow.workThreadDigest } : {}),
+          claimDigest: attemptImportRow.claimDigest,
+          authorityDigest: attemptImportRow.authorityDigest,
+          importedAt: attemptImportRow.importedAt
+        };
+        return {
+          claimed: {
+            run: runFromRow(runRow),
+            event: OpenTagEventSchema.parse(JSON.parse(runRow.eventJson)),
+            attemptId: attemptRow.id,
+            attemptNumber: attemptRow.number,
+            fencingToken: attemptRow.fencingToken,
+            executorId: attemptRow.selectedExecutorId
+          },
+          hostedAuthority,
+          leaseExpiresAt: attemptRow.leaseExpiresAt
+        };
+      }
+      return null;
+    },
+
+    async markHostedRunRunningLocally(input: {
+      runId: string;
+      runnerId: string;
+      attemptId: string;
+      fencingToken: string;
+      executor: string;
+      executorCapability?: unknown;
+      runTimeoutMs?: number;
+      idempotencyKey?: string;
+      destinationId: string;
+      organizationId: string;
+      credentialId: string;
+      request: HostedRunningRequestV1;
+    }): Promise<{ outcome: MarkRunningOutcome; operation: HostedLifecycleOperation }> {
+      const request = HostedRunningRequestV1Schema.parse(input.request);
+      const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
+      if (
+        request.attempt.attemptId !== input.attemptId
+        || request.attempt.fencingTokenDigest !== await computeHostedClaimFencingTokenDigestV1(input.fencingToken)
+        || request.executorId !== safeInput.executor
+        || request.runTimeoutMs !== safeInput.runTimeoutMs
+      ) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_INVALID");
+      const prepared = await prepareHostedLifecycleOperation({
+        destinationId: input.destinationId,
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        credentialId: input.credentialId,
+        runId: input.runId,
+        action: "running",
+        request
+      });
+      return db.transaction((tx) => {
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports)
+          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const claim = importedAttempt
+          ? tx.select().from(hostedClaimOperations).where(and(
+              eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
+              eq(hostedClaimOperations.destinationId, input.destinationId),
+              eq(hostedClaimOperations.organizationId, input.organizationId),
+              eq(hostedClaimOperations.runnerId, input.runnerId),
+              eq(hostedClaimOperations.runId, input.runId),
+              eq(hostedClaimOperations.state, "claimed")
+            )).limit(1).get()
+          : undefined;
+        const authority = importedAttempt
+          ? JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]
+          : undefined;
+        if (!run || !attempt || !importedAttempt || !claim || authority?.credentialId !== input.credentialId) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
+        if (
+          run.assignedRunnerId !== input.runnerId
+          || run.currentAttemptId !== input.attemptId
+          || !["assigned", "running"].includes(run.status)
+          || attempt.runId !== input.runId
+          || attempt.runnerId !== input.runnerId
+          || attempt.fencingToken !== input.fencingToken
+          || !["assigned", "running"].includes(attempt.status)
+          || (attempt.selectedExecutorId !== null && attempt.selectedExecutorId !== safeInput.executor)
+          || !hasActiveAttemptLease(attempt)
+        ) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
+        const duplicate = run.status === "running" && attempt.status === "running";
+        if (!duplicate) {
+          tx.update(runs).set({ status: "running", executor: safeInput.executor, updatedAt: prepared.createdAt })
+            .where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId))).run();
+          tx.update(attempts).set({ status: "running", heartbeatAt: prepared.createdAt, updatedAt: prepared.createdAt })
+            .where(eq(attempts.id, input.attemptId)).run();
+          tx.insert(runEvents).values(runEventValues({
+            runId: input.runId,
+            type: "run.running",
+            payload: {
+              runnerId: input.runnerId,
+              attemptId: input.attemptId,
+              ...(safeInput.idempotencyKey ? { idempotencyKey: safeInput.idempotencyKey } : {}),
+              executor: safeInput.executor,
+              ...(safeInput.runTimeoutMs ? { runTimeoutMs: safeInput.runTimeoutMs } : {})
+            },
+            visibility: "audit",
+            importance: "normal",
+            createdAt: prepared.createdAt
+          })).run();
+          if (safeInput.executorCapability) tx.insert(runEvents).values(runEventValues({
+            runId: input.runId,
+            type: "executor.capability.snapshot",
+            payload: { executor: safeInput.executor, capability: safeInput.executorCapability },
+            visibility: "audit",
+            importance: "normal",
+            message: `Executor capability snapshot recorded for ${safeInput.executor}.`,
+            createdAt: prepared.createdAt
+          })).run();
+        }
+        return { outcome: duplicate ? "duplicate" : "running", operation: journal.operation };
+      }, { behavior: "immediate" });
+    },
+
+    async recordHostedProgressLocally(input: {
+      runId: string;
+      runnerId: string;
+      attemptId: string;
+      fencingToken: string;
+      message: string;
+      type?: string;
+      at?: string;
+      visibility?: RunEventVisibility;
+      importance?: RunEventImportance;
+      idempotencyKey: string;
+      destinationId: string;
+      organizationId: string;
+      credentialId: string;
+      request: HostedProgressRequestV1;
+    }): Promise<{ outcome: "recorded" | "duplicate"; operation: HostedLifecycleOperation }> {
+      const request = HostedProgressRequestV1Schema.parse(input.request);
+      const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
+      const createdAt = safeInput.at ?? request.occurredAt;
+      const expectedProgressDigest = await computeControlPayloadDigestV1({ type: "status", occurredAt: createdAt });
+      if (
+        request.attempt.attemptId !== input.attemptId
+        || request.attempt.fencingTokenDigest !== await computeHostedClaimFencingTokenDigestV1(input.fencingToken)
+        || request.progressDigest !== expectedProgressDigest
+        || request.progressId !== `progress_${expectedProgressDigest.slice("sha256:".length)}`
+      ) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_INVALID");
+      const prepared = await prepareHostedLifecycleOperation({
+        destinationId: input.destinationId,
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        credentialId: input.credentialId,
+        runId: input.runId,
+        action: "progress",
+        request
+      });
+      return db.transaction((tx) => {
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports)
+          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const claim = importedAttempt
+          ? tx.select().from(hostedClaimOperations).where(and(
+              eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
+              eq(hostedClaimOperations.destinationId, input.destinationId),
+              eq(hostedClaimOperations.organizationId, input.organizationId),
+              eq(hostedClaimOperations.runnerId, input.runnerId),
+              eq(hostedClaimOperations.runId, input.runId),
+              eq(hostedClaimOperations.state, "claimed")
+            )).limit(1).get()
+          : undefined;
+        const authority = importedAttempt
+          ? JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]
+          : undefined;
+        if (
+          !run || !attempt || !importedAttempt || !claim || authority?.credentialId !== input.credentialId
+          || run.assignedRunnerId !== input.runnerId
+          || run.currentAttemptId !== input.attemptId || run.status !== "running"
+          || attempt.runId !== input.runId || attempt.runnerId !== input.runnerId
+          || attempt.fencingToken !== input.fencingToken || attempt.status !== "running"
+          || !hasActiveAttemptLease(attempt)
+        ) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
+        const digest = progressIdempotencyDigest(input.idempotencyKey);
+        const inserted = tx.insert(runEvents).values({
+          runId: input.runId,
+          type: "run.progress",
+          payloadJson: JSON.stringify({
+            runnerId: input.runnerId,
+            attemptId: input.attemptId,
+            type: safeInput.type ?? "progress",
+            message: safeInput.message,
+            at: createdAt
+          }),
+          progressIdempotencyDigest: digest,
+          visibility: safeInput.visibility ?? "audit",
+          importance: safeInput.importance ?? "normal",
+          message: safeInput.message,
+          createdAt
+        }).onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] }).run();
+        return { outcome: inserted.changes === 1 ? "recorded" : "duplicate", operation: journal.operation };
+      }, { behavior: "immediate" });
+    },
+
+    async rejectHostedAttemptStartLocally(input: {
+      runId: string;
+      runnerId: string;
+      attemptId: string;
+      fencingToken: string;
+      executorId: string;
+      reason: string;
+      destinationId: string;
+      organizationId: string;
+      credentialId: string;
+      request: HostedRejectStartRequestV1;
+    }): Promise<{ outcome: RejectAttemptStartOutcome | "journaled"; operation: HostedLifecycleOperation }> {
+      const request = HostedRejectStartRequestV1Schema.parse(input.request);
+      const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
+      if (
+        request.attempt.attemptId !== input.attemptId
+        || request.attempt.fencingTokenDigest !== await computeHostedClaimFencingTokenDigestV1(input.fencingToken)
+        || request.executorId !== safeInput.executorId
+      ) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_INVALID");
+      const prepared = await prepareHostedLifecycleOperation({
+        destinationId: input.destinationId,
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        credentialId: input.credentialId,
+        runId: input.runId,
+        action: "reject-start",
+        request
+      });
+      return db.transaction((tx) => {
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const claim = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.destinationId, input.destinationId),
+          eq(hostedClaimOperations.organizationId, input.organizationId),
+          eq(hostedClaimOperations.runnerId, input.runnerId),
+          eq(hostedClaimOperations.runId, input.runId),
+          eq(hostedClaimOperations.attemptId, input.attemptId),
+          eq(hostedClaimOperations.attemptNumber, request.attempt.attemptNumber),
+          eq(hostedClaimOperations.fencingTokenDigest, request.attempt.fencingTokenDigest),
+          eq(hostedClaimOperations.credentialId, input.credentialId),
+          eq(hostedClaimOperations.executorId, safeInput.executorId),
+          eq(hostedClaimOperations.state, "claimed")
+        )).limit(1).get();
+        const shellAuthority = claim?.authorityJson
+          ? JSON.parse(claim.authorityJson) as HostedClaimV1["authority"]
+          : undefined;
+        const validShell = Boolean(
+          claim?.claimDigest && claim.authorityDigest && shellAuthority
+          && canonicalSha256Json(shellAuthority) === claim.authorityDigest
+          && shellAuthority.organizationId === input.organizationId
+          && shellAuthority.runnerId === input.runnerId
+          && shellAuthority.runId === input.runId
+          && shellAuthority.credentialId === input.credentialId
+          && Number.isFinite(Date.parse(claim.leaseExpiresAt ?? ""))
+          && Date.parse(claim.leaseExpiresAt ?? "") > Date.parse(prepared.createdAt)
+        );
+        if (!run || !attempt) {
+          if (!validShell) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+          const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
+          return { outcome: "journaled" as const, operation: journal.operation };
+        }
+        const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
+        const alreadyRejected = routingRejectionsFromJson(run.routingRejectionsJson).some(
+          (rejection) => rejection.runnerId === input.runnerId && rejection.executorId === safeInput.executorId
+        );
+        if (alreadyRejected && run.currentAttemptId !== input.attemptId) {
+          return { outcome: "duplicate" as const, operation: journal.operation };
+        }
+        if (
+          run.status !== "assigned" || run.currentAttemptId !== input.attemptId
+          || run.assignedRunnerId !== input.runnerId || attempt.runId !== input.runId
+          || attempt.runnerId !== input.runnerId || attempt.fencingToken !== input.fencingToken
+          || attempt.status !== "assigned" || attempt.selectedExecutorId !== safeInput.executorId
+          || !hasActiveAttemptLease(attempt)
+        ) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        const rejections = routingRejectionsFromJson(run.routingRejectionsJson);
+        rejections.push({ runnerId: input.runnerId, executorId: safeInput.executorId, reason: safeInput.reason });
+        tx.update(attempts).set({
+          status: "interrupted", finishedAt: prepared.createdAt,
+          resultJson: JSON.stringify({ conclusion: "interrupted", summary: safeInput.reason }),
+          updatedAt: prepared.createdAt
+        }).where(eq(attempts.id, input.attemptId)).run();
+        tx.update(runs).set({
+          status: "queued", assignedRunnerId: null, executor: null, leasedAt: null,
+          leaseExpiresAt: null, heartbeatAt: null, currentAttemptId: null,
+          currentRoutingDecisionId: null, routingRejectionsJson: JSON.stringify(rejections),
+          updatedAt: prepared.createdAt
+        }).where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId))).run();
+        tx.insert(runEvents).values(runEventValues({
+          runId: input.runId,
+          type: "routing.preflight_rejected",
+          payload: {
+            runnerId: input.runnerId, executorId: safeInput.executorId,
+            attemptId: input.attemptId, routingDecisionId: attempt.routingDecisionId,
+            reason: safeInput.reason
+          },
+          visibility: "audit", importance: "blocking", message: safeInput.reason,
+          createdAt: prepared.createdAt
+        })).run();
+        return { outcome: "requeued" as const, operation: journal.operation };
+      }, { behavior: "immediate" });
+    },
+
+    async acquireHostedExecutionStart(input: {
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+    }): Promise<boolean> {
+      return db.transaction((tx) => {
+        const startedAt = nowIso();
+        const imported = tx.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, input.runId)).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports)
+          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const operation = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.operationId, importedAttempt?.claimOperationId ?? ""),
+          eq(hostedClaimOperations.state, "claimed"),
+          eq(hostedClaimOperations.runId, input.runId)
+        )).limit(1).get();
+        const credentialId = importedAttempt
+          ? (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId
+          : "";
+        const runningOperation = operation
+          ? tx.select().from(hostedLifecycleOperations).where(and(
+              eq(hostedLifecycleOperations.destinationId, operation.destinationId),
+              eq(hostedLifecycleOperations.organizationId, operation.organizationId),
+              eq(hostedLifecycleOperations.runnerId, operation.runnerId),
+              eq(hostedLifecycleOperations.credentialId, credentialId),
+              eq(hostedLifecycleOperations.runId, input.runId),
+              eq(hostedLifecycleOperations.attemptId, input.attemptId),
+              eq(hostedLifecycleOperations.action, "running"),
+              eq(hostedLifecycleOperations.state, "acknowledged")
+            )).limit(1).get()
+          : undefined;
+        if (
+          !imported || !importedAttempt || !run || !attempt || !operation || !runningOperation
+          || importedAttempt.runId !== input.runId
+          || run.status !== "running"
+          || run.currentAttemptId !== input.attemptId
+          || attempt.runId !== input.runId
+          || attempt.status !== "running"
+          || attempt.fencingToken !== input.fencingToken
+          || !validAcknowledgedLifecycleDependency(runningOperation)
+        ) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
+        const leaseExpiresAt = Date.parse(attempt.leaseExpiresAt);
+        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= Date.parse(startedAt)) return false;
+        if (operation.executionStartedAt) return false;
+        const acquired = tx.update(hostedClaimOperations).set({
+          executionStartedAt: startedAt,
+          updatedAt: startedAt
+        }).where(and(
+          eq(hostedClaimOperations.operationId, operation.operationId),
+          isNull(hostedClaimOperations.executionStartedAt)
+        )).run();
+        return acquired.changes === 1;
+      });
+    },
+
+    async isHostedExecutionCurrent(input: {
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+    }): Promise<boolean> {
+      return db.transaction((tx) => {
+        const checkedAt = Date.now();
+        const importedRun = tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, input.runId)).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports)
+          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const operation = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.operationId, importedAttempt?.claimOperationId ?? ""),
+          eq(hostedClaimOperations.state, "claimed"),
+          eq(hostedClaimOperations.runId, input.runId),
+          isNotNull(hostedClaimOperations.executionStartedAt)
+        )).limit(1).get();
+        if (
+          !importedRun || !importedAttempt || !run || !attempt || !operation
+          || importedAttempt.runId !== input.runId
+          || run.currentAttemptId !== input.attemptId
+          || !["assigned", "running", "needs_approval"].includes(run.status)
+          || attempt.runId !== input.runId
+          || !["assigned", "running"].includes(attempt.status)
+          || attempt.fencingToken !== input.fencingToken
+        ) {
+          return false;
+        }
+        const leaseExpiresAt = Date.parse(attempt.leaseExpiresAt);
+        return Number.isFinite(leaseExpiresAt) && leaseExpiresAt > checkedAt;
+      });
+    },
+
+    async getHostedExecutionLease(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      credentialId: string;
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+    }): Promise<{ leaseExpiresAt: string } | null> {
+      return db.transaction((tx) => {
+        const checkedAt = Date.now();
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports)
+          .where(eq(hostedAttemptImports.attemptId, input.attemptId)).limit(1).get();
+        const operation = importedAttempt
+          ? tx.select().from(hostedClaimOperations).where(and(
+              eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
+              eq(hostedClaimOperations.destinationId, input.destinationId),
+              eq(hostedClaimOperations.organizationId, input.organizationId),
+              eq(hostedClaimOperations.runnerId, input.runnerId),
+              eq(hostedClaimOperations.state, "claimed"),
+              eq(hostedClaimOperations.runId, input.runId),
+              isNotNull(hostedClaimOperations.executionStartedAt),
+              isNull(hostedClaimOperations.terminalReasonCode)
+            )).limit(1).get()
+          : undefined;
+        if (
+          !run || !attempt || !importedAttempt || !operation
+          || run.currentAttemptId !== input.attemptId
+          || run.assignedRunnerId !== input.runnerId
+          || !["assigned", "running", "needs_approval"].includes(run.status)
+          || run.leaseExpiresAt !== attempt.leaseExpiresAt
+          || attempt.runId !== input.runId
+          || attempt.runnerId !== input.runnerId
+          || !["assigned", "running"].includes(attempt.status)
+          || attempt.fencingToken !== input.fencingToken
+          || importedAttempt.runId !== input.runId
+          || importedAttempt.attemptNumber !== attempt.number
+          || (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId !== input.credentialId
+        ) {
+          return null;
+        }
+        const leaseExpiresAt = Date.parse(attempt.leaseExpiresAt);
+        return Number.isFinite(leaseExpiresAt) && leaseExpiresAt > checkedAt
+          ? { leaseExpiresAt: attempt.leaseExpiresAt }
+          : null;
+      });
+    },
+
+    async enqueueHostedLifecycleOperation(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      credentialId: string;
+      runId: string;
+      action: HostedLifecycleActionV1;
+      request: HostedLifecycleRequestV1;
+      now?: Date;
+    }): Promise<{ outcome: "created" | "replayed"; operation: HostedLifecycleOperation }> {
+      throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_ATOMIC_API_REQUIRED");
+    },
+
+    async claimDueHostedLifecycleOperations(input: {
+      destinationId: string;
+      organizationId: string;
+      leaseOwner: string;
+      leaseSeconds: number;
+      limit?: number;
+      now?: Date;
+    }): Promise<HostedLifecycleOperation[]> {
+      if (!input.leaseOwner || !Number.isFinite(input.leaseSeconds) || input.leaseSeconds <= 0) {
+        throw new Error("hosted_lifecycle_operation_lease_invalid");
+      }
+      const limit = Math.min(100, Math.max(1, Math.trunc(input.limit ?? 50)));
+      const now = input.now ?? new Date();
+      const at = now.toISOString();
+      const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000).toISOString();
+      return db.transaction((tx) => {
+        const predecessor = alias(hostedLifecycleOperations, "hosted_lifecycle_predecessor");
+        const due = tx.select().from(hostedLifecycleOperations).where(and(
+          eq(hostedLifecycleOperations.destinationId, input.destinationId),
+          eq(hostedLifecycleOperations.organizationId, input.organizationId),
+          notExists(
+            tx.select({ operationId: predecessor.operationId })
+              .from(predecessor)
+              .where(and(
+                eq(predecessor.destinationId, hostedLifecycleOperations.destinationId),
+                eq(predecessor.organizationId, hostedLifecycleOperations.organizationId),
+                eq(predecessor.runId, hostedLifecycleOperations.runId),
+                eq(predecessor.attemptId, hostedLifecycleOperations.attemptId),
+                lt(predecessor.sequence, hostedLifecycleOperations.sequence),
+                sql`${predecessor.state} <> 'acknowledged'`
+              ))
+          ),
+          or(
+            and(eq(hostedLifecycleOperations.state, "pending"), lte(hostedLifecycleOperations.nextAttemptAt, at)),
+            and(eq(hostedLifecycleOperations.state, "leased"), lte(hostedLifecycleOperations.leaseExpiresAt, at))
+          )
+        )).orderBy(
+          asc(hostedLifecycleOperations.runId),
+          asc(hostedLifecycleOperations.attemptId),
+          asc(hostedLifecycleOperations.sequence),
+          asc(hostedLifecycleOperations.operationId)
+        ).limit(limit).all();
+        const claimed: HostedLifecycleOperation[] = [];
+        for (const row of due) {
+          const leaseToken = randomUUID();
+          const updated = tx.update(hostedLifecycleOperations).set({
+            state: "leased",
+            attemptCount: row.attemptCount + 1,
+            leaseOwner: input.leaseOwner,
+            leaseToken,
+            leaseExpiresAt,
+            updatedAt: at
+          }).where(and(
+            eq(hostedLifecycleOperations.destinationId, row.destinationId),
+            eq(hostedLifecycleOperations.organizationId, row.organizationId),
+            eq(hostedLifecycleOperations.runnerId, row.runnerId),
+            eq(hostedLifecycleOperations.credentialId, row.credentialId),
+            eq(hostedLifecycleOperations.operationId, row.operationId),
+            or(
+              and(eq(hostedLifecycleOperations.state, "pending"), lte(hostedLifecycleOperations.nextAttemptAt, at)),
+              and(eq(hostedLifecycleOperations.state, "leased"), lte(hostedLifecycleOperations.leaseExpiresAt, at))
+            )
+          )).run();
+          if (updated.changes !== 1) continue;
+          claimed.push(hostedLifecycleOperationFromRow({
+            ...row,
+            state: "leased",
+            attemptCount: row.attemptCount + 1,
+            leaseOwner: input.leaseOwner,
+            leaseToken,
+            leaseExpiresAt,
+            updatedAt: at
+          }));
+        }
+        return claimed;
+      }, { behavior: "immediate" });
+    },
+
+    async acknowledgeHostedLifecycleOperation(input: {
+      destinationId: string;
+      organizationId: string;
+      operationId: string;
+      leaseToken: string;
+      receipt: HostedLifecycleReceiptEnvelopeV1;
+      now?: Date;
+    }): Promise<"acknowledged" | "stale_lease" | "not_found"> {
+      const receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(input.receipt);
+      const at = (input.now ?? new Date()).toISOString();
+      const preflightRow = await db.select().from(hostedLifecycleOperations).where(and(
+        eq(hostedLifecycleOperations.destinationId, input.destinationId),
+        eq(hostedLifecycleOperations.organizationId, input.organizationId),
+        eq(hostedLifecycleOperations.operationId, input.operationId)
+      )).limit(1).get();
+      if (!preflightRow) return "not_found";
+      const request = HostedLifecycleRequestV1Schema.parse(JSON.parse(preflightRow.requestJson));
+      const expectedReceiptId = await computeHostedLifecycleReceiptIdV1({
+        organizationId: preflightRow.organizationId,
+        operationId: preflightRow.operationId
+      });
+      if (
+        receipt.receiptId !== expectedReceiptId
+        || !(await verifyHostedLifecycleReceiptV1({
+          receipt,
+          request,
+          action: preflightRow.action as HostedLifecycleActionV1,
+          organizationId: preflightRow.organizationId,
+          runnerId: preflightRow.runnerId,
+          runId: preflightRow.runId,
+          credentialId: preflightRow.credentialId
+        }))
+      ) return "stale_lease";
+      return db.transaction((tx) => {
+        const row = tx.select().from(hostedLifecycleOperations).where(and(
+          eq(hostedLifecycleOperations.destinationId, input.destinationId),
+          eq(hostedLifecycleOperations.organizationId, input.organizationId),
+          eq(hostedLifecycleOperations.operationId, input.operationId)
+        )).limit(1).get();
+        if (!row) return "not_found" as const;
+        if (row.state === "acknowledged") {
+          return row.receiptId === receipt.receiptId
+            && row.receiptDigest === receipt.receiptDigest
+            && row.receiptJson === canonicalJsonStringify(receipt)
+            ? "acknowledged" as const
+            : "stale_lease" as const;
+        }
+        if (
+          row.state !== "leased" || row.leaseToken !== input.leaseToken
+          || !row.leaseExpiresAt || row.leaseExpiresAt <= at
+          || receipt.organizationId !== row.organizationId
+          || receipt.runId !== row.runId
+          || receipt.operationId !== row.operationId
+          || receipt.requestId !== row.requestId
+          || receipt.requestDigest !== row.requestDigest
+          || receipt.producer.id !== row.runnerId
+          || receipt.producer.credentialId !== row.credentialId
+          || receipt.attempt.attemptId !== row.attemptId
+          || receipt.attempt.attemptNumber !== row.attemptNumber
+          || receipt.attempt.fencingTokenDigest !== row.fencingTokenDigest
+        ) return "stale_lease" as const;
+        return acknowledgeHostedLifecycleOperationTx({
+          tx,
+          row,
+          receipt,
+          acknowledgedAt: at,
+          expectedState: "leased",
+          leaseToken: input.leaseToken
+        }) ? "acknowledged" as const : "stale_lease" as const;
+      }, { behavior: "immediate" });
+    },
+
+    async retryHostedLifecycleOperation(input: {
+      destinationId: string;
+      organizationId: string;
+      operationId: string;
+      leaseToken: string;
+      nextAttemptAt: string;
+      reasonCode: string;
+      now?: Date;
+    }): Promise<"retried" | "stale_lease" | "not_found"> {
+      const at = (input.now ?? new Date()).toISOString();
+      if (input.nextAttemptAt < at) throw new Error("hosted_lifecycle_retry_time_in_past");
+      return db.transaction((tx) => {
+        const row = tx.select().from(hostedLifecycleOperations).where(and(
+          eq(hostedLifecycleOperations.destinationId, input.destinationId),
+          eq(hostedLifecycleOperations.organizationId, input.organizationId),
+          eq(hostedLifecycleOperations.operationId, input.operationId)
+        )).limit(1).get();
+        if (!row) return "not_found" as const;
+        if (row.state !== "leased" || row.leaseToken !== input.leaseToken || !row.leaseExpiresAt || row.leaseExpiresAt <= at) {
+          return "stale_lease" as const;
+        }
+        const updated = tx.update(hostedLifecycleOperations).set({
+          state: "pending",
+          nextAttemptAt: input.nextAttemptAt,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          lastReasonCode: input.reasonCode,
+          updatedAt: at
+        }).where(and(
+          eq(hostedLifecycleOperations.operationId, row.operationId),
+          eq(hostedLifecycleOperations.state, "leased"),
+          eq(hostedLifecycleOperations.leaseToken, input.leaseToken),
+          gt(hostedLifecycleOperations.leaseExpiresAt, at)
+        )).run();
+        return updated.changes === 1 ? "retried" as const : "stale_lease" as const;
+      }, { behavior: "immediate" });
+    },
+
+    async markHostedLifecycleOperationAttention(input: {
+      destinationId: string;
+      organizationId: string;
+      operationId: string;
+      leaseToken: string;
+      reasonCode: string;
+      now?: Date;
+    }): Promise<"attention" | "stale_lease" | "not_found"> {
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const row = tx.select().from(hostedLifecycleOperations).where(and(
+          eq(hostedLifecycleOperations.destinationId, input.destinationId),
+          eq(hostedLifecycleOperations.organizationId, input.organizationId),
+          eq(hostedLifecycleOperations.operationId, input.operationId)
+        )).limit(1).get();
+        if (!row) return "not_found" as const;
+        if (row.state !== "leased" || row.leaseToken !== input.leaseToken || !row.leaseExpiresAt || row.leaseExpiresAt <= at) {
+          return "stale_lease" as const;
+        }
+        const updated = tx.update(hostedLifecycleOperations).set({
+          state: "attention",
+          nextAttemptAt: null,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          lastReasonCode: input.reasonCode,
+          updatedAt: at
+        }).where(and(
+          eq(hostedLifecycleOperations.operationId, row.operationId),
+          eq(hostedLifecycleOperations.state, "leased"),
+          eq(hostedLifecycleOperations.leaseToken, input.leaseToken),
+          gt(hostedLifecycleOperations.leaseExpiresAt, at)
+        )).run();
+        return updated.changes === 1 ? "attention" as const : "stale_lease" as const;
+      }, { behavior: "immediate" });
+    },
+
+    async recoverExpiredHostedLifecycleOperations(input: {
+      destinationId: string;
+      organizationId: string;
+      now?: Date;
+    }): Promise<number> {
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => tx.update(hostedLifecycleOperations).set({
+        state: "pending",
+        nextAttemptAt: at,
+        leaseOwner: null,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        lastReasonCode: "lease_expired",
+        updatedAt: at
+      }).where(and(
+        eq(hostedLifecycleOperations.destinationId, input.destinationId),
+        eq(hostedLifecycleOperations.organizationId, input.organizationId),
+        eq(hostedLifecycleOperations.state, "leased"),
+        lte(hostedLifecycleOperations.leaseExpiresAt, at)
+      )).run().changes, { behavior: "immediate" });
+    },
+
+    async beginHostedHeartbeatOperation(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      credentialId: string;
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+      request: HostedHeartbeatRequestV1;
+    }): Promise<{ outcome: "created" | "replayed"; operation: HostedHeartbeatOperation }> {
+      const prepared = await prepareHostedLifecycleOperation({
+        destinationId: input.destinationId,
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        credentialId: input.credentialId,
+        runId: input.runId,
+        action: "heartbeat",
+        request: input.request
+      });
+      const request = prepared.request as HostedHeartbeatRequestV1;
+      return db.transaction((tx) => {
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(and(
+          eq(attempts.id, input.attemptId),
+          eq(attempts.runId, input.runId),
+          eq(attempts.runnerId, input.runnerId),
+          eq(attempts.fencingToken, input.fencingToken)
+        )).limit(1).get();
+        const importedAttempt = tx.select().from(hostedAttemptImports).where(and(
+          eq(hostedAttemptImports.attemptId, input.attemptId),
+          eq(hostedAttemptImports.runId, input.runId)
+        )).limit(1).get();
+        const claimOperation = importedAttempt
+          ? tx.select().from(hostedClaimOperations).where(and(
+              eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId),
+              eq(hostedClaimOperations.destinationId, input.destinationId),
+              eq(hostedClaimOperations.organizationId, input.organizationId),
+              eq(hostedClaimOperations.runnerId, input.runnerId),
+              eq(hostedClaimOperations.state, "claimed"),
+              eq(hostedClaimOperations.runId, input.runId),
+              isNotNull(hostedClaimOperations.executionStartedAt),
+              isNull(hostedClaimOperations.terminalReasonCode)
+            )).limit(1).get()
+          : undefined;
+        const authorityCredentialId = importedAttempt
+          ? (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId
+          : undefined;
+        if (
+          !run || !attempt || !importedAttempt || !claimOperation
+          || request.attempt.attemptId !== input.attemptId
+          || request.attempt.attemptNumber !== attempt.number
+          || request.attempt.epoch !== attempt.number
+          || request.attempt.fencingToken !== input.fencingToken
+          || request.attempt.fencingTokenDigest !== importedAttempt.fencingTokenDigest
+          || request.expectedLeaseExpiresAt !== attempt.leaseExpiresAt
+          || run.currentAttemptId !== input.attemptId
+          || run.assignedRunnerId !== input.runnerId
+          || !["running", "needs_approval"].includes(run.status)
+          || run.leaseExpiresAt !== attempt.leaseExpiresAt
+          || attempt.status !== "running"
+          || importedAttempt.attemptNumber !== attempt.number
+          || authorityCredentialId !== input.credentialId
+          || !Number.isFinite(Date.parse(attempt.leaseExpiresAt))
+          || Date.parse(attempt.leaseExpiresAt) <= Date.parse(prepared.createdAt)
+        ) {
+          throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
+        }
+        const result = enqueueHostedLifecycleOperationTx(tx, prepared);
+        const operation = result.operation;
+        if (operation.state !== "pending" && operation.state !== "acknowledged") {
+          throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
+        }
+        return {
+          outcome: result.outcome,
+          operation: {
+            destinationId: operation.destinationId,
+            organizationId: operation.organizationId,
+            runnerId: operation.runnerId,
+            credentialId: operation.credentialId,
+            operationId: operation.operationId,
+            requestId: operation.requestId,
+            runId: operation.runId,
+            attemptId: operation.attemptId,
+            attemptNumber: operation.attemptNumber,
+            fencingTokenDigest: operation.fencingTokenDigest,
+            expectedLeaseExpiresAt: request.expectedLeaseExpiresAt,
+            requestDigest: operation.requestDigest,
+            request,
+            state: operation.state,
+            createdAt: operation.createdAt,
+            updatedAt: operation.updatedAt,
+            ...(operation.receiptDigest ? { receiptDigest: operation.receiptDigest } : {}),
+            ...(operation.receipt ? { receipt: operation.receipt } : {}),
+            ...(operation.receipt?.payload.operation === "heartbeat"
+              ? { acceptedLeaseExpiresAt: operation.receipt.payload.leaseExpiresAt }
+              : {}),
+            ...(operation.acknowledgedAt ? { acknowledgedAt: operation.acknowledgedAt } : {})
+          }
+        };
+      }, { behavior: "immediate" });
+    },
+
+    async getHostedHeartbeatOperationForRetry(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      credentialId: string;
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+    }): Promise<HostedHeartbeatOperation | null> {
+      const row = await db.select().from(hostedLifecycleOperations).where(and(
+        eq(hostedLifecycleOperations.destinationId, input.destinationId),
+        eq(hostedLifecycleOperations.organizationId, input.organizationId),
+        eq(hostedLifecycleOperations.runnerId, input.runnerId),
+        eq(hostedLifecycleOperations.credentialId, input.credentialId),
+        eq(hostedLifecycleOperations.runId, input.runId),
+        eq(hostedLifecycleOperations.attemptId, input.attemptId),
+        eq(hostedLifecycleOperations.action, "heartbeat"),
+        eq(hostedLifecycleOperations.state, "pending")
+      )).orderBy(desc(hostedLifecycleOperations.createdAt)).limit(1).get();
+      if (!row) return null;
+      const request = HostedHeartbeatRequestV1Schema.parse(JSON.parse(row.requestJson));
+      const lease = await this.getHostedExecutionLease(input);
+      if (!lease || request.expectedLeaseExpiresAt !== lease.leaseExpiresAt) return null;
+      return {
+        destinationId: row.destinationId,
+        organizationId: row.organizationId,
+        runnerId: row.runnerId,
+        credentialId: row.credentialId,
+        operationId: row.operationId,
+        requestId: row.requestId,
+        runId: row.runId,
+        attemptId: row.attemptId,
+        attemptNumber: row.attemptNumber,
+        fencingTokenDigest: row.fencingTokenDigest,
+        expectedLeaseExpiresAt: request.expectedLeaseExpiresAt,
+        requestDigest: row.requestDigest,
+        request,
+        state: "pending",
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt
+      };
+    },
+
+    async applyHostedHeartbeatReceipt(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      credentialId: string;
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+      operationId: string;
+      requestId: string;
+      receipt: HostedLifecycleReceiptEnvelopeV1;
+    }): Promise<"accepted" | "replayed" | "rejected"> {
+      return await (async () => {
+        const parsed = HostedLifecycleReceiptEnvelopeV1Schema.safeParse(input.receipt);
+        if (!parsed.success || parsed.data.payload.operation !== "heartbeat") return "rejected" as const;
+        const receipt = parsed.data;
+        const journal = await db.select().from(hostedLifecycleOperations).where(and(
+          eq(hostedLifecycleOperations.destinationId, input.destinationId),
+          eq(hostedLifecycleOperations.organizationId, input.organizationId),
+          eq(hostedLifecycleOperations.runnerId, input.runnerId),
+          eq(hostedLifecycleOperations.credentialId, input.credentialId),
+          eq(hostedLifecycleOperations.operationId, input.operationId),
+          eq(hostedLifecycleOperations.requestId, input.requestId),
+          eq(hostedLifecycleOperations.action, "heartbeat")
+        )).limit(1).get();
+        if (!journal) return "rejected" as const;
+        const request = HostedHeartbeatRequestV1Schema.parse(JSON.parse(journal.requestJson));
+        const expectedReceiptId = await computeHostedLifecycleReceiptIdV1({
+          organizationId: input.organizationId,
+          operationId: input.operationId
+        });
+        if (
+          receipt.receiptId !== expectedReceiptId
+          || !(await verifyHostedLifecycleReceiptV1({
+            receipt,
+            request,
+            action: "heartbeat",
+            organizationId: input.organizationId,
+            runnerId: input.runnerId,
+            runId: input.runId,
+            credentialId: input.credentialId
+          }))
+        ) return "rejected" as const;
+        const receiptJson = canonicalJsonStringify(receipt);
+        const acknowledgedAt = nowIso();
+        return db.transaction((tx) => {
+          const current = tx.select().from(hostedLifecycleOperations).where(and(
+            eq(hostedLifecycleOperations.destinationId, input.destinationId),
+            eq(hostedLifecycleOperations.organizationId, input.organizationId),
+            eq(hostedLifecycleOperations.runnerId, input.runnerId),
+            eq(hostedLifecycleOperations.credentialId, input.credentialId),
+            eq(hostedLifecycleOperations.operationId, input.operationId),
+            eq(hostedLifecycleOperations.requestId, input.requestId)
+          )).limit(1).get();
+          if (!current) return "rejected" as const;
+          if (current.state === "acknowledged") {
+            return current.receiptId === receipt.receiptId
+              && current.receiptDigest === receipt.receiptDigest
+              && current.receiptJson === receiptJson
+              ? "replayed" as const
+              : "rejected" as const;
+          }
+          return current.state === "pending" && acknowledgeHostedLifecycleOperationTx({
+            tx,
+            row: current,
+            receipt,
+            acknowledgedAt,
+            expectedState: "pending"
+          }) ? "accepted" as const : "rejected" as const;
+        }, { behavior: "immediate" });
+      })();
+    },
+
+    async acknowledgeHostedClaimEmpty(input: {
+      operationId: string;
+      requestId: string;
+    }): Promise<HostedClaimOperation> {
+      const acknowledgedAt = nowIso();
+      return db.transaction((tx) => {
+        const current = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.operationId, input.operationId),
+          eq(hostedClaimOperations.requestId, input.requestId)
+        )).limit(1).get();
+        if (!current) throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+        if (current.state === "empty") return hostedClaimOperationFromRow(current);
+        if (current.state !== "pending") {
+          throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+        }
+        tx.update(hostedClaimOperations).set({
+          state: "empty",
+          activeKey: null,
+          updatedAt: acknowledgedAt,
+          acknowledgedAt
+        }).where(and(
+          eq(hostedClaimOperations.operationId, input.operationId),
+          eq(hostedClaimOperations.state, "pending")
+        )).run();
+        return hostedClaimOperationFromRow(tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.operationId, input.operationId)).limit(1).get()!);
+      });
+    },
+
+    async abandonHostedClaimOperation(input: {
+      operationId: string;
+      requestId: string;
+      reasonCode: "stale_control_authority" | "operation_digest_conflict";
+    }): Promise<HostedClaimOperation> {
+      const acknowledgedAt = nowIso();
+      return db.transaction((tx) => {
+        const current = tx.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.operationId, input.operationId),
+          eq(hostedClaimOperations.requestId, input.requestId)
+        )).limit(1).get();
+        if (!current) throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+        if (current.state === "empty" && current.terminalReasonCode === input.reasonCode) {
+          return hostedClaimOperationFromRow(current);
+        }
+        if (current.state !== "pending") {
+          throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+        }
+        tx.update(hostedClaimOperations).set({
+          state: "empty",
+          activeKey: null,
+          terminalReasonCode: input.reasonCode,
+          updatedAt: acknowledgedAt,
+          acknowledgedAt
+        }).where(and(
+          eq(hostedClaimOperations.operationId, input.operationId),
+          eq(hostedClaimOperations.state, "pending")
+        )).run();
+        return hostedClaimOperationFromRow(tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.operationId, input.operationId)).limit(1).get()!);
+      });
+    },
+
+    async importHostedAssignedRun(input: {
+      event: OpenTagEvent;
+      claim: HostedClaimV1;
+      sourceReceipt: HostedSourceRefetchReceipt;
+    }): Promise<ImportHostedAssignedRunResult> {
+      let event: OpenTagEvent;
+      let claim: HostedClaimV1;
+      try {
+        event = OpenTagEventSchema.parse(input.event);
+        claim = HostedClaimV1Schema.parse(input.claim);
+      } catch {
+        throw new HostedImportConflictError("HOSTED_IMPORT_CLAIM_INVALID");
+      }
+      if (
+        !(await verifyHostedAdmissionEnvelopeDigestV1(claim.hostedAdmission))
+        || !(await verifyHostedClaimFencingTokenDigestV1(claim))
+      ) {
+        throw new HostedImportConflictError("HOSTED_IMPORT_CLAIM_INVALID");
+      }
+
+      const admission = claim.hostedAdmission;
+      const sourceReceipt = input.sourceReceipt;
+      const projectTarget = projectTargetRefFromEvent(event);
+      const deliveryId = sourceDeliveryIdFromEvent(event);
+      const localThreadNumber = typeof event.metadata.issueNumber === "number"
+        ? event.metadata.issueNumber
+        : typeof event.metadata.pullRequestNumber === "number"
+          ? event.metadata.pullRequestNumber
+          : null;
+      if (
+        event.source !== "github"
+        || event.sourceEventId !== admission.sourceEvent.providerEventId
+        || event.actor.provider !== "github"
+        || event.actor.providerUserId !== admission.verifiedActor.providerUserId
+        || event.actor.handle !== admission.verifiedActor.login
+        || deliveryId !== admission.deliveryId
+        || projectTarget?.provider !== admission.provider
+        || projectTarget.owner !== admission.repository.owner
+        || projectTarget.repo !== admission.repository.repo
+        || event.workItem?.provider !== "github"
+        || event.workItem.kind !== admission.sourceThread.kind
+        || localThreadNumber !== admission.sourceThread.number
+      ) {
+        throw new HostedImportConflictError("HOSTED_IMPORT_EVENT_MISMATCH");
+      }
+      if (
+        sourceReceipt.provider !== "github"
+        || sourceReceipt.providerRepositoryId !== admission.repository.providerRepositoryId
+        || sourceReceipt.owner !== admission.repository.owner
+        || sourceReceipt.repo !== admission.repository.repo
+        || canonicalSha256Json(sourceReceipt.sourceThread) !== canonicalSha256Json(admission.sourceThread)
+        || canonicalSha256Json(sourceReceipt.sourceEvent) !== canonicalSha256Json(admission.sourceEvent)
+        || sourceReceipt.actor.providerUserId !== admission.verifiedActor.providerUserId
+        || sourceReceipt.actor.login !== admission.verifiedActor.login
+        || sourceReceipt.sourceIdentityDigest !== admission.sourceIdentityDigest
+        || sourceReceipt.eventDigest !== canonicalSha256Json(event)
+        || !Number.isFinite(Date.parse(sourceReceipt.refetchedAt))
+      ) {
+        throw new HostedImportConflictError("HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT");
+      }
+
+      const importedAt = nowIso();
+      const protocolFields = protocolRunFieldsFromEvent(event, event.receivedAt);
+      const eventDigest = canonicalSha256Json(event);
+      const contextPacketDigest = canonicalSha256Json(protocolFields.contextPacket);
+      const incomingWorkThreadDigest = protocolFields.thread
+        ? canonicalSha256Json(protocolFields.thread)
+        : null;
+      const claimDigest = canonicalSha256Json(claim);
+      const authorityDigest = canonicalSha256Json(claim.authority);
+
+      const result = db.transaction((tx) => {
+        const claimOperation = tx.select().from(hostedClaimOperations).where(
+          eq(hostedClaimOperations.operationId, claim.operationId)
+        ).limit(1).get();
+        if (
+          !claimOperation
+          || claimOperation.requestId !== claim.requestId
+          || claimOperation.organizationId !== claim.organizationId
+          || claimOperation.runnerId !== claim.runnerId
+        ) {
+          throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+        }
+        const exactAuthorityShell = claimOperation.state === "claimed"
+          && claimOperation.runId === claim.runId
+          && claimOperation.claimDigest === claimDigest
+          && claimOperation.authorityDigest === authorityDigest
+          && claimOperation.authorityJson === canonicalJsonStringify(claim.authority)
+          && claimOperation.attemptId === claim.attempt.id
+          && claimOperation.attemptNumber === claim.attempt.number
+          && claimOperation.fencingTokenDigest === claim.attempt.fencingTokenDigest
+          && claimOperation.credentialId === claim.authority.credentialId
+          && claimOperation.leaseExpiresAt === claim.attempt.leaseExpiresAt
+          && claimOperation.executorId === claim.executorId;
+        const claimAuthorityAvailable = claimOperation.state === "pending" || exactAuthorityShell;
+        if (exactAuthorityShell) {
+          const rejection = tx.select({ operationId: hostedLifecycleOperations.operationId })
+            .from(hostedLifecycleOperations).where(and(
+              eq(hostedLifecycleOperations.destinationId, claimOperation.destinationId),
+              eq(hostedLifecycleOperations.organizationId, claim.organizationId),
+              eq(hostedLifecycleOperations.runnerId, claim.runnerId),
+              eq(hostedLifecycleOperations.credentialId, claim.authority.credentialId),
+              eq(hostedLifecycleOperations.runId, claim.runId),
+              eq(hostedLifecycleOperations.attemptId, claim.attempt.id),
+              eq(hostedLifecycleOperations.action, "reject-start")
+            )).limit(1).get();
+          if (rejection) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
+        const existingImport = tx.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, claim.runId)).limit(1).get();
+        if (existingImport) {
+          const importedAttempt = tx.select().from(hostedAttemptImports)
+            .where(eq(hostedAttemptImports.attemptId, claim.attempt.id)).limit(1).get();
+          if (!importedAttempt) {
+            const exactLineage = existingImport.admissionId === admission.admissionId
+              && existingImport.admissionOperationId === admission.operationId
+              && existingImport.sourceIdentityDigest === admission.sourceIdentityDigest
+              && existingImport.deliveryPayloadDigest === admission.deliveryPayloadDigest
+              && existingImport.admissionEnvelopeDigest === admission.envelopeDigest
+              && existingImport.eventDigest === eventDigest
+              && existingImport.contextPacketDigest === contextPacketDigest
+              && existingImport.workThreadDigest === incomingWorkThreadDigest;
+            if (!exactLineage) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_RUN_CONFLICT");
+            }
+            const currentRun = tx.select().from(runs).where(eq(runs.id, claim.runId)).limit(1).get();
+            const previousAttempt = currentRun?.currentAttemptId
+              ? tx.select().from(attempts).where(eq(attempts.id, currentRun.currentAttemptId)).limit(1).get()
+              : undefined;
+            const previousHostedAttempt = previousAttempt
+              ? tx.select().from(hostedAttemptImports)
+                  .where(eq(hostedAttemptImports.attemptId, previousAttempt.id)).limit(1).get()
+              : undefined;
+            const retryablePreviousAttempt = Boolean(
+              previousAttempt
+              && (
+                ["interrupted", "cancelled", "timed_out", "failed"].includes(previousAttempt.status)
+                || Date.parse(previousAttempt.leaseExpiresAt) <= Date.parse(importedAt)
+              )
+            );
+            if (
+              !currentRun || !previousAttempt || !previousHostedAttempt
+              || previousHostedAttempt.runId !== claim.runId
+              || previousHostedAttempt.attemptNumber !== previousAttempt.number
+              || terminalRunStatus(currentRun.status)
+              || !retryablePreviousAttempt
+              || !claimAuthorityAvailable
+              || claim.attempt.number !== previousAttempt.number + 1
+            ) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_ATTEMPT_CONFLICT");
+            }
+            if (tx.select({ attemptId: hostedAttemptImports.attemptId }).from(hostedAttemptImports)
+              .where(eq(hostedAttemptImports.claimOperationId, claim.operationId)).limit(1).get()) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_OPERATION_CONFLICT");
+            }
+            if (tx.select({ attemptId: hostedAttemptImports.attemptId }).from(hostedAttemptImports)
+              .where(eq(hostedAttemptImports.fencingTokenDigest, claim.attempt.fencingTokenDigest)).limit(1).get()) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_FENCE_CONFLICT");
+            }
+            if (tx.select({ attemptId: hostedAttemptImports.attemptId }).from(hostedAttemptImports)
+              .where(eq(hostedAttemptImports.authorityDigest, authorityDigest)).limit(1).get()) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+            }
+            if (tx.select({ id: attempts.id }).from(attempts).where(or(
+              eq(attempts.id, claim.attempt.id),
+              and(eq(attempts.runId, claim.runId), eq(attempts.number, claim.attempt.number))
+            )).limit(1).get()) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_ATTEMPT_CONFLICT");
+            }
+            if (tx.select({ id: attempts.id }).from(attempts)
+              .where(eq(attempts.fencingToken, claim.attempt.fencingToken)).limit(1).get()) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_FENCE_CONFLICT");
+            }
+            tx.insert(attempts).values({
+              id: claim.attempt.id, runId: claim.runId, number: claim.attempt.number,
+              runnerId: claim.runnerId, runnerLocality: "hosted", selectedExecutorId: claim.executorId,
+              fencingToken: claim.attempt.fencingToken, status: "assigned", startedAt: importedAt,
+              heartbeatAt: importedAt, leaseExpiresAt: claim.attempt.leaseExpiresAt,
+              createdAt: importedAt, updatedAt: importedAt
+            }).run();
+            tx.insert(hostedAttemptImports).values({
+              attemptId: claim.attempt.id, runId: claim.runId, attemptNumber: claim.attempt.number,
+              claimOperationId: claim.operationId, fencingTokenDigest: claim.attempt.fencingTokenDigest,
+              claimDigest, authorityDigest, authorityJson: JSON.stringify(claim.authority), importedAt
+            }).run();
+            const reassigned = tx.update(runs).set({
+              status: "assigned", assignedRunnerId: claim.runnerId, executor: claim.executorId,
+              leasedAt: importedAt, leaseExpiresAt: claim.attempt.leaseExpiresAt, heartbeatAt: importedAt,
+              currentAttemptId: claim.attempt.id, updatedAt: importedAt
+            }).where(and(eq(runs.id, claim.runId), eq(runs.currentAttemptId, previousAttempt.id))).run();
+            if (reassigned.changes !== 1) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+            }
+            if (!exactAuthorityShell) {
+              const acknowledged = tx.update(hostedClaimOperations).set({
+                state: "claimed", activeKey: null, runId: claim.runId,
+                updatedAt: importedAt, acknowledgedAt: importedAt
+              }).where(and(
+                eq(hostedClaimOperations.operationId, claim.operationId),
+                eq(hostedClaimOperations.state, "pending")
+              )).run();
+              if (acknowledged.changes !== 1) {
+                throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+              }
+            } else {
+              tx.update(hostedClaimOperations).set({ activeKey: null, updatedAt: importedAt })
+                .where(eq(hostedClaimOperations.operationId, claim.operationId)).run();
+            }
+            return {
+              outcome: "created" as const,
+              importRow: existingImport,
+              attemptImportRow: tx.select().from(hostedAttemptImports)
+                .where(eq(hostedAttemptImports.attemptId, claim.attempt.id)).limit(1).get()!,
+              runRow: tx.select().from(runs).where(eq(runs.id, claim.runId)).limit(1).get()!,
+              executionStartedAt: null,
+              superseded: false
+            };
+          }
+          const exact = existingImport.admissionId === admission.admissionId
+            && existingImport.admissionOperationId === admission.operationId
+            && importedAttempt.claimOperationId === claim.operationId
+            && importedAttempt.attemptId === claim.attempt.id
+            && importedAttempt.fencingTokenDigest === claim.attempt.fencingTokenDigest
+            && existingImport.sourceIdentityDigest === admission.sourceIdentityDigest
+            && existingImport.deliveryPayloadDigest === admission.deliveryPayloadDigest
+            && existingImport.admissionEnvelopeDigest === admission.envelopeDigest
+            && existingImport.policyReceiptId === claim.admissionPolicySnapshot.receiptId
+            && existingImport.policyPayloadDigest === claim.admissionPolicySnapshot.payloadDigest
+            && existingImport.policyReceiptDigest === claim.admissionPolicySnapshot.receiptDigest
+            && existingImport.eventDigest === eventDigest
+            && existingImport.contextPacketDigest === contextPacketDigest
+            && existingImport.workThreadDigest === incomingWorkThreadDigest
+            && importedAttempt.claimDigest === claimDigest
+            && importedAttempt.authorityDigest === authorityDigest
+            && importedAttempt.authorityJson === JSON.stringify(claim.authority);
+          if (!exact) throw new HostedImportConflictError("HOSTED_IMPORT_RUN_CONFLICT");
+          if (claimOperation.state !== "claimed" || claimOperation.runId !== claim.runId) {
+            throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
+          }
+          const runRow = tx.select().from(runs).where(eq(runs.id, claim.runId)).limit(1).get();
+          const attemptRow = tx.select().from(attempts).where(eq(attempts.id, claim.attempt.id)).limit(1).get();
+          if (runRow && attemptRow && runRow.currentAttemptId !== claim.attempt.id) {
+            const currentHostedAttempt = runRow.currentAttemptId
+              ? tx.select().from(hostedAttemptImports)
+                  .where(eq(hostedAttemptImports.attemptId, runRow.currentAttemptId)).limit(1).get()
+              : undefined;
+            if (
+              !currentHostedAttempt
+              || runRow.eventId !== event.id
+              || runRow.workThreadId !== existingImport.workThreadId
+              || attemptRow.runId !== claim.runId
+              || attemptRow.number !== claim.attempt.number
+              || attemptRow.runnerId !== claim.runnerId
+              || attemptRow.selectedExecutorId !== claim.executorId
+              || attemptRow.fencingToken !== claim.attempt.fencingToken
+              || attemptRow.leaseExpiresAt !== claim.attempt.leaseExpiresAt
+            ) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+            }
+            return {
+              outcome: "replayed" as const,
+              importRow: existingImport,
+              attemptImportRow: importedAttempt,
+              runRow,
+              executionStartedAt: claimOperation.executionStartedAt,
+              superseded: true
+            };
+          }
+          if (
+            runRow && attemptRow
+            && (runRow.status !== "assigned" || attemptRow.status !== "assigned")
+          ) {
+            if (
+              !claimOperation.executionStartedAt
+              || runRow.eventId !== event.id
+              || runRow.workThreadId !== existingImport.workThreadId
+              || attemptRow.runId !== claim.runId
+              || attemptRow.number !== claim.attempt.number
+              || attemptRow.runnerId !== claim.runnerId
+              || attemptRow.selectedExecutorId !== claim.executorId
+              || attemptRow.fencingToken !== claim.attempt.fencingToken
+              || attemptRow.leaseExpiresAt !== claim.attempt.leaseExpiresAt
+            ) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+            }
+            return {
+              outcome: "replayed" as const,
+              importRow: existingImport,
+              attemptImportRow: importedAttempt,
+              runRow,
+              executionStartedAt: claimOperation.executionStartedAt,
+              superseded: false
+            };
+          }
+          if (
+            !runRow || !attemptRow
+            || runRow.status !== "assigned"
+            || runRow.eventId !== event.id
+            || runRow.assignedRunnerId !== claim.runnerId
+            || runRow.executor !== claim.executorId
+            || runRow.currentAttemptId !== claim.attempt.id
+            || runRow.leaseExpiresAt !== claim.attempt.leaseExpiresAt
+            || runRow.workThreadId !== existingImport.workThreadId
+            || attemptRow.runId !== claim.runId
+            || attemptRow.number !== claim.attempt.number
+            || attemptRow.runnerId !== claim.runnerId
+            || attemptRow.selectedExecutorId !== claim.executorId
+            || attemptRow.fencingToken !== claim.attempt.fencingToken
+            || attemptRow.leaseExpiresAt !== claim.attempt.leaseExpiresAt
+            || attemptRow.status !== "assigned"
+          ) {
+            throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+          }
+          return {
+            outcome: "replayed" as const,
+            importRow: existingImport,
+            attemptImportRow: importedAttempt,
+            runRow,
+            executionStartedAt: claimOperation.executionStartedAt,
+            superseded: false
+          };
+        }
+
+        if (!claimAuthorityAvailable) {
+          throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+        }
+
+        if (tx.select({ id: runs.id }).from(runs).where(or(eq(runs.id, claim.runId), eq(runs.eventId, event.id))).limit(1).get()) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_RUN_CONFLICT");
+        }
+        if (tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+          .where(eq(hostedRunImports.admissionId, admission.admissionId)).limit(1).get()) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_ADMISSION_CONFLICT");
+        }
+        if (tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports).where(or(
+          eq(hostedRunImports.claimOperationId, claim.operationId),
+          eq(hostedRunImports.claimOperationId, admission.operationId),
+          eq(hostedRunImports.admissionOperationId, claim.operationId),
+          eq(hostedRunImports.admissionOperationId, admission.operationId)
+        )).limit(1).get()) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_OPERATION_CONFLICT");
+        }
+        const collidingAttempt = tx.select().from(attempts).where(or(
+          eq(attempts.id, claim.attempt.id),
+          and(eq(attempts.runId, claim.runId), eq(attempts.number, claim.attempt.number))
+        )).limit(1).get();
+        if (collidingAttempt) throw new HostedImportConflictError("HOSTED_IMPORT_ATTEMPT_CONFLICT");
+        if (tx.select({ id: attempts.id }).from(attempts)
+          .where(eq(attempts.fencingToken, claim.attempt.fencingToken)).limit(1).get()
+          || tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+            .where(eq(hostedRunImports.fencingTokenDigest, claim.attempt.fencingTokenDigest)).limit(1).get()
+          || tx.select({ attemptId: hostedAttemptImports.attemptId }).from(hostedAttemptImports)
+            .where(eq(hostedAttemptImports.fencingTokenDigest, claim.attempt.fencingTokenDigest)).limit(1).get()) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_FENCE_CONFLICT");
+        }
+        const sourceCollision = tx.select().from(hostedRunImports).where(
+          eq(hostedRunImports.sourceIdentityDigest, admission.sourceIdentityDigest)
+        ).limit(1).get();
+        if (sourceCollision) throw new HostedImportConflictError("HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT");
+        const deliveryCollision = tx.select().from(sourceDeliveries).where(and(
+          eq(sourceDeliveries.source, event.source),
+          eq(sourceDeliveries.deliveryId, admission.deliveryId)
+        )).limit(1).get();
+        if (deliveryCollision) throw new HostedImportConflictError("HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT");
+        if (tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+          .where(eq(hostedRunImports.authorityDigest, authorityDigest)).limit(1).get()
+          || tx.select({ attemptId: hostedAttemptImports.attemptId }).from(hostedAttemptImports)
+            .where(eq(hostedAttemptImports.authorityDigest, authorityDigest)).limit(1).get()) {
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
+
+        let durableThread: DurableWorkThread | undefined;
+        if (protocolFields.thread) {
+          const canonicalKey = workThreadCanonicalKey(protocolFields.thread);
+          const existingThread = tx.select().from(workThreads).where(and(
+            eq(workThreads.scopeId, "local"),
+            eq(workThreads.canonicalKey, canonicalKey)
+          )).limit(1).get();
+          if (existingThread) {
+            let current: DurableWorkThread;
+            try {
+              current = workThreadFromRow(existingThread);
+            } catch {
+              throw new HostedImportConflictError("HOSTED_IMPORT_WORK_THREAD_CONFLICT");
+            }
+            durableThread = mergeWorkThreadAnchors(current, protocolFields.thread);
+            if (workThreadCanonicalKey(durableThread) !== canonicalKey) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_WORK_THREAD_CONFLICT");
+            }
+            const mergedJson = JSON.stringify(durableThread);
+            if (mergedJson !== existingThread.threadJson) {
+              tx.update(workThreads).set({ threadJson: mergedJson, updatedAt: importedAt })
+                .where(eq(workThreads.id, existingThread.id)).run();
+            }
+          } else {
+            const id = protocolFields.thread.id ?? `thread_${randomUUID()}`;
+            if (tx.select({ id: workThreads.id }).from(workThreads).where(eq(workThreads.id, id)).limit(1).get()) {
+              throw new HostedImportConflictError("HOSTED_IMPORT_WORK_THREAD_CONFLICT");
+            }
+            durableThread = WorkThreadSchema.parse({ ...protocolFields.thread, id }) as DurableWorkThread;
+            tx.insert(workThreads).values({
+              id,
+              scopeId: "local",
+              canonicalKey,
+              provider: durableThread.workItemReference.provider,
+              ownerContainerId: durableThread.workItemReference.ownerContainer?.id ?? "",
+              workItemKind: durableThread.workItemReference.kind,
+              externalId: durableThread.workItemReference.externalId,
+              threadJson: JSON.stringify(durableThread),
+              currentAssessmentId: null,
+              createdAt: importedAt,
+              updatedAt: importedAt
+            }).run();
+          }
+        }
+
+        tx.insert(runs).values({
+          id: claim.runId,
+          eventId: event.id,
+          status: "assigned",
+          eventJson: JSON.stringify(event),
+          contextPacketJson: JSON.stringify(protocolFields.contextPacket),
+          assignedRunnerId: claim.runnerId,
+          executor: claim.executorId,
+          repoProvider: projectTarget.provider,
+          repoOwner: projectTarget.owner,
+          repoName: projectTarget.repo,
+          workThreadId: durableThread?.id ?? null,
+          conversationKey: conversationKeyFromEvent(event),
+          leasedAt: importedAt,
+          leaseExpiresAt: claim.attempt.leaseExpiresAt,
+          heartbeatAt: importedAt,
+          currentAttemptId: claim.attempt.id,
+          routingPolicyJson: JSON.stringify({ runnerIds: [claim.runnerId], executorIds: [claim.executorId] }),
+          routingRunnerIdsJson: JSON.stringify([claim.runnerId]),
+          routingExecutorIdsJson: JSON.stringify([claim.executorId]),
+          routingRejectionsJson: "[]",
+          createdAt: importedAt,
+          updatedAt: importedAt
+        }).run();
+        tx.insert(attempts).values({
+          id: claim.attempt.id,
+          runId: claim.runId,
+          number: claim.attempt.number,
+          runnerId: claim.runnerId,
+          runnerLocality: "hosted",
+          selectedExecutorId: claim.executorId,
+          fencingToken: claim.attempt.fencingToken,
+          status: "assigned",
+          startedAt: importedAt,
+          heartbeatAt: importedAt,
+          leaseExpiresAt: claim.attempt.leaseExpiresAt,
+          createdAt: importedAt,
+          updatedAt: importedAt
+        }).run();
+        tx.insert(sourceDeliveries).values({
+          source: event.source,
+          deliveryId: admission.deliveryId,
+          runId: claim.runId,
+          eventId: event.id,
+          createdAt: importedAt
+        }).run();
+        tx.insert(hostedRunImports).values({
+          runId: claim.runId,
+          admissionId: admission.admissionId,
+          admissionOperationId: admission.operationId,
+          claimOperationId: claim.operationId,
+          attemptId: claim.attempt.id,
+          fencingTokenDigest: claim.attempt.fencingTokenDigest,
+          sourceIdentityDigest: admission.sourceIdentityDigest,
+          deliveryPayloadDigest: admission.deliveryPayloadDigest,
+          admissionEnvelopeDigest: admission.envelopeDigest,
+          policyReceiptId: claim.admissionPolicySnapshot.receiptId,
+          policyPayloadDigest: claim.admissionPolicySnapshot.payloadDigest,
+          policyReceiptDigest: claim.admissionPolicySnapshot.receiptDigest,
+          eventDigest,
+          contextPacketDigest,
+          workThreadId: durableThread?.id ?? null,
+          workThreadDigest: incomingWorkThreadDigest,
+          claimDigest,
+          authorityDigest,
+          authorityJson: JSON.stringify(claim.authority),
+          importedAt
+        }).run();
+        tx.insert(hostedAttemptImports).values({
+          attemptId: claim.attempt.id,
+          runId: claim.runId,
+          attemptNumber: claim.attempt.number,
+          claimOperationId: claim.operationId,
+          fencingTokenDigest: claim.attempt.fencingTokenDigest,
+          claimDigest,
+          authorityDigest,
+          authorityJson: JSON.stringify(claim.authority),
+          importedAt
+        }).run();
+        if (!exactAuthorityShell) {
+          const acknowledged = tx.update(hostedClaimOperations).set({
+            state: "claimed",
+            activeKey: null,
+            runId: claim.runId,
+            updatedAt: importedAt,
+            acknowledgedAt: importedAt
+          }).where(and(
+            eq(hostedClaimOperations.operationId, claim.operationId),
+            eq(hostedClaimOperations.state, "pending")
+          )).run();
+          if (acknowledged.changes !== 1) {
+            throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+          }
+        } else {
+          tx.update(hostedClaimOperations).set({ activeKey: null, updatedAt: importedAt })
+            .where(eq(hostedClaimOperations.operationId, claim.operationId)).run();
+        }
+        tx.insert(runEvents).values([
+          runEventValues({
+            runId: claim.runId,
+            type: "run.hosted_imported",
+            payload: {
+              admissionId: admission.admissionId,
+              admissionEnvelopeDigest: admission.envelopeDigest,
+              claimOperationId: claim.operationId,
+              authorityDigest,
+              attemptId: claim.attempt.id,
+              attemptNumber: claim.attempt.number
+            },
+            visibility: "audit",
+            importance: "high",
+            createdAt: importedAt
+          }),
+          runEventValues({
+            runId: claim.runId,
+            type: "context_packet.generated",
+            payload: { contextPacket: protocolFields.contextPacket, ...(durableThread ? { thread: durableThread } : {}) },
+            visibility: "audit",
+            importance: "normal",
+            message: protocolFields.contextPacket.summary,
+            createdAt: importedAt
+          })
+        ]).run();
+        const runRow = tx.select().from(runs).where(eq(runs.id, claim.runId)).limit(1).get();
+        if (!runRow) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        return {
+          outcome: "created" as const,
+          importRow: tx.select().from(hostedRunImports).where(eq(hostedRunImports.runId, claim.runId)).limit(1).get()!,
+          attemptImportRow: tx.select().from(hostedAttemptImports)
+            .where(eq(hostedAttemptImports.attemptId, claim.attempt.id)).limit(1).get()!,
+          runRow,
+          executionStartedAt: null,
+          superseded: false
+        };
+      });
+
+      const storedEvent = OpenTagEventSchema.parse(JSON.parse(result.runRow.eventJson));
+      const hostedAuthority: HostedImportAuthority = {
+        ...(JSON.parse(result.attemptImportRow.authorityJson) as HostedClaimV1["authority"]),
+        admissionId: result.importRow.admissionId,
+        admissionOperationId: result.importRow.admissionOperationId,
+        claimOperationId: result.attemptImportRow.claimOperationId,
+        admissionEnvelopeDigest: result.importRow.admissionEnvelopeDigest,
+        sourceIdentityDigest: result.importRow.sourceIdentityDigest,
+        deliveryPayloadDigest: result.importRow.deliveryPayloadDigest,
+        policyReceiptId: result.importRow.policyReceiptId,
+        policyPayloadDigest: result.importRow.policyPayloadDigest,
+        policyReceiptDigest: result.importRow.policyReceiptDigest,
+        eventDigest: result.importRow.eventDigest,
+        contextPacketDigest: result.importRow.contextPacketDigest,
+        ...(result.importRow.workThreadId ? { workThreadId: result.importRow.workThreadId } : {}),
+        ...(result.importRow.workThreadDigest ? { workThreadDigest: result.importRow.workThreadDigest } : {}),
+        claimDigest: result.attemptImportRow.claimDigest,
+        authorityDigest: result.attemptImportRow.authorityDigest,
+        importedAt: result.attemptImportRow.importedAt
+      };
+      return {
+        outcome: result.outcome,
+        executionState: terminalRunStatus(result.runRow.status)
+          ? "terminal"
+          : result.superseded
+            ? "superseded"
+            : result.executionStartedAt
+            ? "already_started"
+            : "ready_to_start",
+        executionMayStart: false,
+        claimed: result.superseded || result.executionStartedAt || terminalRunStatus(result.runRow.status) ? null : {
+          run: runFromRow(result.runRow),
+          event: storedEvent,
+          attemptId: claim.attempt.id,
+          attemptNumber: claim.attempt.number,
+          fencingToken: claim.attempt.fencingToken,
+          executorId: claim.executorId
+        },
+        hostedAuthority
+      };
+    },
+
     async createRun(input: {
       id: string;
       event: OpenTagEvent;
@@ -5511,7 +11636,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .where(and(
           inArray(runs.status, ["assigned", "running", "needs_approval"]),
           isNotNull(runs.leaseExpiresAt),
-          lte(runs.leaseExpiresAt, now.toISOString())
+          lte(runs.leaseExpiresAt, now.toISOString()),
+          notExists(db.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+            .where(eq(hostedRunImports.runId, runs.id)))
         ))
         .orderBy(asc(runs.leaseExpiresAt), asc(runs.createdAt), asc(runs.id))
         .limit(EXPIRED_LEASE_RECOVERY_LIMIT);
@@ -5520,7 +11647,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const updatedAt = nowIso();
         const interrupted = db.transaction((tx) => {
           const current = tx.select().from(runs).where(eq(runs.id, activeRow.id)).limit(1).get();
-          if (!current || !isIsoExpired(current.leaseExpiresAt, now) || !["assigned", "running", "needs_approval"].includes(current.status)) {
+          const hosted = tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+            .where(eq(hostedRunImports.runId, activeRow.id)).limit(1).get();
+          if (hosted || !current || !isIsoExpired(current.leaseExpiresAt, now) || !["assigned", "running", "needs_approval"].includes(current.status)) {
             return false;
           }
           if (current.currentAttemptId) {
@@ -5588,20 +11717,27 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           claimCursorRunId: runners.claimCursorRunId
         }).from(runners).where(eq(runners.runnerId, input.runnerId)).limit(1).get();
         const hasCursor = Boolean(caller?.claimCursorCreatedAt && caller.claimCursorRunId);
+        const isNotHostedRun = notExists(
+          tx.select({ runId: hostedRunImports.runId })
+            .from(hostedRunImports)
+            .where(eq(hostedRunImports.runId, runs.id))
+        );
         const queuedAfterCursor = hasCursor
           ? tx.select().from(runs).where(and(
               eq(runs.status, "queued"),
+              isNotHostedRun,
               or(
                 gt(runs.createdAt, caller!.claimCursorCreatedAt!),
                 and(eq(runs.createdAt, caller!.claimCursorCreatedAt!), gt(runs.id, caller!.claimCursorRunId!))
               )
             )).orderBy(asc(runs.createdAt), asc(runs.id)).limit(CLAIM_SCAN_LIMIT).all()
-          : tx.select().from(runs).where(eq(runs.status, "queued"))
+          : tx.select().from(runs).where(and(eq(runs.status, "queued"), isNotHostedRun))
               .orderBy(asc(runs.createdAt), asc(runs.id)).limit(CLAIM_SCAN_LIMIT).all();
         const remainingWindow = CLAIM_SCAN_LIMIT - queuedAfterCursor.length;
         const queuedBeforeCursor = hasCursor && remainingWindow > 0
           ? tx.select().from(runs).where(and(
               eq(runs.status, "queued"),
+              isNotHostedRun,
               or(
                 lt(runs.createdAt, caller!.claimCursorCreatedAt!),
                 and(eq(runs.createdAt, caller!.claimCursorCreatedAt!), lte(runs.id, caller!.claimCursorRunId!))
@@ -6310,15 +12446,77 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return "running";
     },
 
-    async completeRun(input: {
+    async completeHostedRunLocally(input: {
       runId: string;
       result: OpenTagRunResult;
       humanEscalation?: HumanEscalation;
-      runnerId?: string;
-      attemptId?: string;
-      fencingToken?: string;
+      runnerId: string;
+      attemptId: string;
+      fencingToken: string;
       idempotencyKey?: string;
+      destinationId: string;
+      organizationId: string;
+      credentialId: string;
+      request: HostedCompleteRequestV1;
     }): Promise<CompleteRunOutcome> {
+      const request = HostedCompleteRequestV1Schema.parse(input.request);
+      const requestDigest = await computeHostedLifecycleRequestDigestV1({
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        action: "complete",
+        request
+      });
+      const requestId = await computeHostedLifecycleRequestIdV1({
+        operationId: request.operationId,
+        requestDigest: request.requestDigest
+      });
+      const operationId = computeHostedLifecycleOperationIdV1(
+        request.requestDigest,
+      );
+      if (
+        request.requestDigest !== requestDigest
+        || request.requestId !== requestId
+        || request.operationId !== operationId
+        || request.attempt.attemptId !== input.attemptId
+        || await computeHostedClaimFencingTokenDigestV1(input.fencingToken)
+          !== request.attempt.fencingTokenDigest
+      ) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_INVALID");
+      return completeRunWithHostedLifecycle({
+        runId: input.runId,
+        result: input.result,
+        ...(input.humanEscalation ? { humanEscalation: input.humanEscalation } : {}),
+        runnerId: input.runnerId,
+        attemptId: input.attemptId,
+        fencingToken: input.fencingToken,
+        ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+      }, {
+          destinationId: input.destinationId,
+          organizationId: input.organizationId,
+          runnerId: input.runnerId,
+          credentialId: input.credentialId,
+          request,
+          requestJson: canonicalJsonStringify(request),
+          businessKeyDigest: canonicalSha256Json({
+            destinationId: input.destinationId,
+            organizationId: input.organizationId,
+            runnerId: input.runnerId,
+            credentialId: input.credentialId,
+            runId: input.runId,
+            attemptId: request.attempt.attemptId,
+            attemptNumber: request.attempt.attemptNumber,
+            action: "complete",
+            discriminator: "single_action_per_attempt"
+          })
+        }
+      );
+    },
+
+    completeRun: (() => {
+      const completeRunInternal = async (
+        input: CompleteRunInput,
+        hostedLifecycleOperation?: HostedCompletionLifecycleOperation,
+      ): Promise<CompleteRunOutcome> => {
       const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
       const safeIdempotencyKey = safeInput.idempotencyKey;
       const parsedResult = OpenTagRunResultSchema.parse(safeInput.result);
@@ -6352,13 +12550,22 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ? {
               artifacts: parsedResult.artifacts.map((artifact, index) => ({
                 ...artifact,
-                id: artifact.id ?? `${input.runId}:artifact:${index + 1}`,
+                id: artifact.id ?? runResultArtifactId(input.runId, index),
                 sourceRunId: input.runId,
                 createdAt: artifact.createdAt ?? updatedAt
               }))
             }
           : {})
       });
+      if (
+        hostedLifecycleOperation
+        && hostedLifecycleOperation.request.resultDigest
+          !== await computeControlPayloadDigestV1(result)
+      ) {
+        throw new HostedLifecycleOperationConflictError(
+          "HOSTED_LIFECYCLE_OPERATION_INVALID",
+        );
+      }
       const status =
         result.conclusion === "success"
           ? "succeeded"
@@ -6375,6 +12582,66 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       if (!runRow) {
         if (input.runnerId) return "not_found";
         throw new Error(`Run not found: ${input.runId}`);
+      }
+      let hasExactHostedLifecycleReplay = false;
+      if (hostedLifecycleOperation) {
+        const lifecycle = hostedLifecycleOperation;
+        const request = lifecycle.request;
+        const [attempt, importedAttempt] = await Promise.all([
+          db.select().from(attempts).where(eq(attempts.id, input.attemptId!)).limit(1).get(),
+          db.select().from(hostedAttemptImports)
+            .where(eq(hostedAttemptImports.attemptId, input.attemptId!)).limit(1).get(),
+        ]);
+        if (
+          !attempt
+          || !importedAttempt
+          || attempt.number !== request.attempt.attemptNumber
+          || importedAttempt.attemptNumber !== request.attempt.attemptNumber
+          || request.attempt.epoch !== request.attempt.attemptNumber
+        ) {
+          throw new HostedLifecycleOperationConflictError(
+            "HOSTED_LIFECYCLE_OPERATION_INVALID",
+          );
+        }
+        const existing = await db.select().from(hostedLifecycleOperations).where(or(
+          and(
+            eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+            eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+            eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+            eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+            eq(hostedLifecycleOperations.operationId, request.operationId)
+          ),
+          and(
+            eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+            eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+            eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+            eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+            eq(hostedLifecycleOperations.requestId, request.requestId)
+          ),
+          and(
+            eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+            eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+            eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+            eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+            eq(hostedLifecycleOperations.businessKeyDigest, lifecycle.businessKeyDigest)
+          )
+        )).limit(1).get();
+        if (existing) {
+          hasExactHostedLifecycleReplay = existing.requestId === request.requestId
+            && existing.action === "complete"
+            && existing.runId === input.runId
+            && existing.attemptId === request.attempt.attemptId
+            && existing.attemptNumber === request.attempt.attemptNumber
+            && existing.fencingTokenDigest === request.attempt.fencingTokenDigest
+            && existing.requestDigest === request.requestDigest
+            && existing.businessKeyDigest === lifecycle.businessKeyDigest
+            && existing.requestJson === lifecycle.requestJson;
+          if (!hasExactHostedLifecycleReplay) {
+            throw new HostedLifecycleOperationConflictError(
+              "HOSTED_LIFECYCLE_OPERATION_CONFLICT",
+            );
+          }
+        }
       }
       if (humanEscalation) {
         if (result.conclusion !== "needs_human") {
@@ -6403,6 +12670,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             completedAttempt.runnerId === input.runnerId &&
             completedAttempt.fencingToken === input.fencingToken &&
             releasedTerminalAttemptMatchesRun(completedAttempt, runRow);
+          if (
+            duplicateTerminalAttempt
+            && hostedLifecycleOperation
+            && !hasExactHostedLifecycleReplay
+          ) {
+            throw new HostedLifecycleOperationConflictError(
+              "HOSTED_LIFECYCLE_OPERATION_CONFLICT",
+            );
+          }
           if (duplicateTerminalAttempt && status === runRow.status) return "duplicate";
           if (duplicateTerminalAttempt && safeIdempotencyKey) {
             const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
@@ -6424,6 +12700,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         }
       }
       if (terminalRunStatus(runRow.status)) {
+        if (hostedLifecycleOperation && !hasExactHostedLifecycleReplay) {
+          throw new HostedLifecycleOperationConflictError(
+            "HOSTED_LIFECYCLE_OPERATION_CONFLICT",
+          );
+        }
         return input.runnerId ? "duplicate" : "not_found";
       }
       const runThread = runRow ? protocolRunFieldsFromEvent(OpenTagEventSchema.parse(JSON.parse(runRow.eventJson)), runRow.createdAt).thread : undefined;
@@ -6515,6 +12796,48 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             return "stale_attempt" as const;
           }
           if (releasedTerminalAttemptMatchesRun(currentAttempt, currentRun)) {
+            if (hostedLifecycleOperation) {
+              const lifecycle = hostedLifecycleOperation;
+              const request = lifecycle.request;
+              const existing = tx.select().from(hostedLifecycleOperations).where(or(
+                and(
+                  eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+                  eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+                  eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+                  eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+                  eq(hostedLifecycleOperations.operationId, request.operationId)
+                ),
+                and(
+                  eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+                  eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+                  eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+                  eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+                  eq(hostedLifecycleOperations.requestId, request.requestId)
+                ),
+                and(
+                  eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+                  eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+                  eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+                  eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+                  eq(hostedLifecycleOperations.businessKeyDigest, lifecycle.businessKeyDigest)
+                )
+              )).limit(1).get();
+              const exact = existing
+                && existing.requestId === request.requestId
+                && existing.action === "complete"
+                && existing.runId === input.runId
+                && existing.attemptId === request.attempt.attemptId
+                && existing.attemptNumber === request.attempt.attemptNumber
+                && existing.fencingTokenDigest === request.attempt.fencingTokenDigest
+                && existing.requestDigest === request.requestDigest
+                && existing.businessKeyDigest === lifecycle.businessKeyDigest
+                && existing.requestJson === lifecycle.requestJson;
+              if (!exact) {
+                throw new HostedLifecycleOperationConflictError(
+                  "HOSTED_LIFECYCLE_OPERATION_CONFLICT",
+                );
+              }
+            }
             return status === currentRun.status ? ("duplicate" as const) : ("stale_attempt" as const);
           }
           if (currentAttempt.status !== "assigned" && currentAttempt.status !== "running") {
@@ -6643,11 +12966,96 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             createdAt: updatedAt
           })).onConflictDoNothing().run();
         }
+        if (hostedLifecycleOperation) {
+          const lifecycle = hostedLifecycleOperation;
+          const request = lifecycle.request;
+          const existing = tx.select().from(hostedLifecycleOperations).where(or(
+            and(
+              eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+              eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+              eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+              eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+              eq(hostedLifecycleOperations.operationId, request.operationId)
+            ),
+            and(
+              eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+              eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+              eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+              eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+              eq(hostedLifecycleOperations.requestId, request.requestId)
+            ),
+            and(
+              eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+              eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+              eq(hostedLifecycleOperations.runnerId, lifecycle.runnerId),
+              eq(hostedLifecycleOperations.credentialId, lifecycle.credentialId),
+              eq(hostedLifecycleOperations.businessKeyDigest, lifecycle.businessKeyDigest)
+            )
+          )).limit(1).get();
+          if (existing) {
+            const exact = existing.requestId === request.requestId
+              && existing.action === "complete"
+              && existing.runId === input.runId
+              && existing.attemptId === request.attempt.attemptId
+              && existing.attemptNumber === request.attempt.attemptNumber
+              && existing.fencingTokenDigest === request.attempt.fencingTokenDigest
+              && existing.requestDigest === request.requestDigest
+              && existing.businessKeyDigest === lifecycle.businessKeyDigest
+              && existing.requestJson === lifecycle.requestJson;
+            if (!exact) throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_CONFLICT");
+          } else {
+            const terminal = tx.select({ operationId: hostedLifecycleOperations.operationId })
+              .from(hostedLifecycleOperations).where(and(
+                eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+                eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+                eq(hostedLifecycleOperations.runId, input.runId),
+                eq(hostedLifecycleOperations.attemptId, request.attempt.attemptId),
+                inArray(hostedLifecycleOperations.action, ["complete", "reject-start"])
+              )).limit(1).get();
+            if (terminal) {
+              throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_CONFLICT");
+            }
+            const sequenceRow = tx.select({
+              value: sql<number>`coalesce(max(${hostedLifecycleOperations.sequence}), 0)`
+            }).from(hostedLifecycleOperations).where(and(
+              eq(hostedLifecycleOperations.destinationId, lifecycle.destinationId),
+              eq(hostedLifecycleOperations.organizationId, lifecycle.organizationId),
+              eq(hostedLifecycleOperations.runId, input.runId),
+              eq(hostedLifecycleOperations.attemptId, request.attempt.attemptId)
+            )).get();
+            tx.insert(hostedLifecycleOperations).values({
+              destinationId: lifecycle.destinationId,
+              organizationId: lifecycle.organizationId,
+              runnerId: lifecycle.runnerId,
+              credentialId: lifecycle.credentialId,
+              operationId: request.operationId,
+              requestId: request.requestId,
+              action: "complete",
+              runId: input.runId,
+              attemptId: request.attempt.attemptId,
+              attemptNumber: request.attempt.attemptNumber,
+              fencingTokenDigest: request.attempt.fencingTokenDigest,
+              requestDigest: request.requestDigest,
+              businessKeyDigest: lifecycle.businessKeyDigest,
+              sequence: Number(sequenceRow?.value ?? 0) + 1,
+              requestJson: lifecycle.requestJson,
+              state: "pending",
+              attemptCount: 0,
+              nextAttemptAt: updatedAt,
+              createdAt: updatedAt,
+              updatedAt
+            }).run();
+          }
+        }
         return "completed" as const;
       });
       if (completionOutcome !== "completed") return completionOutcome;
       return "completed";
-    },
+      };
+      completeRunWithHostedLifecycle = (input, lifecycle) =>
+        completeRunInternal(input, lifecycle);
+      return (input: CompleteRunInput) => completeRunInternal(input);
+    })(),
 
     async requestActionPermission(input: {
       runnerId: string;
@@ -7954,6 +14362,1594 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .sort((left, right) => right.count - left.count || left.id.localeCompare(right.id));
     },
 
+    async getGovernedCallbackEnqueueContext(input: {
+      runId: string;
+      assessmentId: string;
+    }): Promise<GetGovernedCallbackEnqueueContextResult> {
+      return db.transaction((tx) => {
+        const importedRun = tx.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, input.runId)).all();
+        const assessmentRows = tx.select().from(completionAssessments)
+          .where(eq(completionAssessments.id, input.assessmentId)).all();
+        if (importedRun.length === 0) {
+          return { outcome: "not_found" } as const;
+        }
+        if (importedRun.length !== 1 || assessmentRows.length !== 1) {
+          return { outcome: "authority_conflict" } as const;
+        }
+
+        const imported = importedRun[0]!;
+        const assessmentRow = assessmentRows[0]!;
+        try {
+          if (!imported.workThreadId) governedCallbackEnqueueConflict();
+          const runRows = tx.select().from(runs).where(and(
+            eq(runs.id, input.runId),
+            eq(runs.workThreadId, imported.workThreadId)
+          )).all();
+          const threadRows = tx.select().from(workThreads).where(and(
+            eq(workThreads.id, imported.workThreadId),
+            eq(workThreads.currentAssessmentId, input.assessmentId)
+          )).all();
+          const attemptRows = tx.select().from(hostedAttemptImports).where(and(
+            eq(hostedAttemptImports.attemptId, imported.attemptId),
+            eq(hostedAttemptImports.runId, imported.runId),
+            eq(hostedAttemptImports.claimOperationId, imported.claimOperationId),
+            eq(hostedAttemptImports.fencingTokenDigest, imported.fencingTokenDigest)
+          )).all();
+          if (runRows.length !== 1 || threadRows.length !== 1 || attemptRows.length !== 1) {
+            governedCallbackEnqueueConflict();
+          }
+          const run = runRows[0]!;
+          const importedAttempt = attemptRows[0]!;
+          const authority = governedCallbackEnqueueAuthorityFromJson(imported.authorityJson);
+          const actualAttemptRows = tx.select().from(attempts).where(and(
+            eq(attempts.id, authority.attemptId),
+            eq(attempts.runId, authority.runId)
+          )).all();
+          if (actualAttemptRows.length !== 1) governedCallbackEnqueueConflict();
+          const actualAttempt = actualAttemptRows[0]!;
+          const actualFencingTokenDigest = `sha256:${createHash("sha256")
+            .update(actualAttempt.fencingToken)
+            .digest("hex")}`;
+          const claimRows = tx.select().from(hostedClaimOperations).where(and(
+            eq(hostedClaimOperations.operationId, imported.claimOperationId),
+            eq(hostedClaimOperations.organizationId, authority.organizationId),
+            eq(hostedClaimOperations.runnerId, authority.runnerId),
+            eq(hostedClaimOperations.runId, imported.runId),
+            eq(hostedClaimOperations.credentialId, authority.credentialId),
+            eq(hostedClaimOperations.attemptId, imported.attemptId),
+            eq(hostedClaimOperations.attemptNumber, importedAttempt.attemptNumber),
+            eq(hostedClaimOperations.fencingTokenDigest, imported.fencingTokenDigest),
+            eq(hostedClaimOperations.state, "claimed"),
+            isNotNull(hostedClaimOperations.executionStartedAt),
+            isNull(hostedClaimOperations.terminalReasonCode)
+          )).all();
+          if (claimRows.length !== 1) governedCallbackEnqueueConflict();
+          const claim = claimRows[0]!;
+          const completionRows = tx.select().from(hostedLifecycleOperations).where(and(
+            eq(hostedLifecycleOperations.destinationId, claim.destinationId),
+            eq(hostedLifecycleOperations.organizationId, authority.organizationId),
+            eq(hostedLifecycleOperations.runnerId, authority.runnerId),
+            eq(hostedLifecycleOperations.credentialId, authority.credentialId),
+            eq(hostedLifecycleOperations.action, "complete"),
+            eq(hostedLifecycleOperations.runId, imported.runId),
+            eq(hostedLifecycleOperations.attemptId, imported.attemptId),
+            eq(hostedLifecycleOperations.attemptNumber, importedAttempt.attemptNumber),
+            eq(hostedLifecycleOperations.fencingTokenDigest, imported.fencingTokenDigest),
+            eq(hostedLifecycleOperations.state, "acknowledged")
+          )).all();
+          if (completionRows.length !== 1) {
+            governedCallbackEnqueueConflict();
+          }
+          const completion = completionRows[0]!;
+          if (!validAcknowledgedLifecycleDependency(completion)) {
+            governedCallbackEnqueueConflict();
+          }
+
+          const projectionIdentity = {
+            namespace: "opentag.control.receipt/completion-assessment/v1",
+            parts: [authority.organizationId, imported.workThreadId, input.assessmentId]
+          };
+          const projectionRows = tx.select().from(controlPlaneProjectionOutbox).where(and(
+            eq(controlPlaneProjectionOutbox.destinationId, claim.destinationId),
+            eq(controlPlaneProjectionOutbox.organizationId, authority.organizationId),
+            eq(controlPlaneProjectionOutbox.runId, imported.runId),
+            eq(controlPlaneProjectionOutbox.workThreadId, imported.workThreadId),
+            eq(controlPlaneProjectionOutbox.receiptKind, "completion_assessment"),
+            eq(controlPlaneProjectionOutbox.identityKey,
+              canonicalSha256Json(projectionIdentity))
+          )).all();
+          if (projectionRows.length !== 1) {
+            governedCallbackEnqueueConflict();
+          }
+          const projection = governedCallbackEnqueueProjectionFromRow(projectionRows[0]!);
+          if (projection.envelope.receiptKind !== "completion_assessment") {
+            governedCallbackEnqueueConflict();
+          }
+          const envelope = projection.envelope;
+          const assessment = parseGovernedCallbackEnqueueSchema(
+            CompletionAssessmentSchema,
+            assessmentRow.assessmentJson
+          );
+          const completionRequest = parseGovernedCallbackEnqueueSchema(
+            HostedCompleteRequestV1Schema,
+            completion.requestJson
+          );
+          const completionReceipt = parseGovernedCallbackEnqueueSchema(
+            HostedLifecycleReceiptEnvelopeV1Schema,
+            completion.receiptJson!
+          );
+          if (!run.resultJson || !actualAttempt.resultJson) {
+            governedCallbackEnqueueConflict();
+          }
+          const runResult = parseGovernedCallbackEnqueueSchema(
+            OpenTagRunResultSchema,
+            run.resultJson
+          );
+          const attemptResult = parseGovernedCallbackEnqueueSchema(
+            OpenTagRunResultSchema,
+            actualAttempt.resultJson
+          );
+          const expectedRunStatus = runResult.conclusion === "success"
+            ? "succeeded"
+            : runResult.conclusion === "failure"
+              ? "failed"
+              : runResult.conclusion === "needs_human"
+                ? "needs_approval"
+                : runResult.conclusion;
+          const expectedAttemptStatus = runResult.conclusion === "success"
+            ? "succeeded"
+            : runResult.conclusion === "failure"
+              ? "failed"
+              : runResult.conclusion === "needs_human"
+                ? "needs_human"
+                : runResult.conclusion;
+          const executorResultRef = envelope.payload.executorResultReceiptRef;
+          if (
+            assessmentRow.workThreadId !== imported.workThreadId
+            || actualAttempt.runId !== authority.runId
+            || actualAttempt.runnerId !== authority.runnerId
+            || actualAttempt.number !== authority.attemptNumber
+            || actualFencingTokenDigest !== authority.fencingTokenDigest
+            || !releasedTerminalAttemptMatchesRun(actualAttempt, run)
+            || run.status !== expectedRunStatus
+            || actualAttempt.status !== expectedAttemptStatus
+            || completionRequest.conclusion !== runResult.conclusion
+            || canonicalJsonStringify(runResult) !== canonicalJsonStringify(attemptResult)
+            || canonicalSha256Json(runResult) !== completionRequest.resultDigest
+            || canonicalSha256Json(attemptResult) !== completionRequest.resultDigest
+            || assessment.id !== input.assessmentId
+            || assessment.workThreadId !== imported.workThreadId
+            || assessment.triggeredByRunId !== imported.runId
+            || imported.authorityJson !== importedAttempt.authorityJson
+            || imported.authorityJson !== claim.authorityJson
+            || imported.authorityDigest !== importedAttempt.authorityDigest
+            || imported.authorityDigest !== claim.authorityDigest
+            || imported.claimDigest !== importedAttempt.claimDigest
+            || imported.claimDigest !== claim.claimDigest
+            || canonicalSha256Json(authority) !== imported.authorityDigest
+            || authority.organizationId !== claim.organizationId
+            || authority.runnerId !== claim.runnerId
+            || authority.runId !== imported.runId
+            || authority.credentialId !== claim.credentialId
+            || authority.attemptId !== imported.attemptId
+            || authority.attemptNumber !== importedAttempt.attemptNumber
+            || authority.epoch !== importedAttempt.attemptNumber
+            || authority.fencingTokenDigest !== imported.fencingTokenDigest
+            || projection.destinationId !== claim.destinationId
+            || projection.organizationId !== authority.organizationId
+            || projection.runId !== imported.runId
+            || projection.workThreadId !== imported.workThreadId
+            || projection.requiresLifecycleOperationId !== completion.operationId
+            || envelope.payload.assessmentId !== input.assessmentId
+            || envelope.organizationId !== authority.organizationId
+            || envelope.runId !== imported.runId
+            || envelope.workThreadId !== imported.workThreadId
+            || envelope.producer.kind !== "local_opentag"
+            || envelope.producer.credentialId !== authority.credentialId
+            || envelope.producer.registrationGeneration
+              !== authority.registrationGeneration
+            || envelope.attempt.attemptId !== authority.attemptId
+            || envelope.attempt.attemptNumber !== authority.attemptNumber
+            || envelope.attempt.epoch !== authority.epoch
+            || envelope.attempt.fencingTokenDigest !== authority.fencingTokenDigest
+            || envelope.payload.workThreadId !== imported.workThreadId
+            || envelope.payload.runId !== imported.runId
+            || envelope.payload.attempt.attemptId !== authority.attemptId
+            || envelope.payload.attempt.attemptNumber !== authority.attemptNumber
+            || envelope.payload.attempt.epoch !== authority.epoch
+            || envelope.payload.attempt.fencingTokenDigest !== authority.fencingTokenDigest
+            || envelope.payload.admissionPolicySnapshot.snapshotId
+              !== authority.admissionPolicySnapshotId
+            || envelope.payload.admissionPolicySnapshot.digest
+              !== authority.admissionPolicySnapshotDigest
+            || envelope.payload.contract.contractId !== assessment.contractId
+            || envelope.payload.contract.version !== assessment.contractVersion
+            || envelope.payload.contract.cycle !== assessment.cycle
+            || envelope.payload.assessmentInputDigest !== assessment.inputDigest
+            || envelope.payload.conclusion !== assessment.state
+            || envelope.payload.assessedAt !== assessment.assessedAt
+            || envelope.payload.assessedBy !== (assessment.assessedBy === "opentag"
+              ? "local_opentag"
+              : "human")
+            || (envelope.payload.supersedesAssessmentId ?? null)
+              !== (assessment.supersedesAssessmentId ?? null)
+            || executorResultRef.receiptId !== completionReceipt.receiptId
+            || executorResultRef.operationId !== completion.operationId
+            || executorResultRef.requestId !== completion.requestId
+            || executorResultRef.requestDigest !== completion.requestDigest
+            || executorResultRef.resultDigest !== completionRequest.resultDigest
+            || !envelope.predecessorReceiptDigests?.includes(completionReceipt.receiptDigest)
+          ) governedCallbackEnqueueConflict();
+
+          return {
+            outcome: "ready",
+            destinationId: claim.destinationId,
+            organizationId: authority.organizationId,
+            runnerId: authority.runnerId,
+            producer: envelope.producer,
+            sourceThreadIdentityDigest: imported.sourceIdentityDigest,
+            assessmentReceipt: envelope,
+            completionOperationId: completion.operationId,
+            authority: {
+              attemptId: authority.attemptId,
+              attemptNumber: authority.attemptNumber,
+              epoch: authority.epoch,
+              fencingTokenDigest: authority.fencingTokenDigest,
+              admissionId: imported.admissionId,
+              admissionOperationId: imported.admissionOperationId,
+              claimOperationId: imported.claimOperationId
+            }
+          } as const;
+        } catch (error) {
+          if (error instanceof GovernedCallbackEnqueueValidationError) {
+            return { outcome: "authority_conflict" } as const;
+          }
+          throw error;
+        }
+      });
+    },
+
+    async listGovernedCallbackScopes(): Promise<GovernedCallbackScope[]> {
+      const rows = await db.select({
+        destinationId: governedCallbackIntents.destinationId,
+        organizationId: governedCallbackIntents.organizationId
+      }).from(governedCallbackIntents).where(
+        inArray(governedCallbackIntents.state, ["pending", "leased", "sending"])
+      );
+      return [...new Map(rows.map((row) => [
+        `${row.destinationId}\u0000${row.organizationId}`,
+        row
+      ])).values()].sort((left, right) =>
+        left.destinationId.localeCompare(right.destinationId)
+        || left.organizationId.localeCompare(right.organizationId));
+    },
+
+    async enqueueGovernedCallbackIntent(input: {
+      destinationId: string;
+      runnerId: string;
+      idempotencyKey: string;
+      delivery: {
+        provider: "github";
+        mode: CallbackDeliveryKind;
+        target: string;
+        body: string;
+        threadKey?: string;
+        agentId?: string;
+        statusMessageKey?: string;
+        blocks?: unknown[];
+        rich?: unknown;
+      };
+      completionOperationId: string;
+      authority: {
+        attemptId: string;
+        attemptNumber: number;
+        epoch: number;
+        fencingTokenDigest: string;
+        admissionId: string;
+        admissionOperationId: string;
+        claimOperationId: string;
+      };
+      receipt: typeof CallbackIntentObservationReceiptEnvelopeV1Schema._output;
+      now?: Date;
+    }): Promise<{ outcome: "created" | "replayed"; intent: GovernedCallbackIntent }> {
+      const receipt = validateCallbackProjectionEnvelope(
+        CallbackIntentObservationReceiptEnvelopeV1Schema,
+        input.receipt
+      );
+      if (
+        !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(input.idempotencyKey)
+        || input.authority.epoch !== input.authority.attemptNumber
+        || input.delivery.provider !== "github"
+        || receipt.payload.provider !== "github"
+      ) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
+      let githubTarget: Awaited<ReturnType<typeof parseGitHubIssueCommentsTargetV1>>;
+      try {
+        githubTarget = await parseGitHubIssueCommentsTargetV1(
+          input.delivery.target,
+          input.delivery.threadKey
+        );
+      } catch {
+        throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
+      }
+      const safeDelivery = sanitizeCredentialLikeValue({
+        target: input.delivery.target,
+        body: input.delivery.body,
+        ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
+        ...(input.delivery.agentId ? { agentId: input.delivery.agentId } : {}),
+        ...(input.delivery.statusMessageKey ? { statusMessageKey: input.delivery.statusMessageKey } : {}),
+        ...(input.delivery.blocks ? { blocks: input.delivery.blocks } : {}),
+        ...(input.delivery.rich !== undefined ? { rich: input.delivery.rich } : {})
+      });
+      const deliveryMetadataJson = canonicalJsonStringify({
+        ...(safeDelivery.agentId ? { agentId: safeDelivery.agentId } : {}),
+        ...(safeDelivery.statusMessageKey ? { statusMessageKey: safeDelivery.statusMessageKey } : {}),
+        ...(safeDelivery.blocks ? { blocks: safeDelivery.blocks } : {}),
+        ...(safeDelivery.rich !== undefined ? { rich: safeDelivery.rich } : {})
+      });
+      const payloadDigest = canonicalSha256Json({
+        method: "POST",
+        mode: input.delivery.mode,
+        target: safeDelivery.target,
+        body: safeDelivery.body,
+        threadKey: safeDelivery.threadKey ?? null,
+        agentId: safeDelivery.agentId ?? null,
+        statusMessageKey: safeDelivery.statusMessageKey ?? null,
+        blocks: safeDelivery.blocks ?? null,
+        rich: safeDelivery.rich ?? null
+      });
+      if (payloadDigest !== receipt.payload.payloadDigest) {
+        throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
+      }
+      const createdAt = (input.now ?? new Date()).toISOString();
+      const receiptJson = canonicalJsonStringify(receipt);
+      return db.transaction((tx) => {
+        const assessmentProjection = tx.select().from(controlPlaneProjectionOutbox).where(and(
+          eq(controlPlaneProjectionOutbox.destinationId, input.destinationId),
+          eq(controlPlaneProjectionOutbox.organizationId, receipt.organizationId),
+          eq(controlPlaneProjectionOutbox.workThreadId, receipt.workThreadId),
+          eq(controlPlaneProjectionOutbox.receiptKind, "completion_assessment"),
+          eq(controlPlaneProjectionOutbox.receiptDigest, receipt.payload.assessmentDigest)
+        )).limit(1).get();
+        let assessmentEnvelope: CompletionAssessmentReceiptEnvelopeV1;
+        try {
+          if (!assessmentProjection) throw new Error("assessment projection missing");
+          assessmentEnvelope = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+            JSON.parse(assessmentProjection.envelopeJson)
+          );
+          assertProjectionCustodySafe(assessmentEnvelope);
+          assertProjectionDigests(assessmentEnvelope);
+          if (
+            assessmentEnvelope.receiptId !== assessmentProjection.receiptId
+            || assessmentEnvelope.receiptDigest !== receipt.payload.assessmentDigest
+            || assessmentEnvelope.payload.assessmentId !== receipt.payload.assessmentRef
+          ) throw new Error("assessment projection mismatch");
+        } catch {
+          throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+        }
+        const deliveryIdempotencyKey = `governed:${canonicalSha256Json({
+          destinationId: input.destinationId,
+          organizationId: receipt.organizationId,
+          localIntentId: receipt.payload.localIntentId,
+          idempotencyKey: input.idempotencyKey
+        })}`;
+        tx.insert(callbackDeliveries).values({
+          runId: receipt.runId,
+          kind: input.delivery.mode,
+          provider: input.delivery.provider,
+          uri: safeDelivery.target,
+          body: safeDelivery.body,
+          threadKey: safeDelivery.threadKey ?? null,
+          idempotencyKey: deliveryIdempotencyKey,
+          metadataJson: deliveryMetadataJson,
+          dispatchMode: "governed",
+          governedState: "pending",
+          status: "pending",
+          createdAt,
+          updatedAt: createdAt
+        }).onConflictDoNothing({ target: callbackDeliveries.idempotencyKey }).run();
+        const governedDelivery = tx.select().from(callbackDeliveries).where(
+          eq(callbackDeliveries.idempotencyKey, deliveryIdempotencyKey)
+        ).limit(1).get();
+        if (
+          !governedDelivery
+          || governedDelivery.dispatchMode !== "governed"
+          || governedDelivery.runId !== receipt.runId
+          || governedDelivery.kind !== input.delivery.mode
+          || governedDelivery.provider !== input.delivery.provider
+          || governedDelivery.uri !== safeDelivery.target
+          || governedDelivery.body !== safeDelivery.body
+          || governedDelivery.threadKey !== (safeDelivery.threadKey ?? null)
+          || governedDelivery.metadataJson !== deliveryMetadataJson
+          || governedCallbackPayloadDigest(governedDelivery) !== receipt.payload.payloadDigest
+        ) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_CONFLICT");
+        const existing = tx.select().from(governedCallbackIntents).where(or(
+          eq(governedCallbackIntents.localIntentId, receipt.payload.localIntentId),
+          and(
+            eq(governedCallbackIntents.destinationId, input.destinationId),
+            eq(governedCallbackIntents.organizationId, receipt.organizationId),
+            eq(governedCallbackIntents.idempotencyKey, input.idempotencyKey)
+          ),
+          and(
+            eq(governedCallbackIntents.destinationId, input.destinationId),
+            eq(governedCallbackIntents.organizationId, receipt.organizationId),
+            eq(governedCallbackIntents.operationId, receipt.operationId)
+          )
+        )).limit(1).get();
+        if (existing) {
+          const exact = existing.destinationId === input.destinationId
+            && existing.organizationId === receipt.organizationId
+            && existing.runnerId === input.runnerId
+            && existing.idempotencyKey === input.idempotencyKey
+            && existing.localIntentId === receipt.payload.localIntentId
+            && existing.runId === receipt.runId
+            && existing.workThreadId === receipt.workThreadId
+            && existing.runAttemptId === input.authority.attemptId
+            && existing.runAttemptNumber === input.authority.attemptNumber
+            && existing.fencingTokenDigest === input.authority.fencingTokenDigest
+            && existing.admissionId === input.authority.admissionId
+            && existing.admissionOperationId === input.authority.admissionOperationId
+            && existing.claimOperationId === input.authority.claimOperationId
+            && existing.completionOperationId === input.completionOperationId
+            && existing.assessmentReceiptId === assessmentEnvelope.receiptId
+            && existing.assessmentReceiptDigest === assessmentEnvelope.receiptDigest
+            && existing.localDeliveryId === governedDelivery.id
+            && existing.payloadDigest === receipt.payload.payloadDigest
+            && existing.targetIdentityDigest === githubTarget.targetIdentityDigest
+            && existing.intentReceiptDigest === receipt.receiptDigest
+            && existing.intentReceiptJson === receiptJson;
+          if (!exact) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_CONFLICT");
+          return { outcome: "replayed" as const, intent: governedCallbackIntentFromRow(existing) };
+        }
+        const authorityRow = {
+          localIntentId: receipt.payload.localIntentId,
+          idempotencyKey: input.idempotencyKey,
+          destinationId: input.destinationId,
+          organizationId: receipt.organizationId,
+          runnerId: input.runnerId,
+          producerId: receipt.producer.id,
+          credentialId: receipt.producer.credentialId,
+          registrationGeneration: receipt.producer.registrationGeneration,
+          runId: receipt.runId,
+          workThreadId: receipt.workThreadId,
+          runAttemptId: input.authority.attemptId,
+          runAttemptNumber: input.authority.attemptNumber,
+          fencingTokenDigest: input.authority.fencingTokenDigest,
+          admissionId: input.authority.admissionId,
+          admissionOperationId: input.authority.admissionOperationId,
+          claimOperationId: input.authority.claimOperationId,
+          completionOperationId: input.completionOperationId,
+          assessmentReceiptId: assessmentEnvelope.receiptId,
+          assessmentReceiptDigest: assessmentEnvelope.receiptDigest,
+          localDeliveryId: governedDelivery.id,
+          provider: receipt.payload.provider,
+          operationId: receipt.operationId,
+          payloadDigest: receipt.payload.payloadDigest,
+          intentReceiptId: receipt.receiptId,
+          intentReceiptDigest: receipt.receiptDigest,
+          intentReceiptJson: receiptJson,
+          targetIdentityDigest: githubTarget.targetIdentityDigest,
+          state: "pending",
+          currentAttemptId: `callback_attempt_${canonicalSha256Json({
+            localIntentId: receipt.payload.localIntentId,
+            attemptNumber: 1,
+            payloadDigest: receipt.payload.payloadDigest
+          }).slice("sha256:".length)}`,
+          currentAttemptNumber: 1,
+          nextAttemptAt: createdAt,
+          createdAt,
+          updatedAt: createdAt
+        };
+        tx.insert(governedCallbackIntents).values(authorityRow).run();
+        tx.insert(governedCallbackAttempts).values({
+          localAttemptId: authorityRow.currentAttemptId,
+          localIntentId: receipt.payload.localIntentId,
+          attemptNumber: 1,
+          requestDigest: canonicalSha256Json({
+            localIntentId: receipt.payload.localIntentId,
+            attemptNumber: 1,
+            payloadDigest: receipt.payload.payloadDigest,
+            runId: receipt.runId,
+            runAttemptId: input.authority.attemptId,
+            fencingTokenDigest: input.authority.fencingTokenDigest
+          }),
+          state: "pending",
+          createdAt,
+          updatedAt: createdAt
+        }).run();
+        const created = tx.select().from(governedCallbackIntents)
+          .where(eq(governedCallbackIntents.localIntentId, receipt.payload.localIntentId))
+          .limit(1).get();
+        if (!created) throw new Error("governed_callback_intent_insert_lost");
+        assertGovernedCallbackAuthorityTx(tx, created);
+        const importedAuthority = tx.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, created.runId)).limit(1).get();
+        if (importedAuthority?.sourceIdentityDigest !== receipt.payload.sourceThreadIdentityDigest) {
+          throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+        }
+        assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+          destinationId: input.destinationId,
+          envelope: receipt,
+          dependsOnReceiptId: assessmentEnvelope.receiptId,
+          requiresLifecycleOperationId: input.completionOperationId,
+          ...(input.now ? { now: input.now } : {})
+        }));
+        tx.insert(runEvents).values(runEventValues({
+          runId: receipt.runId,
+          type: "callback.governed.intent_queued",
+          payload: {
+            localIntentId: receipt.payload.localIntentId,
+            provider: "github",
+            payloadDigest: receipt.payload.payloadDigest,
+            intentReceiptId: receipt.receiptId
+          },
+          visibility: "audit",
+          importance: "normal",
+          createdAt
+        })).run();
+        return { outcome: "created" as const, intent: governedCallbackIntentFromRow(created) };
+      }, { behavior: "immediate" });
+    },
+
+    async claimGovernedCallbackIntents(input: {
+      destinationId: string;
+      organizationId: string;
+      leaseOwner: string;
+      leaseSeconds: number;
+      limit?: number;
+      now?: Date;
+    }): Promise<ClaimedGovernedCallback[]> {
+      if (!input.leaseOwner || !Number.isFinite(input.leaseSeconds) || input.leaseSeconds <= 0) {
+        throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
+      }
+      const now = input.now ?? new Date();
+      const at = now.toISOString();
+      const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000).toISOString();
+      const limit = Math.min(100, Math.max(1, Math.trunc(input.limit ?? 50)));
+      return db.transaction((tx) => {
+        const due = tx.select().from(governedCallbackIntents).where(and(
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId),
+          eq(governedCallbackIntents.state, "pending"),
+          lte(governedCallbackIntents.nextAttemptAt, at)
+        )).orderBy(asc(governedCallbackIntents.createdAt), asc(governedCallbackIntents.localIntentId))
+          .limit(limit).all();
+        const claimed: ClaimedGovernedCallback[] = [];
+        for (const row of due) {
+          let localDelivery: typeof callbackDeliveries.$inferSelect;
+          try {
+            localDelivery = assertGovernedCallbackAuthorityTx(tx, row);
+          } catch (error) {
+            if (!(error instanceof GovernedCallbackConflictError)) throw error;
+            tx.update(governedCallbackIntents).set({
+              state: "attention",
+              nextAttemptAt: null,
+              lastReasonCode: "authority_conflict",
+              updatedAt: at,
+              terminalAt: at
+            }).where(and(
+              eq(governedCallbackIntents.localIntentId, row.localIntentId),
+              eq(governedCallbackIntents.state, "pending")
+            )).run();
+            if (row.localDeliveryId !== null) {
+              const governedDelivery = tx.select({
+                id: callbackDeliveries.id,
+                governedState: callbackDeliveries.governedState
+              })
+                .from(callbackDeliveries).where(and(
+                  eq(callbackDeliveries.id, row.localDeliveryId),
+                  eq(callbackDeliveries.dispatchMode, "governed")
+                )).limit(1).get();
+              const deliveryUpdated = tx.update(callbackDeliveries).set({
+                governedState: "attention",
+                updatedAt: at
+              }).where(and(
+                eq(callbackDeliveries.id, row.localDeliveryId),
+                eq(callbackDeliveries.dispatchMode, "governed"),
+                inArray(callbackDeliveries.governedState, ["pending", "leased", "sending"])
+              )).run();
+              if (
+                governedDelivery
+                && ["pending", "leased", "sending"].includes(governedDelivery.governedState ?? "")
+                && deliveryUpdated.changes !== 1
+              ) {
+                throw new Error("governed_callback_delivery_quarantine_update_lost");
+              }
+            }
+            continue;
+          }
+          const pendingAttempt = row.currentAttemptId
+            ? tx.select().from(governedCallbackAttempts).where(and(
+                eq(governedCallbackAttempts.localAttemptId, row.currentAttemptId),
+                eq(governedCallbackAttempts.localIntentId, row.localIntentId),
+                eq(governedCallbackAttempts.attemptNumber, row.currentAttemptNumber),
+                eq(governedCallbackAttempts.state, "pending")
+              )).limit(1).get()
+            : undefined;
+          if (!pendingAttempt) {
+            tx.update(governedCallbackIntents).set({
+              state: "attention",
+              nextAttemptAt: null,
+              lastReasonCode: "pending_attempt_missing",
+              updatedAt: at,
+              terminalAt: at
+            }).where(and(
+              eq(governedCallbackIntents.localIntentId, row.localIntentId),
+              eq(governedCallbackIntents.state, "pending")
+            )).run();
+            updateGovernedDeliveryStateTx(tx, {
+              deliveryId: row.localDeliveryId!,
+              from: "pending",
+              to: "attention",
+              updatedAt: at
+            });
+            continue;
+          }
+          const leaseToken = randomBytes(32).toString("hex");
+          const updated = tx.update(governedCallbackIntents).set({
+            state: "leased",
+            nextAttemptAt: null,
+            leaseOwner: input.leaseOwner,
+            leaseToken,
+            leaseExpiresAt,
+            lastReasonCode: null,
+            updatedAt: at
+          }).where(and(
+            eq(governedCallbackIntents.localIntentId, row.localIntentId),
+            eq(governedCallbackIntents.state, "pending"),
+            eq(governedCallbackIntents.currentAttemptId, pendingAttempt.localAttemptId),
+            eq(governedCallbackIntents.currentAttemptNumber, pendingAttempt.attemptNumber)
+          )).run();
+          if (updated.changes !== 1) continue;
+          const attemptUpdated = tx.update(governedCallbackAttempts).set({
+            state: "leased",
+            leaseOwner: input.leaseOwner,
+            leaseToken,
+            leaseExpiresAt,
+            updatedAt: at
+          }).where(and(
+            eq(governedCallbackAttempts.localAttemptId, pendingAttempt.localAttemptId),
+            eq(governedCallbackAttempts.state, "pending")
+          )).run();
+          if (attemptUpdated.changes !== 1) throw new Error("governed_callback_claim_update_lost");
+          updateGovernedDeliveryStateTx(tx, {
+            deliveryId: row.localDeliveryId!,
+            from: "pending",
+            to: "leased",
+            updatedAt: at
+          });
+          const intent = tx.select().from(governedCallbackIntents)
+            .where(eq(governedCallbackIntents.localIntentId, row.localIntentId)).limit(1).get()!;
+          const attempt = tx.select().from(governedCallbackAttempts)
+            .where(eq(governedCallbackAttempts.localAttemptId, pendingAttempt.localAttemptId)).limit(1).get()!;
+          claimed.push({
+            intent: governedCallbackIntentFromRow(intent),
+            attempt: governedCallbackAttemptFromRow(attempt),
+            delivery: callbackDeliveryFromRow({ ...localDelivery, governedState: "leased", updatedAt: at }),
+            producer: {
+              kind: "local_opentag",
+              id: row.producerId,
+              credentialId: row.credentialId,
+              registrationGeneration: row.registrationGeneration
+            },
+            intentReceiptDigest: row.intentReceiptDigest,
+            targetIdentityDigest: row.targetIdentityDigest,
+            authority: {
+              attemptId: row.runAttemptId,
+              attemptNumber: row.runAttemptNumber,
+              epoch: row.runAttemptNumber,
+              fencingTokenDigest: row.fencingTokenDigest,
+              completionOperationId: row.completionOperationId!,
+              assessmentReceiptId: row.assessmentReceiptId!,
+              assessmentReceiptDigest: row.assessmentReceiptDigest!
+            }
+          });
+        }
+        return claimed;
+      }, { behavior: "immediate" });
+    },
+
+    async beginGovernedCallbackSending(input: {
+      destinationId: string;
+      organizationId: string;
+      localIntentId: string;
+      localAttemptId: string;
+      leaseToken: string;
+      now?: Date;
+    }): Promise<
+      | { outcome: "sending"; attemptedAt: string }
+      | { outcome: "stale_lease" }
+      | { outcome: "not_found" }
+    > {
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const intent = tx.select().from(governedCallbackIntents).where(and(
+          eq(governedCallbackIntents.localIntentId, input.localIntentId),
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId)
+        )).limit(1).get();
+        const attempt = tx.select().from(governedCallbackAttempts).where(and(
+          eq(governedCallbackAttempts.localAttemptId, input.localAttemptId),
+          eq(governedCallbackAttempts.localIntentId, input.localIntentId)
+        )).limit(1).get();
+        if (!intent || !attempt) return { outcome: "not_found" } as const;
+        assertGovernedCallbackAuthorityTx(tx, intent);
+        if (
+          intent.state !== "leased" || attempt.state !== "leased"
+          || intent.currentAttemptId !== input.localAttemptId
+          || intent.leaseToken !== input.leaseToken || attempt.leaseToken !== input.leaseToken
+          || !intent.leaseExpiresAt || intent.leaseExpiresAt <= at
+          || attempt.leaseExpiresAt !== intent.leaseExpiresAt
+        ) return { outcome: "stale_lease" } as const;
+        const intentUpdated = tx.update(governedCallbackIntents).set({ state: "sending", updatedAt: at })
+          .where(and(
+            eq(governedCallbackIntents.localIntentId, input.localIntentId),
+            eq(governedCallbackIntents.state, "leased"),
+            eq(governedCallbackIntents.currentAttemptId, input.localAttemptId),
+            eq(governedCallbackIntents.leaseToken, input.leaseToken),
+            gt(governedCallbackIntents.leaseExpiresAt, at)
+          )).run();
+        const attemptUpdated = tx.update(governedCallbackAttempts).set({
+          state: "sending",
+          attemptedAt: at,
+          updatedAt: at
+        }).where(and(
+          eq(governedCallbackAttempts.localAttemptId, input.localAttemptId),
+          eq(governedCallbackAttempts.state, "leased"),
+          eq(governedCallbackAttempts.leaseToken, input.leaseToken),
+          gt(governedCallbackAttempts.leaseExpiresAt, at)
+        )).run();
+        if (intentUpdated.changes !== 1 || attemptUpdated.changes !== 1) {
+          throw new Error("governed_callback_begin_sending_update_lost");
+        }
+        updateGovernedDeliveryStateTx(tx, {
+          deliveryId: intent.localDeliveryId!,
+          from: "leased",
+          to: "sending",
+          updatedAt: at
+        });
+        return { outcome: "sending", attemptedAt: at } as const;
+      }, { behavior: "immediate" });
+    },
+
+    async quarantineGovernedCallbackAttempt(input: {
+      destinationId: string;
+      organizationId: string;
+      localIntentId: string;
+      localAttemptId: string;
+      leaseToken: string;
+      attemptReceipt: typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output;
+      now?: Date;
+    }): Promise<"quarantined" | "replayed" | "stale_lease" | "not_found"> {
+      const receipt = validateCallbackProjectionEnvelope(
+        CallbackAttemptObservationReceiptEnvelopeV1Schema,
+        input.attemptReceipt
+      );
+      if (receipt.payload.outcome !== "attention") return "stale_lease";
+      const receiptJson = canonicalJsonStringify(receipt);
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const intent = tx.select().from(governedCallbackIntents).where(and(
+          eq(governedCallbackIntents.localIntentId, input.localIntentId),
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId)
+        )).limit(1).get();
+        const attempt = tx.select().from(governedCallbackAttempts).where(and(
+          eq(governedCallbackAttempts.localAttemptId, input.localAttemptId),
+          eq(governedCallbackAttempts.localIntentId, input.localIntentId)
+        )).limit(1).get();
+        if (!intent || !attempt) return "not_found" as const;
+        if (attempt.state === "attention") {
+          return attempt.attemptReceiptDigest === receipt.receiptDigest
+            && attempt.attemptReceiptJson === receiptJson
+            ? "replayed" as const
+            : "stale_lease" as const;
+        }
+        assertGovernedCallbackAuthorityTx(tx, intent, { requireCurrentAssessment: false });
+        if (
+          intent.state !== "leased" || attempt.state !== "leased"
+          || intent.currentAttemptId !== attempt.localAttemptId
+          || intent.leaseToken !== input.leaseToken || attempt.leaseToken !== input.leaseToken
+          || !intent.leaseExpiresAt || intent.leaseExpiresAt <= at
+          || receipt.organizationId !== intent.organizationId
+          || receipt.runId !== intent.runId
+          || receipt.workThreadId !== intent.workThreadId
+          || receipt.producer.id !== intent.producerId
+          || receipt.producer.credentialId !== intent.credentialId
+          || receipt.producer.registrationGeneration !== intent.registrationGeneration
+          || receipt.payload.localIntentId !== intent.localIntentId
+          || receipt.payload.localAttemptId !== attempt.localAttemptId
+          || receipt.payload.attemptNumber !== attempt.attemptNumber
+          || receipt.payload.requestDigest !== attempt.requestDigest
+          || !receipt.predecessorReceiptDigests?.includes(intent.intentReceiptDigest)
+        ) return "stale_lease" as const;
+        const attemptUpdated = tx.update(governedCallbackAttempts).set({
+          state: "attention",
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          attemptedAt: receipt.payload.attemptedAt,
+          observedAt: receipt.payload.observedAt,
+          reasonCode: receipt.payload.reasonCode,
+          nextAction: receipt.payload.nextAction!,
+          owner: receipt.payload.owner!,
+          attemptReceiptId: receipt.receiptId,
+          attemptReceiptDigest: receipt.receiptDigest,
+          attemptReceiptJson: receiptJson,
+          updatedAt: at
+        }).where(and(
+          eq(governedCallbackAttempts.localAttemptId, attempt.localAttemptId),
+          eq(governedCallbackAttempts.state, "leased"),
+          eq(governedCallbackAttempts.leaseToken, input.leaseToken)
+        )).run();
+        const intentUpdated = tx.update(governedCallbackIntents).set({
+          state: "attention",
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          nextAttemptAt: null,
+          lastReasonCode: receipt.payload.reasonCode,
+          updatedAt: at,
+          terminalAt: at
+        }).where(and(
+          eq(governedCallbackIntents.localIntentId, intent.localIntentId),
+          eq(governedCallbackIntents.state, "leased"),
+          eq(governedCallbackIntents.leaseToken, input.leaseToken)
+        )).run();
+        if (attemptUpdated.changes !== 1 || intentUpdated.changes !== 1) {
+          throw new Error("governed_callback_quarantine_update_lost");
+        }
+        updateGovernedDeliveryStateTx(tx, {
+          deliveryId: intent.localDeliveryId!,
+          from: "leased",
+          to: "attention",
+          updatedAt: at
+        });
+        assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+          destinationId: intent.destinationId,
+          envelope: receipt,
+          dependsOnReceiptId: intent.intentReceiptId,
+          ...(input.now ? { now: input.now } : {})
+        }));
+        tx.insert(runEvents).values(runEventValues({
+          runId: intent.runId,
+          type: "callback.governed.attention",
+          payload: {
+            localIntentId: intent.localIntentId,
+            localAttemptId: attempt.localAttemptId,
+            reasonCode: receipt.payload.reasonCode,
+            nextAction: receipt.payload.nextAction,
+            owner: receipt.payload.owner
+          },
+          visibility: "audit",
+          importance: "high",
+          createdAt: at
+        })).run();
+        return "quarantined" as const;
+      }, { behavior: "immediate" });
+    },
+
+    async recoverExpiredGovernedCallbacks(input: {
+      destinationId: string;
+      organizationId: string;
+      now?: Date;
+    }): Promise<{ requeued: number; outcomeUnknown: number }> {
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        let requeued = 0;
+        let outcomeUnknown = 0;
+        const expired = tx.select().from(governedCallbackIntents).where(and(
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId),
+          inArray(governedCallbackIntents.state, ["leased", "sending"]),
+          lte(governedCallbackIntents.leaseExpiresAt, at)
+        )).all();
+        for (const intent of expired) {
+          const attempt = intent.currentAttemptId
+            ? tx.select().from(governedCallbackAttempts)
+                .where(eq(governedCallbackAttempts.localAttemptId, intent.currentAttemptId)).limit(1).get()
+            : undefined;
+          if (!attempt || attempt.leaseToken !== intent.leaseToken) continue;
+          let frozenAuthorityValid = true;
+          try {
+            assertGovernedCallbackAuthorityTx(tx, intent, { requireCurrentAssessment: false });
+          } catch (error) {
+            if (!(error instanceof GovernedCallbackConflictError)) throw error;
+            frozenAuthorityValid = false;
+          }
+          if (!frozenAuthorityValid && intent.state === "leased" && attempt.state === "leased") {
+            const observation = buildLocalAttentionAttemptObservation(intent, attempt, at);
+            const attemptUpdated = tx.update(governedCallbackAttempts).set({
+              state: "attention",
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              attemptedAt: observation.payload.attemptedAt,
+              observedAt: observation.payload.observedAt,
+              reasonCode: observation.payload.reasonCode,
+              nextAction: observation.payload.nextAction,
+              owner: observation.payload.owner,
+              attemptReceiptId: observation.receiptId,
+              attemptReceiptDigest: observation.receiptDigest,
+              attemptReceiptJson: canonicalJsonStringify(observation),
+              updatedAt: at
+            }).where(and(
+              eq(governedCallbackAttempts.localAttemptId, attempt.localAttemptId),
+              eq(governedCallbackAttempts.state, "leased"),
+              eq(governedCallbackAttempts.leaseToken, attempt.leaseToken!)
+            )).run();
+            const intentUpdated = tx.update(governedCallbackIntents).set({
+              state: "attention",
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              lastReasonCode: observation.payload.reasonCode,
+              updatedAt: at,
+              terminalAt: at
+            }).where(and(
+              eq(governedCallbackIntents.localIntentId, intent.localIntentId),
+              eq(governedCallbackIntents.state, "leased"),
+              eq(governedCallbackIntents.leaseToken, attempt.leaseToken!)
+            )).run();
+            const deliveryUpdated = tx.update(callbackDeliveries)
+              .set({ governedState: "attention", updatedAt: at })
+              .where(and(
+                eq(callbackDeliveries.id, intent.localDeliveryId!),
+                eq(callbackDeliveries.dispatchMode, "governed"),
+                eq(callbackDeliveries.governedState, "leased")
+              )).run();
+            if (
+              attemptUpdated.changes !== 1
+              || intentUpdated.changes !== 1
+              || deliveryUpdated.changes !== 1
+            ) throw new Error("governed_callback_authority_quarantine_update_lost");
+            tx.insert(runEvents).values(runEventValues({
+              runId: intent.runId,
+              type: "callback.governed.attention",
+              payload: {
+                localIntentId: intent.localIntentId,
+                localAttemptId: attempt.localAttemptId,
+                reasonCode: observation.payload.reasonCode,
+                nextAction: observation.payload.nextAction,
+                owner: observation.payload.owner,
+                detail: "authority_conflict"
+              },
+              visibility: "audit",
+              importance: "high",
+              createdAt: at
+            })).run();
+            continue;
+          }
+          if (intent.state === "leased" && attempt.state === "leased") {
+            const attemptUpdated = tx.update(governedCallbackAttempts).set({
+              state: "pending",
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              updatedAt: at
+            }).where(and(
+              eq(governedCallbackAttempts.localAttemptId, attempt.localAttemptId),
+              eq(governedCallbackAttempts.state, "leased"),
+              eq(governedCallbackAttempts.leaseToken, attempt.leaseToken!)
+            )).run();
+            const intentUpdated = tx.update(governedCallbackIntents).set({
+              state: "pending",
+              nextAttemptAt: at,
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              lastReasonCode: "lease_expired_before_send",
+              updatedAt: at
+            }).where(and(
+              eq(governedCallbackIntents.localIntentId, intent.localIntentId),
+              eq(governedCallbackIntents.state, "leased"),
+              eq(governedCallbackIntents.leaseToken, attempt.leaseToken!)
+            )).run();
+            if (attemptUpdated.changes !== 1 || intentUpdated.changes !== 1) {
+              throw new Error("governed_callback_lease_recovery_update_lost");
+            }
+            updateGovernedDeliveryStateTx(tx, {
+              deliveryId: intent.localDeliveryId!,
+              from: "leased",
+              to: "pending",
+              updatedAt: at
+            });
+            requeued += 1;
+            continue;
+          }
+          if (intent.state === "sending" && attempt.state === "sending") {
+            const observation = buildExpiredSendingAttemptObservation(intent, attempt, at);
+            const observationJson = canonicalJsonStringify(observation);
+            const attemptUpdated = tx.update(governedCallbackAttempts).set({
+              state: "outcome_unknown",
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              observedAt: at,
+              reasonCode: "provider_receipt_missing",
+              nextAction: "reconcile-provider",
+              owner: intent.producerId,
+              attemptReceiptId: observation.receiptId,
+              attemptReceiptDigest: observation.receiptDigest,
+              attemptReceiptJson: observationJson,
+              updatedAt: at
+            }).where(and(
+              eq(governedCallbackAttempts.localAttemptId, attempt.localAttemptId),
+              eq(governedCallbackAttempts.state, "sending"),
+              eq(governedCallbackAttempts.leaseToken, attempt.leaseToken!)
+            )).run();
+            const intentUpdated = tx.update(governedCallbackIntents).set({
+              state: "attention",
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              lastReasonCode: "provider_receipt_missing",
+              updatedAt: at,
+              terminalAt: at
+            }).where(and(
+              eq(governedCallbackIntents.localIntentId, intent.localIntentId),
+              eq(governedCallbackIntents.state, "sending"),
+              eq(governedCallbackIntents.leaseToken, attempt.leaseToken!)
+            )).run();
+            if (attemptUpdated.changes !== 1 || intentUpdated.changes !== 1) {
+              throw new Error("governed_callback_unknown_recovery_update_lost");
+            }
+            updateGovernedDeliveryStateTx(tx, {
+              deliveryId: intent.localDeliveryId!,
+              from: "sending",
+              to: "attention",
+              updatedAt: at
+            });
+            if (frozenAuthorityValid) {
+              assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+                destinationId: intent.destinationId,
+                envelope: observation,
+                dependsOnReceiptId: intent.intentReceiptId,
+                now: new Date(at)
+              }));
+            }
+            tx.insert(runEvents).values(runEventValues({
+              runId: intent.runId,
+              type: "callback.governed.outcome_unknown",
+              payload: {
+                localIntentId: intent.localIntentId,
+                localAttemptId: attempt.localAttemptId,
+                reasonCode: "provider_receipt_missing",
+                nextAction: "reconcile-provider",
+                owner: intent.producerId
+              },
+              visibility: "audit",
+              importance: "high",
+              createdAt: at
+            })).run();
+            outcomeUnknown += 1;
+          }
+        }
+        return { requeued, outcomeUnknown };
+      }, { behavior: "immediate" });
+    },
+
+    async finalizeGovernedCallbackAttempt(input: {
+      destinationId: string;
+      organizationId: string;
+      localIntentId: string;
+      localAttemptId: string;
+      leaseToken: string;
+      attemptReceipt: typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output;
+      providerReceipt?: typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+      now?: Date;
+    }): Promise<
+      | "finalized"
+      | "replayed"
+      | "stale_lease"
+      | "not_found"
+      | {
+          outcome: "reconciliation_required";
+          attemptReceiptId: string;
+          attemptReceiptDigest: string;
+        }
+    > {
+      const attemptReceipt = validateCallbackProjectionEnvelope(
+        CallbackAttemptObservationReceiptEnvelopeV1Schema,
+        input.attemptReceipt
+      );
+      const providerReceipt = input.providerReceipt
+        ? validateCallbackProjectionEnvelope(
+            CallbackProviderObservationReceiptEnvelopeV1Schema,
+            input.providerReceipt
+          )
+        : undefined;
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const intent = tx.select().from(governedCallbackIntents).where(and(
+          eq(governedCallbackIntents.localIntentId, input.localIntentId),
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId)
+        )).limit(1).get();
+        const attempt = tx.select().from(governedCallbackAttempts).where(and(
+          eq(governedCallbackAttempts.localAttemptId, input.localAttemptId),
+          eq(governedCallbackAttempts.localIntentId, input.localIntentId)
+        )).limit(1).get();
+        if (!intent || !attempt) return "not_found" as const;
+        const attemptJson = canonicalJsonStringify(attemptReceipt);
+        const providerJson = providerReceipt ? canonicalJsonStringify(providerReceipt) : null;
+        if (["accepted", "rejected", "attention"].includes(attempt.state)) {
+          return attempt.attemptReceiptDigest === attemptReceipt.receiptDigest
+            && attempt.attemptReceiptJson === attemptJson
+            && attempt.providerReceiptDigest === (providerReceipt?.receiptDigest ?? null)
+            && attempt.providerReceiptJson === providerJson
+            ? "replayed" as const
+            : "stale_lease" as const;
+        }
+        assertGovernedCallbackAuthorityTx(tx, intent, { requireCurrentAssessment: false });
+        const outcome = attemptReceipt.payload.outcome;
+        const expectedProviderOutcome = outcome === "accepted"
+          ? "succeeded"
+          : outcome === "rejected" ? "failed" : null;
+        const delivery = tx.select().from(callbackDeliveries)
+          .where(eq(callbackDeliveries.id, intent.localDeliveryId!)).limit(1).get();
+        const importedRun = tx.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, intent.runId)).limit(1).get();
+        const run = tx.select().from(runs).where(eq(runs.id, intent.runId)).limit(1).get();
+        if (!delivery || !importedRun || !run) return "stale_lease" as const;
+        let target: { issueNumber: number; resourceIdentity: string };
+        try {
+          target = governedCallbackEventTarget({
+            eventJson: run.eventJson,
+            eventDigest: importedRun.eventDigest,
+            deliveryTarget: delivery.uri,
+            targetIdentityDigest: intent.targetIdentityDigest
+          });
+        } catch {
+          return "stale_lease" as const;
+        }
+        if (attempt.state === "outcome_unknown") {
+          if (
+            attemptReceipt.payload.outcome !== "outcome_unknown"
+            && providerReceipt
+            && attempt.attemptReceiptId
+            && attempt.attemptReceiptDigest
+            && providerReceipt.organizationId === intent.organizationId
+            && providerReceipt.runId === intent.runId
+            && providerReceipt.workThreadId === intent.workThreadId
+            && providerReceipt.producer.id === intent.producerId
+            && providerReceipt.producer.credentialId === intent.credentialId
+            && providerReceipt.producer.registrationGeneration === intent.registrationGeneration
+            && providerReceipt.payload.localIntentId === intent.localIntentId
+            && providerReceipt.payload.localAttemptId === attempt.localAttemptId
+            && governedProviderIdentityMatches({
+              receipt: providerReceipt,
+              targetIdentityDigest: intent.targetIdentityDigest,
+              issueNumber: target.issueNumber
+            })
+            && Date.parse(providerReceipt.payload.observedAt)
+              >= Date.parse(attempt.attemptedAt!)
+          ) {
+            return {
+              outcome: "reconciliation_required" as const,
+              attemptReceiptId: attempt.attemptReceiptId,
+              attemptReceiptDigest: attempt.attemptReceiptDigest
+            };
+          }
+          return attempt.attemptReceiptDigest === attemptReceipt.receiptDigest
+            && attempt.attemptReceiptJson === attemptJson
+            && !providerReceipt
+            && attempt.providerReceiptDigest === null
+            && attempt.providerReceiptJson === null
+            ? "replayed" as const
+            : "stale_lease" as const;
+        }
+        if (
+          ((outcome === "accepted" || outcome === "rejected") && !providerReceipt)
+          || ((outcome === "outcome_unknown" || outcome === "attention") && !!providerReceipt)
+          || intent.state !== "sending" || attempt.state !== "sending"
+          || intent.currentAttemptId !== attempt.localAttemptId
+          || intent.leaseToken !== input.leaseToken || attempt.leaseToken !== input.leaseToken
+          || attemptReceipt.organizationId !== intent.organizationId
+          || attemptReceipt.runId !== intent.runId
+          || attemptReceipt.workThreadId !== intent.workThreadId
+          || attemptReceipt.producer.id !== intent.producerId
+          || attemptReceipt.producer.credentialId !== intent.credentialId
+          || attemptReceipt.producer.registrationGeneration !== intent.registrationGeneration
+          || attemptReceipt.payload.localIntentId !== intent.localIntentId
+          || attemptReceipt.payload.localAttemptId !== attempt.localAttemptId
+          || attemptReceipt.payload.attemptNumber !== attempt.attemptNumber
+          || attemptReceipt.payload.requestDigest !== attempt.requestDigest
+          || !attemptReceipt.predecessorReceiptDigests?.includes(
+            intent.intentReceiptDigest
+          )
+          || attemptReceipt.payload.attemptedAt !== attempt.attemptedAt
+          || (providerReceipt && (
+            providerReceipt.organizationId !== intent.organizationId
+            || providerReceipt.runId !== intent.runId
+            || providerReceipt.workThreadId !== intent.workThreadId
+            || providerReceipt.producer.id !== intent.producerId
+            || providerReceipt.producer.credentialId !== intent.credentialId
+            || providerReceipt.producer.registrationGeneration !== intent.registrationGeneration
+            || providerReceipt.payload.localIntentId !== intent.localIntentId
+            || providerReceipt.payload.localAttemptId !== attempt.localAttemptId
+            || providerReceipt.payload.outcome !== expectedProviderOutcome
+            || !governedProviderIdentityMatches({
+              receipt: providerReceipt,
+              targetIdentityDigest: intent.targetIdentityDigest,
+              issueNumber: target.issueNumber
+            })
+            || providerReceipt.payload.reasonCode !== attemptReceipt.payload.reasonCode
+            || Date.parse(providerReceipt.payload.observedAt)
+              < Date.parse(attempt.attemptedAt!)
+            || !providerReceipt.predecessorReceiptDigests?.includes(
+              attemptReceipt.receiptDigest
+            )
+          ))
+        ) return "stale_lease" as const;
+        const attemptUpdated = tx.update(governedCallbackAttempts).set({
+          state: outcome,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          observedAt: attemptReceipt.payload.observedAt,
+          reasonCode: attemptReceipt.payload.reasonCode,
+          nextAction: attemptReceipt.payload.nextAction ?? null,
+          owner: attemptReceipt.payload.owner ?? null,
+          attemptReceiptId: attemptReceipt.receiptId,
+          attemptReceiptDigest: attemptReceipt.receiptDigest,
+          attemptReceiptJson: attemptJson,
+          providerReceiptId: providerReceipt?.payload.providerReceiptId ?? null,
+          resourceIdentity: providerReceipt?.payload.resourceIdentity ?? null,
+          providerReceiptDigest: providerReceipt?.receiptDigest ?? null,
+          providerReceiptJson: providerJson,
+          updatedAt: at
+        }).where(and(
+          eq(governedCallbackAttempts.localAttemptId, attempt.localAttemptId),
+          eq(governedCallbackAttempts.state, "sending"),
+          eq(governedCallbackAttempts.leaseToken, input.leaseToken)
+        )).run();
+        const intentState = outcome === "outcome_unknown" || outcome === "attention"
+          ? "attention"
+          : outcome;
+        const intentUpdated = tx.update(governedCallbackIntents).set({
+          state: intentState,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          lastReasonCode: attemptReceipt.payload.reasonCode,
+          updatedAt: at,
+          terminalAt: at
+        }).where(and(
+          eq(governedCallbackIntents.localIntentId, intent.localIntentId),
+          eq(governedCallbackIntents.state, "sending"),
+          eq(governedCallbackIntents.currentAttemptId, attempt.localAttemptId),
+          eq(governedCallbackIntents.leaseToken, input.leaseToken)
+        )).run();
+        if (attemptUpdated.changes !== 1 || intentUpdated.changes !== 1) {
+          throw new Error("governed_callback_finalize_update_lost");
+        }
+        updateGovernedDeliveryStateTx(tx, {
+          deliveryId: intent.localDeliveryId!,
+          from: "sending",
+          to: intentState,
+          updatedAt: at
+        });
+        assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+          destinationId: intent.destinationId,
+          envelope: attemptReceipt,
+          dependsOnReceiptId: intent.intentReceiptId,
+          ...(input.now ? { now: input.now } : {})
+        }));
+        if (providerReceipt) {
+          assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+            destinationId: intent.destinationId,
+            envelope: providerReceipt,
+            dependsOnReceiptId: attemptReceipt.receiptId,
+            ...(input.now ? { now: input.now } : {})
+          }));
+        }
+        tx.insert(runEvents).values(runEventValues({
+          runId: intent.runId,
+          type: `callback.governed.${outcome}`,
+          payload: {
+            localIntentId: intent.localIntentId,
+            localAttemptId: attempt.localAttemptId,
+            ...(providerReceipt ? {
+              providerReceiptId: providerReceipt.payload.providerReceiptId,
+              resourceIdentity: providerReceipt.payload.resourceIdentity
+            } : {}),
+            reasonCode: attemptReceipt.payload.reasonCode,
+            ...(attemptReceipt.payload.nextAction ? { nextAction: attemptReceipt.payload.nextAction } : {}),
+            ...(attemptReceipt.payload.owner ? { owner: attemptReceipt.payload.owner } : {})
+          },
+          visibility: "audit",
+          importance: outcome === "outcome_unknown" ? "high" : "normal",
+          createdAt: at
+        })).run();
+        return "finalized" as const;
+      }, { behavior: "immediate" });
+    },
+
+    async reconcileGovernedCallbackOutcome(input: {
+      destinationId: string;
+      organizationId: string;
+      localIntentId: string;
+      localAttemptId: string;
+      providerReceipt: typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+      now?: Date;
+    }): Promise<{ outcome: "recorded" | "replayed" }> {
+      const evidence = validateCallbackProjectionEnvelope(
+        CallbackProviderObservationReceiptEnvelopeV1Schema,
+        input.providerReceipt
+      );
+      const evidenceJson = canonicalJsonStringify(evidence);
+      const evidenceDigest = evidence.receiptDigest;
+      const resolution = evidence.payload.outcome === "succeeded"
+        ? "accepted"
+        : evidence.payload.outcome === "failed" ? "rejected" : null;
+      if (!resolution) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
+      const at = (input.now ?? new Date()).toISOString();
+      return db.transaction((tx) => {
+        const intent = tx.select().from(governedCallbackIntents).where(and(
+          eq(governedCallbackIntents.localIntentId, input.localIntentId),
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId)
+        )).limit(1).get();
+        const existing = tx.select().from(governedCallbackReconciliations)
+          .where(or(
+            eq(governedCallbackReconciliations.reconciliationId, evidence.receiptId),
+            eq(governedCallbackReconciliations.localAttemptId, input.localAttemptId)
+          ))
+          .limit(1).get();
+        if (existing) {
+          const exact = intent
+            && existing.reconciliationId === evidence.receiptId
+            && existing.localIntentId === input.localIntentId
+            && existing.localAttemptId === input.localAttemptId
+            && existing.resolution === resolution
+            && existing.evidenceDigest === evidenceDigest
+            && existing.evidenceJson === evidenceJson
+            && existing.owner === evidence.producer.id
+            && existing.retryAttemptId === null;
+          if (!exact) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_CONFLICT");
+          return { outcome: "replayed" as const };
+        }
+        const attempt = tx.select().from(governedCallbackAttempts).where(and(
+          eq(governedCallbackAttempts.localAttemptId, input.localAttemptId),
+          eq(governedCallbackAttempts.localIntentId, input.localIntentId),
+          eq(governedCallbackAttempts.state, "outcome_unknown")
+        )).limit(1).get();
+        if (!intent || !attempt || !["outcome_unknown", "attention"].includes(intent.state)) {
+          throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_RECONCILIATION_REQUIRED");
+        }
+        let unknownAttemptReceipt: typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output;
+        try {
+          if (!attempt.attemptReceiptJson || !attempt.attemptReceiptDigest) throw new Error();
+          unknownAttemptReceipt = CallbackAttemptObservationReceiptEnvelopeV1Schema.parse(
+            JSON.parse(attempt.attemptReceiptJson)
+          );
+        } catch {
+          throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_RECONCILIATION_REQUIRED");
+        }
+        assertGovernedCallbackAuthorityTx(tx, intent, { requireCurrentAssessment: false });
+        const delivery = tx.select().from(callbackDeliveries)
+          .where(eq(callbackDeliveries.id, intent.localDeliveryId!)).limit(1).get();
+        const importedRun = tx.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, intent.runId)).limit(1).get();
+        const run = tx.select().from(runs).where(eq(runs.id, intent.runId)).limit(1).get();
+        let target: { issueNumber: number; resourceIdentity: string } | undefined;
+        try {
+          if (!delivery || !importedRun || !run) throw new Error();
+          target = governedCallbackEventTarget({
+            eventJson: run.eventJson,
+            eventDigest: importedRun.eventDigest,
+            deliveryTarget: delivery.uri,
+            targetIdentityDigest: intent.targetIdentityDigest
+          });
+        } catch {
+          throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+        }
+        if (
+          unknownAttemptReceipt.payload.outcome !== "outcome_unknown"
+          || unknownAttemptReceipt.receiptDigest !== attempt.attemptReceiptDigest
+          || unknownAttemptReceipt.receiptId !== attempt.attemptReceiptId
+          || unknownAttemptReceipt.organizationId !== intent.organizationId
+          || unknownAttemptReceipt.runId !== intent.runId
+          || unknownAttemptReceipt.workThreadId !== intent.workThreadId
+          || unknownAttemptReceipt.producer.id !== intent.producerId
+          || unknownAttemptReceipt.producer.credentialId !== intent.credentialId
+          || unknownAttemptReceipt.producer.registrationGeneration
+            !== intent.registrationGeneration
+          || unknownAttemptReceipt.payload.localIntentId !== intent.localIntentId
+          || unknownAttemptReceipt.payload.localAttemptId !== attempt.localAttemptId
+          || unknownAttemptReceipt.payload.attemptNumber !== attempt.attemptNumber
+          || unknownAttemptReceipt.payload.requestDigest !== attempt.requestDigest
+          || unknownAttemptReceipt.payload.attemptedAt !== attempt.attemptedAt
+          || !unknownAttemptReceipt.predecessorReceiptDigests?.includes(
+            intent.intentReceiptDigest
+          )
+          || evidence.organizationId !== intent.organizationId
+          || evidence.runId !== intent.runId
+          || evidence.workThreadId !== intent.workThreadId
+          || evidence.producer.id !== intent.producerId
+          || evidence.producer.credentialId !== intent.credentialId
+          || evidence.producer.registrationGeneration !== intent.registrationGeneration
+          || evidence.payload.localIntentId !== intent.localIntentId
+          || evidence.payload.localAttemptId !== attempt.localAttemptId
+          || !governedProviderIdentityMatches({
+            receipt: evidence,
+            targetIdentityDigest: intent.targetIdentityDigest,
+            issueNumber: target.issueNumber
+          })
+          || !evidence.predecessorReceiptDigests?.includes(attempt.attemptReceiptDigest)
+          || Date.parse(evidence.payload.observedAt) < Date.parse(attempt.attemptedAt!)
+          || (resolution === "accepted" && evidence.payload.reasonCode !== "provider_accepted")
+          || (resolution === "rejected" && evidence.payload.reasonCode !== "provider_rejected")
+        ) {
+          throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
+        }
+        const updated = tx.update(governedCallbackIntents).set({
+          state: resolution,
+          lastReasonCode: "reconciled_provider_evidence",
+          updatedAt: at,
+          terminalAt: at
+        }).where(and(
+          eq(governedCallbackIntents.localIntentId, input.localIntentId),
+          inArray(governedCallbackIntents.state, ["outcome_unknown", "attention"]),
+          eq(governedCallbackIntents.currentAttemptId, input.localAttemptId)
+        )).run();
+        if (updated.changes !== 1) throw new Error("governed_callback_reconciliation_update_lost");
+        updateGovernedDeliveryStateTx(tx, {
+          deliveryId: intent.localDeliveryId!,
+          from: ["outcome_unknown", "attention"],
+          to: resolution,
+          updatedAt: at
+        });
+        tx.insert(governedCallbackReconciliations).values({
+          reconciliationId: evidence.receiptId,
+          localIntentId: input.localIntentId,
+          localAttemptId: input.localAttemptId,
+          resolution,
+          evidenceDigest,
+          evidenceJson,
+          owner: evidence.producer.id,
+          retryAttemptId: null,
+          createdAt: at
+        }).run();
+        tx.insert(runEvents).values(runEventValues({
+          runId: intent.runId,
+          type: "callback.governed.reconciled",
+          payload: {
+            reconciliationId: evidence.receiptId,
+            localIntentId: input.localIntentId,
+            localAttemptId: input.localAttemptId,
+            resolution,
+            evidenceDigest,
+            owner: evidence.producer.id,
+            resourceIdentity: evidence.payload.resourceIdentity
+          },
+          visibility: "audit",
+          importance: "high",
+          createdAt: at
+        })).run();
+        assertProjectionCreatedOrReplayed(enqueueControlPlaneProjectionTx(tx, {
+          destinationId: intent.destinationId,
+          envelope: evidence,
+          dependsOnReceiptId: attempt.attemptReceiptId!,
+          ...(input.now ? { now: input.now } : {})
+        }));
+        return { outcome: "recorded" as const };
+      }, { behavior: "immediate" });
+    },
+
+    async getPriorAcceptedGovernedGitHubResource(input: {
+      destinationId: string;
+      organizationId: string;
+      runId: string;
+      workThreadId: string;
+      statusMessageKey: string;
+      targetIdentityDigest: string;
+    }): Promise<PriorAcceptedGovernedGitHubResource> {
+      const rows = await db.select({
+        intent: governedCallbackIntents,
+        attempt: governedCallbackAttempts,
+        delivery: callbackDeliveries
+      }).from(governedCallbackIntents)
+        .innerJoin(governedCallbackAttempts, and(
+          eq(governedCallbackAttempts.localIntentId, governedCallbackIntents.localIntentId),
+          eq(governedCallbackAttempts.localAttemptId, governedCallbackIntents.currentAttemptId)
+        ))
+        .innerJoin(callbackDeliveries,
+          eq(callbackDeliveries.id, governedCallbackIntents.localDeliveryId))
+        .where(and(
+          eq(governedCallbackIntents.destinationId, input.destinationId),
+          eq(governedCallbackIntents.organizationId, input.organizationId),
+          eq(governedCallbackIntents.runId, input.runId),
+          eq(governedCallbackIntents.workThreadId, input.workThreadId),
+          eq(governedCallbackIntents.targetIdentityDigest, input.targetIdentityDigest),
+          eq(governedCallbackIntents.state, "accepted")
+        ));
+      const candidates: Array<{
+        providerReceiptId: string;
+        resourceIdentity: string;
+        targetIdentityDigest: string;
+      }> = [];
+      for (const row of rows) {
+        const metadata = callbackDeliveryMetadataFromJson(row.delivery.metadataJson);
+        if (metadata?.statusMessageKey !== input.statusMessageKey) continue;
+        const importedRun = await db.select().from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, row.intent.runId)).limit(1).get();
+        const run = await db.select().from(runs)
+          .where(eq(runs.id, row.intent.runId)).limit(1).get();
+        let target: { issueNumber: number; resourceIdentity: string };
+        try {
+          if (!importedRun || !run) throw new Error();
+          target = governedCallbackEventTarget({
+            eventJson: run.eventJson,
+            eventDigest: importedRun.eventDigest,
+            deliveryTarget: row.delivery.uri,
+            targetIdentityDigest: row.intent.targetIdentityDigest
+          });
+        } catch {
+          return { outcome: "conflict" };
+        }
+        let receiptJson = row.attempt.state === "accepted"
+          ? row.attempt.providerReceiptJson
+          : null;
+        let expectedReceiptDigest = row.attempt.state === "accepted"
+          ? row.attempt.providerReceiptDigest
+          : null;
+        if (row.attempt.state === "outcome_unknown") {
+          const reconciliations = await db.select().from(governedCallbackReconciliations)
+            .where(and(
+              eq(governedCallbackReconciliations.localIntentId, row.intent.localIntentId),
+              eq(governedCallbackReconciliations.localAttemptId, row.attempt.localAttemptId),
+              eq(governedCallbackReconciliations.resolution, "accepted")
+            ));
+          if (reconciliations.length !== 1) return { outcome: "conflict" };
+          receiptJson = reconciliations[0]!.evidenceJson;
+          expectedReceiptDigest = reconciliations[0]!.evidenceDigest;
+        }
+        let receipt: typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+        try {
+          if (!receiptJson) throw new Error();
+          receipt = CallbackProviderObservationReceiptEnvelopeV1Schema.parse(
+            JSON.parse(receiptJson)
+          );
+        } catch {
+          return { outcome: "conflict" };
+        }
+        if (
+          receipt.payload.outcome !== "succeeded"
+          || receipt.receiptDigest !== expectedReceiptDigest
+          || receipt.organizationId !== row.intent.organizationId
+          || receipt.runId !== row.intent.runId
+          || receipt.workThreadId !== row.intent.workThreadId
+          || receipt.producer.id !== row.intent.producerId
+          || receipt.producer.credentialId !== row.intent.credentialId
+          || receipt.producer.registrationGeneration !== row.intent.registrationGeneration
+          || receipt.payload.localIntentId !== row.intent.localIntentId
+          || receipt.payload.localAttemptId !== row.attempt.localAttemptId
+          || !receipt.predecessorReceiptDigests?.includes(
+            row.attempt.attemptReceiptDigest!
+          )
+          || !governedProviderIdentityMatches({
+            receipt,
+            targetIdentityDigest: row.intent.targetIdentityDigest,
+            issueNumber: target.issueNumber
+          })
+        ) return { outcome: "conflict" };
+        candidates.push({
+          providerReceiptId: receipt.payload.providerReceiptId,
+          resourceIdentity: receipt.payload.resourceIdentity,
+          targetIdentityDigest: receipt.payload.targetIdentityDigest
+        });
+      }
+      if (candidates.length === 0) return { outcome: "not_found" };
+      const resources = new Map(candidates.map((candidate) => [
+        `${candidate.providerReceiptId}\u0000${candidate.resourceIdentity}`,
+        candidate
+      ]));
+      if (resources.size !== 1) return { outcome: "conflict" };
+      return { outcome: "found", ...resources.values().next().value! };
+    },
+
     async enqueueCallbackDelivery(input: {
       runId: string;
       kind: CallbackDeliveryKind;
@@ -7994,6 +15990,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             ...(safeDelivery.blocks ? { blocks: safeDelivery.blocks } : {}),
             ...(safeDelivery.rich !== undefined ? { rich: safeDelivery.rich } : {})
           }),
+          dispatchMode: "legacy",
+          governedState: null,
           status: "pending",
           createdAt,
           updatedAt: createdAt
@@ -8031,7 +16029,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const row = await db
         .select()
         .from(callbackDeliveries)
-        .where(eq(callbackDeliveries.id, input.deliveryId))
+        .where(and(
+          eq(callbackDeliveries.id, input.deliveryId),
+          eq(callbackDeliveries.dispatchMode, "legacy")
+        ))
         .limit(1)
         .get();
       if (!row) return;
@@ -8043,7 +16044,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       await db
         .update(callbackDeliveries)
         .set({ status: "delivered", attempts: row.attempts + 1, lastError: null, nextAttemptAt: null, metadataJson, updatedAt })
-        .where(eq(callbackDeliveries.id, input.deliveryId));
+        .where(and(
+          eq(callbackDeliveries.id, input.deliveryId),
+          eq(callbackDeliveries.dispatchMode, "legacy")
+        ));
       const deliveredRow = { ...row, metadataJson };
       await appendRunEvent({
         runId: row.runId,
@@ -8065,7 +16069,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const rows = await db
         .select()
         .from(callbackDeliveries)
-        .where(and(eq(callbackDeliveries.runId, input.runId), eq(callbackDeliveries.provider, input.provider), eq(callbackDeliveries.status, "delivered")))
+        .where(and(
+          eq(callbackDeliveries.runId, input.runId),
+          eq(callbackDeliveries.provider, input.provider),
+          eq(callbackDeliveries.status, "delivered"),
+          eq(callbackDeliveries.dispatchMode, "legacy")
+        ))
         .orderBy(desc(callbackDeliveries.updatedAt), desc(callbackDeliveries.id));
 
       for (const row of rows) {
@@ -8082,7 +16091,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const row = await db
         .select()
         .from(callbackDeliveries)
-        .where(eq(callbackDeliveries.id, input.deliveryId))
+        .where(and(
+          eq(callbackDeliveries.id, input.deliveryId),
+          eq(callbackDeliveries.dispatchMode, "legacy")
+        ))
         .limit(1)
         .get();
       if (!row) return;
@@ -8093,7 +16105,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       await db
         .update(callbackDeliveries)
         .set({ status: "failed", attempts: attemptCount, lastError: safeError, nextAttemptAt: input.nextAttemptAt ?? null, updatedAt })
-        .where(eq(callbackDeliveries.id, input.deliveryId));
+        .where(and(
+          eq(callbackDeliveries.id, input.deliveryId),
+          eq(callbackDeliveries.dispatchMode, "legacy")
+        ));
       await appendRunEvent({
         runId: row.runId,
         type: `callback.${row.kind}.failed`,
@@ -8129,13 +16144,65 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       }
     },
 
+    async markCallbackAttention(input: {
+      deliveryId: number;
+      reasonCode: string;
+      nextAction: string;
+      owner?: string;
+    }): Promise<void> {
+      const updatedAt = nowIso();
+      const row = await db.select().from(callbackDeliveries).where(and(
+        eq(callbackDeliveries.id, input.deliveryId),
+        eq(callbackDeliveries.dispatchMode, "legacy"),
+        inArray(callbackDeliveries.status, ["pending", "delivering", "failed"])
+      )).limit(1).get();
+      if (!row) return;
+      const safe = sanitizeCredentialLikeValue({
+        reasonCode: input.reasonCode.slice(0, 128),
+        nextAction: input.nextAction.slice(0, 256),
+        ...(input.owner ? { owner: input.owner.slice(0, 128) } : {})
+      }, { secrets: await attemptFencingTokensForRun(row.runId) });
+      const attempts = row.attempts + 1;
+      const updated = await db.update(callbackDeliveries).set({
+        status: "attention",
+        attempts,
+        lastError: safe.reasonCode,
+        nextAttemptAt: null,
+        updatedAt
+      }).where(and(
+        eq(callbackDeliveries.id, input.deliveryId),
+        eq(callbackDeliveries.dispatchMode, "legacy"),
+        inArray(callbackDeliveries.status, ["pending", "delivering", "failed"])
+      ));
+      if (updated.changes !== 1) return;
+      await appendRunEvent({
+        runId: row.runId,
+        type: `callback.${row.kind}.attention`,
+        payload: {
+          ...callbackDeliveryFromRow(row),
+          status: "attention",
+          attempts,
+          reasonCode: safe.reasonCode,
+          nextAction: safe.nextAction,
+          ...(safe.owner ? { owner: safe.owner } : {}),
+          updatedAt
+        },
+        visibility: "audit",
+        importance: "high",
+        createdAt: updatedAt
+      });
+    },
+
     async listPendingCallbackDeliveries(input: { limit: number; now?: Date; maxAttempts?: number }): Promise<CallbackDelivery[]> {
       const now = input.now ?? new Date();
       const maxAttempts = input.maxAttempts ?? Number.POSITIVE_INFINITY;
       const rows = await db
         .select()
         .from(callbackDeliveries)
-        .where(inArray(callbackDeliveries.status, ["pending", "failed"]))
+        .where(and(
+          eq(callbackDeliveries.dispatchMode, "legacy"),
+          inArray(callbackDeliveries.status, ["pending", "failed"])
+        ))
         .orderBy(asc(callbackDeliveries.id));
       return rows
         .map(callbackDeliveryFromRow)
@@ -8153,7 +16220,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const rows = await db
         .select()
         .from(callbackDeliveries)
-        .where(inArray(callbackDeliveries.status, ["pending", "failed", "delivering"]))
+        .where(and(
+          eq(callbackDeliveries.dispatchMode, "legacy"),
+          inArray(callbackDeliveries.status, ["pending", "failed", "delivering"])
+        ))
         .orderBy(asc(callbackDeliveries.id));
 
       const claimed: CallbackDelivery[] = [];
@@ -8166,8 +16236,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const updatedAt = input.now ? input.now.toISOString() : nowIso();
         const claimWhere =
           row.status === "delivering"
-            ? and(eq(callbackDeliveries.id, row.id), eq(callbackDeliveries.status, "delivering"), eq(callbackDeliveries.updatedAt, row.updatedAt))
-            : and(eq(callbackDeliveries.id, row.id), inArray(callbackDeliveries.status, ["pending", "failed"]));
+            ? and(eq(callbackDeliveries.id, row.id), eq(callbackDeliveries.dispatchMode, "legacy"), eq(callbackDeliveries.status, "delivering"), eq(callbackDeliveries.updatedAt, row.updatedAt))
+            : and(eq(callbackDeliveries.id, row.id), eq(callbackDeliveries.dispatchMode, "legacy"), inArray(callbackDeliveries.status, ["pending", "failed"]));
         const claimResult = await db.update(callbackDeliveries).set({ status: "delivering", updatedAt }).where(claimWhere);
         if (claimResult.changes === 0) continue;
 

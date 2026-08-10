@@ -2,14 +2,209 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadConfigFromEnv, parseDaemonConfig, readKeychainSecret, runnerDispatcherToken } from "../src/config.js";
-import { builtInAcpOptionsFromConfig, executorsFromConfig } from "../src/runtime.js";
+import {
+  beginHostedCredentialRevocation,
+  beginHostedCredentialRotation,
+  beginHostedCredentialRotationSuccessor,
+  confirmHostedCredentialRevocation,
+  finalizeHostedCredentialRotation,
+  hostedCredentialOperationProblem,
+  hostedCredentialMutationRequestDigest,
+  loadConfigFromEnv,
+  markHostedCredentialRevocationOutcomeUnknown,
+  markHostedCredentialRotationOutcomeUnknown,
+  parseDaemonConfig as parseDaemonConfigStrict,
+  readKeychainSecret,
+  reconcileHostedCredentialRotationSuccessorReplay,
+  recordHostedCredentialConflict,
+  recordHostedCredentialReconciliationFailure,
+  runnerDispatcherToken,
+  stageHostedCredentialRotation
+} from "../src/config.js";
+import { builtInAcpOptionsFromConfig, createDaemonClient, executorsFromConfig } from "../src/runtime.js";
 
 const baseRepository = {
   owner: "acme",
   repo: "widgets",
   checkoutPath: "/tmp/acme-widgets"
 };
+
+const hostedTrust = {
+  schemaVersion: 1 as const,
+  origin: "https://control.example",
+  authorizedAt: "2026-08-08T00:00:00.000Z",
+  authorizationMethod: "explicit_cli" as const
+};
+
+function parseDaemonConfig(value: unknown) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const raw = value as Record<string, unknown>;
+    if (raw.controlRegistration !== undefined) {
+      return parseDaemonConfigStrict({
+        dispatcherUrl: "https://control.example",
+        trustedRelay: hostedTrust,
+        ...raw
+      });
+    }
+  }
+  return parseDaemonConfigStrict(value);
+}
+
+const hostedRegistration = {
+  schemaVersion: 1 as const,
+  protocolVersion: "1.0" as const,
+  organizationId: "org_1",
+  runnerId: "runner_hosted",
+  registrationGeneration: 1,
+  credentialGeneration: 1,
+  credentialId: "credential_runtime_1",
+  credentialPurpose: "runtime" as const,
+  createdAt: "2026-08-08T00:00:00.000Z"
+};
+
+const hostedCredentialMutationRequest = {
+  schemaVersion: 1 as const,
+  protocolVersion: "1.0" as const,
+  requiredCapabilities: ["relay.credential-rotation.v1"] as const,
+  requestId: "request_rotate_1",
+  operationId: "operation_rotate_1",
+  runnerId: "runner_hosted",
+  expectedRegistrationGeneration: 1,
+  expectedCredentialGeneration: 1,
+  expectedCredentialId: "credential_runtime_1"
+};
+
+const hostedCredentialRevocationRequest = {
+  ...hostedCredentialMutationRequest,
+  requestId: "request_revoke_1",
+  operationId: "operation_revoke_1",
+};
+
+const hostedCredentialMutationDigest = hostedCredentialMutationRequestDigest(
+  "rotate",
+  hostedCredentialMutationRequest
+);
+const hostedCredentialRevocationDigest = hostedCredentialMutationRequestDigest(
+  "revoke",
+  hostedCredentialRevocationRequest
+);
+
+function rotationInput(request = hostedCredentialMutationRequest) {
+  return { request, canonicalRequestDigest: hostedCredentialMutationRequestDigest("rotate", request) };
+}
+
+function revocationInput(request = hostedCredentialRevocationRequest) {
+  return { request, canonicalRequestDigest: hostedCredentialMutationRequestDigest("revoke", request) };
+}
+
+const rotatedHostedRotation = {
+  schemaVersion: 1 as const,
+  protocolVersion: "1.0" as const,
+  operationId: "operation_rotate_1",
+  runnerId: "runner_hosted",
+  registrationGeneration: 1,
+  credentialGeneration: 2,
+  replacedCredentialId: "credential_runtime_1",
+  credentialId: "credential_runtime_2",
+  credentialPurpose: "runtime" as const,
+  createdAt: "2026-08-08T00:01:00.000Z"
+};
+
+const replayedHostedRotation = {
+  ...rotatedHostedRotation,
+  replayed: true as const
+};
+
+function freshHostedRotation(
+  rotation = rotatedHostedRotation,
+  runnerToken = "runtime_new"
+) {
+  return { ...rotation, runnerToken, replayed: false as const };
+}
+
+const currentAfterLostRotation = {
+  schemaVersion: 1 as const,
+  protocolVersion: "1.0" as const,
+  projectionStatus: "ready" as const,
+  runnerId: "runner_hosted",
+  registrationGeneration: 1,
+  credentialGeneration: 2,
+  activeCredentialId: "credential_runtime_2",
+  credentialState: "active" as const,
+  observedAt: "2026-08-08T00:03:00.000Z"
+};
+
+const successorRotationRequest = {
+  ...hostedCredentialMutationRequest,
+  requestId: "request_rotate_successor_1",
+  operationId: "operation_rotate_successor_1",
+  expectedCredentialGeneration: 2,
+  expectedCredentialId: "credential_runtime_2"
+};
+
+const successorRotationMetadata = {
+  ...rotatedHostedRotation,
+  operationId: "operation_rotate_successor_1",
+  credentialGeneration: 3,
+  replacedCredentialId: "credential_runtime_2",
+  credentialId: "credential_runtime_3",
+  createdAt: "2026-08-08T00:04:00.000Z"
+};
+
+const rotatedHostedRegistration = {
+  schemaVersion: rotatedHostedRotation.schemaVersion,
+  protocolVersion: rotatedHostedRotation.protocolVersion,
+  organizationId: hostedRegistration.organizationId,
+  runnerId: rotatedHostedRotation.runnerId,
+  registrationGeneration: rotatedHostedRotation.registrationGeneration,
+  credentialGeneration: rotatedHostedRotation.credentialGeneration,
+  credentialId: rotatedHostedRotation.credentialId,
+  credentialPurpose: rotatedHostedRotation.credentialPurpose,
+  createdAt: rotatedHostedRotation.createdAt
+};
+
+function hostedRevocation(operationId: string, registrationGeneration = 1) {
+  return {
+    schemaVersion: 1 as const,
+    protocolVersion: "1.0" as const,
+    operationId,
+    runnerId: "runner_hosted",
+    registrationGeneration,
+    credentialGeneration: 2,
+    credentialState: "revoked" as const,
+    revokedCredentialId: "credential_runtime_1",
+    credentialPurpose: "runtime" as const,
+    activeCredentialId: null,
+    revokedAt: "2026-08-08T00:02:00.000Z",
+    replayed: false
+  };
+}
+
+function hostedControl(
+  state: "credential_staged" | "paired",
+  registration = hostedRegistration
+) {
+  return {
+    kind: "hosted_control_v1" as const,
+    state,
+    operationId: "operation_pair_1",
+    registration
+  };
+}
+
+function hostedCredentialConflictConfig() {
+  const paired = parseDaemonConfig({
+    runnerId: "runner_hosted",
+    runnerToken: "runtime_old",
+    controlRegistration: hostedControl("paired")
+  });
+  return recordHostedCredentialConflict(
+    markHostedCredentialRotationOutcomeUnknown(
+      beginHostedCredentialRotation(paired, rotationInput())
+    ),
+    { replay: replayedHostedRotation, current: currentAfterLostRotation }
+  );
+}
 
 function acpAgent(input: {
   label: string;
@@ -164,6 +359,38 @@ describe("parseDaemonConfig ACP agents", () => {
         }
       }
     })).toThrow(/env|unrecognized/iu);
+  });
+});
+
+describe("parseDaemonConfig repository identity", () => {
+  it("canonicalizes GitHub provider, owner, and repo to lowercase only", () => {
+    const config = parseDaemonConfig({
+      repositories: [
+        {
+          provider: "GitHub",
+          owner: "AcMe",
+          repo: "Widgets",
+          checkoutPath: "/tmp/github-widgets"
+        },
+        {
+          provider: "GitLab",
+          owner: "AcMe",
+          repo: "Widgets",
+          checkoutPath: "/tmp/gitlab-widgets"
+        }
+      ]
+    });
+
+    expect(config.repositories[0]).toMatchObject({
+      provider: "github",
+      owner: "acme",
+      repo: "widgets"
+    });
+    expect(config.repositories[1]).toMatchObject({
+      provider: "GitLab",
+      owner: "AcMe",
+      repo: "Widgets"
+    });
   });
 });
 
@@ -363,6 +590,853 @@ describe("parseDaemonConfig run timeout", () => {
         runTimeoutMs: 0
       })
     ).toThrow();
+  });
+});
+
+describe("Hosted Control V1 credential state", () => {
+  it("requires canonical explicit relay trust before resolving hosted secrets", () => {
+    expect(() => parseDaemonConfigStrict({
+      runnerId: "runner_hosted",
+      dispatcherUrl: "https://control.example",
+      runnerToken: { kind: "file", path: "/definitely/not-read/runtime-token" },
+      controlRegistration: hostedControl("paired")
+    })).toThrow(/explicit trustedRelay authorization/iu);
+
+    expect(() => parseDaemonConfigStrict({
+      runnerId: "runner_hosted",
+      dispatcherUrl: "https://CONTROL.example:443",
+      runnerToken: "runtime-token",
+      trustedRelay: hostedTrust,
+      controlRegistration: hostedControl("paired")
+    })).not.toThrow();
+  });
+
+  it("blocks dispatcher rebinding before runtime client creation", () => {
+    const paired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime-token",
+      controlRegistration: hostedControl("paired")
+    });
+    expect(() => createDaemonClient({
+      ...paired,
+      dispatcherUrl: "https://other.example"
+    })).toThrow(/does not match the explicitly trusted relay origin/iu);
+  });
+
+  it("keeps marker-free legacy token resolution unchanged", () => {
+    const config = parseDaemonConfig({
+      runnerId: "runner_legacy",
+      pairingToken: "legacy_pairing"
+    });
+
+    expect(config.controlRegistration).toBeUndefined();
+    expect(runnerDispatcherToken(config)).toBe("legacy_pairing");
+  });
+
+  it("strictly parses all hosted states and only authenticates a paired runner", () => {
+    const unpaired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      pairingToken: "pairing_bootstrap",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        flow: "registration",
+        operationId: "operation_pair_1",
+        reason: "pending"
+      }
+    });
+    const recoveryRequired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        reason: "recovery_required",
+        registration: hostedRegistration
+      }
+    });
+    const staged = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_staged",
+      controlRegistration: hostedControl("credential_staged")
+    });
+    const paired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_committed",
+      controlRegistration: hostedControl("paired")
+    });
+    const reProvisionOutcomeUnknown = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        flow: "reprovision",
+        operationId: "operation_reprovision_1",
+        reason: "outcome_unknown",
+        recoveryCredentialId: "credential_recovery_1",
+        registration: hostedRegistration
+      }
+    });
+
+    expect(runnerDispatcherToken(unpaired)).toBeUndefined();
+    expect(runnerDispatcherToken(recoveryRequired)).toBeUndefined();
+    expect(runnerDispatcherToken(staged)).toBeUndefined();
+    expect(runnerDispatcherToken(reProvisionOutcomeUnknown)).toBeUndefined();
+    expect(runnerDispatcherToken(paired)).toBe("runtime_committed");
+    expect(() => createDaemonClient(unpaired)).toThrow(/not paired/iu);
+    expect(() => createDaemonClient(staged)).toThrow(/staged but not committed/iu);
+    expect(() => createDaemonClient(paired)).toThrow(
+      /does not expose a legacy claim-capable daemon client/iu
+    );
+  });
+
+  it("rejects unknown hosted fields and invalid metadata", () => {
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        flow: "registration",
+        operationId: "operation_pair_1",
+        reason: "pending",
+        unexpected: true
+      }
+    })).toThrow(/unrecognized/iu);
+
+    for (const registration of [
+      { ...hostedRegistration, createdAt: "not-a-timestamp" },
+      { ...hostedRegistration, createdAt: "2026-08-08T08:00:00.000+08:00" },
+      { ...hostedRegistration, registrationGeneration: 0 },
+      { ...hostedRegistration, credentialGeneration: -1 },
+      { ...hostedRegistration, unexpected: true }
+    ]) {
+      expect(() => parseDaemonConfig({
+        runnerId: "runner_hosted",
+        runnerToken: "runtime_staged",
+        controlRegistration: hostedControl("credential_staged", registration as typeof hostedRegistration)
+      })).toThrow();
+    }
+
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_staged",
+      controlRegistration: hostedControl("credential_staged", hostedRegistration)
+    })).not.toThrow();
+  });
+
+  it("enforces initial registration and re-provision replay state", () => {
+    const registrationWithoutLocalSecret = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        flow: "registration",
+        operationId: "operation_pair_1",
+        reason: "outcome_unknown"
+      }
+    });
+    expect(registrationWithoutLocalSecret.controlRegistration?.state).toBe("unpaired");
+
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      pairingToken: "pairing_bootstrap",
+      runnerToken: "runtime_must_not_exist",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        flow: "registration",
+        operationId: "operation_pair_1",
+        reason: "pending"
+      }
+    })).toThrow(/must not contain a runtime runner token/iu);
+
+    const reProvision = {
+      kind: "hosted_control_v1" as const,
+      state: "unpaired" as const,
+      flow: "reprovision" as const,
+      operationId: "operation_reprovision_1",
+      reason: "outcome_unknown" as const,
+      recoveryCredentialId: "credential_recovery_1",
+      registration: hostedRegistration
+    };
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      pairingToken: "pairing_must_not_exist",
+      controlRegistration: reProvision
+    })).toThrow(/must not retain a pairing token/iu);
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_must_not_exist",
+      controlRegistration: reProvision
+    })).toThrow(/must not contain a runtime runner token/iu);
+  });
+
+  it("requires recovery metadata and rejects every persisted token", () => {
+    const recoveryRequired = {
+      kind: "hosted_control_v1" as const,
+      state: "unpaired" as const,
+      reason: "recovery_required" as const
+    };
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      controlRegistration: recoveryRequired
+    })).toThrow();
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      pairingToken: "pairing_must_not_exist",
+      controlRegistration: { ...recoveryRequired, registration: hostedRegistration }
+    })).toThrow(/must not retain the consumed pairing token/iu);
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_must_not_exist",
+      controlRegistration: { ...recoveryRequired, registration: hostedRegistration }
+    })).toThrow(/must not contain a runtime runner token/iu);
+  });
+
+  it("rejects unsafe hosted credential persistence combinations", () => {
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_staged",
+      pairingToken: "pairing_must_be_deleted",
+      controlRegistration: hostedControl("credential_staged")
+    })).toThrow(/must not retain/iu);
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      controlRegistration: hostedControl("paired")
+    })).toThrow(/requires a staged runtime runner token/iu);
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_other",
+      runnerToken: "runtime_committed",
+      controlRegistration: hostedControl("paired")
+    })).toThrow(/must match daemon runnerId/iu);
+  });
+
+  it("persists the complete non-secret rotation request and fails closed while unresolved", () => {
+    const paired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_old",
+      controlRegistration: hostedControl("paired")
+    });
+
+    const pending = beginHostedCredentialRotation(paired, rotationInput());
+    expect(pending.runnerToken).toBeUndefined();
+    expect(pending.pairingToken).toBeUndefined();
+    expect(pending.controlRegistration).toEqual({
+      kind: "hosted_control_v1",
+      state: "rotation_pending",
+      endpoint: "rotate",
+      origin: "paired",
+      canonicalRequestDigest: hostedCredentialMutationDigest,
+      request: hostedCredentialMutationRequest,
+      registration: hostedRegistration
+    });
+    expect(runnerDispatcherToken(pending)).toBeUndefined();
+    expect(() => createDaemonClient(pending)).toThrow(/rotation is pending/iu);
+
+    const restarted = parseDaemonConfig(JSON.parse(JSON.stringify(pending)));
+    const outcomeUnknown = markHostedCredentialRotationOutcomeUnknown(restarted);
+    expect(outcomeUnknown.controlRegistration?.state).toBe("rotation_outcome_unknown");
+    expect(outcomeUnknown.runnerToken).toBeUndefined();
+    expect(runnerDispatcherToken(outcomeUnknown)).toBeUndefined();
+  });
+
+  it("stages a fresh rotation token for restart-safe local finalization", () => {
+    const paired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_old",
+      controlRegistration: hostedControl("paired")
+    });
+    const pending = beginHostedCredentialRotation(paired, rotationInput());
+    const staged = stageHostedCredentialRotation(pending, freshHostedRotation());
+    expect(staged.controlRegistration?.state).toBe("rotation_staged");
+    expect(staged.runnerToken).toBe("runtime_new");
+    expect(runnerDispatcherToken(staged)).toBeUndefined();
+    expect(() => createDaemonClient(staged)).toThrow(/rotation is staged/iu);
+
+    const restarted = parseDaemonConfig(JSON.parse(JSON.stringify(staged)));
+    const finalized = finalizeHostedCredentialRotation(restarted);
+    expect(finalized.runnerToken).toBe("runtime_new");
+    expect(finalized.controlRegistration).toEqual({
+      kind: "hosted_control_v1",
+      state: "paired",
+      operationId: "operation_rotate_1",
+      registration: rotatedHostedRegistration
+    });
+    expect(runnerDispatcherToken(finalized)).toBe("runtime_new");
+  });
+
+  it("persists revocation replay state and atomically removes token custody on confirmation", () => {
+    const paired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_old",
+      controlRegistration: hostedControl("paired")
+    });
+    const request = {
+      ...hostedCredentialMutationRequest,
+      requestId: "request_revoke_1",
+      operationId: "operation_revoke_1"
+    };
+    const pending = beginHostedCredentialRevocation(paired, revocationInput(request));
+    expect(pending.runnerToken).toBeUndefined();
+    expect(pending.controlRegistration).toMatchObject({ state: "revocation_pending", request });
+    const unknown = markHostedCredentialRevocationOutcomeUnknown(
+      parseDaemonConfig(JSON.parse(JSON.stringify(pending)))
+    );
+    expect(unknown.controlRegistration?.state).toBe("revocation_outcome_unknown");
+    expect(runnerDispatcherToken(unknown)).toBeUndefined();
+
+    const revoked = confirmHostedCredentialRevocation(unknown, hostedRevocation("operation_revoke_1"));
+    expect(revoked.runnerToken).toBeUndefined();
+    expect(revoked.controlRegistration).toMatchObject({
+      state: "revoked",
+      revocation: {
+        registrationGeneration: 1,
+        credentialGeneration: 2,
+        revokedCredentialId: "credential_runtime_1"
+      }
+    });
+    expect(parseDaemonConfig(JSON.parse(JSON.stringify(revoked)))).toEqual(revoked);
+    expect(runnerDispatcherToken(revoked)).toBeUndefined();
+    expect(() => createDaemonClient(revoked)).toThrow(/is revoked/iu);
+  });
+
+  it("records stale-credential conflicts with both expected and current credential metadata", () => {
+    const paired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_old",
+      controlRegistration: hostedControl("paired")
+    });
+    const current = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      projectionStatus: "ready" as const,
+      runnerId: "runner_hosted",
+      registrationGeneration: 1,
+      credentialGeneration: 2,
+      activeCredentialId: "credential_runtime_2",
+      credentialState: "active" as const,
+      observedAt: "2026-08-08T00:03:00.000Z"
+    };
+    const outcomeUnknown = markHostedCredentialRotationOutcomeUnknown(
+      beginHostedCredentialRotation(paired, rotationInput())
+    );
+    const conflict = recordHostedCredentialConflict(outcomeUnknown, {
+      replay: replayedHostedRotation,
+      current
+    });
+    expect(conflict.runnerToken).toBeUndefined();
+    expect(conflict.controlRegistration).toEqual({
+      kind: "hosted_control_v1",
+      state: "credential_conflict",
+      endpoint: "rotate",
+      canonicalRequestDigest: hostedCredentialMutationDigest,
+      request: hostedCredentialMutationRequest,
+      registration: hostedRegistration,
+      replay: replayedHostedRotation,
+      current,
+      successorAttempted: false,
+      provenance: {
+        origin: "lost_201_replay",
+        source: "verified_metadata_replay_and_current_state"
+      }
+    });
+    expect(runnerDispatcherToken(conflict)).toBeUndefined();
+  });
+
+  it("derives credential-conflict authority only from a verified rotation replay", () => {
+    const paired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_old",
+      controlRegistration: hostedControl("paired")
+    });
+    expect(() => recordHostedCredentialConflict(paired, {
+      replay: replayedHostedRotation,
+      current: currentAfterLostRotation
+    })).toThrow(/authoritative rotation outcome-unknown/iu);
+
+    const revocationUnknown = markHostedCredentialRevocationOutcomeUnknown(
+      beginHostedCredentialRevocation(paired, revocationInput())
+    );
+    expect(() => recordHostedCredentialConflict(revocationUnknown, {
+      replay: replayedHostedRotation,
+      current: currentAfterLostRotation
+    })).toThrow(/authoritative rotation outcome-unknown/iu);
+    const directlyRevoked = confirmHostedCredentialRevocation(
+      revocationUnknown,
+      { ...hostedRevocation("operation_revoke_1"), replayed: true }
+    );
+    expect(directlyRevoked.controlRegistration?.state).toBe("revoked");
+  });
+
+  it("keeps credential conflict independent and permits exactly one fresh successor", () => {
+    const conflict = parseDaemonConfig(JSON.parse(JSON.stringify(hostedCredentialConflictConfig())));
+    expect(conflict.controlRegistration?.state).toBe("credential_conflict");
+    expect(hostedCredentialOperationProblem(conflict.controlRegistration, "reprovision")).toMatch(/requires/iu);
+    expect(runnerDispatcherToken(conflict)).toBeUndefined();
+
+    const successor = beginHostedCredentialRotationSuccessor(conflict, {
+      request: successorRotationRequest
+    });
+    expect(successor.controlRegistration).toMatchObject({
+      state: "rotation_pending",
+      origin: "lost_201_successor",
+      request: successorRotationRequest,
+      predecessorConflict: {
+        originalRequest: hostedCredentialMutationRequest,
+        replay: replayedHostedRotation,
+        current: currentAfterLostRotation,
+        successorAttempted: true,
+        provenance: {
+          origin: "lost_201_replay",
+          source: "verified_metadata_replay_and_current_state"
+        }
+      }
+    });
+    expect(() => beginHostedCredentialRotationSuccessor(successor, {
+      request: successorRotationRequest
+    })).toThrow(/unattempted credential-conflict/iu);
+
+    const staged = stageHostedCredentialRotation(
+      parseDaemonConfig(JSON.parse(JSON.stringify(successor))),
+      freshHostedRotation(successorRotationMetadata, "runtime_successor")
+    );
+    const finalized = finalizeHostedCredentialRotation(
+      parseDaemonConfig(JSON.parse(JSON.stringify(staged)))
+    );
+    expect(finalized.runnerToken).toBe("runtime_successor");
+    expect(finalized.controlRegistration).toMatchObject({
+      state: "paired",
+      registration: {
+        registrationGeneration: 1,
+        credentialGeneration: 3,
+        credentialId: "credential_runtime_3"
+      }
+    });
+  });
+
+  it("persists successor transport uncertainty until a strict replay proves terminal recovery", () => {
+    const successor = beginHostedCredentialRotationSuccessor(
+      hostedCredentialConflictConfig(),
+      { request: successorRotationRequest }
+    );
+    const outcomeUnknown = markHostedCredentialRotationOutcomeUnknown(
+      parseDaemonConfig(JSON.parse(JSON.stringify(successor)))
+    );
+    expect(outcomeUnknown.controlRegistration).toMatchObject({
+      state: "rotation_outcome_unknown",
+      origin: "lost_201_successor",
+      predecessorConflict: { successorAttempted: true }
+    });
+    expect(parseDaemonConfig(JSON.parse(JSON.stringify(outcomeUnknown)))).toEqual(outcomeUnknown);
+    expect(() => beginHostedCredentialRotationSuccessor(outcomeUnknown, {
+      request: successorRotationRequest
+    })).toThrow(/unattempted credential-conflict/iu);
+    const stagedFromFreshReplay = stageHostedCredentialRotation(
+      parseDaemonConfig(JSON.parse(JSON.stringify(outcomeUnknown))),
+      freshHostedRotation(successorRotationMetadata, "runtime_successor_replayed_fresh")
+    );
+    const finalizedFromFreshReplay = finalizeHostedCredentialRotation(
+      parseDaemonConfig(JSON.parse(JSON.stringify(stagedFromFreshReplay)))
+    );
+    expect(finalizedFromFreshReplay.runnerToken).toBe("runtime_successor_replayed_fresh");
+    expect(finalizedFromFreshReplay.controlRegistration).toMatchObject({
+      state: "paired",
+      registration: {
+        registrationGeneration: 1,
+        credentialGeneration: 3,
+        credentialId: "credential_runtime_3"
+      }
+    });
+    const successorReplay = { ...successorRotationMetadata, replayed: true as const };
+    expect(() => stageHostedCredentialRotation(
+      outcomeUnknown,
+      successorReplay as never
+    )).toThrow();
+    const terminal = reconcileHostedCredentialRotationSuccessorReplay(
+      outcomeUnknown,
+      successorReplay
+    );
+    expect(terminal.controlRegistration).toMatchObject({
+      state: "unpaired",
+      reason: "recovery_required",
+      recoveryReason: "successor_replay_without_token",
+      successorRequest: successorRotationRequest,
+      successorReplay
+    });
+    expect(hostedCredentialOperationProblem(terminal.controlRegistration, "reprovision")).toBeUndefined();
+    expect(parseDaemonConfig(JSON.parse(JSON.stringify(terminal)))).toEqual(terminal);
+
+    const mismatchTerminal = reconcileHostedCredentialRotationSuccessorReplay(
+      outcomeUnknown,
+      { ...successorReplay, operationId: "operation_wrong_successor" }
+    );
+    expect(mismatchTerminal.controlRegistration).toMatchObject({
+      state: "unpaired",
+      recoveryReason: "successor_replay_mismatch"
+    });
+
+    const paired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_old",
+      controlRegistration: hostedControl("paired")
+    });
+    const rotationUnknown = markHostedCredentialRotationOutcomeUnknown(
+      beginHostedCredentialRotation(paired, rotationInput())
+    );
+    const replayMismatch = recordHostedCredentialConflict(rotationUnknown, {
+      replay: { ...replayedHostedRotation, operationId: "operation_other" },
+      current: currentAfterLostRotation
+    });
+    expect(replayMismatch.controlRegistration).toMatchObject({
+      state: "unpaired",
+      recoveryReason: "replay_mismatch"
+    });
+    expect(hostedCredentialOperationProblem(replayMismatch.controlRegistration, "reprovision")).toBeUndefined();
+
+    const currentUnsafe = recordHostedCredentialConflict(rotationUnknown, {
+      replay: replayedHostedRotation,
+      current: {
+        ...currentAfterLostRotation,
+        credentialState: "revoked",
+        activeCredentialId: null
+      }
+    });
+    expect(currentUnsafe.controlRegistration).toMatchObject({
+      state: "unpaired",
+      recoveryReason: "current_state_unsafe"
+    });
+
+    const pendingProjection = recordHostedCredentialConflict(rotationUnknown, {
+      replay: replayedHostedRotation,
+      current: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        projectionStatus: "pending",
+        runnerId: "runner_hosted",
+        registrationGeneration: null,
+        credentialGeneration: null,
+        activeCredentialId: null,
+        credentialState: "unknown",
+        reason: "legacy_projection_unbackfilled",
+        nextAction: "operator_projection_migration_required",
+        observedAt: "2026-08-08T00:03:00.000Z"
+      }
+    });
+    expect(pendingProjection.runnerToken).toBeUndefined();
+    expect(pendingProjection.controlRegistration).toMatchObject({
+      state: "unpaired",
+      reason: "recovery_required",
+      recoveryReason: "current_state_unsafe",
+      evidence: {
+        current: {
+          projectionStatus: "pending",
+          registrationGeneration: null,
+          credentialGeneration: null,
+          credentialState: "unknown"
+        },
+        provenance: { source: "current_state_unsafe" }
+      }
+    });
+    expect(() => beginHostedCredentialRotationSuccessor(pendingProjection, {
+      request: successorRotationRequest
+    })).toThrow(/unattempted credential-conflict/iu);
+    expect(parseDaemonConfig(JSON.parse(JSON.stringify(pendingProjection))))
+      .toEqual(pendingProjection);
+  });
+
+  it("records membership and current-read failures as redacted terminal evidence", () => {
+    const paired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_old",
+      controlRegistration: hostedControl("paired")
+    });
+    const rotationUnknown = markHostedCredentialRotationOutcomeUnknown(
+      beginHostedCredentialRotation(paired, rotationInput())
+    );
+    const membershipFailure = recordHostedCredentialReconciliationFailure(rotationUnknown, {
+      reason: "membership_verification_failed",
+      code: "membership_unavailable"
+    });
+    expect(membershipFailure.controlRegistration).toMatchObject({
+      state: "unpaired",
+      recoveryReason: "membership_verification_failed",
+      evidence: {
+        kind: "reconciliation_failure",
+        failure: {
+          reason: "membership_verification_failed",
+          code: "membership_unavailable"
+        },
+        provenance: {
+          origin: "lost_201_reconciliation",
+          source: "redacted_local_failure"
+        }
+      }
+    });
+    expect(JSON.stringify(membershipFailure)).not.toMatch(/token|stack|message/iu);
+
+    const currentFailure = recordHostedCredentialReconciliationFailure(rotationUnknown, {
+      reason: "current_state_read_failed",
+      code: "invalid_response"
+    });
+    expect(currentFailure.controlRegistration).toMatchObject({
+      recoveryReason: "current_state_read_failed",
+      evidence: { failure: { code: "invalid_response" } }
+    });
+    expect(() => recordHostedCredentialReconciliationFailure(rotationUnknown, {
+      reason: "membership_verification_failed",
+      code: "current_state_unavailable"
+    })).toThrow(/code does not match/iu);
+  });
+
+  it("stages only a complete fresh 201 response", () => {
+    const paired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_old",
+      controlRegistration: hostedControl("paired")
+    });
+    const pending = beginHostedCredentialRotation(paired, rotationInput());
+    const outcomeUnknown = markHostedCredentialRotationOutcomeUnknown(pending);
+    expect(stageHostedCredentialRotation(
+      outcomeUnknown,
+      freshHostedRotation()
+    ).runnerToken).toBe("runtime_new");
+    expect(() => stageHostedCredentialRotation(
+      outcomeUnknown,
+      replayedHostedRotation as never
+    )).toThrow();
+    expect(() => stageHostedCredentialRotation(
+      pending,
+      replayedHostedRotation as never
+    )).toThrow();
+    expect(() => stageHostedCredentialRotation(
+      pending,
+      { rotation: rotatedHostedRotation, runnerToken: "runtime_old" } as never
+    )).toThrow();
+    expect(stageHostedCredentialRotation(pending, freshHostedRotation()).runnerToken).toBe("runtime_new");
+  });
+
+  it("rejects nested lifecycle identity, successor tuple, and terminal-field corruption", () => {
+    const conflict = hostedCredentialConflictConfig();
+    const successor = beginHostedCredentialRotationSuccessor(conflict, {
+      request: successorRotationRequest
+    });
+    for (const mutate of [
+      (raw: any) => { raw.controlRegistration.predecessorConflict.originalRequest.runnerId = "runner_other"; },
+      (raw: any) => { raw.controlRegistration.predecessorConflict.replay.runnerId = "runner_other"; },
+      (raw: any) => { raw.controlRegistration.predecessorConflict.current.runnerId = "runner_other"; },
+      (raw: any) => {
+        raw.controlRegistration.request.operationId = hostedCredentialMutationRequest.operationId;
+        raw.controlRegistration.canonicalRequestDigest = hostedCredentialMutationRequestDigest(
+          "rotate",
+          raw.controlRegistration.request
+        );
+      },
+      (raw: any) => {
+        raw.controlRegistration.request.expectedCredentialId = "credential_other";
+        raw.controlRegistration.canonicalRequestDigest = hostedCredentialMutationRequestDigest(
+          "rotate",
+          raw.controlRegistration.request
+        );
+      }
+    ]) {
+      const raw = JSON.parse(JSON.stringify(successor));
+      mutate(raw);
+      expect(() => parseDaemonConfig(raw)).toThrow();
+    }
+
+    const successorUnknown = markHostedCredentialRotationOutcomeUnknown(successor);
+    const successorTerminal = reconcileHostedCredentialRotationSuccessorReplay(
+      successorUnknown,
+      { ...successorRotationMetadata, replayed: true }
+    );
+    const corruptedSuccessorTerminal = JSON.parse(JSON.stringify(successorTerminal));
+    corruptedSuccessorTerminal.controlRegistration.successorReplay.runnerId = "runner_other";
+    expect(() => parseDaemonConfig(corruptedSuccessorTerminal)).toThrow(/runnerId|successor/iu);
+    const corruptedSuccessorTuple = JSON.parse(JSON.stringify(successorTerminal));
+    corruptedSuccessorTuple.controlRegistration.successorRequest.expectedCredentialId = "credential_other";
+    corruptedSuccessorTuple.controlRegistration.successorCanonicalRequestDigest =
+      hostedCredentialMutationRequestDigest(
+        "rotate",
+        corruptedSuccessorTuple.controlRegistration.successorRequest
+      );
+    expect(() => parseDaemonConfig(corruptedSuccessorTuple)).toThrow(/successor/iu);
+
+    const normalUnknown = markHostedCredentialRotationOutcomeUnknown(
+      beginHostedCredentialRotation(
+        parseDaemonConfig({
+          runnerId: "runner_hosted",
+          runnerToken: "runtime_old",
+          controlRegistration: hostedControl("paired")
+        }),
+        rotationInput()
+      )
+    );
+    const nonSuccessorTerminal = recordHostedCredentialReconciliationFailure(normalUnknown, {
+      reason: "current_state_read_failed",
+      code: "current_state_unavailable"
+    });
+    expect(() => parseDaemonConfig({
+      ...nonSuccessorTerminal,
+      controlRegistration: {
+        ...nonSuccessorTerminal.controlRegistration,
+        successorRequest: successorRotationRequest,
+        successorCanonicalRequestDigest: hostedCredentialMutationRequestDigest(
+          "rotate",
+          successorRotationRequest
+        )
+      }
+    })).toThrow(/unrecognized/iu);
+    const corruptedFailureCode = JSON.parse(JSON.stringify(nonSuccessorTerminal));
+    corruptedFailureCode.controlRegistration.evidence.failure.code = "membership_unavailable";
+    expect(() => parseDaemonConfig(corruptedFailureCode)).toThrow(/redacted code/iu);
+  });
+
+  it("binds every persisted mutation digest to the canonical strict request", () => {
+    const wrongDigest = `sha256:${"f".repeat(64)}`;
+    const paired = parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_old",
+      controlRegistration: hostedControl("paired")
+    });
+    expect(() => beginHostedCredentialRotation(paired, {
+      request: hostedCredentialMutationRequest,
+      canonicalRequestDigest: wrongDigest
+    })).toThrow(/digest does not match/iu);
+    expect(() => beginHostedCredentialRevocation(paired, {
+      request: hostedCredentialMutationRequest,
+      canonicalRequestDigest: wrongDigest
+    })).toThrow(/digest does not match/iu);
+
+    const conflict = hostedCredentialConflictConfig();
+    expect(() => parseDaemonConfig({
+      ...conflict,
+      controlRegistration: {
+        ...conflict.controlRegistration,
+        canonicalRequestDigest: wrongDigest
+      }
+    })).toThrow(/digest must match/iu);
+    expect(() => beginHostedCredentialRotationSuccessor(conflict, {
+      request: successorRotationRequest,
+      canonicalRequestDigest: wrongDigest
+    })).toThrow(/digest does not match/iu);
+  });
+
+  it("binds canonical mutation digests to the requested endpoint", () => {
+    expect(hostedCredentialMutationRequestDigest(
+      "rotate",
+      hostedCredentialMutationRequest
+    )).not.toBe(hostedCredentialMutationRequestDigest(
+      "revoke",
+      hostedCredentialMutationRequest
+    ));
+  });
+
+  it("rejects revoked snapshots whose pre-revocation tuple is corrupted", () => {
+    const revoked = confirmHostedCredentialRevocation(
+      beginHostedCredentialRevocation(
+        parseDaemonConfig({
+          runnerId: "runner_hosted",
+          runnerToken: "runtime_old",
+          controlRegistration: hostedControl("paired")
+        }),
+        revocationInput()
+      ),
+      hostedRevocation("operation_revoke_1")
+    );
+    const control = revoked.controlRegistration;
+    if (!control || control.state !== "revoked") throw new Error("Expected revoked fixture.");
+    for (const registration of [
+      { ...control.registration, registrationGeneration: 2 },
+      { ...control.registration, credentialGeneration: 2 },
+      { ...control.registration, credentialId: "credential_other" }
+    ]) {
+      expect(() => parseDaemonConfig({
+        ...revoked,
+        controlRegistration: { ...control, registration }
+      })).toThrow(/revocation metadata must advance/iu);
+    }
+  });
+
+  it("allows rotate and revoke only from paired, while revoked permits only re-provision", () => {
+    const paired = hostedControl("paired");
+    expect(hostedCredentialOperationProblem(paired, "rotate")).toBeUndefined();
+    expect(hostedCredentialOperationProblem(paired, "revoke")).toBeUndefined();
+    expect(hostedCredentialOperationProblem(paired, "reprovision")).toMatch(/requires/iu);
+
+    const revoked = confirmHostedCredentialRevocation(
+      beginHostedCredentialRevocation(
+        parseDaemonConfig({
+          runnerId: "runner_hosted",
+          runnerToken: "runtime_old",
+          controlRegistration: paired
+        }),
+        revocationInput({
+          ...hostedCredentialRevocationRequest,
+          operationId: "operation_revoke_1"
+        })
+      ),
+      hostedRevocation("operation_revoke_1")
+    );
+    expect(hostedCredentialOperationProblem(revoked.controlRegistration, "reprovision")).toBeUndefined();
+    expect(hostedCredentialOperationProblem(revoked.controlRegistration, "rotate")).toMatch(/paired/iu);
+    expect(hostedCredentialOperationProblem(revoked.controlRegistration, "revoke")).toMatch(/paired/iu);
+    expect(() => beginHostedCredentialRotation(revoked, rotationInput())).toThrow(/paired/iu);
+  });
+
+  it("rejects unknown mutation fields, secrets in fail-closed states, and invalid generation transitions", () => {
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "rotation_pending",
+        endpoint: "rotate",
+        origin: "paired",
+        canonicalRequestDigest: hostedCredentialMutationDigest,
+        request: { ...hostedCredentialMutationRequest, operatorToken: "must_not_persist" },
+        registration: hostedRegistration
+      }
+    })).toThrow(/unrecognized/iu);
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "must_not_survive",
+      controlRegistration: {
+        kind: "hosted_control_v1",
+        state: "revocation_outcome_unknown",
+        endpoint: "revoke",
+        canonicalRequestDigest: hostedCredentialRevocationDigest,
+        request: hostedCredentialRevocationRequest,
+        registration: hostedRegistration
+      }
+    })).toThrow(/must not contain a runtime runner token/iu);
+    expect(() => parseDaemonConfig({
+      runnerId: "runner_hosted",
+      runnerToken: "runtime_current",
+      runnerTokens: ["runtime_old_grace_token"],
+      controlRegistration: hostedControl("paired")
+    })).toThrow(/must not retain fallback runner tokens/iu);
+
+    const pending = beginHostedCredentialRotation(
+      parseDaemonConfig({
+        runnerId: "runner_hosted",
+        runnerToken: "runtime_old",
+        controlRegistration: hostedControl("paired")
+      }),
+      rotationInput()
+    );
+    expect(() => stageHostedCredentialRotation(
+      pending,
+      freshHostedRotation({ ...rotatedHostedRotation, credentialGeneration: 3 })
+    )).toThrow(/advance only the credential generation/iu);
+    expect(() => confirmHostedCredentialRevocation(
+      beginHostedCredentialRevocation(
+        parseDaemonConfig({
+          runnerId: "runner_hosted",
+          runnerToken: "runtime_old",
+          controlRegistration: hostedControl("paired")
+        }),
+        revocationInput()
+      ),
+      hostedRevocation("operation_revoke_1", 2)
+    )).toThrow(/advance only the credential generation/iu);
   });
 });
 

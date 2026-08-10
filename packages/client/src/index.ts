@@ -14,7 +14,56 @@ import {
   FactoryRecipeSnapshotInputSchema,
   FactoryRecipeSnapshotSchema,
   RoutingDecisionSchema,
+  CallbackAttemptObservationReceiptEnvelopeV1Schema,
+  CallbackIntentObservationReceiptEnvelopeV1Schema,
+  CallbackProviderObservationReceiptEnvelopeV1Schema,
+  computePermissionFencingTokenDigestV1,
+  computePermissionRequestDigestV1,
+  canonicalJsonStringify,
+  CompletionAssessmentReceiptEnvelopeV1Schema,
+  CompletionEvidenceObservationReceiptEnvelopeV1Schema,
+  CompletionContractRefReceiptEnvelopeV1Schema,
+  computeControlPayloadDigestV1,
+  computeControlReceiptDigestV1,
+  ControlErrorHttpResponseV1Schema,
+  HumanPermissionDecisionHttpResponseV1Schema,
+  HumanPermissionDecisionRequestV1Schema,
+  HostedClaimRequestV1Schema,
+  HostedClaimV1Schema,
+  HostedCompleteRequestV1Schema,
+  HostedHeartbeatRequestV1Schema,
+  HostedLifecycleReceiptEnvelopeV1Schema,
+  HostedProgressRequestV1Schema,
+  HostedRejectStartRequestV1Schema,
+  HostedRunningRequestV1Schema,
+  computeHostedClaimFencingTokenDigestV1,
+  computeHostedLifecycleRequestDigestV1,
+  computeHostedLifecycleRequestIdV1,
+  verifyHostedLifecycleReceiptV1,
+  verifyHostedAdmissionEnvelopeDigestV1,
+  verifyHostedClaimExpectedAuthorityV1,
+  verifyHostedClaimFencingTokenDigestV1,
+  verifyCompletionEvidenceObservationReceiptDigestsV1,
+  MaterialActionReconcileHttpResponseV1Schema,
+  MaterialActionReceiptEnvelopeV1Schema,
+  MaterialActionStableIdV1Schema,
+  RunnerMaterialActionReconcileAttemptV1Schema,
+  RunnerMaterialActionReconcileRequestV1Schema,
+  computeMaterialActionFencingTokenDigestV1,
+  computeMaterialActionPayloadDigestV1,
+  computeMaterialActionReceiptDigestV1,
+  PermissionResolutionCurrentHttpResponseV1Schema,
+  RelayCapabilitiesResponseV1Schema,
+  RunnerPermissionCurrentQueryV1Schema,
+  RunnerPermissionRequestHttpResponseV1Schema,
+  RunnerPermissionRequestV1Schema,
+  RunnerControlContextResponseV1Schema,
+  RunnerReadinessReceiptEnvelopeV1Schema,
+  RunnerCredentialHttpResponseV1Schema,
+  RunnerCredentialReprovisionRequestV1Schema,
   RunnerDirectoryEntrySchema,
+  RunnerRegistrationRequestV1Schema,
+  WorkThreadRefReceiptEnvelopeV1Schema,
   RunAdmissionDecisionSchema,
   WorkstreamAdmissionBatchInputSchema,
   WorkstreamAdmissionBatchReceiptSchema,
@@ -43,13 +92,38 @@ import {
   type OpenTagManagedChannelBindingOwnership,
   type OpenTagRun,
   type OpenTagRunResult,
+  type HostedCompleteRequestV1,
+  type HostedHeartbeatRequestV1,
+  type HostedLifecycleReceiptEnvelopeV1,
+  type HostedLifecycleActionV1,
+  type HostedLifecycleRequestV1,
+  type HostedProgressRequestV1,
+  type HostedRejectStartRequestV1,
+  type HostedRunningRequestV1,
   type AcceptedProgressMetrics,
   type FactoryRecipeSnapshot,
   type FactoryRecipeSnapshotInput,
   type PolicyRule,
   type ProposalLineage,
   type RoutingDecision,
+  type RunnerCredentialReprovisionRequestV1,
+  type RunnerCredentialResponseV1,
   type RunnerDirectoryEntry,
+  type RunnerRegistrationRequestV1,
+  type RunnerReadinessReceiptEnvelopeV1,
+  type RunnerControlContextResponseV1,
+  type HumanPermissionDecisionRequestV1,
+  type HostedClaimRequestV1,
+  type HostedClaimV1,
+  type RunnerMaterialActionReconcileRequestV1,
+  type MaterialActionReceiptEnvelopeV1,
+  type PermissionResolutionReceiptEnvelopeV1,
+  type RunnerPermissionCurrentQueryV1,
+  type RunnerPermissionRequestV1,
+  type WorkThreadRefReceiptEnvelopeV1,
+  type CompletionContractRefReceiptEnvelopeV1,
+  type CompletionAssessmentReceiptEnvelopeV1,
+  type CompletionEvidenceObservationReceiptEnvelopeV1,
   type RunnerRegistrationConfig,
   type RunnerRegistrationInput,
   type RunEventImportance,
@@ -69,6 +143,14 @@ import {
 export type {
   FactoryRecipeSnapshot,
   FactoryRecipeSnapshotInput,
+  HumanPermissionDecisionRequestV1,
+  HostedClaimRequestV1,
+  HostedClaimV1,
+  MaterialActionReceiptEnvelopeV1,
+  PermissionResolutionReceiptEnvelopeV1,
+  RunnerMaterialActionReconcileRequestV1,
+  RunnerPermissionCurrentQueryV1,
+  RunnerPermissionRequestV1,
   Workstream,
   WorkstreamAdmissionBatchInput,
   WorkstreamAdmissionBatchReceipt,
@@ -271,9 +353,72 @@ export type SourceDeliveryPruneResult = {
   retainedActive: number;
 };
 
+export type ControlCredential =
+  | { kind: "bootstrap_pairing"; token: string }
+  | { kind: "recovery_pairing"; token: string }
+  | { kind: "operator"; token: string }
+  | { kind: "approver"; token: string }
+  | { kind: "runtime"; token: string };
+
+export type RelayCapabilitiesResponseV1 = typeof RelayCapabilitiesResponseV1Schema._output;
+export type CallbackIntentObservationReceiptEnvelopeV1 =
+  typeof CallbackIntentObservationReceiptEnvelopeV1Schema._output;
+export type CallbackAttemptObservationReceiptEnvelopeV1 =
+  typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output;
+export type CallbackProviderObservationReceiptEnvelopeV1 =
+  typeof CallbackProviderObservationReceiptEnvelopeV1Schema._output;
+export type CallbackObservationReceiptEnvelopeV1 =
+  | CallbackIntentObservationReceiptEnvelopeV1
+  | CallbackAttemptObservationReceiptEnvelopeV1
+  | CallbackProviderObservationReceiptEnvelopeV1;
+
+export type ControlReceiptResult<T> =
+  | { status: 201; replayed: false; outcome: "accepted"; receipt: T }
+  | { status: 200; replayed: true; outcome: "accepted"; receipt: T };
+
+export type CallbackObservationControlReceiptResult =
+  | ControlReceiptResult<CallbackObservationReceiptEnvelopeV1>
+  | {
+      status: 202;
+      replayed: false;
+      outcome: "outcome_unknown";
+      receipt: CallbackObservationReceiptEnvelopeV1;
+    };
+
+export type MaterialActionReconcileControlV1Result =
+  | {
+      status: 200;
+      outcome: "resolved";
+      receipt: MaterialActionReceiptEnvelopeV1;
+    }
+  | {
+      status: 202;
+      outcome: "outcome_unknown";
+      receipt: MaterialActionReceiptEnvelopeV1;
+    };
+
+export type RunnerPermissionRequestControlV1Result = {
+  status: 202;
+  outcome: "waiting";
+  receipt: PermissionResolutionReceiptEnvelopeV1;
+};
+
+export type HumanPermissionDecisionControlV1Result = {
+  status: 200;
+  outcome: "resolved";
+  receipt: PermissionResolutionReceiptEnvelopeV1;
+};
+
+export type PermissionResolutionCurrentControlV1Result =
+  | RunnerPermissionRequestControlV1Result
+  | HumanPermissionDecisionControlV1Result;
+
 export type OpenTagClientOptions = {
   dispatcherUrl: string;
   pairingToken?: string;
+  controlCredential?: ControlCredential;
+  controlSignal?: AbortSignal;
+  controlTimeoutMs?: number;
   channelPrincipalCredential?: string;
   fetchImpl?: typeof fetch;
 };
@@ -488,7 +633,61 @@ export type LinearOAuthInstallationStart = {
 };
 
 export type OpenTagClient = {
+  getRelayCapabilitiesControlV1(): Promise<RelayCapabilitiesResponseV1>;
+  getRunnerControlContextV1(input: { runnerId: string }): Promise<RunnerControlContextResponseV1>;
+  claimHostedRunControlV1(input: {
+    runnerId: string;
+    request: HostedClaimRequestV1;
+  }): Promise<HostedClaimV1 | null>;
+  heartbeatHostedRunControlV1(input: {
+    organizationId: string;
+    credentialId: string;
+    runnerId: string;
+    runId: string;
+    request: HostedHeartbeatRequestV1;
+  }): Promise<ControlReceiptResult<HostedLifecycleReceiptEnvelopeV1>>;
+  markHostedRunRunningControlV1(input: {
+    organizationId: string;
+    credentialId: string;
+    runnerId: string;
+    runId: string;
+    request: HostedRunningRequestV1;
+  }): Promise<ControlReceiptResult<HostedLifecycleReceiptEnvelopeV1>>;
+  progressHostedRunControlV1(input: {
+    organizationId: string;
+    credentialId: string;
+    runnerId: string;
+    runId: string;
+    request: HostedProgressRequestV1;
+  }): Promise<ControlReceiptResult<HostedLifecycleReceiptEnvelopeV1>>;
+  completeHostedRunControlV1(input: {
+    organizationId: string;
+    credentialId: string;
+    runnerId: string;
+    runId: string;
+    request: HostedCompleteRequestV1;
+  }): Promise<ControlReceiptResult<HostedLifecycleReceiptEnvelopeV1>>;
+  rejectHostedAttemptStartControlV1(input: {
+    organizationId: string;
+    credentialId: string;
+    runnerId: string;
+    runId: string;
+    request: HostedRejectStartRequestV1;
+  }): Promise<ControlReceiptResult<HostedLifecycleReceiptEnvelopeV1>>;
   registerRunner(input: RegisterRunnerInput): Promise<void>;
+  registerRunnerControlV1(input: RunnerRegistrationRequestV1): Promise<RunnerCredentialResponseV1>;
+  reprovisionRunnerControlV1(input: RunnerCredentialReprovisionRequestV1): Promise<RunnerCredentialResponseV1>;
+  reportRunnerReadinessControlV1(input: RunnerReadinessReceiptEnvelopeV1): Promise<ControlReceiptResult<RunnerReadinessReceiptEnvelopeV1>>;
+  requestActionPermissionControlV1(input: RunnerPermissionRequestV1): Promise<RunnerPermissionRequestControlV1Result>;
+  resolveActionPermissionControlV1(input: { runnerId: string; decision: HumanPermissionDecisionRequestV1 }): Promise<HumanPermissionDecisionControlV1Result>;
+  getActionPermissionCurrentControlV1(input: RunnerPermissionCurrentQueryV1): Promise<PermissionResolutionCurrentControlV1Result>;
+  recordMaterialActionReceiptControlV1(input: { runnerId: string; fencingToken: string; receipt: MaterialActionReceiptEnvelopeV1 }): Promise<ControlReceiptResult<MaterialActionReceiptEnvelopeV1>>;
+  reconcileMaterialActionControlV1(input: RunnerMaterialActionReconcileRequestV1): Promise<MaterialActionReconcileControlV1Result>;
+  projectWorkThreadRefControlV1(input: WorkThreadRefReceiptEnvelopeV1): Promise<ControlReceiptResult<WorkThreadRefReceiptEnvelopeV1>>;
+  projectCompletionContractRefControlV1(input: CompletionContractRefReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionContractRefReceiptEnvelopeV1>>;
+  projectCompletionAssessmentControlV1(input: CompletionAssessmentReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionAssessmentReceiptEnvelopeV1>>;
+  projectCompletionEvidenceControlV1(input: CompletionEvidenceObservationReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionEvidenceObservationReceiptEnvelopeV1>>;
+  projectCallbackObservationControlV1(input: CallbackObservationReceiptEnvelopeV1): Promise<CallbackObservationControlReceiptResult>;
   getRunner(input: { runnerId: string }): Promise<{ runner: RunnerRegistration }>;
   listRunners(): Promise<{ runners: RunnerDirectoryEntry[] }>;
   listControlPlaneAlerts(input?: { limit?: number; since?: string }): Promise<{ alerts: ControlPlaneAlert[] }>;
@@ -622,6 +821,36 @@ export class OpenTagClientHttpError extends Error {
   }
 }
 
+type RunnerCredentialControlV1HttpResponse = ReturnType<
+  typeof RunnerCredentialHttpResponseV1Schema.parse
+>;
+type RunnerCredentialControlV1ErrorResponse = Exclude<
+  RunnerCredentialControlV1HttpResponse,
+  { status: 200 | 201 }
+>;
+
+export class OpenTagControlV1HttpError extends Error {
+  readonly status: RunnerCredentialControlV1ErrorResponse["status"];
+  readonly code: RunnerCredentialControlV1ErrorResponse["body"]["error"];
+  readonly requestId: string;
+  readonly retryAfterSeconds?: number;
+
+  constructor(
+    action: string,
+    status: RunnerCredentialControlV1ErrorResponse["status"],
+    code: RunnerCredentialControlV1ErrorResponse["body"]["error"],
+    requestId: string,
+    retryAfterSeconds?: number
+  ) {
+    super(`${action} failed: ${status} ${code} requestId=${requestId}`);
+    this.name = "OpenTagControlV1HttpError";
+    this.status = status;
+    this.code = code;
+    this.requestId = requestId;
+    if (retryAfterSeconds !== undefined) this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
 function baseUrlFrom(dispatcherUrl: string): string {
   return dispatcherUrl.replace(/\/$/, "");
 }
@@ -632,6 +861,24 @@ function authHeaders(pairingToken: string | undefined): Record<string, string> {
 
 function jsonHeaders(pairingToken: string | undefined): Record<string, string> {
   return { "content-type": "application/json", ...authHeaders(pairingToken) };
+}
+
+function requireControlCredential(
+  credential: ControlCredential | undefined,
+  requiredKind: ControlCredential["kind"]
+): string {
+  const actualKind = credential?.kind ?? "missing";
+  if (
+    !credential
+    || credential.kind !== requiredKind
+    || typeof credential.token !== "string"
+    || credential.token.trim().length === 0
+  ) {
+    throw new Error(
+      `Control credential rejected: required=${requiredKind} actual=${actualKind}`
+    );
+  }
+  return credential.token;
 }
 
 function parseRunTimeoutPolicy(value: unknown): RunTimeoutPolicy {
@@ -678,6 +925,527 @@ async function assertOk(response: Response, action: string): Promise<void> {
     const text = await response.text();
     throw new OpenTagClientHttpError(action, response.status, text);
   }
+}
+
+type StrictControlSchema<T> = {
+  parse(value: unknown): T;
+  safeParse(value: unknown):
+    | { success: true; data: T }
+    | { success: false };
+};
+
+function assertControlResponseBoundary(
+  response: Response,
+  action: string,
+  trustedOrigin: string
+): void {
+  if (
+    response.redirected
+    || response.type === "opaqueredirect"
+    || (response.status >= 300 && response.status < 400)
+  ) {
+    throw new OpenTagClientHttpError(action, response.status, "redirect_rejected");
+  }
+  if (!response.url) {
+    throw new OpenTagClientHttpError(action, response.status, "response_origin_unverifiable");
+  }
+  let responseOrigin: string;
+  try {
+    responseOrigin = new URL(response.url).origin;
+  } catch {
+    throw new OpenTagClientHttpError(action, response.status, "response_origin_mismatch");
+  }
+  if (responseOrigin !== trustedOrigin) {
+    throw new OpenTagClientHttpError(action, response.status, "response_origin_mismatch");
+  }
+}
+
+async function parseControlJson(
+  response: Response,
+  action: string,
+  trustedOrigin: string
+): Promise<unknown> {
+  assertControlResponseBoundary(response, action, trustedOrigin);
+  try {
+    return await response.json();
+  } catch {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_json_response");
+  }
+}
+
+function throwControlV1Error(
+  response: Response,
+  body: unknown,
+  action: string,
+  expectedRequestId?: string,
+  preserveServerRequestId = false
+): never {
+  const error = ControlErrorHttpResponseV1Schema.safeParse({
+    status: response.status,
+    body
+  });
+  if (!error.success) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+  if (expectedRequestId !== undefined && error.data.body.requestId !== expectedRequestId) {
+    throw new OpenTagClientHttpError(action, response.status, "response_identity_mismatch");
+  }
+  if (error.data.status === 429) {
+    const retryAfter = response.headers.get("retry-after");
+    if (retryAfter !== String(error.data.body.retryAfterSeconds)) {
+      throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+    }
+  }
+  throw new OpenTagControlV1HttpError(
+    action,
+    error.data.status,
+    error.data.body.error,
+    expectedRequestId
+      ?? (preserveServerRequestId ? error.data.body.requestId : "unavailable"),
+    error.data.status === 429 ? error.data.body.retryAfterSeconds : undefined
+  );
+}
+
+async function parseHostedLifecycleControlV1Response(input: {
+  response: Response,
+  action: string,
+  trustedOrigin: string,
+  lifecycleAction: HostedLifecycleActionV1,
+  organizationId: string,
+  credentialId: string,
+  runnerId: string,
+  runId: string,
+  request: HostedLifecycleRequestV1,
+}): Promise<ControlReceiptResult<HostedLifecycleReceiptEnvelopeV1>> {
+  const body = await parseControlJson(
+    input.response,
+    input.action,
+    input.trustedOrigin,
+  );
+  if (input.response.status !== 200 && input.response.status !== 201) {
+    throwControlV1Error(
+      input.response,
+      body,
+      input.action,
+      input.request.requestId,
+    );
+  }
+  const parsed = HostedLifecycleReceiptEnvelopeV1Schema.safeParse(body);
+  if (
+    !parsed.success
+    || !(await verifyHostedLifecycleReceiptV1({
+      receipt: parsed.data,
+      request: input.request,
+      action: input.lifecycleAction,
+      organizationId: input.organizationId,
+      runnerId: input.runnerId,
+      runId: input.runId,
+      credentialId: input.credentialId,
+    }))
+  ) {
+    throw new OpenTagClientHttpError(
+      input.action,
+      input.response.status,
+      "invalid_control_v1_response",
+    );
+  }
+  return input.response.status === 201
+    ? { status: 201, replayed: false, outcome: "accepted", receipt: parsed.data }
+    : { status: 200, replayed: true, outcome: "accepted", receipt: parsed.data };
+}
+
+async function validateHostedLifecycleRequest(input: {
+  organizationId: string;
+  runnerId: string;
+  runId: string;
+  action: HostedLifecycleActionV1;
+  request: HostedLifecycleRequestV1;
+}): Promise<void> {
+  const expectedDigest = await computeHostedLifecycleRequestDigestV1(input);
+  const expectedRequestId = await computeHostedLifecycleRequestIdV1({
+    operationId: input.request.operationId,
+    requestDigest: expectedDigest,
+  });
+  const expectedFenceDigest = await computeHostedClaimFencingTokenDigestV1(
+    input.request.attempt.fencingToken,
+  );
+  if (
+    input.request.requestDigest !== expectedDigest
+    || input.request.requestId !== expectedRequestId
+    || input.request.attempt.fencingTokenDigest !== expectedFenceDigest
+  ) {
+    throw new Error("Hosted lifecycle request identity is invalid.");
+  }
+}
+
+async function parseControlReceiptResponse<T extends {
+  receiptId: string;
+  organizationId: string;
+  operationId: string;
+  receiptDigest: string;
+}>(
+  response: Response,
+  action: string,
+  trustedOrigin: string,
+  request: T,
+  schema: StrictControlSchema<T>,
+  isUnknownResponse?: (receipt: T) => boolean
+): Promise<ControlReceiptResult<T> | {
+  status: 202;
+  replayed: false;
+  outcome: "outcome_unknown";
+  receipt: T;
+}> {
+  const body = await parseControlJson(response, action, trustedOrigin);
+  if (response.status !== 200 && response.status !== 201 && response.status !== 202) {
+    throwControlV1Error(response, body, action);
+  }
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+  if (canonicalJsonStringify(parsed.data) !== canonicalJsonStringify(request)) {
+    throw new OpenTagClientHttpError(action, response.status, "response_identity_mismatch");
+  }
+  if (response.status === 202 && !isUnknownResponse?.(parsed.data)) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+  if (response.status === 200) {
+    return { status: 200, replayed: true, outcome: "accepted", receipt: parsed.data };
+  }
+  if (response.status === 201) {
+    return { status: 201, replayed: false, outcome: "accepted", receipt: parsed.data };
+  }
+  return {
+    status: 202,
+    replayed: false,
+    outcome: "outcome_unknown",
+    receipt: parsed.data
+  };
+}
+
+async function assertMaterialActionReceiptControlV1(
+  receipt: MaterialActionReceiptEnvelopeV1,
+  expected: {
+    organizationId: string;
+    runnerId: string;
+    runId: string;
+    actionId: string;
+    attemptId: string;
+    attemptNumber: number;
+    epoch: number;
+    fencingTokenDigest: string;
+    expectedCurrentReceiptId?: string;
+    expectedCurrentReceiptDigest?: string;
+  },
+  action: string,
+  status: number
+): Promise<void> {
+  const expectedPayloadDigest = await computeMaterialActionPayloadDigestV1(
+    receipt.payload
+  );
+  const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
+  const expectedReceiptDigest = await computeMaterialActionReceiptDigestV1(
+    receiptDigestInput
+  );
+  if (
+    receipt.payloadDigest !== expectedPayloadDigest
+    || receipt.receiptDigest !== expectedReceiptDigest
+  ) {
+    throw new OpenTagClientHttpError(
+      action,
+      status,
+      "invalid_material_receipt_digest"
+    );
+  }
+  if (
+    receipt.organizationId !== expected.organizationId
+    || receipt.producer.id !== expected.runnerId
+    || receipt.runId !== expected.runId
+    || receipt.payload.actionId !== expected.actionId
+    || receipt.attempt.attemptId !== expected.attemptId
+    || receipt.attempt.attemptNumber !== expected.attemptNumber
+    || receipt.attempt.epoch !== expected.epoch
+    || receipt.attempt.fencingTokenDigest !== expected.fencingTokenDigest
+    || (
+      expected.expectedCurrentReceiptId !== undefined
+      && receipt.receiptId !== expected.expectedCurrentReceiptId
+    )
+    || (
+      expected.expectedCurrentReceiptDigest !== undefined
+      && receipt.receiptDigest !== expected.expectedCurrentReceiptDigest
+    )
+  ) {
+    throw new OpenTagClientHttpError(
+      action,
+      status,
+      "response_identity_mismatch"
+    );
+  }
+}
+
+async function parseMaterialActionReconcileControlV1Response(
+  response: Response,
+  action: string,
+  trustedOrigin: string,
+  request: RunnerMaterialActionReconcileRequestV1
+): Promise<MaterialActionReconcileControlV1Result> {
+  const body = await parseControlJson(response, action, trustedOrigin);
+  const parsed = MaterialActionReconcileHttpResponseV1Schema.safeParse({
+    status: response.status,
+    body,
+  });
+  if (!parsed.success) {
+    throw new OpenTagClientHttpError(
+      action,
+      response.status,
+      "invalid_control_v1_response"
+    );
+  }
+  if (parsed.data.status !== 200 && parsed.data.status !== 202) {
+    throwControlV1Error(response, body, action, request.requestId);
+  }
+  const receipt = parsed.data.body;
+  await assertMaterialActionReceiptControlV1(
+    receipt,
+    {
+      organizationId: request.organizationId,
+      runnerId: request.runnerId,
+      runId: request.runId,
+      actionId: request.actionId,
+      attemptId: request.attempt.attemptId,
+      attemptNumber: request.attempt.attemptNumber,
+      epoch: request.attempt.epoch,
+      fencingTokenDigest: request.attempt.fencingTokenDigest,
+      ...(request.expectedCurrentReceiptId === undefined ? {} : {
+        expectedCurrentReceiptId: request.expectedCurrentReceiptId,
+        expectedCurrentReceiptDigest: request.expectedCurrentReceiptDigest!,
+      }),
+    },
+    action,
+    response.status
+  );
+  return parsed.data.status === 200
+    ? { status: 200, outcome: "resolved", receipt }
+    : { status: 202, outcome: "outcome_unknown", receipt };
+}
+
+type PermissionResolutionExpectedIdentity = {
+  operationId?: string;
+  organizationId: string;
+  runId: string;
+  attemptId: string;
+  attemptNumber?: number;
+  epoch?: number;
+  fencingTokenDigest?: string;
+  actionId: string;
+  permissionRequestId: string;
+  permissionRequestDigest: string;
+  policySnapshotDigest?: string;
+  decisionId?: string;
+  decision?: "allow_once" | "deny";
+  decidedAt?: string;
+};
+
+async function canonicalSha256Digest(value: unknown): Promise<string> {
+  const bytes = new TextEncoder().encode(canonicalJsonStringify(value));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function assertPermissionResolutionDigests(
+  receipt: PermissionResolutionReceiptEnvelopeV1,
+  action: string,
+  status: number
+): Promise<void> {
+  const expectedPayloadDigest = await canonicalSha256Digest(receipt.payload);
+  const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
+  const expectedReceiptDigest = await canonicalSha256Digest(receiptDigestInput);
+  if (
+    receipt.payloadDigest !== expectedPayloadDigest
+    || receipt.receiptDigest !== expectedReceiptDigest
+  ) {
+    throw new OpenTagClientHttpError(action, status, "invalid_control_v1_response");
+  }
+}
+
+function assertPermissionResolutionIdentity(
+  receipt: PermissionResolutionReceiptEnvelopeV1,
+  expected: PermissionResolutionExpectedIdentity,
+  action: string,
+  status: number
+): void {
+  if (
+    (expected.operationId !== undefined && receipt.operationId !== expected.operationId)
+    || receipt.organizationId !== expected.organizationId
+    || receipt.runId !== expected.runId
+    || receipt.attempt.attemptId !== expected.attemptId
+    || (expected.attemptNumber !== undefined
+      && receipt.attempt.attemptNumber !== expected.attemptNumber)
+    || (expected.epoch !== undefined && receipt.attempt.epoch !== expected.epoch)
+    || (expected.fencingTokenDigest !== undefined
+      && receipt.attempt.fencingTokenDigest !== expected.fencingTokenDigest)
+    || receipt.payload.actionId !== expected.actionId
+    || receipt.payload.permissionRequestId !== expected.permissionRequestId
+    || receipt.payload.permissionRequestDigest !== expected.permissionRequestDigest
+    || (expected.policySnapshotDigest !== undefined
+      && receipt.payload.policySnapshotDigest !== expected.policySnapshotDigest)
+    || (expected.decisionId !== undefined && receipt.payload.decisionRef !== expected.decisionId)
+    || (expected.decision !== undefined && receipt.payload.decision !== expected.decision)
+    || (expected.decidedAt !== undefined && receipt.payload.decidedAt !== expected.decidedAt)
+  ) {
+    throw new OpenTagClientHttpError(action, status, "response_identity_mismatch");
+  }
+}
+
+async function parseRunnerPermissionRequestControlV1Response(
+  response: Response,
+  action: string,
+  trustedOrigin: string,
+  request: RunnerPermissionRequestV1
+): Promise<RunnerPermissionRequestControlV1Result> {
+  const body = await parseControlJson(response, action, trustedOrigin);
+  if (response.status !== 202) {
+    throwControlV1Error(response, body, action, request.requestId);
+  }
+  const parsed = RunnerPermissionRequestHttpResponseV1Schema.safeParse({ status: response.status, body });
+  if (!parsed.success) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+  const receipt = parsed.data.body;
+  await assertPermissionResolutionDigests(receipt, action, response.status);
+  assertPermissionResolutionIdentity(receipt, {
+    operationId: request.operationId,
+    organizationId: request.organizationId,
+    runId: request.runId,
+    attemptId: request.attempt.attemptId,
+    attemptNumber: request.attempt.attemptNumber,
+    epoch: request.attempt.epoch,
+    fencingTokenDigest: request.attempt.fencingTokenDigest,
+    actionId: request.actionId,
+    permissionRequestId: request.permissionRequestId,
+    permissionRequestDigest: request.permissionRequestDigest,
+    policySnapshotDigest: request.policySnapshotDigest,
+  }, action, response.status);
+  if (
+    receipt.payload.actionFamily !== request.actionFamily
+    || receipt.payload.riskTier !== request.riskTier
+    || receipt.payload.targetFingerprint !== request.targetFingerprint
+    || canonicalJsonStringify(receipt.payload.permissionScopes)
+      !== canonicalJsonStringify(request.permissionScopes)
+    || receipt.payload.policySnapshotRef !== request.policySnapshotRef
+    || receipt.payload.requestedAt !== request.requestedAt
+  ) {
+    throw new OpenTagClientHttpError(action, response.status, "response_identity_mismatch");
+  }
+  return { status: 202, outcome: "waiting", receipt };
+}
+
+async function parseHumanPermissionDecisionControlV1Response(
+  response: Response,
+  action: string,
+  trustedOrigin: string,
+  request: HumanPermissionDecisionRequestV1
+): Promise<HumanPermissionDecisionControlV1Result> {
+  const body = await parseControlJson(response, action, trustedOrigin);
+  if (response.status !== 200) {
+    throwControlV1Error(response, body, action, request.requestId);
+  }
+  const parsed = HumanPermissionDecisionHttpResponseV1Schema.safeParse({ status: response.status, body });
+  if (!parsed.success) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+  const receipt = parsed.data.body;
+  await assertPermissionResolutionDigests(receipt, action, response.status);
+  assertPermissionResolutionIdentity(receipt, {
+    operationId: request.operationId,
+    organizationId: request.organizationId,
+    runId: request.runId,
+    attemptId: request.attempt.attemptId,
+    attemptNumber: request.attempt.attemptNumber,
+    epoch: request.attempt.epoch,
+    fencingTokenDigest: request.attempt.fencingTokenDigest,
+    actionId: request.actionId,
+    permissionRequestId: request.permissionRequestId,
+    permissionRequestDigest: request.permissionRequestDigest,
+    policySnapshotDigest: request.policySnapshotDigest,
+    decisionId: request.decisionId,
+    decision: request.decision,
+    decidedAt: request.decidedAt,
+  }, action, response.status);
+  return { status: 200, outcome: "resolved", receipt };
+}
+
+async function parsePermissionResolutionCurrentControlV1Response(
+  response: Response,
+  action: string,
+  trustedOrigin: string,
+  query: RunnerPermissionCurrentQueryV1
+): Promise<PermissionResolutionCurrentControlV1Result> {
+  const body = await parseControlJson(response, action, trustedOrigin);
+  if (response.status !== 200 && response.status !== 202) {
+    throwControlV1Error(response, body, action);
+  }
+  const parsed = PermissionResolutionCurrentHttpResponseV1Schema.safeParse({
+    status: response.status,
+    body,
+  });
+  if (!parsed.success) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+  const receipt = parsed.data.body;
+  await assertPermissionResolutionDigests(receipt, action, response.status);
+  assertPermissionResolutionIdentity(receipt, {
+    ...query,
+    attemptId: query.attempt.attemptId,
+    attemptNumber: query.attempt.attemptNumber,
+    epoch: query.attempt.epoch,
+    fencingTokenDigest: query.attempt.fencingTokenDigest,
+  }, action, response.status);
+  return response.status === 202
+    ? { status: 202, outcome: "waiting", receipt }
+    : { status: 200, outcome: "resolved", receipt };
+}
+
+async function parseRunnerCredentialControlV1Response(
+  response: Response,
+  action: string,
+  trustedOrigin: string,
+  expected: {
+    requestId: string;
+    operationId: string;
+    runnerId: string;
+    registrationGeneration: number;
+    credentialGeneration: number;
+  }
+): Promise<RunnerCredentialResponseV1> {
+  const body = await parseControlJson(response, action, trustedOrigin);
+
+  const envelope = RunnerCredentialHttpResponseV1Schema.safeParse({
+    status: response.status,
+    body
+  });
+  if (!envelope.success) {
+    throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+  }
+
+  if (envelope.data.status !== 200 && envelope.data.status !== 201) {
+    throwControlV1Error(response, body, action, expected.requestId);
+  }
+
+  if (
+    envelope.data.body.operationId !== expected.operationId
+    || envelope.data.body.runnerId !== expected.runnerId
+  ) {
+    throw new OpenTagClientHttpError(action, response.status, "response_identity_mismatch");
+  }
+  if (
+    envelope.data.body.registrationGeneration !== expected.registrationGeneration
+    || envelope.data.body.credentialGeneration !== expected.credentialGeneration
+  ) {
+    throw new OpenTagClientHttpError(action, response.status, "response_generation_mismatch");
+  }
+  return envelope.data.body;
 }
 
 function parseSourceDeliveryPruneResult(value: unknown): SourceDeliveryPruneResult {
@@ -728,6 +1496,12 @@ function parseClaimedRun(body: {
 
 export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClient {
   const baseUrl = baseUrlFrom(options.dispatcherUrl);
+  let trustedControlOrigin: string;
+  try {
+    trustedControlOrigin = new URL(baseUrl).origin;
+  } catch {
+    throw new Error("OpenTag dispatcher URL is invalid.");
+  }
   const baseFetch = options.fetchImpl ?? fetch;
   const fetchImpl: typeof fetch = (url, init) => {
     if (!options.channelPrincipalCredential) return baseFetch(url, init);
@@ -735,8 +1509,330 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
     headers.set("x-opentag-channel-principal", options.channelPrincipalCredential);
     return baseFetch(url, { ...init, headers });
   };
+  const controlFetch = async (
+    url: string,
+    init: RequestInit,
+    action: string
+  ): Promise<Response> => {
+    const requestAbort = new AbortController();
+    const onExternalAbort = () => requestAbort.abort(options.controlSignal?.reason);
+    if (options.controlSignal?.aborted) onExternalAbort();
+    else options.controlSignal?.addEventListener("abort", onExternalAbort, { once: true });
+    const timeout = setTimeout(
+      () => requestAbort.abort(new Error("control_request_timeout")),
+      options.controlTimeoutMs ?? 30_000,
+    );
+    try {
+      return await baseFetch(url, {
+        ...init,
+        redirect: "manual",
+        signal: requestAbort.signal,
+      });
+    } catch (error) {
+      if (!(error instanceof TypeError) && !requestAbort.signal.aborted) {
+        throw error;
+      }
+      throw new OpenTagClientHttpError(action, 0, "transport_failed");
+    } finally {
+      clearTimeout(timeout);
+      options.controlSignal?.removeEventListener("abort", onExternalAbort);
+    }
+  };
 
   return {
+    async getRelayCapabilitiesControlV1() {
+      const action = "getRelayCapabilitiesControlV1";
+      const response = await controlFetch(
+        `${baseUrl}/v1/relay/capabilities`,
+        { method: "GET" },
+        action
+      );
+      const body = await parseControlJson(response, action, trustedControlOrigin);
+      if (response.status !== 200) {
+        const parsedError = ControlErrorHttpResponseV1Schema.safeParse({ status: response.status, body });
+        if (!parsedError.success) {
+          throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+        }
+        throwControlV1Error(response, body, action, undefined, true);
+      }
+      const parsed = RelayCapabilitiesResponseV1Schema.safeParse(body);
+      if (!parsed.success) {
+        throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+      }
+      return parsed.data;
+    },
+
+    async getRunnerControlContextV1(input) {
+      const runnerId = RunnerControlContextResponseV1Schema.shape.runnerId.parse(input.runnerId);
+      const action = "getRunnerControlContextV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(runnerId)}/control-context`,
+        { method: "GET", headers: authHeaders(token) },
+        action,
+      );
+      const body = await parseControlJson(response, action, trustedControlOrigin);
+      if (response.status !== 200) {
+        const parsedError = ControlErrorHttpResponseV1Schema.safeParse({ status: response.status, body });
+        if (!parsedError.success) {
+          throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+        }
+        throwControlV1Error(response, body, action, undefined, true);
+      }
+      const parsed = RunnerControlContextResponseV1Schema.safeParse(body);
+      if (!parsed.success || parsed.data.runnerId !== runnerId) {
+        throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+      }
+      return parsed.data;
+    },
+
+    async claimHostedRunControlV1(input) {
+      const runnerId = HostedClaimV1Schema.shape.runnerId.parse(input.runnerId);
+      const request = HostedClaimRequestV1Schema.parse(input.request);
+      const action = "claimHostedRunControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(runnerId)}/hosted-claims`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      assertControlResponseBoundary(response, action, trustedControlOrigin);
+      if (response.status === 204) return null;
+
+      const body = await parseControlJson(response, action, trustedControlOrigin);
+      if (response.status !== 200) {
+        const parsedError = ControlErrorHttpResponseV1Schema.safeParse({
+          status: response.status,
+          body,
+        });
+        if (!parsedError.success) {
+          throw new OpenTagClientHttpError(
+            action,
+            response.status,
+            "invalid_control_v1_response",
+          );
+        }
+        throwControlV1Error(response, body, action, request.requestId);
+      }
+
+      const parsed = HostedClaimV1Schema.safeParse(body);
+      if (!parsed.success) {
+        throw new OpenTagClientHttpError(
+          action,
+          response.status,
+          "invalid_control_v1_response",
+        );
+      }
+      const claim = parsed.data;
+      if (
+        claim.runnerId !== runnerId
+        || !verifyHostedClaimExpectedAuthorityV1(request, claim)
+      ) {
+        throw new OpenTagClientHttpError(
+          action,
+          response.status,
+          "response_identity_mismatch",
+        );
+      }
+      if (!(await verifyHostedClaimFencingTokenDigestV1(claim))) {
+        throw new OpenTagClientHttpError(
+          action,
+          response.status,
+          "invalid_control_v1_response",
+        );
+      }
+      const policy = claim.admissionPolicySnapshot;
+      const expectedPolicyPayloadDigest = await computeControlPayloadDigestV1(
+        policy.payload,
+      );
+      const { receiptDigest: _receiptDigest, ...policyReceiptDigestInput } =
+        policy;
+      const expectedPolicyReceiptDigest = await computeControlReceiptDigestV1(
+        policyReceiptDigestInput,
+      );
+      if (
+        !(await verifyHostedAdmissionEnvelopeDigestV1(claim.hostedAdmission))
+        || policy.payloadDigest !== expectedPolicyPayloadDigest
+        || policy.receiptDigest !== expectedPolicyReceiptDigest
+      ) {
+        throw new OpenTagClientHttpError(
+          action,
+          response.status,
+          "invalid_control_v1_response",
+        );
+      }
+      return claim;
+    },
+
+    async heartbeatHostedRunControlV1(input) {
+      const action = "heartbeatHostedRunControlV1";
+      const request = HostedHeartbeatRequestV1Schema.parse(input.request);
+      await validateHostedLifecycleRequest({
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        action: "heartbeat",
+        request,
+      });
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(input.runnerId)}/runs/${encodeURIComponent(input.runId)}/heartbeat`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      return parseHostedLifecycleControlV1Response({
+        response,
+        action,
+        trustedOrigin: trustedControlOrigin,
+        lifecycleAction: "heartbeat",
+        organizationId: input.organizationId,
+        credentialId: input.credentialId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        request,
+      });
+    },
+
+    async markHostedRunRunningControlV1(input) {
+      const action = "markHostedRunRunningControlV1";
+      const request = HostedRunningRequestV1Schema.parse(input.request);
+      await validateHostedLifecycleRequest({
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        action: "running",
+        request,
+      });
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(input.runnerId)}/runs/${encodeURIComponent(input.runId)}/running`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      return parseHostedLifecycleControlV1Response({
+        response,
+        action,
+        trustedOrigin: trustedControlOrigin,
+        lifecycleAction: "running",
+        organizationId: input.organizationId,
+        credentialId: input.credentialId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        request,
+      });
+    },
+
+    async progressHostedRunControlV1(input) {
+      const action = "progressHostedRunControlV1";
+      const request = HostedProgressRequestV1Schema.parse(input.request);
+      await validateHostedLifecycleRequest({
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        action: "progress",
+        request,
+      });
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(input.runnerId)}/runs/${encodeURIComponent(input.runId)}/progress`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      return parseHostedLifecycleControlV1Response({
+        response,
+        action,
+        trustedOrigin: trustedControlOrigin,
+        lifecycleAction: "progress",
+        organizationId: input.organizationId,
+        credentialId: input.credentialId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        request,
+      });
+    },
+
+    async completeHostedRunControlV1(input) {
+      const action = "completeHostedRunControlV1";
+      const request = HostedCompleteRequestV1Schema.parse(input.request);
+      await validateHostedLifecycleRequest({
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        action: "complete",
+        request,
+      });
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(input.runnerId)}/runs/${encodeURIComponent(input.runId)}/complete`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      return parseHostedLifecycleControlV1Response({
+        response,
+        action,
+        trustedOrigin: trustedControlOrigin,
+        lifecycleAction: "complete",
+        organizationId: input.organizationId,
+        credentialId: input.credentialId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        request,
+      });
+    },
+
+    async rejectHostedAttemptStartControlV1(input) {
+      const action = "rejectHostedAttemptStartControlV1";
+      const request = HostedRejectStartRequestV1Schema.parse(input.request);
+      await validateHostedLifecycleRequest({
+        organizationId: input.organizationId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        action: "reject-start",
+        request,
+      });
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(input.runnerId)}/runs/${encodeURIComponent(input.runId)}/reject-start`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      return parseHostedLifecycleControlV1Response({
+        response,
+        action,
+        trustedOrigin: trustedControlOrigin,
+        lifecycleAction: "reject-start",
+        organizationId: input.organizationId,
+        credentialId: input.credentialId,
+        runnerId: input.runnerId,
+        runId: input.runId,
+        request,
+      });
+    },
+
     async registerRunner(input) {
       const response = await fetchImpl(`${baseUrl}/v1/runners`, {
         method: "POST",
@@ -744,6 +1840,399 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         body: JSON.stringify({ ...input, name: input.name ?? input.runnerId })
       });
       await assertOk(response, "registerRunner");
+    },
+
+    async registerRunnerControlV1(input) {
+      const request = RunnerRegistrationRequestV1Schema.parse(input);
+      const controlToken = requireControlCredential(
+        options.controlCredential,
+        "bootstrap_pairing"
+      );
+      const action = "registerRunnerControlV1";
+      const response = await controlFetch(`${baseUrl}/v1/runners`, {
+        method: "POST",
+        headers: jsonHeaders(controlToken),
+        body: JSON.stringify(request)
+      }, action);
+      return parseRunnerCredentialControlV1Response(
+        response,
+        action,
+        trustedControlOrigin,
+        {
+          ...request,
+          registrationGeneration: 1,
+          credentialGeneration: 1
+        }
+      );
+    },
+
+    async reprovisionRunnerControlV1(input) {
+      const request = RunnerCredentialReprovisionRequestV1Schema.parse(input);
+      const controlToken = requireControlCredential(
+        options.controlCredential,
+        "recovery_pairing"
+      );
+      const action = "reprovisionRunnerControlV1";
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/credentials/reprovision`,
+        {
+          method: "POST",
+          headers: jsonHeaders(controlToken),
+          body: JSON.stringify(request)
+        },
+        action
+      );
+      return parseRunnerCredentialControlV1Response(
+        response,
+        action,
+        trustedControlOrigin,
+        {
+          ...request,
+          registrationGeneration: request.expectedRegistrationGeneration + 1,
+          credentialGeneration: request.expectedCredentialGeneration + 1
+        }
+      );
+    },
+
+    async reportRunnerReadinessControlV1(input) {
+      const request = RunnerReadinessReceiptEnvelopeV1Schema.parse(input);
+      const action = "reportRunnerReadinessControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(request.payload.runnerId)}/readiness`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request)
+        },
+        action
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        request,
+        RunnerReadinessReceiptEnvelopeV1Schema,
+        undefined
+      ) as Promise<ControlReceiptResult<RunnerReadinessReceiptEnvelopeV1>>;
+    },
+
+    async requestActionPermissionControlV1(input) {
+      const action = "requestActionPermissionControlV1";
+      const request = RunnerPermissionRequestV1Schema.parse(input);
+      const expectedFencingTokenDigest = await computePermissionFencingTokenDigestV1(
+        request.attempt.fencingToken
+      );
+      if (request.attempt.fencingTokenDigest !== expectedFencingTokenDigest) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_permission_fencing_token_digest"
+        );
+      }
+      const expectedPermissionRequestDigest = await computePermissionRequestDigestV1({
+        schemaVersion: request.schemaVersion,
+        protocolVersion: request.protocolVersion,
+        requiredCapabilities: request.requiredCapabilities,
+        organizationId: request.organizationId,
+        runnerId: request.runnerId,
+        runId: request.runId,
+        attempt: {
+          attemptId: request.attempt.attemptId,
+          attemptNumber: request.attempt.attemptNumber,
+          epoch: request.attempt.epoch,
+          fencingTokenDigest: request.attempt.fencingTokenDigest,
+        },
+        permissionRequestId: request.permissionRequestId,
+        actionId: request.actionId,
+        actionFamily: request.actionFamily,
+        riskTier: request.riskTier,
+        targetFingerprint: request.targetFingerprint,
+        permissionScopes: request.permissionScopes,
+        policySnapshotRef: request.policySnapshotRef,
+        policySnapshotDigest: request.policySnapshotDigest,
+        requestedAt: request.requestedAt,
+      });
+      if (request.permissionRequestDigest !== expectedPermissionRequestDigest) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_permission_request_digest"
+        );
+      }
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/runs/${encodeURIComponent(request.runId)}/action-permissions`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action
+      );
+      return parseRunnerPermissionRequestControlV1Response(
+        response,
+        action,
+        trustedControlOrigin,
+        request
+      );
+    },
+
+    async resolveActionPermissionControlV1(input) {
+      const runnerId = RunnerPermissionCurrentQueryV1Schema.shape.runnerId.parse(input.runnerId);
+      const decision = HumanPermissionDecisionRequestV1Schema.parse(input.decision);
+      const action = "resolveActionPermissionControlV1";
+      const token = requireControlCredential(options.controlCredential, "approver");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(runnerId)}/runs/${encodeURIComponent(decision.runId)}/action-permissions/${encodeURIComponent(decision.actionId)}/resolve`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(decision),
+        },
+        action
+      );
+      return parseHumanPermissionDecisionControlV1Response(
+        response,
+        action,
+        trustedControlOrigin,
+        decision
+      );
+    },
+
+    async getActionPermissionCurrentControlV1(input) {
+      const query = RunnerPermissionCurrentQueryV1Schema.parse(input);
+      const action = "getActionPermissionCurrentControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const search = new URLSearchParams({
+        organizationId: query.organizationId,
+        attemptId: query.attempt.attemptId,
+        attemptNumber: String(query.attempt.attemptNumber),
+        epoch: String(query.attempt.epoch),
+        fencingTokenDigest: query.attempt.fencingTokenDigest,
+        permissionRequestId: query.permissionRequestId,
+        permissionRequestDigest: query.permissionRequestDigest,
+      });
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(query.runnerId)}/runs/${encodeURIComponent(query.runId)}/action-permissions/${encodeURIComponent(query.actionId)}/current?${search.toString()}`,
+        { method: "GET", headers: authHeaders(token) },
+        action
+      );
+      return parsePermissionResolutionCurrentControlV1Response(
+        response,
+        action,
+        trustedControlOrigin,
+        query
+      );
+    },
+
+    async recordMaterialActionReceiptControlV1(input) {
+      const action = "recordMaterialActionReceiptControlV1";
+      const runnerId = MaterialActionStableIdV1Schema.parse(input.runnerId);
+      const fencingToken =
+        RunnerMaterialActionReconcileAttemptV1Schema.shape.fencingToken.parse(
+          input.fencingToken
+        );
+      const receipt = MaterialActionReceiptEnvelopeV1Schema.parse(input.receipt);
+      const expectedFenceDigest = await computeMaterialActionFencingTokenDigestV1(
+        fencingToken
+      );
+      const expectedPayloadDigest = await computeMaterialActionPayloadDigestV1(
+        receipt.payload
+      );
+      const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
+      const expectedReceiptDigest = await computeMaterialActionReceiptDigestV1(
+        receiptDigestInput
+      );
+      if (receipt.attempt.fencingTokenDigest !== expectedFenceDigest) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_material_fencing_token_digest"
+        );
+      }
+      if (receipt.producer.id !== runnerId) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_material_receipt_identity"
+        );
+      }
+      if (
+        receipt.payloadDigest !== expectedPayloadDigest
+        || receipt.receiptDigest !== expectedReceiptDigest
+      ) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_material_receipt_digest"
+        );
+      }
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(runnerId)}/runs/${encodeURIComponent(receipt.runId)}/material-actions/${encodeURIComponent(receipt.payload.actionId)}/receipt`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify({ fencingToken, receipt })
+        },
+        action
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        receipt,
+        MaterialActionReceiptEnvelopeV1Schema,
+        undefined
+      ) as Promise<ControlReceiptResult<MaterialActionReceiptEnvelopeV1>>;
+    },
+
+    async reconcileMaterialActionControlV1(input) {
+      const request = RunnerMaterialActionReconcileRequestV1Schema.parse(input);
+      const action = "reconcileMaterialActionControlV1";
+      const expectedFenceDigest = await computeMaterialActionFencingTokenDigestV1(
+        request.attempt.fencingToken
+      );
+      if (request.attempt.fencingTokenDigest !== expectedFenceDigest) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_material_fencing_token_digest"
+        );
+      }
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/material-actions/${encodeURIComponent(request.actionId)}/reconcile`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action
+      );
+      return parseMaterialActionReconcileControlV1Response(
+        response,
+        action,
+        trustedControlOrigin,
+        request
+      );
+    },
+
+    async projectWorkThreadRefControlV1(input) {
+      const request = WorkThreadRefReceiptEnvelopeV1Schema.parse(input);
+      const action = "projectWorkThreadRefControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runs/${encodeURIComponent(request.runId)}/receipts/work-thread-ref`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) },
+        action
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        request,
+        WorkThreadRefReceiptEnvelopeV1Schema,
+        undefined
+      ) as Promise<ControlReceiptResult<WorkThreadRefReceiptEnvelopeV1>>;
+    },
+
+    async projectCompletionContractRefControlV1(input) {
+      const request = CompletionContractRefReceiptEnvelopeV1Schema.parse(input);
+      const action = "projectCompletionContractRefControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runs/${encodeURIComponent(request.runId)}/receipts/completion-contract-ref`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) },
+        action
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        request,
+        CompletionContractRefReceiptEnvelopeV1Schema,
+        undefined
+      ) as Promise<ControlReceiptResult<CompletionContractRefReceiptEnvelopeV1>>;
+    },
+
+    async projectCompletionAssessmentControlV1(input) {
+      const request = CompletionAssessmentReceiptEnvelopeV1Schema.parse(input);
+      const action = "projectCompletionAssessmentControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runs/${encodeURIComponent(request.runId)}/receipts/completion-assessments`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) },
+        action
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        request,
+        CompletionAssessmentReceiptEnvelopeV1Schema,
+        undefined
+      ) as Promise<ControlReceiptResult<CompletionAssessmentReceiptEnvelopeV1>>;
+    },
+
+    async projectCompletionEvidenceControlV1(input) {
+      const request = CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
+        input,
+      );
+      const action = "projectCompletionEvidenceControlV1";
+      if (!(await verifyCompletionEvidenceObservationReceiptDigestsV1(request))) {
+        throw new OpenTagClientHttpError(
+          action,
+          0,
+          "invalid_completion_evidence_digest",
+        );
+      }
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runs/${encodeURIComponent(request.runId)}/receipts/completion-evidence`,
+        {
+          method: "POST",
+          headers: jsonHeaders(token),
+          body: JSON.stringify(request),
+        },
+        action,
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        request,
+        CompletionEvidenceObservationReceiptEnvelopeV1Schema,
+        undefined,
+      ) as Promise<
+        ControlReceiptResult<CompletionEvidenceObservationReceiptEnvelopeV1>
+      >;
+    },
+
+    async projectCallbackObservationControlV1(input) {
+      const schema = input.receiptKind === "callback_intent_observation"
+        ? CallbackIntentObservationReceiptEnvelopeV1Schema
+        : input.receiptKind === "callback_attempt_observation"
+          ? CallbackAttemptObservationReceiptEnvelopeV1Schema
+          : CallbackProviderObservationReceiptEnvelopeV1Schema;
+      const request = schema.parse(input) as CallbackObservationReceiptEnvelopeV1;
+      const action = "projectCallbackObservationControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runs/${encodeURIComponent(request.runId)}/receipts/callback-observations`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) },
+        action
+      );
+      return parseControlReceiptResponse(
+        response,
+        action,
+        trustedControlOrigin,
+        request,
+        schema as StrictControlSchema<CallbackObservationReceiptEnvelopeV1>,
+        (receipt) => receipt.receiptKind !== "callback_intent_observation"
+          && receipt.payload.outcome === "outcome_unknown"
+      );
     },
 
     async getRunner(input) {

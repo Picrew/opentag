@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 import {
   CompletionAssessmentSchema,
+  compareCompletionGateIds,
+  compareRfc3339Timestamps,
   CompletionContractSchema,
   CompletionGateResultSchema,
+  reduceCompletionGateStates,
   type CompletionAssessment,
   type CompletionGate,
   type CompletionGateResult,
@@ -42,7 +45,10 @@ export function completionInputDigest(input: Omit<CompletionEvaluationInput, "li
     blockingEscalations: [...(input.blockingEscalations ?? [])].sort((left, right) => left.id.localeCompare(right.id)),
     waiverValidity: [...input.waivers]
       .filter((waiver) => Boolean(waiver.expiresAt))
-      .map((waiver) => ({ id: waiver.id, active: waiver.expiresAt! > waiverEvaluationTime }))
+      .map((waiver) => ({
+        id: waiver.id,
+        active: compareRfc3339Timestamps(waiver.expiresAt!, waiverEvaluationTime) > 0
+      }))
       .sort((left, right) => left.id.localeCompare(right.id))
   };
   return `sha256:${createHash("sha256").update(JSON.stringify(canonicalize(ordered))).digest("hex")}`;
@@ -61,7 +67,16 @@ function latestTimestamp(input: CompletionEvaluationInput): string {
       ...(item.resolution?.resolvedAt ? [item.resolution.resolvedAt] : [])
     ])
   ];
-  return timestamps.sort().at(-1) ?? input.contract.createdAt;
+  return latestExactTimestamp(timestamps);
+}
+
+function latestExactTimestamp(timestamps: readonly string[]): string {
+  return timestamps.slice(1).reduce((latest, timestamp) => {
+    const instantOrder = compareRfc3339Timestamps(timestamp, latest);
+    if (instantOrder > 0) return timestamp;
+    if (instantOrder < 0) return latest;
+    return compareCompletionGateIds(timestamp, latest) < 0 ? timestamp : latest;
+  }, timestamps[0]!);
 }
 
 function activeBlockingEscalations(input: CompletionEvaluationInput) {
@@ -72,9 +87,24 @@ function activeBlockingEscalations(input: CompletionEvaluationInput) {
 
 function assessmentTimestamp(input: CompletionEvaluationInput, evaluationTime: string): string {
   const expiredBoundaries = input.waivers.flatMap((waiver) =>
-    waiver.expiresAt && waiver.expiresAt <= evaluationTime ? [waiver.expiresAt] : []
+    waiver.expiresAt
+      && compareRfc3339Timestamps(waiver.expiresAt, evaluationTime) <= 0
+      ? [waiver.expiresAt]
+      : []
   );
-  return [latestTimestamp(input), ...expiredBoundaries].sort().at(-1) ?? input.contract.createdAt;
+  const timestamps = [latestTimestamp(input), ...expiredBoundaries];
+  return latestExactTimestamp(timestamps);
+}
+
+function canonicalLatestRunResult(
+  runResults: CompletionEvaluationInput["runResults"]
+) {
+  return [...runResults]
+    .sort((left, right) =>
+      compareRfc3339Timestamps(left.recordedAt, right.recordedAt)
+      || compareCompletionGateIds(left.runId, right.runId)
+    )
+    .at(-1);
 }
 
 function assuranceAccepted(actual: CompletionEvidenceFact["assurance"], minimum: "verified" | "reported"): boolean {
@@ -82,27 +112,47 @@ function assuranceAccepted(actual: CompletionEvidenceFact["assurance"], minimum:
   return minimum === "verified" ? actual === "verified" : actual === "verified" || actual === "reported";
 }
 
-function validWaiver(
+function validWaiverForAssessment(
   waiver: CompletionWaiver,
-  gateId: string,
   input: CompletionEvaluationInput,
-  evaluatedAt: string
+  evaluationTime: string,
+  assessedAt: string
 ): boolean {
-  const currentRunId = [...input.runResults]
-    .sort((left, right) => left.recordedAt.localeCompare(right.recordedAt) || left.runId.localeCompare(right.runId))
-    .at(-1)?.runId;
+  const currentRunId = canonicalLatestRunResult(input.runResults)?.runId;
   return waiver.contractId === input.contract.id
     && waiver.contractVersion === input.contract.version
     && waiver.cycle === input.contract.cycle
     && (!waiver.runId || waiver.runId === currentRunId)
-    && waiver.gateIds.includes(gateId)
-    && (!waiver.expiresAt || waiver.expiresAt > evaluatedAt);
+    && compareRfc3339Timestamps(waiver.waivedAt, evaluationTime) <= 0
+    && compareRfc3339Timestamps(waiver.waivedAt, assessedAt) <= 0
+    && (
+      !waiver.expiresAt
+      || (
+        compareRfc3339Timestamps(waiver.expiresAt, evaluationTime) > 0
+        && compareRfc3339Timestamps(waiver.expiresAt, assessedAt) > 0
+      )
+    );
 }
 
-function waiverForGate(input: CompletionEvaluationInput, gateId: string, evaluatedAt: string): CompletionWaiver | undefined {
+function canonicalActiveWaiver(
+  input: CompletionEvaluationInput,
+  evaluationTime: string,
+  assessedAt: string
+): CompletionWaiver | undefined {
+  const contractGateIds = new Set(input.contract.gates.map((gate) => gate.id));
   return input.waivers
-    .filter((waiver) => validWaiver(waiver, gateId, input, evaluatedAt))
-    .sort((left, right) => right.waivedAt.localeCompare(left.waivedAt) || left.id.localeCompare(right.id))[0];
+    .filter((waiver) =>
+      validWaiverForAssessment(waiver, input, evaluationTime, assessedAt)
+      && waiver.gateIds.every((gateId) => contractGateIds.has(gateId))
+    )
+    .sort((left, right) => {
+      const waiverTimeOrder = compareRfc3339Timestamps(
+        left.waivedAt,
+        right.waivedAt
+      );
+      if (waiverTimeOrder !== 0) return -waiverTimeOrder;
+      return compareCompletionGateIds(left.id, right.id);
+    })[0];
 }
 
 function resolvedTargets(input: CompletionEvaluationInput): {
@@ -149,12 +199,15 @@ function authoritativeEvidence(facts: CompletionEvidenceFact[]): {
 } {
   if (facts.length === 0) return { facts: [], conflicted: false };
   const ordered = [...facts].sort((left, right) =>
-    right.observedAt.localeCompare(left.observedAt)
-    || right.receivedAt.localeCompare(left.receivedAt)
-    || left.id.localeCompare(right.id)
+    compareRfc3339Timestamps(right.observedAt, left.observedAt)
+    || compareRfc3339Timestamps(right.receivedAt, left.receivedAt)
+    || compareCompletionGateIds(left.id, right.id)
   );
   const latest = ordered[0]!;
-  const tied = ordered.filter((item) => item.observedAt === latest.observedAt && item.receivedAt === latest.receivedAt);
+  const tied = ordered.filter((item) =>
+    compareRfc3339Timestamps(item.observedAt, latest.observedAt) === 0
+    && compareRfc3339Timestamps(item.receivedAt, latest.receivedAt) === 0
+  );
   const claims = new Set(tied.map((item) => JSON.stringify(canonicalize({ assurance: item.assurance, claim: item.claim }))));
   return { facts: tied, conflicted: claims.size > 1 };
 }
@@ -165,10 +218,13 @@ function currentReceipt(receipts: CompletionEvaluationInput["materialActionRecei
 } {
   if (receipts.length === 0) return { receipts: [], conflicted: false };
   const ordered = [...receipts].sort((left, right) =>
-    right.observedAt.localeCompare(left.observedAt) || left.id.localeCompare(right.id)
+    compareRfc3339Timestamps(right.observedAt, left.observedAt)
+    || compareCompletionGateIds(left.id, right.id)
   );
   const latest = ordered[0]!;
-  const tied = ordered.filter((item) => item.observedAt === latest.observedAt);
+  const tied = ordered.filter((item) =>
+    compareRfc3339Timestamps(item.observedAt, latest.observedAt) === 0
+  );
   return { receipts: tied, conflicted: new Set(tied.map((item) => item.outcome)).size > 1 };
 }
 
@@ -209,11 +265,10 @@ function evaluateGate(
   artifactsByTarget: Map<string, CompletionArtifact[]>,
   ambiguousKeys: Set<string>,
   evaluatedAt: string,
-  waiverEvaluationTime: string
+  activeWaiver: CompletionWaiver | undefined
 ): CompletionGateResult {
-  const waiver = waiverForGate(input, gate.id, waiverEvaluationTime);
-  if (waiver) {
-    return result({ gateId: gate.id, ...(gate.targetKey ? { targetKey: gate.targetKey } : {}), state: "waived", evidenceIds: [], reasonCode: "gate_waived", reason: `Gate waived by ${waiver.actor.handle ?? waiver.actor.providerUserId}.` }, evaluatedAt);
+  if (activeWaiver?.gateIds.includes(gate.id)) {
+    return result({ gateId: gate.id, ...(gate.targetKey ? { targetKey: gate.targetKey } : {}), state: "waived", evidenceIds: [], reasonCode: "gate_waived", reason: `Gate waived by ${activeWaiver.actor.handle ?? activeWaiver.actor.providerUserId}.` }, evaluatedAt);
   }
   const target = gate.targetKey ? targetByKey.get(gate.targetKey) : undefined;
   if (gate.targetKey && ambiguousKeys.has(gate.targetKey)) {
@@ -291,26 +346,79 @@ function evaluateGate(
     if (failed) return result({ gateId: gate.id, ...(gate.targetKey ? { targetKey: gate.targetKey } : {}), state: "failed", evidenceIds: [failed.id], reasonCode: "material_action_failed", reason: "The required material action failed." }, evaluatedAt);
     return result({ gateId: gate.id, ...(gate.targetKey ? { targetKey: gate.targetKey } : {}), state: "missing", evidenceIds: [], reasonCode: "material_action_missing", reason: "No receipt exists for the required material action." }, evaluatedAt);
   }
-  const acceptance = input.evidence.find((item) =>
-    item.kind === "human.acceptance"
-    && item.claim.predicate === "role"
-    && item.claim.outcome === gate.requiredRole
-    && item.assurance === "verified"
-  );
+  const authoritative = authoritativeEvidence(input.evidence.filter((item) =>
+    item.kind === "human.acceptance" && item.claim.predicate === "role"
+  ));
+  const acceptance = authoritative.conflicted
+    ? undefined
+    : authoritative.facts.find((item) =>
+        item.claim.outcome === gate.requiredRole && item.assurance === "verified"
+      );
   return acceptance
     ? result({ gateId: gate.id, ...(gate.targetKey ? { targetKey: gate.targetKey } : {}), state: "passed", evidenceIds: [acceptance.id], reasonCode: "human_acceptance_recorded", reason: `Acceptance recorded for role ${gate.requiredRole}.` }, evaluatedAt)
     : result({ gateId: gate.id, ...(gate.targetKey ? { targetKey: gate.targetKey } : {}), state: "missing", evidenceIds: [], reasonCode: "human_acceptance_missing", reason: `Acceptance from role ${gate.requiredRole} is missing.` }, evaluatedAt);
 }
 
-function compatibilityAssessment(input: CompletionEvaluationInput, inputDigest: string, evaluatedAt: string): CompletionAssessment {
-  const successful = input.runResults.find((item) => item.result.conclusion === "success");
+function compatibilityAssessment(
+  input: CompletionEvaluationInput,
+  inputDigest: string,
+  evaluatedAt: string,
+  evaluationTime: string
+): CompletionAssessment {
+  const latestResult = canonicalLatestRunResult(input.runResults);
   const blockingEscalations = activeBlockingEscalations(input);
+  const activeWaiver = canonicalActiveWaiver(
+    input,
+    evaluationTime,
+    evaluatedAt
+  );
   const sequence = input.lineage?.sequence ?? 1;
-  const state = blockingEscalations.length > 0 ? "blocked" : successful ? "satisfied" : input.runResults.length > 0 ? "unsatisfied" : "pending";
+  const executionGateId = input.contract.gates[0]?.id ?? "execution";
+  const executionWaived = activeWaiver?.gateIds.includes(executionGateId) ?? false;
+  const executionGate: CompletionGateResult = executionWaived
+    ? result({
+      gateId: executionGateId,
+      state: "waived",
+      evidenceIds: [],
+      reasonCode: "gate_waived",
+      reason: `Gate waived by ${activeWaiver?.actor.handle ?? activeWaiver?.actor.providerUserId}.`
+    }, evaluatedAt)
+    : latestResult?.result.conclusion === "success"
+      ? result({
+        gateId: executionGateId,
+        state: "passed",
+        evidenceIds: [latestResult.runId],
+        reasonCode: "execution_succeeded",
+        reason: "Executor run succeeded under the compatibility contract."
+      }, evaluatedAt)
+      : latestResult
+        ? result({
+          gateId: executionGateId,
+          state: "failed",
+          evidenceIds: [],
+          reasonCode: "execution_not_succeeded",
+          reason: "The terminal executor result did not succeed."
+        }, evaluatedAt)
+        : result({
+          gateId: executionGateId,
+          state: "missing",
+          evidenceIds: [],
+          reasonCode: "execution_incomplete",
+          reason: "No terminal executor result is available."
+        }, evaluatedAt);
+  const effectiveGateResults = [executionGate, ...blockingEscalations.map((escalation) => ({
+    gateId: `human_escalation:${escalation.id}`,
+    state: "unknown" as const,
+    evidenceIds: [escalation.id],
+    reasonCode: "human_acceptance_missing" as const,
+    reason: escalation.reason,
+    evaluatedAt
+  }))].sort((left, right) => compareCompletionGateIds(left.gateId, right.gateId));
+  const state = reduceCompletionGateStates(effectiveGateResults.map((gate) => gate.state));
   return CompletionAssessmentSchema.parse({
     id: `assessment_${inputDigest.slice("sha256:".length, "sha256:".length + 24)}_${sequence}`,
     workThreadId: input.contract.workThreadId,
-    ...(successful ? { triggeredByRunId: successful.runId } : {}),
+    ...(latestResult ? { triggeredByRunId: latestResult.runId } : {}),
     contractId: input.contract.id,
     contractVersion: input.contract.version,
     cycle: input.contract.cycle,
@@ -319,25 +427,12 @@ function compatibilityAssessment(input: CompletionEvaluationInput, inputDigest: 
     targetBindings: [],
     state,
     evidenceBacked: false,
-    gateResults: [{
-      gateId: input.contract.gates[0]?.id ?? "execution",
-      state: successful ? "passed" : input.runResults.length > 0 ? "failed" : "missing",
-      evidenceIds: successful ? [successful.runId] : [],
-      reasonCode: successful ? "execution_succeeded" : "execution_incomplete",
-      reason: successful ? "Executor run succeeded under the compatibility contract." : "No successful executor result is available.",
-      evaluatedAt
-    }, ...blockingEscalations.map((escalation) => ({
-      gateId: `human_escalation:${escalation.id}`,
-      state: "unknown" as const,
-      evidenceIds: [escalation.id],
-      reasonCode: "human_acceptance_missing" as const,
-      reason: escalation.reason,
-      evaluatedAt
-    }))],
+    gateResults: effectiveGateResults,
     assessedAt: evaluatedAt,
-    assessedBy: "opentag",
+    assessedBy: executionWaived ? "human" : "opentag",
     ...(input.lineage?.supersedesAssessmentId ? { supersedesAssessmentId: input.lineage.supersedesAssessmentId } : {}),
-    ...(successful && blockingEscalations.length === 0 ? { acceptedAt: evaluatedAt } : {})
+    ...((state === "satisfied" || state === "waived") ? { acceptedAt: evaluatedAt } : {}),
+    ...(executionWaived ? { waiver: activeWaiver } : {})
   });
 }
 
@@ -346,10 +441,17 @@ export function evaluateCompletion(inputValue: CompletionEvaluationInput): Compl
   const evaluationTime = input.evaluatedAt ?? latestTimestamp(input);
   const evaluatedAt = assessmentTimestamp(input, evaluationTime);
   const inputDigest = completionInputDigest({ ...input, evaluatedAt: evaluationTime });
-  if (input.contract.mode === "execution_compat") return compatibilityAssessment(input, inputDigest, evaluatedAt);
+  if (input.contract.mode === "execution_compat") {
+    return compatibilityAssessment(input, inputDigest, evaluatedAt, evaluationTime);
+  }
 
   const { bindings, artifactsByTarget, ambiguousKeys } = resolvedTargets(input);
   const targetByKey = new Map(bindings.map((target) => [target.key, target]));
+  const activeWaiver = canonicalActiveWaiver(
+    input,
+    evaluationTime,
+    evaluatedAt
+  );
   const gateResults = input.contract.gates.map((gate) => evaluateGate(
     gate,
     input,
@@ -357,13 +459,8 @@ export function evaluateCompletion(inputValue: CompletionEvaluationInput): Compl
     artifactsByTarget,
     ambiguousKeys,
     evaluatedAt,
-    evaluationTime
+    activeWaiver
   ));
-  const hasExecutionSuccess = input.runResults.some((item) => item.result.conclusion === "success");
-  const hasUnknown = gateResults.some((gate) => gate.state === "unknown");
-  const hasFailed = gateResults.some((gate) => gate.state === "failed");
-  const hasMissing = gateResults.some((gate) => gate.state === "missing");
-  const hasWaived = gateResults.some((gate) => gate.state === "waived");
   const blockingEscalations = activeBlockingEscalations(input);
   const effectiveGateResults = [
     ...gateResults,
@@ -375,30 +472,15 @@ export function evaluateCompletion(inputValue: CompletionEvaluationInput): Compl
       reason: escalation.reason,
       evaluatedAt
     }))
-  ];
-  const state: CompletionAssessment["state"] = blockingEscalations.length > 0
-    ? "blocked"
-    : !hasExecutionSuccess && input.runResults.length > 0
-    ? "unsatisfied"
-    : hasUnknown
-      ? "blocked"
-      : hasFailed
-        ? "unsatisfied"
-        : hasMissing || !hasExecutionSuccess
-          ? "pending"
-          : hasWaived
-            ? "waived"
-            : "satisfied";
+  ].sort((left, right) => compareCompletionGateIds(left.gateId, right.gateId));
+  const state = reduceCompletionGateStates(effectiveGateResults.map((gate) => gate.state));
   const sequence = input.lineage?.sequence ?? 1;
-  const activeWaiver = state === "waived"
-    ? input.waivers
-      .filter((waiver) => gateResults.some((gate) => gate.state === "waived" && validWaiver(waiver, gate.gateId, input, evaluationTime)))
-      .sort((left, right) => right.waivedAt.localeCompare(left.waivedAt) || left.id.localeCompare(right.id))[0]
-    : undefined;
+  const appliedWaiver = gateResults.some((gate) => gate.state === "waived") ? activeWaiver : undefined;
+  const latestRunResult = canonicalLatestRunResult(input.runResults);
   return CompletionAssessmentSchema.parse({
     id: `assessment_${inputDigest.slice("sha256:".length, "sha256:".length + 24)}_${sequence}`,
     workThreadId: input.contract.workThreadId,
-    ...(input.runResults.at(-1)?.runId ? { triggeredByRunId: input.runResults.at(-1)?.runId } : {}),
+    ...(latestRunResult ? { triggeredByRunId: latestRunResult.runId } : {}),
     contractId: input.contract.id,
     contractVersion: input.contract.version,
     cycle: input.contract.cycle,
@@ -409,10 +491,10 @@ export function evaluateCompletion(inputValue: CompletionEvaluationInput): Compl
     evidenceBacked: true,
     gateResults: effectiveGateResults,
     assessedAt: evaluatedAt,
-    assessedBy: activeWaiver ? "human" : "opentag",
+    assessedBy: appliedWaiver ? "human" : "opentag",
     ...(input.lineage?.supersedesAssessmentId ? { supersedesAssessmentId: input.lineage.supersedesAssessmentId } : {}),
     ...((state === "satisfied" || state === "waived") ? { acceptedAt: evaluatedAt } : {}),
-    ...(activeWaiver ? { waiver: activeWaiver } : {})
+    ...(appliedWaiver ? { waiver: appliedWaiver } : {})
   });
 }
 
@@ -423,19 +505,23 @@ export function deriveWorkLoopView(input: {
   blockingEscalations?: CompletionEvaluationInput["blockingEscalations"];
   assessment: CompletionAssessment;
 }): WorkLoopView {
-  const latestRunResult = [...input.runResults]
-    .sort((left, right) => left.recordedAt.localeCompare(right.recordedAt) || left.runId.localeCompare(right.runId))
-    .at(-1);
+  const latestRunResult = canonicalLatestRunResult(input.runResults);
   const latestResult = latestRunResult?.result;
   const execution = latestResult?.conclusion === "success"
     ? "succeeded"
     : latestResult?.conclusion === "failure"
       ? "failed"
       : latestResult?.conclusion ?? "idle";
-  const missingGateIds = input.assessment.gateResults.filter((gate) => gate.state === "missing").map((gate) => gate.gateId);
-  const failedGateIds = input.assessment.gateResults.filter((gate) => gate.state === "failed").map((gate) => gate.gateId);
-  const blockedGateIds = input.assessment.gateResults.filter((gate) => gate.state === "unknown").map((gate) => gate.gateId);
-  const gateCauses: WorkLoopCause[] = input.assessment.gateResults
+  const assessmentGateById = new Map(input.assessment.gateResults.map((gate) => [gate.gateId, gate]));
+  const contractGateIds = new Set(input.contract.gates.map((gate) => gate.id));
+  const orderedGateResults = [
+    ...input.contract.gates.map((gate) => assessmentGateById.get(gate.id)).filter((gate) => gate !== undefined),
+    ...input.assessment.gateResults.filter((gate) => !contractGateIds.has(gate.gateId))
+  ];
+  const missingGateIds = orderedGateResults.filter((gate) => gate.state === "missing").map((gate) => gate.gateId);
+  const failedGateIds = orderedGateResults.filter((gate) => gate.state === "failed").map((gate) => gate.gateId);
+  const blockedGateIds = orderedGateResults.filter((gate) => gate.state === "unknown").map((gate) => gate.gateId);
+  const gateCauses: WorkLoopCause[] = orderedGateResults
     .filter((gate) => gate.state !== "passed" && gate.state !== "waived")
     .map((gate) => ({
       kind: "completion_gate",
@@ -455,7 +541,7 @@ export function deriveWorkLoopView(input: {
   }));
   const receiptsById = new Map((input.materialActionReceipts ?? []).map((receipt) => [receipt.id, receipt]));
   const materialActionCausesById = new Map<string, Extract<WorkLoopCause, { kind: "material_action" }>>();
-  for (const gate of input.assessment.gateResults) {
+  for (const gate of orderedGateResults) {
     if (gate.reasonCode !== "material_action_failed" && gate.reasonCode !== "material_action_unknown") continue;
     const outcome = gate.reasonCode === "material_action_failed" ? "failed" : "unknown";
     for (const receiptId of gate.evidenceIds) {
@@ -487,10 +573,10 @@ export function deriveWorkLoopView(input: {
     "external_state_subject_mismatch",
     "external_state_stale"
   ]);
-  const refreshGate = input.assessment.gateResults.find((gate) =>
+  const refreshGate = orderedGateResults.find((gate) =>
     gate.state !== "passed" && gate.state !== "waived" && refreshReasonCodes.has(gate.reasonCode)
   );
-  const humanGate = input.assessment.gateResults.find((gate) => gate.reasonCode === "human_acceptance_missing");
+  const humanGate = orderedGateResults.find((gate) => gate.reasonCode === "human_acceptance_missing");
   const unknownMaterialAction = materialActionCauses.find((cause) =>
     cause.kind === "material_action" && cause.outcome === "unknown"
   );

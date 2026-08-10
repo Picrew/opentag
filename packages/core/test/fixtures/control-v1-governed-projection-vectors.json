@@ -1,0 +1,352 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": "1.0",
+  "vectorVersion": "opentag.control.governed-projection-vectors/v1",
+  "fixtures": {
+    "workThreadRef": {
+      "schemaVersion": 1,
+      "protocolVersion": "1.0",
+      "organizationId": "org-1",
+      "operationId": "operation-1",
+      "producer": {
+        "kind": "local_opentag",
+        "id": "local-opentag-1",
+        "credentialId": "runtime-credential-1",
+        "registrationGeneration": 1
+      },
+      "predecessorReceiptDigests": [
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      ],
+      "observedAt": "2026-08-09T01:03:04.000Z",
+      "runId": "run-1",
+      "workThreadId": "thread-1",
+      "receiptId": "receipt-work-thread-1",
+      "receiptKind": "work_thread_ref",
+      "requiredCapabilities": [
+        "relay.work-thread-ref.v1"
+      ],
+      "identity": {
+        "namespace": "opentag.control.receipt/work-thread-ref/v1",
+        "parts": [
+          "org-1",
+          "run-1",
+          "thread-1"
+        ]
+      },
+      "payload": {
+        "workThreadId": "thread-1",
+        "sourceIdentityDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "localCreationReceiptId": "local-create-1",
+        "localCreationReceiptDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "lineageKind": "github_issue",
+        "hostedAuthorityRef": {
+          "claimOperationId": "claim-operation-1",
+          "authorityDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "attempt": {
+            "attemptId": "attempt-2",
+            "attemptNumber": 2,
+            "epoch": 2,
+            "fencingTokenDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          },
+          "admissionPolicySnapshot": {
+            "receiptId": "policy-receipt-1",
+            "snapshotId": "policy-1",
+            "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+          }
+        },
+        "createdAt": "2026-08-09T01:02:03.000Z"
+      },
+      "payloadDigest": "sha256:a2652ba630fc3afae2fa2f1590477bdff80a80ab516472d466eb327d6c503a17",
+      "receiptDigest": "sha256:23ec9201d32a1f75b94c0843d9142069841284bbceebf189f8cb7cf170faadfd"
+    },
+    "completionContractRef": {
+      "schemaVersion": 1,
+      "protocolVersion": "1.0",
+      "organizationId": "org-1",
+      "operationId": "operation-1",
+      "producer": {
+        "kind": "local_opentag",
+        "id": "local-opentag-1",
+        "credentialId": "runtime-credential-1",
+        "registrationGeneration": 1
+      },
+      "predecessorReceiptDigests": [
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      ],
+      "observedAt": "2026-08-09T01:03:04.000Z",
+      "runId": "run-1",
+      "workThreadId": "thread-1",
+      "receiptId": "receipt-contract-1",
+      "receiptKind": "completion_contract_ref",
+      "requiredCapabilities": [
+        "relay.completion-contract-ref.v1"
+      ],
+      "identity": {
+        "namespace": "opentag.control.receipt/completion-contract-ref/v1",
+        "parts": [
+          "org-1",
+          "run-1",
+          "thread-1",
+          "contract-1",
+          "3",
+          "2"
+        ]
+      },
+      "payload": {
+        "contractId": "contract-1",
+        "version": 3,
+        "cycle": 2,
+        "mode": "governed",
+        "contentDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "resolvedTargetDigests": [],
+        "requiredGateIds": [
+          "artifact",
+          "verification"
+        ],
+        "createdAt": "2026-08-09T01:02:03.000Z",
+        "supersedesContractId": "contract-0"
+      },
+      "payloadDigest": "sha256:b7e44f94ed451f5eeb2b10e3aa7596c1e7a1b8af0c6a471da0dbca441c5288b3",
+      "receiptDigest": "sha256:1aa79c71a0a099b1f50dcc68fd210d4a856d85d9bbd232202b9db754300c7ad2"
+    },
+    "completionAssessment": {
+      "schemaVersion": 1,
+      "protocolVersion": "1.0",
+      "organizationId": "org-1",
+      "operationId": "operation-1",
+      "producer": {
+        "kind": "local_opentag",
+        "id": "local-opentag-1",
+        "credentialId": "runtime-credential-1",
+        "registrationGeneration": 1
+      },
+      "predecessorReceiptDigests": [
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      ],
+      "observedAt": "2026-08-09T01:03:04.000Z",
+      "runId": "run-1",
+      "workThreadId": "thread-1",
+      "receiptId": "receipt-assessment-1",
+      "receiptKind": "completion_assessment",
+      "requiredCapabilities": [
+        "relay.completion-assessment.v1"
+      ],
+      "identity": {
+        "namespace": "opentag.control.receipt/completion-assessment/v1",
+        "parts": [
+          "org-1",
+          "thread-1",
+          "assessment-1"
+        ]
+      },
+      "attempt": {
+        "attemptId": "attempt-2",
+        "attemptNumber": 2,
+        "epoch": 2,
+        "fencingTokenDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "payload": {
+        "assessmentId": "assessment-1",
+        "workThreadId": "thread-1",
+        "contract": {
+          "contractId": "contract-1",
+          "version": 3,
+          "cycle": 2,
+          "mode": "governed",
+          "contentDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "admissionPolicySnapshot": {
+          "snapshotId": "policy-1",
+          "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "runId": "run-1",
+        "attempt": {
+          "attemptId": "attempt-2",
+          "attemptNumber": 2,
+          "epoch": 2,
+          "fencingTokenDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+        },
+        "executorResultReceiptRef": {
+          "receiptId": "lifecycle_6c6fe8b2a09240e9d9ac50289a235027ed5e626efa625a09dd7883dd6ef5e4b2",
+          "operationId": "op_5555555555555555555555555555555555555555555555555555555555555555",
+          "requestId": "req_40ed5e0d48213af23c5b2da0ffc096e166a671537f30d1b68e25c9fb21cd2368",
+          "requestDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "resultDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        "assessmentInputDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "evidenceReceiptDigests": [
+          "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+        ],
+        "gateResults": [
+          {
+            "gateId": "artifact",
+            "state": "satisfied",
+            "reasonCode": "artifact_requirement_satisfied",
+            "evidenceReceiptDigests": [
+              "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+            ]
+          },
+          {
+            "gateId": "verification",
+            "state": "waived",
+            "reasonCode": "gate_waived",
+            "evidenceReceiptDigests": [
+              "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+            ]
+          }
+        ],
+        "conclusion": "waived",
+        "assessedAt": "2026-08-09T01:03:04.000Z",
+        "assessedBy": "human",
+        "waiver": {
+          "ref": "waiver-1",
+          "actorRef": "user-1",
+          "reasonDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+        }
+      },
+      "payloadDigest": "sha256:0a7e7ec638fe182857ad6aeda07fe47506e20a1d872bb021c590c021ced5c528",
+      "receiptDigest": "sha256:98ba2f21dc611ea8a3f7596caa3155fabff43a1391a08a0dc5f793f1daad6e5b"
+    },
+    "callbackIntentObservation": {
+      "schemaVersion": 1,
+      "protocolVersion": "1.0",
+      "organizationId": "org-1",
+      "operationId": "operation-1",
+      "producer": {
+        "kind": "local_opentag",
+        "id": "local-opentag-1",
+        "credentialId": "runtime-credential-1",
+        "registrationGeneration": 1
+      },
+      "predecessorReceiptDigests": [
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      ],
+      "observedAt": "2026-08-09T01:03:04.000Z",
+      "runId": "run-1",
+      "workThreadId": "thread-1",
+      "receiptId": "receipt-callback-intent-1",
+      "receiptKind": "callback_intent_observation",
+      "requiredCapabilities": [
+        "relay.callback-observation.v1"
+      ],
+      "identity": {
+        "namespace": "opentag.control.receipt/callback-intent-observation/v1",
+        "parts": [
+          "org-1",
+          "thread-1",
+          "intent-1"
+        ]
+      },
+      "payload": {
+        "localIntentId": "intent-1",
+        "assessmentRef": "assessment-1",
+        "assessmentDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "provider": "github",
+        "sourceThreadIdentityDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "operationId": "operation-1",
+        "payloadDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "createdAt": "2026-08-09T01:02:03.000Z"
+      },
+      "payloadDigest": "sha256:1ddfe72706d13d22331723b9553b13dfe8082f936304332c268b101d2e48f13a",
+      "receiptDigest": "sha256:5e358645d03201a465e42ed19cc863f2770e54a22048d0f4d71d7c36f9c9cfdd"
+    },
+    "callbackAttemptObservation": {
+      "schemaVersion": 1,
+      "protocolVersion": "1.0",
+      "organizationId": "org-1",
+      "operationId": "operation-1",
+      "producer": {
+        "kind": "local_opentag",
+        "id": "local-opentag-1",
+        "credentialId": "runtime-credential-1",
+        "registrationGeneration": 1
+      },
+      "predecessorReceiptDigests": [
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      ],
+      "observedAt": "2026-08-09T01:03:04.000Z",
+      "runId": "run-1",
+      "workThreadId": "thread-1",
+      "receiptId": "receipt-callback-attempt-1",
+      "receiptKind": "callback_attempt_observation",
+      "requiredCapabilities": [
+        "relay.callback-observation.v1"
+      ],
+      "identity": {
+        "namespace": "opentag.control.receipt/callback-attempt-observation/v1",
+        "parts": [
+          "org-1",
+          "thread-1",
+          "intent-1",
+          "callback-attempt-1"
+        ]
+      },
+      "payload": {
+        "localIntentId": "intent-1",
+        "localAttemptId": "callback-attempt-1",
+        "attemptNumber": 1,
+        "requestDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "outcome": "outcome_unknown",
+        "reasonCode": "provider_timeout",
+        "nextAction": "reconcile-provider",
+        "owner": "local-opentag-1",
+        "attemptedAt": "2026-08-09T01:02:03.000Z",
+        "observedAt": "2026-08-09T01:03:04.000Z"
+      },
+      "payloadDigest": "sha256:17a0ed91247ba32d118423959f99dd211bd29610d90757840d88dd3a3eb7ab2d",
+      "receiptDigest": "sha256:4a2a7f41e0c1d1032486d0d13814b5006e7a05b52a0950e26e26091e81876b37"
+    },
+    "callbackProviderObservation": {
+      "schemaVersion": 1,
+      "protocolVersion": "1.0",
+      "organizationId": "org-1",
+      "operationId": "operation-1",
+      "producer": {
+        "kind": "local_opentag",
+        "id": "local-opentag-1",
+        "credentialId": "runtime-credential-1",
+        "registrationGeneration": 1
+      },
+      "predecessorReceiptDigests": [
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      ],
+      "observedAt": "2026-08-09T01:03:04.000Z",
+      "runId": "run-1",
+      "workThreadId": "thread-1",
+      "receiptId": "receipt-callback-provider-1",
+      "receiptKind": "callback_provider_observation",
+      "requiredCapabilities": [
+        "relay.callback-observation.v1"
+      ],
+      "identity": {
+        "namespace": "opentag.control.receipt/callback-provider-observation/v1",
+        "parts": [
+          "org-1",
+          "thread-1",
+          "intent-1",
+          "callback-attempt-1",
+          "provider-receipt-1"
+        ]
+      },
+      "payload": {
+        "localIntentId": "intent-1",
+        "localAttemptId": "callback-attempt-1",
+        "providerReceiptId": "provider-receipt-1",
+        "resourceIdentity": "github:issue:42",
+        "targetIdentityDigest": "sha256:19568d5ca3fd27fcee6e31580558d18691a37465d664c84c2648d532b169f2f1",
+        "outcome": "succeeded",
+        "observedAt": "2026-08-09T01:03:04.000Z",
+        "reasonCode": "provider_accepted"
+      },
+      "payloadDigest": "sha256:b525e9638cbabb7bd3a3829288759a78917b4a371efaa88d4f5238a2f4afbed6",
+      "receiptDigest": "sha256:9125f677ebacccb951186d911564e56c9e875170e63764ca24bddfc443c23dc0"
+    }
+  }
+}

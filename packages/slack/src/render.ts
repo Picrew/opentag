@@ -165,9 +165,43 @@ export function escapeSlackText(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function replaceMarkdownLinks(
+  text: string,
+  replacement: (label: string, url: string) => string
+): string {
+  let output = "";
+  let cursor = 0;
+  while (cursor < text.length) {
+    const labelStart = text.indexOf("[", cursor);
+    if (labelStart === -1) return output + text.slice(cursor);
+    const labelEnd = text.indexOf("]", labelStart + 1);
+    if (labelEnd === -1) return output + text.slice(cursor);
+    if (labelEnd === labelStart + 1 || text[labelEnd + 1] !== "(") {
+      output += text.slice(cursor, labelEnd + 1);
+      cursor = labelEnd + 1;
+      continue;
+    }
+    const urlStart = labelEnd + 2;
+    const urlEnd = text.indexOf(")", urlStart);
+    if (urlEnd === -1) return output + text.slice(cursor);
+    if (urlEnd === urlStart) {
+      output += text.slice(cursor, urlEnd + 1);
+      cursor = urlEnd + 1;
+      continue;
+    }
+    output += text.slice(cursor, labelStart);
+    output += replacement(
+      text.slice(labelStart + 1, labelEnd),
+      text.slice(urlStart, urlEnd)
+    );
+    cursor = urlEnd + 1;
+  }
+  return output;
+}
+
 export function markdownToSlackMrkdwn(text: string): string {
   const links: string[] = [];
-  const withoutLinks = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label: string, url: string) => {
+  const withoutLinks = replaceMarkdownLinks(text, (label, url) => {
     const token = `\u0000SLACK_LINK_${links.length}\u0000`;
     links.push(`<${url}|${escapeSlackText(label)}>`);
     return token;

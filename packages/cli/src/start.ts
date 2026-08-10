@@ -10,7 +10,12 @@ import {
   type RepositoryBindingConfig
 } from "@opentag/client";
 import type { AdapterMutationMapping } from "@opentag/core";
-import { startGitHubIngress, type GitHubIngressConfig, type GitHubIngressHandle } from "@opentag/github";
+import {
+  resolveGitHubSourceApiOrigin,
+  startGitHubIngress,
+  type GitHubIngressConfig,
+  type GitHubIngressHandle
+} from "@opentag/github";
 import { startGitLabIngress, type GitLabIngressConfig, type GitLabIngressHandle } from "@opentag/gitlab";
 import { DEFAULT_AGENT_ID, startLarkIngress, type LarkIngressConfig, type LarkIngressHandle } from "@opentag/lark";
 import {
@@ -44,6 +49,7 @@ import {
 import {
   defaultConfigPath,
   ensurePrivateDirectory,
+  hostedRunnerAuthProblem,
   readCliConfig,
   relayUrlFromConfig,
   runtimeModeFromConfig,
@@ -59,7 +65,12 @@ import { linearLocalWebhookUrl, linearPublicWebhookUrlPlaceholder, linearWebhook
 import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_LINEAR_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "./platforms/ports.js";
 import { teamsLocalWebhookUrl, teamsPublicWebhookUrlPlaceholder } from "./platforms/teams/display.js";
 import { telegramLocalWebhookUrl, telegramPublicWebhookUrlPlaceholder } from "./platforms/telegram/display.js";
-import { assertRelayTransportAllowed, relayTrustWarning } from "./relay-security.js";
+import {
+  assertHostedRelayAuthorization,
+  assertRelayTransportAllowed,
+  canonicalHostedRelayOrigin,
+  relayTrustWarning
+} from "./relay-security.js";
 import { createSlackLinearBacklogHandler } from "./slack-linear-backlog.js";
 
 export type StartCommandOptions = {
@@ -933,6 +944,32 @@ function defaultStartDependencies(dependencies: StartRuntimeDependencies = {}) {
   };
 }
 
+export function hostedE2EGitHubApiOriginFromEnv(
+  config: OpenTagCliConfig,
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  const marker = env.OPENTAG_E2E_HOSTED_CLAIM_V1;
+  const apiOrigin = env.OPENTAG_E2E_GITHUB_API_ORIGIN;
+  if (marker === undefined && apiOrigin === undefined) return undefined;
+  if (marker !== "1" || !apiOrigin) {
+    throw new Error(
+      "Hosted Control V1 E2E GitHub API origin markers are incomplete."
+    );
+  }
+  if (
+    config.daemon.controlRegistration?.kind !== "hosted_control_v1"
+    || config.daemon.controlRegistration.state !== "paired"
+  ) {
+    throw new Error(
+      "Hosted Control V1 E2E GitHub API origin requires a paired Hosted Control V1 runner."
+    );
+  }
+  return resolveGitHubSourceApiOrigin({
+    token: config.daemon.githubToken ?? "",
+    apiOrigin,
+  });
+}
+
 function addAbortHandlers(input: StartFromConfigInput, abortController: AbortController): {
   shutdownRequested(): boolean;
   dispose(): void;
@@ -1035,13 +1072,14 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
   }
   const dispatcher = dependencies.startDispatcher(dispatcherInput);
   let originalError: unknown;
+  let daemonPromise: Promise<void> | undefined;
 
   try {
     await dependencies.waitForDispatcher({ dispatcherUrl: config.daemon.dispatcherUrl });
     await dependencies.bootstrapDispatcher(config);
 
-    const daemonPromise = dependencies.serveDaemon({
-      ...createDaemonRuntimeInput(config.daemon),
+    daemonPromise = dependencies.serveDaemon({
+      ...createDaemonRuntimeInput(config.daemon, { databasePath: config.state.databasePath }),
       signal: abortController.signal
     });
     abortOnSubsystemFailure(daemonPromise, abortController);
@@ -1177,6 +1215,7 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     throw error;
   } finally {
     abortController.abort();
+    if (daemonPromise) await Promise.allSettled([daemonPromise]);
     await Promise.allSettled([...ingresses].reverse().map((ingress) => ingress.handle.close()));
     try {
       await dispatcher.close();
@@ -1190,7 +1229,12 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
   }
 }
 
-async function startRelayMode(input: StartFromConfigInput, abortController: AbortController, shutdownRequested: () => boolean): Promise<void> {
+async function startRelayMode(
+  input: StartFromConfigInput,
+  abortController: AbortController,
+  shutdownRequested: () => boolean,
+  githubApiOrigin?: string,
+): Promise<void> {
   const dependencies = defaultStartDependencies(input.dependencies);
   const logger = dependencies.logger;
   const config = input.config;
@@ -1199,11 +1243,17 @@ async function startRelayMode(input: StartFromConfigInput, abortController: Abor
   assertRelayTransportAllowed(relayUrl);
 
   await dependencies.waitForDispatcher({ dispatcherUrl: config.daemon.dispatcherUrl });
-  await dependencies.bootstrapDispatcher(config);
+  if (!config.daemon.controlRegistration) {
+    await dependencies.bootstrapDispatcher(config);
+  }
 
+  let daemonPromise: Promise<void> | undefined;
   try {
-    const daemonPromise = dependencies.serveDaemon({
-      ...createDaemonRuntimeInput(config.daemon),
+    daemonPromise = dependencies.serveDaemon({
+      ...createDaemonRuntimeInput(config.daemon, {
+        databasePath: config.state.databasePath,
+        ...(githubApiOrigin !== undefined ? { githubApiOrigin } : {}),
+      }),
       signal: abortController.signal
     });
     abortOnSubsystemFailure(daemonPromise, abortController);
@@ -1246,10 +1296,34 @@ async function startRelayMode(input: StartFromConfigInput, abortController: Abor
     }
   } finally {
     abortController.abort();
+    if (daemonPromise) await Promise.allSettled([daemonPromise]);
   }
 }
 
 export async function startFromConfig(input: StartFromConfigInput): Promise<void> {
+  if (input.config.daemon.controlRegistration) {
+    assertHostedRelayAuthorization({
+      dispatcherUrl: input.config.daemon.dispatcherUrl,
+      trustedRelay: input.config.daemon.trustedRelay
+    });
+    const relayUrl = relayUrlFromConfig(input.config);
+    if (!relayUrl) {
+      throw new Error("Hosted Control V1 requires runtime.mode=relay before secrets or network access.");
+    }
+    if (
+      canonicalHostedRelayOrigin(relayUrl)
+      !== canonicalHostedRelayOrigin(input.config.daemon.dispatcherUrl)
+    ) {
+      throw new Error("Hosted Control V1 relay origin does not match dispatcher origin.");
+    }
+  }
+  const hostedAuthProblem = hostedRunnerAuthProblem(input.config.daemon);
+  if (hostedAuthProblem) throw new Error(hostedAuthProblem);
+  const githubApiOrigin = hostedE2EGitHubApiOriginFromEnv(
+    input.config,
+    input.dependencies?.env ?? process.env,
+  );
+
   ensurePrivateDirectory(input.config.state.directory);
   ensurePrivateDirectory(input.config.state.worktreeRoot);
 
@@ -1262,7 +1336,12 @@ export async function startFromConfig(input: StartFromConfigInput): Promise<void
   const abortHandlers = addAbortHandlers(input, abortController);
   try {
     if (runtimeModeFromConfig(input.config) === "relay") {
-      await startRelayMode(input, abortController, abortHandlers.shutdownRequested);
+      await startRelayMode(
+        input,
+        abortController,
+        abortHandlers.shutdownRequested,
+        githubApiOrigin,
+      );
       return;
     }
     await startLocalMode(input, abortController, abortHandlers.shutdownRequested);

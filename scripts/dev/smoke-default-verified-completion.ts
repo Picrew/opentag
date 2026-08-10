@@ -86,6 +86,7 @@ async function main() {
     callbackSink: {
       async deliver(message) {
         delivered.push(message);
+        return { handled: true, outcome: "accepted" } as const;
       }
     }
   });

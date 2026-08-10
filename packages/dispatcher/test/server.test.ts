@@ -3,10 +3,23 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
 import { describe, expect, it, onTestFinished } from "vitest";
+import {
+  CallbackAttemptObservationReceiptEnvelopeV1Schema,
+  CallbackIntentObservationReceiptEnvelopeV1Schema,
+  CallbackProviderObservationReceiptEnvelopeV1Schema,
+  CompletionAssessmentReceiptEnvelopeV1Schema,
+  HostedLifecycleReceiptEnvelopeV1Schema,
+  buildHostedLifecycleRequestV1,
+  canonicalJsonStringify,
+  computeControlPayloadDigestV1
+} from "@opentag/core";
 import { computeLinearSignature } from "@opentag/linear";
 import { parseSlackSuggestedActionButtonValue, type SlackBlock } from "@opentag/slack";
+import { createOpenTagRepository } from "@opentag/store";
 import { z } from "zod";
+import { canonicalSha256Json } from "../../store/src/canonical-json.js";
 import { createDefaultCallbackPresentation } from "../src/presentation.js";
 import { createDispatcherApp as createRawDispatcherApp, type CallbackMessage } from "../src/server.js";
 
@@ -148,6 +161,91 @@ function authorizedJsonRequest(body: unknown, token = "pairing_token") {
 
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function createControlledTimeouts() {
+  let nextId = 1;
+  const callbacks = new Map<number, () => void>();
+  type ControlledHandle = ReturnType<typeof globalThis.setTimeout> & {
+    controlledId: number;
+  };
+  const setTimeout = ((callback: () => void) => {
+    const controlledId = nextId++;
+    const handle = {
+      controlledId,
+      unref() {}
+    } as ControlledHandle;
+    callbacks.set(controlledId, callback);
+    return handle;
+  }) as typeof globalThis.setTimeout;
+  const clearTimeout = ((handle: ControlledHandle) => {
+    callbacks.delete(handle.controlledId);
+  }) as typeof globalThis.clearTimeout;
+  return {
+    setTimeout,
+    clearTimeout,
+    get pendingCount() {
+      return callbacks.size;
+    },
+    runNext() {
+      const next = callbacks.entries().next().value as
+        | [number, () => void]
+        | undefined;
+      if (!next) throw new Error("No controlled timeout is pending.");
+      callbacks.delete(next[0]);
+      next[1]();
+    },
+    runAll() {
+      while (callbacks.size > 0) this.runNext();
+    }
+  };
+}
+
+async function waitForCondition(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error("Timed out waiting for deterministic test condition.");
+}
+
+async function waitForDatabase(
+  sqlite: Database.Database,
+  query: string,
+  predicate: (row: Record<string, unknown> | undefined) => boolean,
+  timeoutMs = 5_000
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  let lastRow: Record<string, unknown> | undefined;
+  while (Date.now() < deadline) {
+    lastRow = sqlite.prepare(query).get() as Record<string, unknown> | undefined;
+    if (predicate(lastRow)) return lastRow ?? {};
+    await wait(20);
+  }
+  throw new Error(
+    `Timed out waiting for database condition: ${query}; last row: ${JSON.stringify(lastRow)}`
+  );
+}
+
+function receiptWithDigests<T extends { payload: unknown }>(value: T) {
+  const withPayloadDigest = {
+    ...value,
+    payloadDigest: canonicalSha256Json(value.payload)
+  };
+  return {
+    ...withPayloadDigest,
+    receiptDigest: canonicalSha256Json(withPayloadDigest)
+  };
 }
 
 function expireRunnerLease(databasePath: string, runId: string, attemptId: string): void {
@@ -678,6 +776,34 @@ describe("dispatcher API", () => {
         secondaryAnchors: [expect.objectContaining({ externalId: "acme/demo#1/comment-2" })]
       }
     });
+  });
+
+  it("does not expose readiness ingress without a runner-scoped authenticated principal", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      runnerTokens: ["runner_a_token", "runner_b_token"],
+    });
+    const response = await app.request("/v1/runners/runner_b/readiness", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer runner_a_token",
+      },
+      body: "{}",
+    });
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: "unauthorized",
+      reason: "invalid_pairing_token",
+    });
+
+    const unconfigured = createDispatcherApp({ databasePath: ":memory:" });
+    const absent = await unconfigured.request("/v1/runners/runner_b/readiness", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(absent.status).toBe(404);
   });
 
   it("rejects normalized events that cannot derive a durable WorkThread", async () => {
@@ -1356,6 +1482,7 @@ describe("dispatcher API", () => {
             body: message.body,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -1460,6 +1587,7 @@ describe("dispatcher API", () => {
             body: message.body,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -1582,6 +1710,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       sourceReceiptSink: {
@@ -3097,6 +3226,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body, ...(message.blocks?.length ? { blocks: message.blocks } : {}) });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -3187,6 +3317,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -3248,6 +3379,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -3534,7 +3666,7 @@ describe("dispatcher API", () => {
             ...(message.blocks?.length ? { blocks: message.blocks } : {}),
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
-          return { externalMessageId: message.externalMessageId ?? "slack_status_1" };
+          return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId ?? "slack_status_1" } as const;
         }
       },
       sourceReceiptSink: {
@@ -3645,7 +3777,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push(message);
-          return { externalMessageId: "safe-status" };
+          return { handled: true, outcome: "accepted", externalMessageId: "safe-status" } as const;
         }
       },
       sourceReceiptSink: { async deliver() { return { delivered: true }; } }
@@ -3712,6 +3844,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           callbacks.push({ kind: message.kind });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       sourceReceiptSink: {
@@ -3823,6 +3956,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           callbacks.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -3867,6 +4001,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           callbacks.push({ kind: message.kind });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       sourceReceiptSink: {
@@ -3926,6 +4061,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           callbacks.push({ kind: message.kind, ...(message.rich ? { hasRich: true } : {}) });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -3964,7 +4100,7 @@ describe("dispatcher API", () => {
             ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
             ...(message.rich ? { hasRich: true } : {})
           });
-          return { externalMessageId: message.externalMessageId ?? "om_final" };
+          return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId ?? "om_final" } as const;
         }
       }
     });
@@ -4031,7 +4167,7 @@ describe("dispatcher API", () => {
             ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
             ...(message.rich ? { hasRich: true } : {})
           });
-          return { externalMessageId: message.externalMessageId ?? "om_status" };
+          return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId ?? "om_status" } as const;
         }
       }
     });
@@ -4110,7 +4246,7 @@ describe("dispatcher API", () => {
             ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
             ...(message.rich ? { hasRich: true } : {})
           });
-          return { externalMessageId: message.externalMessageId ?? "om_status" };
+          return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId ?? "om_status" } as const;
         }
       }
     });
@@ -4160,6 +4296,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -4299,7 +4436,7 @@ describe("dispatcher API", () => {
             ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
             ...(message.rich ? { hasRich: true } : {})
           });
-          return { externalMessageId: message.externalMessageId ?? "om_status" };
+          return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId ?? "om_status" } as const;
         }
       }
     });
@@ -4989,6 +5126,7 @@ describe("dispatcher API", () => {
             kind: message.kind,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -5067,7 +5205,7 @@ describe("dispatcher API", () => {
             ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
             ...(message.rich?.provider ? { richProvider: message.rich.provider } : {})
           });
-          return { externalMessageId: message.externalMessageId ?? "100" };
+          return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId ?? "100" } as const;
         }
       }
     });
@@ -5164,6 +5302,7 @@ describe("dispatcher API", () => {
             body: message.body,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -5220,6 +5359,7 @@ describe("dispatcher API", () => {
             body: message.body,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -5289,6 +5429,7 @@ describe("dispatcher API", () => {
             body: message.body,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -5395,7 +5536,7 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: { async deliver(message) { delivered.push({ kind: message.kind, body: message.body }); } }
+      callbackSink: { async deliver(message) { delivered.push({ kind: message.kind, body: message.body }); return { handled: true, outcome: "accepted" } as const; } }
     });
     await app.request("/v1/repo-bindings", jsonRequest({
       provider: "github",
@@ -5480,6 +5621,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -5555,6 +5697,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -6388,6 +6531,100 @@ describe("dispatcher API", () => {
     await expect(claim.json()).resolves.toMatchObject({ run: { id: "run_scratch_dispatcher" } });
   });
 
+  it("uses legacy terminal callback delivery for a hosted run without a completion assessment", async () => {
+    const sqlite = new Database(":memory:");
+    const delivered: CallbackMessage[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      sqlite,
+      callbackSink: {
+        async deliver(message) {
+          delivered.push(message);
+          return { handled: true, outcome: "accepted" } as const;
+        }
+      }
+    });
+    onTestFinished(async () => {
+      await app.stopBackgroundWorkers();
+      sqlite.close();
+    });
+    const runnerId = "runner_hosted_scratch";
+    const runId = "run_hosted_scratch";
+    const event = {
+      id: "evt_hosted_scratch",
+      source: "slack",
+      sourceEventId: "message_hosted_scratch",
+      receivedAt: "2026-07-12T00:00:00.000Z",
+      actor: { provider: "slack", providerUserId: "U123", handle: "alice" },
+      target: { mention: "@opentag", agentId: "opentag", executorHint: "custom" },
+      command: { rawText: "summarize this thread", intent: "run", args: {} },
+      context: [],
+      permissions: [],
+      callback: { provider: "slack", uri: "https://example.com/callback" },
+      metadata: { teamId: "T123", channelId: "C456" }
+    };
+    expect((await app.request("/v1/runners", jsonRequest({
+      runnerId,
+      name: "Hosted Scratch Runner"
+    }))).status).toBe(201);
+    await bindSourceChannel(app, event);
+    expect((await app.request("/v1/runs", jsonRequest({ runId, event }))).status)
+      .toBe(201);
+    const claimResponse = await app.request(`/v1/runners/${runnerId}/claim`, {
+      method: "POST"
+    });
+    expect(claimResponse.status).toBe(200);
+    const claim = await claimResponse.json() as {
+      attemptId: string;
+      fencingToken: string;
+    };
+    const importedAt = new Date().toISOString();
+    sqlite.prepare(`INSERT INTO hosted_run_imports (
+      run_id, admission_id, admission_operation_id, claim_operation_id,
+      attempt_id, fencing_token_digest, source_identity_digest,
+      delivery_payload_digest, admission_envelope_digest, policy_receipt_id,
+      policy_payload_digest, policy_receipt_digest, event_digest,
+      context_packet_digest, claim_digest, authority_digest, authority_json,
+      imported_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)`)
+      .run(
+        runId,
+        "admission_hosted_scratch",
+        "admission_operation_hosted_scratch",
+        "claim_operation_hosted_scratch",
+        claim.attemptId,
+        `sha256:${"1".repeat(64)}`,
+        `sha256:${"2".repeat(64)}`,
+        `sha256:${"3".repeat(64)}`,
+        `sha256:${"4".repeat(64)}`,
+        "policy_receipt_hosted_scratch",
+        `sha256:${"5".repeat(64)}`,
+        `sha256:${"6".repeat(64)}`,
+        `sha256:${"7".repeat(64)}`,
+        `sha256:${"8".repeat(64)}`,
+        `sha256:${"9".repeat(64)}`,
+        `sha256:${"a".repeat(64)}`,
+        importedAt
+      );
+    delivered.length = 0;
+
+    const complete = await app.request(
+      `/v1/runners/${runnerId}/runs/${runId}/complete`,
+      jsonRequest({ result: { conclusion: "success", summary: "Scratch run completed." } })
+    );
+
+    expect(complete.status).toBe(200);
+    expect(delivered).toEqual([
+      expect.objectContaining({
+        runId,
+        kind: "final"
+      })
+    ]);
+    expect(sqlite.prepare(`SELECT dispatch_mode AS dispatchMode, status
+      FROM callback_deliveries WHERE run_id = ? AND kind = 'final'`).get(runId))
+      .toEqual({ dispatchMode: "legacy", status: "delivered" });
+  });
+
   it("deletes generic channel bindings", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
 
@@ -6552,6 +6789,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -6631,6 +6869,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -6678,6 +6917,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -6969,6 +7209,7 @@ describe("dispatcher API", () => {
             kind: message.kind,
             ...(message.agentId ? { agentId: message.agentId } : {})
           });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       sourceReceiptSink: {
@@ -7039,6 +7280,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7143,6 +7385,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -7185,6 +7428,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7238,6 +7482,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7289,6 +7534,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7350,6 +7596,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7405,6 +7652,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7484,6 +7732,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -7656,6 +7905,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -8476,6 +8726,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -8540,6 +8791,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -8722,6 +8974,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -8835,6 +9088,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -8953,7 +9207,7 @@ describe("dispatcher API", () => {
     const delivered: CallbackMessage[] = [];
     const app = createDispatcherApp({
       databasePath,
-      callbackSink: { async deliver(message) { delivered.push(message); } }
+      callbackSink: { async deliver(message) { delivered.push(message); return { handled: true, outcome: "accepted" } as const; } }
     });
     await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Local Runner" }));
     await app.request("/v1/channel-bindings", jsonRequest({
@@ -9179,6 +9433,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       gitlabApply: {
@@ -9295,6 +9550,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       linearApply: {
@@ -9406,6 +9662,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       gitlabApply: {
@@ -9524,6 +9781,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -9630,6 +9888,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       linearApply: {
@@ -9860,6 +10119,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       }
     });
@@ -9947,6 +10207,7 @@ describe("dispatcher API", () => {
       callbackSink: {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body });
+          return { handled: true, outcome: "accepted" } as const;
         }
       },
       githubApply: {
@@ -10162,4 +10423,766 @@ describe("dispatcher API", () => {
     const text = await response.text();
     expect(text).not.toContain("invalid_json_body");
   });
+
+  it("schedules exactly one fresh governed callback runtime start after startup failure", async () => {
+    const timeouts = createControlledTimeouts();
+    const firstStart = deferred();
+    const secondStart = deferred();
+    let startCalls = 0;
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      governedCallbackRuntime: {
+        retryDelayMs: 1,
+        setTimeout: timeouts.setTimeout,
+        clearTimeout: timeouts.clearTimeout,
+        create: () => ({
+          start() {
+            startCalls += 1;
+            return startCalls === 1 ? firstStart.promise : secondStart.promise;
+          },
+          async enqueue() {
+            throw new Error("unexpected governed callback enqueue");
+          },
+          async stop() {}
+        })
+      }
+    });
+
+    firstStart.reject(new Error("startup failed"));
+    await waitForCondition(() => timeouts.pendingCount === 1);
+    expect(startCalls).toBe(1);
+
+    timeouts.runNext();
+    expect(startCalls).toBe(2);
+    expect(timeouts.pendingCount).toBe(0);
+    secondStart.resolve();
+    await app.stopBackgroundWorkers();
+  });
+
+  it("cancels a pending governed callback runtime retry when background workers stop", async () => {
+    const timeouts = createControlledTimeouts();
+    let startCalls = 0;
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      governedCallbackRuntime: {
+        retryDelayMs: 1,
+        setTimeout: timeouts.setTimeout,
+        clearTimeout: timeouts.clearTimeout,
+        create: () => ({
+          async start() {
+            startCalls += 1;
+            throw new Error("startup failed");
+          },
+          async enqueue() {
+            throw new Error("unexpected governed callback enqueue");
+          },
+          async stop() {}
+        })
+      }
+    });
+    await waitForCondition(() => timeouts.pendingCount === 1);
+
+    await app.stopBackgroundWorkers();
+
+    expect(timeouts.pendingCount).toBe(0);
+    timeouts.runAll();
+    expect(startCalls).toBe(1);
+  });
+
+  it("waits for an in-flight governed callback runtime start before stopping without restarting", async () => {
+    const timeouts = createControlledTimeouts();
+    const inFlightStart = deferred();
+    let startCalls = 0;
+    let stopCalls = 0;
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      governedCallbackRuntime: {
+        retryDelayMs: 1,
+        setTimeout: timeouts.setTimeout,
+        clearTimeout: timeouts.clearTimeout,
+        create: () => ({
+          start() {
+            startCalls += 1;
+            return inFlightStart.promise;
+          },
+          async enqueue() {
+            throw new Error("unexpected governed callback enqueue");
+          },
+          async stop() {
+            stopCalls += 1;
+          }
+        })
+      }
+    });
+
+    let stopped = false;
+    const stopTask = app.stopBackgroundWorkers().then(() => {
+      stopped = true;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(stopped).toBe(false);
+    expect(stopCalls).toBe(0);
+
+    inFlightStart.reject(new Error("startup failed during stop"));
+    await stopTask;
+
+    expect(stopCalls).toBe(1);
+    expect(timeouts.pendingCount).toBe(0);
+    timeouts.runAll();
+    expect(startCalls).toBe(1);
+  });
+
+  it("keeps governed callback runtime retries serial across repeated startup failures", async () => {
+    const timeouts = createControlledTimeouts();
+    const starts: Array<ReturnType<typeof deferred>> = [];
+    let concurrentStarts = 0;
+    let maxConcurrentStarts = 0;
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      governedCallbackRuntime: {
+        retryDelayMs: 1,
+        setTimeout: timeouts.setTimeout,
+        clearTimeout: timeouts.clearTimeout,
+        create: () => ({
+          start() {
+            concurrentStarts += 1;
+            maxConcurrentStarts = Math.max(
+              maxConcurrentStarts,
+              concurrentStarts
+            );
+            const start = deferred();
+            starts.push(start);
+            return start.promise.finally(() => {
+              concurrentStarts -= 1;
+            });
+          },
+          async enqueue() {
+            throw new Error("unexpected governed callback enqueue");
+          },
+          async stop() {}
+        })
+      }
+    });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(starts).toHaveLength(attempt + 1);
+      starts[attempt]!.reject(new Error(`startup failed ${attempt + 1}`));
+      await waitForCondition(() => timeouts.pendingCount === 1);
+      expect(concurrentStarts).toBe(0);
+      if (attempt < 2) timeouts.runNext();
+    }
+
+    expect(maxConcurrentStarts).toBe(1);
+    expect(timeouts.pendingCount).toBe(1);
+    await app.stopBackgroundWorkers();
+  });
+
+  it("keeps hosted terminal callbacks out of the legacy sink until lifecycle authority is acknowledged", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "opentag-hosted-callback-server-"));
+    onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
+    const databasePath = join(directory, "dispatcher.sqlite");
+    const sqlite = new Database(databasePath);
+    const providerDeliveries: CallbackMessage[] = [];
+    const callbackSink = {
+      async preflight(message: CallbackMessage) {
+        return message.provider === "github"
+          ? { handled: true } as const
+          : { handled: false, reasonCode: "provider_not_supported" } as const;
+      },
+      async deliver(message: CallbackMessage) {
+        providerDeliveries.push(message);
+        return {
+          handled: true,
+          outcome: "accepted",
+          externalMessageId: "comment_101",
+          providerReceiptId: "comment_101",
+          providerResourceUri:
+            "https://api.github.com/repos/acme/demo/issues/comments/101"
+        } as const;
+      }
+    };
+    const app = createDispatcherApp({
+      databasePath,
+      sqlite,
+      callbackSink,
+      reassessmentObligations: {
+        autoStart: true,
+        pollIntervalMs: 10,
+        retryBaseMs: 500,
+        retryMaxMs: 500,
+        leaseSeconds: 2,
+        maxAttempts: 5
+      }
+    });
+    try {
+      const runnerId = "runner_hosted_callback";
+      const runId = "run_hosted_callback";
+      const destinationId = "cloud_hosted_callback";
+      const organizationId = "org_hosted_callback";
+      const credentialId = "credential_hosted_callback";
+      expect((await app.request("/v1/runners", jsonRequest({
+        runnerId,
+        name: "Hosted callback runner",
+        locality: "local",
+        executors: [echoExecutorRegistration]
+      }))).status).toBe(201);
+      expect((await app.request("/v1/repo-bindings", jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId,
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo"
+      }))).status).toBe(201);
+      expect((await app.request("/v1/runs", jsonRequest({
+        runId,
+        event: {
+          ...validEvent,
+          id: "evt_hosted_callback",
+          metadata: { ...validEvent.metadata, issueNumber: 1 }
+        }
+      }))).status).toBe(201);
+      const claimResponse = await app.request(`/v1/runners/${runnerId}/claim`, {
+        method: "POST"
+      });
+      expect(claimResponse.status).toBe(200);
+      const claim = await claimResponse.json() as {
+        attemptId: string;
+        fencingToken: string;
+      };
+      const runRow = sqlite.prepare(`SELECT event_json AS eventJson,
+        work_thread_id AS workThreadId FROM runs WHERE id = ?`).get(runId) as {
+          eventJson: string;
+          workThreadId: string;
+        };
+      const attemptRow = sqlite.prepare(`SELECT number, runner_locality AS runnerLocality
+        FROM attempts WHERE id = ?`).get(claim.attemptId) as {
+          number: number;
+          runnerLocality: string;
+        };
+      expect(attemptRow.runnerLocality).toBe("local");
+      sqlite.prepare("UPDATE attempts SET runner_locality = 'hosted' WHERE id = ?")
+        .run(claim.attemptId);
+      expect(sqlite.prepare(`SELECT runner_locality AS runnerLocality
+        FROM attempts WHERE id = ?`).get(claim.attemptId)).toEqual({
+          runnerLocality: "hosted"
+        });
+
+      const fencingTokenDigest = `sha256:${createHash("sha256")
+        .update(claim.fencingToken)
+        .digest("hex")}`;
+      const claimOperationId = "claim_operation_hosted_callback";
+      const claimDigest = `sha256:${"d".repeat(64)}`;
+      const evidenceDigest = `sha256:${"e".repeat(64)}`;
+      const authority = {
+        organizationId,
+        runnerId,
+        runId,
+        credentialId,
+        registrationGeneration: 1,
+        credentialGeneration: 1,
+        projectTargetId: "project_target_hosted_callback",
+        bindingId: "binding_hosted_callback",
+        targetBindingDigest: `sha256:${"6".repeat(64)}`,
+        admissionPolicyReceiptId: "policy_receipt_hosted_callback",
+        admissionPolicySnapshotId: "policy_snapshot_hosted_callback",
+        admissionPolicySnapshotDigest: evidenceDigest,
+        runnerReadinessReceiptId: "readiness_receipt_hosted_callback",
+        runnerReadinessReceiptDigest: `sha256:${"8".repeat(64)}`,
+        targetReadinessReceiptId: "readiness_receipt_hosted_callback",
+        targetReadinessReceiptDigest: `sha256:${"8".repeat(64)}`,
+        executorId: "echo",
+        executorCapabilityDigest: `sha256:${"9".repeat(64)}`,
+        attemptId: claim.attemptId,
+        attemptNumber: attemptRow.number,
+        epoch: attemptRow.number,
+        fencingTokenDigest
+      };
+      const authorityJson = canonicalJsonStringify(authority);
+      const authorityDigest = canonicalSha256Json(authority);
+      const importedAt = new Date().toISOString();
+      sqlite.prepare(`INSERT INTO hosted_claim_operations (
+        operation_id, request_id, organization_id, runner_id, destination_id,
+        request_digest, request_json, state, run_id, claim_digest,
+        authority_digest, authority_json, attempt_id, attempt_number,
+        fencing_token_digest, credential_id, execution_started_at,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, '{}', 'claimed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(
+          claimOperationId,
+          "claim_request_hosted_callback",
+          organizationId,
+          runnerId,
+          destinationId,
+          `sha256:${"1".repeat(64)}`,
+          runId,
+          claimDigest,
+          authorityDigest,
+          authorityJson,
+          claim.attemptId,
+          attemptRow.number,
+          fencingTokenDigest,
+          credentialId,
+          importedAt,
+          importedAt,
+          importedAt
+        );
+      sqlite.prepare(`INSERT INTO hosted_run_imports (
+        run_id, admission_id, admission_operation_id, claim_operation_id,
+        attempt_id, fencing_token_digest, source_identity_digest,
+        delivery_payload_digest, admission_envelope_digest, policy_receipt_id,
+        policy_payload_digest, policy_receipt_digest, event_digest,
+        context_packet_digest, work_thread_id, claim_digest, authority_digest,
+        authority_json, imported_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(
+          runId,
+          "admission_hosted_callback",
+          "admission_operation_hosted_callback",
+          claimOperationId,
+          claim.attemptId,
+          fencingTokenDigest,
+          `sha256:${"2".repeat(64)}`,
+          `sha256:${"3".repeat(64)}`,
+          `sha256:${"4".repeat(64)}`,
+          authority.admissionPolicyReceiptId,
+          `sha256:${"5".repeat(64)}`,
+          evidenceDigest,
+          canonicalSha256Json(JSON.parse(runRow.eventJson)),
+          `sha256:${"7".repeat(64)}`,
+          runRow.workThreadId,
+          claimDigest,
+          authorityDigest,
+          authorityJson,
+          importedAt
+        );
+      sqlite.prepare(`INSERT INTO hosted_attempt_imports (
+        attempt_id, run_id, attempt_number, claim_operation_id,
+        fencing_token_digest, claim_digest, authority_digest, authority_json,
+        imported_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(
+          claim.attemptId,
+          runId,
+          attemptRow.number,
+          claimOperationId,
+          fencingTokenDigest,
+          claimDigest,
+          authorityDigest,
+          authorityJson,
+          importedAt
+        );
+
+      const legacyDeliveriesBeforeHostedCompletion = sqlite.prepare(`SELECT
+        count(*) AS count FROM callback_deliveries
+        WHERE run_id = ? AND dispatch_mode = 'legacy'`).get(runId) as {
+          count: number;
+        };
+      expect(legacyDeliveriesBeforeHostedCompletion).toEqual({ count: 1 });
+      providerDeliveries.length = 0;
+      const result = { conclusion: "success" as const, summary: "completed locally" };
+      const request = await buildHostedLifecycleRequestV1({
+        action: "complete",
+        organizationId,
+        runnerId,
+        runId,
+        attempt: {
+          attemptId: claim.attemptId,
+          attemptNumber: attemptRow.number,
+          epoch: attemptRow.number,
+          fencingToken: claim.fencingToken,
+          fencingTokenDigest
+        },
+        occurredAt: new Date().toISOString(),
+        conclusion: "success",
+        reasonCode: "executor_success",
+        resultDigest: await computeControlPayloadDigestV1(result),
+        artifactDigests: [],
+        evidenceDigests: []
+      });
+      const repo = createOpenTagRepository(drizzle(sqlite));
+      await expect(repo.completeHostedRunLocally({
+        runId,
+        result,
+        runnerId,
+        attemptId: claim.attemptId,
+        fencingToken: claim.fencingToken,
+        destinationId,
+        organizationId,
+        credentialId,
+        request
+      })).resolves.toBe("completed");
+
+      await waitForDatabase(
+        sqlite,
+        `SELECT state, attempt_count AS attemptCount, last_reason_code AS lastReasonCode
+          FROM reassessment_obligations WHERE source_kind = 'run_result_recorded'
+          AND source_id = '${runId}'`,
+        (row) => row?.["state"] === "pending"
+          && Number(row["attemptCount"]) >= 1
+          && row["lastReasonCode"] === "reassessment_failed"
+      );
+      expect(sqlite.prepare("SELECT count(*) AS count FROM governed_callback_intents").get())
+        .toEqual({ count: 0 });
+      expect(sqlite.prepare(`SELECT count(*) AS count
+        FROM control_plane_projection_outbox
+        WHERE receipt_kind = 'completion_assessment'`).get()).toEqual({ count: 0 });
+      expect(providerDeliveries).toEqual([]);
+      const preAcknowledgementAssessment = sqlite.prepare(`SELECT
+        work_threads.current_assessment_id AS assessmentId,
+        completion_assessments.assessment_json AS assessmentJson,
+        (SELECT count(*) FROM completion_assessments
+          WHERE work_thread_id = work_threads.id) AS assessmentCount
+        FROM work_threads
+        JOIN completion_assessments
+          ON completion_assessments.id = work_threads.current_assessment_id
+        WHERE work_threads.id = ?`).get(runRow.workThreadId) as {
+          assessmentId: string;
+          assessmentJson: string;
+          assessmentCount: number;
+        };
+      expect(preAcknowledgementAssessment.assessmentCount).toBe(1);
+      expect(JSON.parse(preAcknowledgementAssessment.assessmentJson)).toMatchObject({
+        id: preAcknowledgementAssessment.assessmentId,
+        workThreadId: runRow.workThreadId,
+        triggeredByRunId: runId
+      });
+
+      const [lifecycle] = await repo.claimDueHostedLifecycleOperations({
+        destinationId,
+        organizationId,
+        leaseOwner: "server-test-lifecycle-pump",
+        leaseSeconds: 30,
+        now: new Date()
+      });
+      expect(lifecycle?.operationId).toBe(request.operationId);
+      const receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(receiptWithDigests({
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        receiptKind: "attempt_lifecycle",
+        receiptId: `lifecycle_${canonicalSha256Json({
+          organizationId,
+          operationId: request.operationId
+        }).slice("sha256:".length)}`,
+        organizationId,
+        requestId: request.requestId,
+        operationId: request.operationId,
+        requestDigest: request.requestDigest,
+        requiredCapabilities: ["relay.lifecycle.v1"],
+        producer: { kind: "runner", id: runnerId, credentialId },
+        identity: {
+          namespace: "opentag.control.receipt/attempt-lifecycle/v1",
+          parts: [organizationId, runId, claim.attemptId, "executor_result", request.operationId]
+        },
+        observedAt: new Date().toISOString(),
+        runId,
+        attempt: {
+          attemptId: claim.attemptId,
+          attemptNumber: attemptRow.number,
+          epoch: attemptRow.number,
+          fencingTokenDigest
+        },
+        payload: {
+          operation: "executor_result",
+          occurredAt: request.occurredAt,
+          conclusion: "success",
+          reasonCode: "executor_success",
+          resultDigest: request.resultDigest,
+          artifactDigests: [],
+          evidenceDigests: []
+        }
+      }));
+      await expect(repo.acknowledgeHostedLifecycleOperation({
+        destinationId,
+        organizationId,
+        operationId: request.operationId,
+        leaseToken: lifecycle!.leaseToken!,
+        receipt,
+        now: new Date()
+      })).resolves.toBe("acknowledged");
+
+      const assessmentProjectionRow = sqlite.prepare(`SELECT
+        destination_id AS destinationId,
+        organization_id AS organizationId,
+        run_id AS runId,
+        work_thread_id AS workThreadId,
+        payload_digest AS payloadDigest,
+        receipt_digest AS receiptDigest,
+        envelope_json AS envelopeJson,
+        requires_lifecycle_operation_id AS requiresLifecycleOperationId
+        FROM control_plane_projection_outbox
+        WHERE receipt_kind = 'completion_assessment'`).get() as {
+          destinationId: string;
+          organizationId: string;
+          runId: string;
+          workThreadId: string;
+          payloadDigest: string;
+          receiptDigest: string;
+          envelopeJson: string;
+          requiresLifecycleOperationId: string;
+        };
+      const assessmentProjection = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
+        JSON.parse(assessmentProjectionRow.envelopeJson)
+      );
+      const currentAssessment = sqlite.prepare(`SELECT current_assessment_id AS assessmentId
+        FROM work_threads WHERE id = ?`).get(runRow.workThreadId) as {
+          assessmentId: string;
+      };
+      expect(assessmentProjectionRow).toMatchObject({
+        destinationId,
+        organizationId,
+        runId,
+        workThreadId: runRow.workThreadId,
+        payloadDigest: assessmentProjection.payloadDigest,
+        receiptDigest: assessmentProjection.receiptDigest,
+        requiresLifecycleOperationId: request.operationId
+      });
+      expect(assessmentProjection.payloadDigest).toBe(
+        canonicalSha256Json(assessmentProjection.payload)
+      );
+      const { receiptDigest: _receiptDigest, ...assessmentWithoutReceiptDigest } =
+        assessmentProjection;
+      expect(assessmentProjection.receiptDigest).toBe(
+        canonicalSha256Json(assessmentWithoutReceiptDigest)
+      );
+      expect(assessmentProjectionRow.requiresLifecycleOperationId).toBe(request.operationId);
+      expect(assessmentProjection.identity).toEqual({
+        namespace: "opentag.control.receipt/completion-assessment/v1",
+        parts: [
+          organizationId,
+          runRow.workThreadId,
+          preAcknowledgementAssessment.assessmentId
+        ]
+      });
+      expect(assessmentProjection.producer).toEqual({
+        kind: "local_opentag",
+        id: runnerId,
+        credentialId,
+        registrationGeneration: 1
+      });
+      expect(assessmentProjection.attempt).toEqual({
+        attemptId: claim.attemptId,
+        attemptNumber: attemptRow.number,
+        epoch: attemptRow.number,
+        fencingTokenDigest
+      });
+      expect(assessmentProjection.predecessorReceiptDigests).toContain(
+        receipt.receiptDigest
+      );
+      expect(currentAssessment.assessmentId).toBe(
+        preAcknowledgementAssessment.assessmentId
+      );
+      expect(assessmentProjection.payload.assessmentId).toBe(
+        preAcknowledgementAssessment.assessmentId
+      );
+      expect(assessmentProjection.payload.executorResultReceiptRef).toEqual({
+        receiptId: receipt.receiptId,
+        operationId: request.operationId,
+        requestId: request.requestId,
+        requestDigest: request.requestDigest,
+        resultDigest: request.resultDigest
+      });
+
+      await waitForDatabase(
+        sqlite,
+        `SELECT state, attempt_count AS attemptCount,
+          last_reason_code AS lastReasonCode, last_error AS lastError,
+          satisfied_assessment_id AS satisfiedAssessmentId,
+          (SELECT count(*) FROM governed_callback_intents) AS intentCount,
+          (SELECT count(*) FROM control_plane_projection_outbox
+            WHERE receipt_kind = 'completion_assessment') AS assessmentReceiptCount
+          FROM reassessment_obligations WHERE source_kind = 'run_result_recorded'
+          AND source_id = '${runId}'`,
+        (row) => row?.["state"] === "satisfied"
+          && row["lastReasonCode"] === "assessment_satisfied"
+          && row["lastError"] === null
+          && row["satisfiedAssessmentId"]
+            === preAcknowledgementAssessment.assessmentId
+          && Number(row["attemptCount"]) >= 2
+          && Number(row["attemptCount"]) < 5
+          && row["intentCount"] === 1
+          && row["assessmentReceiptCount"] === 1
+      );
+      await waitForDatabase(
+        sqlite,
+        `SELECT state,
+          (SELECT count(*) FROM governed_callback_attempts
+            WHERE state = 'accepted') AS acceptedAttemptCount,
+          (SELECT count(*) FROM governed_callback_attempts
+            WHERE provider_receipt_id IS NOT NULL
+              AND provider_receipt_digest IS NOT NULL
+              AND provider_receipt_json IS NOT NULL) AS providerReceiptCount
+          FROM governed_callback_intents`,
+        (row) => row?.["state"] === "accepted"
+          && row["acceptedAttemptCount"] === 1
+          && row["providerReceiptCount"] === 1
+      );
+      const intentRow = sqlite.prepare(`SELECT
+        local_intent_id AS localIntentId,
+        destination_id AS destinationId,
+        organization_id AS organizationId,
+        runner_id AS runnerId,
+        credential_id AS credentialId,
+        registration_generation AS registrationGeneration,
+        run_id AS runId,
+        work_thread_id AS workThreadId,
+        run_attempt_id AS runAttemptId,
+        run_attempt_number AS runAttemptNumber,
+        fencing_token_digest AS fencingTokenDigest,
+        admission_id AS admissionId,
+        admission_operation_id AS admissionOperationId,
+        claim_operation_id AS claimOperationId,
+        completion_operation_id AS completionOperationId,
+        assessment_receipt_id AS assessmentReceiptId,
+        assessment_receipt_digest AS assessmentReceiptDigest,
+        state, current_attempt_number AS currentAttemptNumber,
+        last_reason_code AS lastReasonCode, terminal_at AS terminalAt
+        FROM governed_callback_intents`).get() as {
+          localIntentId: string;
+          destinationId: string;
+          organizationId: string;
+          runnerId: string;
+          credentialId: string;
+          registrationGeneration: number;
+          runId: string;
+          workThreadId: string;
+          runAttemptId: string;
+          runAttemptNumber: number;
+          fencingTokenDigest: string;
+          admissionId: string;
+          admissionOperationId: string;
+          claimOperationId: string;
+          completionOperationId: string;
+          assessmentReceiptId: string;
+          assessmentReceiptDigest: string;
+          state: string;
+          currentAttemptNumber: number;
+          lastReasonCode: string;
+          terminalAt: string;
+        };
+      expect(intentRow).toMatchObject({
+        destinationId,
+        organizationId,
+        runnerId,
+        credentialId,
+        registrationGeneration: authority.registrationGeneration,
+        runId,
+        workThreadId: runRow.workThreadId,
+        runAttemptId: claim.attemptId,
+        runAttemptNumber: attemptRow.number,
+        fencingTokenDigest,
+        admissionId: "admission_hosted_callback",
+        admissionOperationId: "admission_operation_hosted_callback",
+        claimOperationId,
+        completionOperationId: request.operationId,
+        assessmentReceiptId: assessmentProjection.receiptId,
+        assessmentReceiptDigest: assessmentProjection.receiptDigest,
+        state: "accepted",
+        currentAttemptNumber: 1,
+        lastReasonCode: "provider_accepted"
+      });
+      expect(intentRow.terminalAt).toEqual(expect.any(String));
+
+      const projectionRows = sqlite.prepare(`SELECT receipt_kind AS receiptKind,
+        receipt_id AS receiptId, operation_id AS operationId,
+        depends_on_receipt_id AS dependsOnReceiptId,
+        envelope_json AS envelopeJson
+        FROM control_plane_projection_outbox WHERE run_id = ?
+        AND receipt_kind IN (
+          'completion_assessment', 'callback_intent_observation',
+          'callback_attempt_observation', 'callback_provider_observation'
+        )`).all(runId) as Array<{
+          receiptKind: string;
+          receiptId: string;
+          operationId: string;
+          dependsOnReceiptId: string | null;
+          envelopeJson: string;
+        }>;
+      expect(projectionRows).toHaveLength(4);
+      expect(new Set(projectionRows.map((row) => row.operationId)).size).toBe(4);
+      const projectionByKind = new Map(
+        projectionRows.map((row) => [row.receiptKind, row])
+      );
+      const intentProjectionRow = projectionByKind.get(
+        "callback_intent_observation"
+      )!;
+      const attemptProjectionRow = projectionByKind.get(
+        "callback_attempt_observation"
+      )!;
+      const providerProjectionRow = projectionByKind.get(
+        "callback_provider_observation"
+      )!;
+      const intentProjection = CallbackIntentObservationReceiptEnvelopeV1Schema
+        .parse(JSON.parse(intentProjectionRow.envelopeJson));
+      const attemptProjection = CallbackAttemptObservationReceiptEnvelopeV1Schema
+        .parse(JSON.parse(attemptProjectionRow.envelopeJson));
+      const providerProjection = CallbackProviderObservationReceiptEnvelopeV1Schema
+        .parse(JSON.parse(providerProjectionRow.envelopeJson));
+      expect(intentProjection.predecessorReceiptDigests).toEqual([
+        assessmentProjection.receiptDigest
+      ]);
+      expect(intentProjection.payload).toMatchObject({
+        localIntentId: intentRow.localIntentId,
+        assessmentRef: assessmentProjection.payload.assessmentId,
+        assessmentDigest: assessmentProjection.receiptDigest,
+        provider: "github"
+      });
+      expect(intentProjectionRow.dependsOnReceiptId).toBe(
+        assessmentProjection.receiptId
+      );
+      expect(attemptProjection.predecessorReceiptDigests).toEqual([
+        intentProjection.receiptDigest
+      ]);
+      expect(attemptProjection.payload).toMatchObject({
+        localIntentId: intentRow.localIntentId,
+        attemptNumber: 1,
+        outcome: "accepted",
+        reasonCode: "provider_accepted"
+      });
+      expect(attemptProjectionRow.dependsOnReceiptId).toBe(
+        intentProjection.receiptId
+      );
+      expect(providerProjection.predecessorReceiptDigests).toEqual([
+        attemptProjection.receiptDigest
+      ]);
+      expect(providerProjection.payload).toMatchObject({
+        localIntentId: intentRow.localIntentId,
+        providerReceiptId: "comment_101",
+        resourceIdentity: "github:comment:101",
+        outcome: "succeeded",
+        reasonCode: "provider_accepted"
+      });
+      expect(providerProjectionRow.dependsOnReceiptId).toBe(
+        attemptProjection.receiptId
+      );
+      await wait(100);
+      expect(sqlite.prepare(`SELECT count(*) AS count
+        FROM callback_deliveries WHERE run_id = ?
+        AND dispatch_mode = 'legacy'`).get(runId)).toEqual(
+        legacyDeliveriesBeforeHostedCompletion
+      );
+      expect(sqlite.prepare(`SELECT kind, status, count(*) AS count
+        FROM callback_deliveries WHERE run_id = ?
+        AND dispatch_mode = 'legacy'
+        GROUP BY kind, status`).all(runId)).toEqual([
+        { kind: "acknowledgement", status: "delivered", count: 1 }
+      ]);
+      expect(sqlite.prepare(`SELECT dispatch_mode AS dispatchMode,
+        governed_state AS governedState, count(*) AS count
+        FROM callback_deliveries WHERE run_id = ?
+        AND dispatch_mode = 'governed'
+        GROUP BY dispatch_mode, governed_state`).all(runId)).toEqual([
+        { dispatchMode: "governed", governedState: "accepted", count: 1 }
+      ]);
+      expect(sqlite.prepare(`SELECT count(*) AS count
+        FROM control_plane_projection_outbox
+        WHERE receipt_kind = 'completion_assessment'`).get()).toEqual({ count: 1 });
+      expect(sqlite.prepare(`SELECT count(*) AS count FROM completion_assessments
+        WHERE work_thread_id = ?`).get(runRow.workThreadId)).toEqual({ count: 1 });
+      expect(providerDeliveries).toHaveLength(1);
+    } finally {
+      await app.stopBackgroundWorkers();
+      sqlite.close();
+    }
+  }, 15_000);
 });

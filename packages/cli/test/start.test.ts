@@ -11,6 +11,7 @@ import {
   createLinearOAuthTokenProvider,
   dispatcherRuntimeInputFromCliConfig,
   githubIngressConfigFromCliConfig,
+  hostedE2EGitHubApiOriginFromEnv,
   gitlabIngressConfigFromCliConfig,
   linearIngressConfigFromCliConfig,
   larkIngressConfigFromCliConfig,
@@ -99,6 +100,41 @@ function githubConfig(port?: number) {
       port: port ?? 3050
     }
   });
+}
+
+function pairedHostedGithubConfig() {
+  const built = githubConfig();
+  built.runtime = {
+    mode: "relay",
+    relayUrl: "https://relay.example",
+    relayProvider: "custom"
+  };
+  built.daemon.dispatcherUrl = "https://relay.example";
+  built.daemon.runnerToken = "hosted_runtime_token";
+  built.daemon.trustedRelay = {
+    schemaVersion: 1,
+    origin: "https://relay.example",
+    authorizedAt: "2026-08-08T00:00:00.000Z",
+    authorizationMethod: "explicit_cli"
+  };
+  delete built.daemon.pairingToken;
+  built.daemon.controlRegistration = {
+    kind: "hosted_control_v1",
+    state: "paired",
+    operationId: "operation-1",
+    registration: {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      organizationId: "org_1",
+      runnerId: built.daemon.runnerId,
+      registrationGeneration: 1,
+      credentialGeneration: 1,
+      credentialId: "credential-1",
+      credentialPurpose: "runtime",
+      createdAt: "2026-08-08T00:00:00.000Z"
+    }
+  };
+  return built;
 }
 
 function gitlabConfig(port?: number) {
@@ -1181,6 +1217,241 @@ describe("OpenTag CLI start wiring", () => {
     expect(logs.join("\n")).toContain("OpenTag will use the fixed profile 'opentag-fixed'");
   });
 
+  it("aborts and awaits the relay daemon before start resolves", async () => {
+    const built = githubConfig();
+    built.runtime = {
+      mode: "relay",
+      relayUrl: "https://relay.example",
+      relayProvider: "custom"
+    };
+    built.daemon.dispatcherUrl = "https://relay.example";
+    const calls: string[] = [];
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async waitForDispatcher() {},
+        async bootstrapDispatcher() {},
+        serveDaemon: async ({ signal }) => {
+          calls.push(`daemon.started:${signal?.aborted}`);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          calls.push("daemon.stopped");
+        },
+        logger: { log() {} }
+      }
+    });
+    expect(calls).toEqual(["daemon.started:true", "daemon.stopped"]);
+  });
+
+  it("starts a paired Hosted Control V1 runner with wait then daemon and no bootstrap", async () => {
+    const built = githubConfig();
+    built.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
+    built.daemon.dispatcherUrl = "https://relay.example";
+    built.daemon.runnerToken = "hosted_runtime_token";
+    built.daemon.trustedRelay = {
+      schemaVersion: 1,
+      origin: "https://relay.example",
+      authorizedAt: "2026-08-08T00:00:00.000Z",
+      authorizationMethod: "explicit_cli"
+    };
+    delete built.daemon.pairingToken;
+    built.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "paired",
+      operationId: "operation-1",
+      registration: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        organizationId: "org_1",
+        runnerId: built.daemon.runnerId,
+        registrationGeneration: 1,
+        credentialGeneration: 1,
+        credentialId: "credential-1",
+        credentialPurpose: "runtime",
+        createdAt: "2026-08-08T00:00:00.000Z"
+      }
+    };
+    const calls: string[] = [];
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async waitForDispatcher() { calls.push("wait"); },
+        async bootstrapDispatcher() { calls.push("bootstrap"); },
+        async serveDaemon() { calls.push("daemon"); },
+        logger: { log() {} }
+      }
+    });
+
+    expect(calls).toEqual(["wait", "daemon"]);
+  });
+
+  it("passes the non-persisted E2E GitHub origin through a real Hosted Control daemon input", async () => {
+    const built = pairedHostedGithubConfig();
+    built.daemon.githubToken = "opentag_e2e_no_provider_credential_v1";
+    const calls: string[] = [];
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        env: {
+          OPENTAG_E2E_HOSTED_CLAIM_V1: "1",
+          OPENTAG_E2E_GITHUB_API_ORIGIN: "http://127.0.0.1:43123"
+        },
+        async waitForDispatcher() { calls.push("wait"); },
+        async serveDaemon() { calls.push("daemon"); },
+        logger: { log() {} }
+      }
+    });
+
+    expect(calls).toEqual(["wait", "daemon"]);
+  });
+
+  it("checks hosted authorization before resolving the E2E GitHub origin", async () => {
+    const built = pairedHostedGithubConfig();
+    delete built.daemon.trustedRelay;
+
+    await expect(startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      listenForProcessSignals: false,
+      dependencies: {
+        env: { OPENTAG_E2E_HOSTED_CLAIM_V1: "1" },
+        logger: { log() {} }
+      }
+    })).rejects.toThrow(/explicit trustedRelay authorization before secrets or network access/u);
+  });
+
+  it("accepts E2E GitHub API markers only for paired Hosted Control with the public sentinel", () => {
+    const built = pairedHostedGithubConfig();
+    const apiOrigin = "http://127.0.0.1:43123";
+    built.daemon.githubToken = "opentag_e2e_no_provider_credential_v1";
+    expect(hostedE2EGitHubApiOriginFromEnv(built, {
+      OPENTAG_E2E_HOSTED_CLAIM_V1: "1",
+      OPENTAG_E2E_GITHUB_API_ORIGIN: apiOrigin
+    })).toBe(apiOrigin);
+
+    expect(() => hostedE2EGitHubApiOriginFromEnv(built, {
+      OPENTAG_E2E_HOSTED_CLAIM_V1: "1"
+    })).toThrow(/markers are incomplete/u);
+    expect(() => hostedE2EGitHubApiOriginFromEnv(built, {
+      OPENTAG_E2E_GITHUB_API_ORIGIN: apiOrigin
+    })).toThrow(/markers are incomplete/u);
+    expect(() => hostedE2EGitHubApiOriginFromEnv(built, {
+      OPENTAG_E2E_HOSTED_CLAIM_V1: "0",
+      OPENTAG_E2E_GITHUB_API_ORIGIN: apiOrigin
+    })).toThrow(/markers are incomplete/u);
+
+    const local = githubConfig();
+    local.daemon.githubToken = "opentag_e2e_no_provider_credential_v1";
+    expect(() => hostedE2EGitHubApiOriginFromEnv(local, {
+      OPENTAG_E2E_HOSTED_CLAIM_V1: "1",
+      OPENTAG_E2E_GITHUB_API_ORIGIN: apiOrigin
+    })).toThrow(/requires a paired Hosted Control V1 runner/u);
+  });
+
+  it("rejects unsafe E2E GitHub origin values without exposing the token or origin", () => {
+    const built = pairedHostedGithubConfig();
+    const token = "real_provider_secret";
+    const apiOrigin = "http://127.0.0.1.evil.example:43123/private?token=bad";
+    built.daemon.githubToken = token;
+    try {
+      hostedE2EGitHubApiOriginFromEnv(built, {
+        OPENTAG_E2E_HOSTED_CLAIM_V1: "1",
+        OPENTAG_E2E_GITHUB_API_ORIGIN: apiOrigin
+      });
+      throw new Error("expected E2E origin rejection");
+    } catch (error) {
+      const loggable = error instanceof Error ? `${error.name}:${error.message}` : String(error);
+      expect(loggable).toContain("github_source_api_origin_invalid");
+      expect(loggable).not.toContain(token);
+      expect(loggable).not.toContain(apiOrigin);
+    }
+  });
+
+  it("rejects invalid hosted auth before wait, bootstrap, or daemon startup", async () => {
+    const built = githubConfig();
+    built.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
+    built.daemon.dispatcherUrl = "https://relay.example";
+    built.daemon.trustedRelay = {
+      schemaVersion: 1,
+      origin: "https://relay.example",
+      authorizedAt: "2026-08-08T00:00:00.000Z",
+      authorizationMethod: "explicit_cli"
+    };
+    built.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "unpaired",
+      flow: "registration",
+      operationId: "operation-1",
+      reason: "pending"
+    };
+    const calls: string[] = [];
+
+    await expect(startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      listenForProcessSignals: false,
+      dependencies: {
+        async waitForDispatcher() { calls.push("wait"); },
+        async bootstrapDispatcher() { calls.push("bootstrap"); },
+        async serveDaemon() { calls.push("daemon"); }
+      }
+    })).rejects.toThrow("Hosted Control V1 runner is not paired");
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects a hosted dispatcher rebind before wait or client startup", async () => {
+    const built = githubConfig();
+    built.runtime = { mode: "relay", relayUrl: "https://other.example" };
+    built.daemon.dispatcherUrl = "https://other.example";
+    built.daemon.runnerToken = "hosted_runtime_token";
+    built.daemon.trustedRelay = {
+      schemaVersion: 1,
+      origin: "https://relay.example",
+      authorizedAt: "2026-08-08T00:00:00.000Z",
+      authorizationMethod: "explicit_cli"
+    };
+    delete built.daemon.pairingToken;
+    built.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "paired",
+      operationId: "operation-rebind",
+      registration: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        organizationId: "org_1",
+        runnerId: built.daemon.runnerId,
+        registrationGeneration: 1,
+        credentialGeneration: 1,
+        credentialId: "credential-1",
+        credentialPurpose: "runtime",
+        createdAt: "2026-08-08T00:00:00.000Z"
+      }
+    };
+    const calls: string[] = [];
+
+    await expect(startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      listenForProcessSignals: false,
+      dependencies: {
+        async waitForDispatcher() { calls.push("wait"); },
+        async bootstrapDispatcher() { calls.push("bootstrap"); },
+        async serveDaemon() { calls.push("daemon"); }
+      }
+    })).rejects.toThrow(/does not match the explicitly trusted relay origin/iu);
+    expect(calls).toEqual([]);
+  });
+
   it("starts relay mode for GitLab without local dispatcher, local port checks, or local GitLab ingress", async () => {
     const built = gitlabConfig();
     built.runtime = {
@@ -1367,6 +1638,51 @@ describe("OpenTag CLI start wiring", () => {
 
     expect(calls.slice(0, 2)).toEqual(["ports", "dispatcher"]);
     expect(calls).toEqual(expect.arrayContaining(["wait", "bootstrap", "daemon", "lark-ingress", "lark.close", "dispatcher.close"]));
+  });
+
+  it("awaits the local daemon before closing the dispatcher", async () => {
+    const built = config();
+    const calls: string[] = [];
+    const dispatcherHandle = {
+      url: "http://localhost:3030",
+      server: {},
+      async close() {
+        calls.push("dispatcher.close");
+      }
+    } as ReturnType<NonNullable<StartRuntimeDependencies["startDispatcher"]>>;
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async assertStartPortsAvailable() {},
+        startDispatcher: () => dispatcherHandle,
+        async waitForDispatcher() {},
+        async bootstrapDispatcher() {},
+        serveDaemon: async ({ signal }) => {
+          calls.push(`daemon.started:${signal?.aborted}`);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          calls.push("daemon.stopped");
+        },
+        startLarkIngress: () => ({
+          startPromise: new Promise<void>(() => {}),
+          async handleCardAction() {
+            return { status: "ignored_card_action_not_opentag" as const };
+          },
+          async close() {
+            calls.push("lark.close");
+          }
+        }),
+        logger: { log() {} }
+      }
+    });
+    expect(calls).toEqual([
+      "daemon.started:true",
+      "daemon.stopped",
+      "lark.close",
+      "dispatcher.close"
+    ]);
   });
 
   it("logs mounted Telegram and Discord dispatcher endpoints in local mode", async () => {

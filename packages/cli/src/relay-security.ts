@@ -1,4 +1,10 @@
 import { relayUrlFromConfig, runtimeModeFromConfig, type OpenTagCliConfig } from "./config.js";
+export {
+  TrustedRelayAuthorizationV1Schema,
+  assertHostedRelayAuthorization,
+  canonicalHostedRelayOrigin,
+  type TrustedRelayAuthorizationV1
+} from "@opentag/local-runtime";
 
 export type RelaySecurityCheck = {
   status: "ok" | "warn" | "fail";

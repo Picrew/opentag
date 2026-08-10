@@ -196,16 +196,18 @@ describe("OpenTag repository", () => {
       .resolves.toMatchObject({ outcome: "duplicate", assessment: original });
 
     await expect(repo.appendCompletionAssessment({
-      assessment: { ...original, assessedBy: "human" },
+      assessment: { ...original, evidenceBacked: false },
       expectedCurrentAssessmentId: null
     })).rejects.toThrow(/CompletionAssessment assessment-immutable is immutable/u);
 
     await expect(repo.appendCompletionAssessment({
-      assessment: completionAssessment({
-        id: "assessment-same-input-digest",
-        workThreadId: thread.id,
-        assessedBy: "human"
-      }),
+      assessment: {
+        ...completionAssessment({
+          id: "assessment-same-input-digest",
+          workThreadId: thread.id
+        }),
+        evidenceBacked: false
+      },
       expectedCurrentAssessmentId: original.id
     })).rejects.toThrow(/CompletionAssessment input digest .* is immutable/u);
 

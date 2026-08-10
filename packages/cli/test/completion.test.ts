@@ -58,8 +58,8 @@ function waivedResponse() {
     targetSelectors: [{ key: "primary_change", kind: "change_request", lineage: "current_cycle", cardinality: "exactly_one" }],
     resolvedFrom: [{ scope: "work_context_owner_container", ref: "github:acme/demo", version: "1" }],
     gates: [
-      { id: "required_checks", kind: "verification", targetKey: "primary_change", evidenceKind: "source_control.required_checks", requiredOutcome: "passed", minimumAssurance: "verified" },
-      { id: "merge", kind: "external_state", targetKey: "primary_change", provider: "github", requiredState: "merged", minimumAssurance: "verified" }
+      { id: "merge", kind: "external_state", targetKey: "primary_change", provider: "github", requiredState: "merged", minimumAssurance: "verified" },
+      { id: "required_checks", kind: "verification", targetKey: "primary_change", evidenceKind: "source_control.required_checks", requiredOutcome: "passed", minimumAssurance: "verified" }
     ],
     maxAutomaticRetries: 1,
     onSatisfied: "report_only",

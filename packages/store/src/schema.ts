@@ -1,5 +1,8 @@
 import type Database from "better-sqlite3";
-import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
+import { check, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+
+import { canonicalSha256Json } from "./canonical-json.js";
 
 export const runs = sqliteTable(
   "runs",
@@ -75,6 +78,228 @@ export const attempts = sqliteTable(
     runNumberIdx: uniqueIndex("attempts_run_number_idx").on(table.runId, table.number),
     runIdx: index("attempts_run_idx").on(table.runId),
     runnerIdx: index("attempts_runner_idx").on(table.runnerId)
+  })
+);
+
+export const hostedRunImports = sqliteTable(
+  "hosted_run_imports",
+  {
+    runId: text("run_id").primaryKey(),
+    admissionId: text("admission_id").notNull(),
+    admissionOperationId: text("admission_operation_id").notNull(),
+    claimOperationId: text("claim_operation_id").notNull(),
+    attemptId: text("attempt_id").notNull(),
+    fencingTokenDigest: text("fencing_token_digest").notNull(),
+    sourceIdentityDigest: text("source_identity_digest").notNull(),
+    deliveryPayloadDigest: text("delivery_payload_digest").notNull(),
+    admissionEnvelopeDigest: text("admission_envelope_digest").notNull(),
+    policyReceiptId: text("policy_receipt_id").notNull(),
+    policyPayloadDigest: text("policy_payload_digest").notNull(),
+    policyReceiptDigest: text("policy_receipt_digest").notNull(),
+    eventDigest: text("event_digest").notNull(),
+    contextPacketDigest: text("context_packet_digest").notNull(),
+    workThreadId: text("work_thread_id"),
+    workThreadDigest: text("work_thread_digest"),
+    claimDigest: text("claim_digest").notNull(),
+    authorityDigest: text("authority_digest").notNull(),
+    authorityJson: text("authority_json").notNull(),
+    importedAt: text("imported_at").notNull()
+  },
+  (table) => ({
+    admissionIdx: uniqueIndex("hosted_run_imports_admission_idx").on(table.admissionId),
+    claimOperationIdx: uniqueIndex("hosted_run_imports_claim_operation_idx").on(table.claimOperationId),
+    attemptIdx: uniqueIndex("hosted_run_imports_attempt_idx").on(table.attemptId),
+    fenceIdx: uniqueIndex("hosted_run_imports_fence_idx").on(table.fencingTokenDigest),
+    sourceIdx: uniqueIndex("hosted_run_imports_source_idx").on(table.sourceIdentityDigest),
+    authorityIdx: uniqueIndex("hosted_run_imports_authority_idx").on(table.authorityDigest),
+    workThreadIdx: index("hosted_run_imports_work_thread_idx").on(table.workThreadId)
+  })
+);
+
+export const hostedClaimOperations = sqliteTable(
+  "hosted_claim_operations",
+  {
+    operationId: text("operation_id").primaryKey(),
+    requestId: text("request_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    runnerId: text("runner_id").notNull(),
+    destinationId: text("destination_id").notNull(),
+    activeKey: text("active_key"),
+    requestDigest: text("request_digest").notNull(),
+    requestJson: text("request_json").notNull(),
+    state: text("state").notNull(),
+    runId: text("run_id"),
+    claimDigest: text("claim_digest"),
+    authorityDigest: text("authority_digest"),
+    authorityJson: text("authority_json"),
+    attemptId: text("attempt_id"),
+    attemptNumber: integer("attempt_number"),
+    fencingTokenDigest: text("fencing_token_digest"),
+    credentialId: text("credential_id"),
+    leaseExpiresAt: text("lease_expires_at"),
+    executorId: text("executor_id"),
+    executionStartedAt: text("execution_started_at"),
+    terminalReasonCode: text("terminal_reason_code"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    acknowledgedAt: text("acknowledged_at")
+  },
+  (table) => ({
+    requestIdx: uniqueIndex("hosted_claim_operations_request_idx").on(table.requestId),
+    activeIdx: uniqueIndex("hosted_claim_operations_active_idx").on(table.activeKey),
+    runnerStateIdx: index("hosted_claim_operations_runner_state_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.runnerId,
+      table.state
+    )
+  })
+);
+
+export const hostedAttemptImports = sqliteTable(
+  "hosted_attempt_imports",
+  {
+    attemptId: text("attempt_id").primaryKey(),
+    runId: text("run_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    claimOperationId: text("claim_operation_id").notNull(),
+    fencingTokenDigest: text("fencing_token_digest").notNull(),
+    claimDigest: text("claim_digest").notNull(),
+    authorityDigest: text("authority_digest").notNull(),
+    authorityJson: text("authority_json").notNull(),
+    importedAt: text("imported_at").notNull()
+  },
+  (table) => ({
+    runNumberIdx: uniqueIndex("hosted_attempt_imports_run_number_idx").on(table.runId, table.attemptNumber),
+    operationIdx: uniqueIndex("hosted_attempt_imports_operation_idx").on(table.claimOperationId),
+    fenceIdx: uniqueIndex("hosted_attempt_imports_fence_idx").on(table.fencingTokenDigest),
+    authorityIdx: uniqueIndex("hosted_attempt_imports_authority_idx").on(table.authorityDigest),
+    runIdx: index("hosted_attempt_imports_run_idx").on(table.runId)
+  })
+);
+
+export const hostedHeartbeatOperations = sqliteTable(
+  "hosted_heartbeat_operations",
+  {
+    destinationId: text("destination_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    runnerId: text("runner_id").notNull(),
+    credentialId: text("credential_id").notNull(),
+    operationId: text("operation_id").notNull(),
+    requestId: text("request_id").notNull(),
+    runId: text("run_id").notNull(),
+    attemptId: text("attempt_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    fencingTokenDigest: text("fencing_token_digest").notNull(),
+    expectedLeaseExpiresAt: text("expected_lease_expires_at").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    requestJson: text("request_json").notNull(),
+    activeKey: text("active_key"),
+    state: text("state").notNull(),
+    receiptDigest: text("receipt_digest"),
+    receiptJson: text("receipt_json"),
+    acceptedLeaseExpiresAt: text("accepted_lease_expires_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    acknowledgedAt: text("acknowledged_at")
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [
+      table.destinationId,
+      table.organizationId,
+      table.runnerId,
+      table.credentialId,
+      table.operationId
+    ] }),
+    requestIdx: uniqueIndex("hosted_heartbeat_operations_request_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.runnerId,
+      table.credentialId,
+      table.requestId
+    ),
+    activeIdx: uniqueIndex("hosted_heartbeat_operations_active_idx").on(table.activeKey),
+    attemptIdx: index("hosted_heartbeat_operations_attempt_idx").on(
+      table.runId,
+      table.attemptId,
+      table.state
+    )
+  })
+);
+
+export const hostedLifecycleOperations = sqliteTable(
+  "hosted_lifecycle_operations",
+  {
+    destinationId: text("destination_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    runnerId: text("runner_id").notNull(),
+    credentialId: text("credential_id").notNull(),
+    operationId: text("operation_id").notNull(),
+    requestId: text("request_id").notNull(),
+    action: text("action").notNull(),
+    runId: text("run_id").notNull(),
+    attemptId: text("attempt_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    fencingTokenDigest: text("fencing_token_digest").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    businessKeyDigest: text("business_key_digest").notNull(),
+    sequence: integer("sequence").notNull(),
+    requestJson: text("request_json").notNull(),
+    state: text("state").notNull(),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    nextAttemptAt: text("next_attempt_at"),
+    leaseOwner: text("lease_owner"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: text("lease_expires_at"),
+    receiptId: text("receipt_id"),
+    receiptDigest: text("receipt_digest"),
+    receiptJson: text("receipt_json"),
+    lastReasonCode: text("last_reason_code"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    acknowledgedAt: text("acknowledged_at")
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [
+      table.destinationId,
+      table.organizationId,
+      table.runnerId,
+      table.credentialId,
+      table.operationId
+    ] }),
+    requestIdx: uniqueIndex("hosted_lifecycle_operations_request_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.runnerId,
+      table.credentialId,
+      table.requestId
+    ),
+    businessIdx: uniqueIndex("hosted_lifecycle_operations_business_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.runnerId,
+      table.credentialId,
+      table.businessKeyDigest
+    ),
+    sequenceIdx: uniqueIndex("hosted_lifecycle_operations_sequence_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.runId,
+      table.attemptId,
+      table.sequence
+    ),
+    dueIdx: index("hosted_lifecycle_operations_due_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.state,
+      table.nextAttemptAt,
+      table.createdAt
+    ),
+    attemptIdx: index("hosted_lifecycle_operations_attempt_idx").on(
+      table.runId,
+      table.attemptId,
+      table.state
+    )
   })
 );
 
@@ -446,6 +671,8 @@ export const callbackDeliveries = sqliteTable(
     threadKey: text("thread_key"),
     idempotencyKey: text("idempotency_key"),
     metadataJson: text("metadata_json"),
+    dispatchMode: text("dispatch_mode").notNull().default("legacy"),
+    governedState: text("governed_state"),
     status: text("status").notNull(),
     attempts: integer("attempts").notNull().default(0),
     lastError: text("last_error"),
@@ -456,7 +683,157 @@ export const callbackDeliveries = sqliteTable(
   (table) => ({
     callbackRunIdx: index("callback_deliveries_run_idx").on(table.runId),
     callbackStatusIdx: index("callback_deliveries_status_idx").on(table.status),
+    callbackDispatchStatusIdx: index("callback_deliveries_dispatch_status_idx").on(
+      table.dispatchMode,
+      table.status
+    ),
     callbackIdempotencyIdx: uniqueIndex("callback_deliveries_idempotency_key_idx").on(table.idempotencyKey)
+  })
+);
+
+export const governedCallbackIntents = sqliteTable(
+  "governed_callback_intents",
+  {
+    localIntentId: text("local_intent_id").primaryKey(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    destinationId: text("destination_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    runnerId: text("runner_id").notNull(),
+    producerId: text("producer_id").notNull(),
+    credentialId: text("credential_id").notNull(),
+    registrationGeneration: integer("registration_generation").notNull(),
+    runId: text("run_id").notNull(),
+    workThreadId: text("work_thread_id").notNull(),
+    runAttemptId: text("run_attempt_id").notNull(),
+    runAttemptNumber: integer("run_attempt_number").notNull(),
+    fencingTokenDigest: text("fencing_token_digest").notNull(),
+    admissionId: text("admission_id").notNull(),
+    admissionOperationId: text("admission_operation_id").notNull(),
+    claimOperationId: text("claim_operation_id").notNull(),
+    completionOperationId: text("completion_operation_id").notNull(),
+    assessmentReceiptId: text("assessment_receipt_id").notNull(),
+    assessmentReceiptDigest: text("assessment_receipt_digest").notNull(),
+    localDeliveryId: integer("local_delivery_id").notNull(),
+    provider: text("provider").notNull(),
+    operationId: text("operation_id").notNull(),
+    payloadDigest: text("payload_digest").notNull(),
+    intentReceiptId: text("intent_receipt_id").notNull(),
+    intentReceiptDigest: text("intent_receipt_digest").notNull(),
+    intentReceiptJson: text("intent_receipt_json").notNull(),
+    targetIdentityDigest: text("target_identity_digest").notNull(),
+    state: text("state").notNull(),
+    currentAttemptId: text("current_attempt_id"),
+    currentAttemptNumber: integer("current_attempt_number").notNull().default(0),
+    nextAttemptAt: text("next_attempt_at"),
+    leaseOwner: text("lease_owner"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: text("lease_expires_at"),
+    lastReasonCode: text("last_reason_code"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    terminalAt: text("terminal_at")
+  },
+  (table) => ({
+    idempotencyIdx: uniqueIndex("governed_callback_intents_idempotency_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.idempotencyKey
+    ),
+    operationIdx: uniqueIndex("governed_callback_intents_operation_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.operationId
+    ),
+    deliveryIdx: uniqueIndex("governed_callback_intents_delivery_idx").on(table.localDeliveryId),
+    dueIdx: index("governed_callback_intents_due_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.state,
+      table.nextAttemptAt,
+      table.leaseExpiresAt
+    ),
+    stateCheck: check(
+      "governed_callback_intents_state_check",
+      sql`${table.state} IN ('pending', 'leased', 'sending', 'accepted', 'rejected', 'outcome_unknown', 'attention')`
+    ),
+    providerCheck: check("governed_callback_intents_provider_check", sql`${table.provider} = 'github'`),
+    attemptNumberCheck: check(
+      "governed_callback_intents_attempt_number_check",
+      sql`typeof(${table.currentAttemptNumber}) = 'integer' AND ${table.currentAttemptNumber} >= 0`
+    )
+  })
+);
+
+export const governedCallbackAttempts = sqliteTable(
+  "governed_callback_attempts",
+  {
+    localAttemptId: text("local_attempt_id").primaryKey(),
+    localIntentId: text("local_intent_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    previousAttemptId: text("previous_attempt_id"),
+    retryAuthorizationId: text("retry_authorization_id"),
+    requestDigest: text("request_digest").notNull(),
+    state: text("state").notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: text("lease_expires_at"),
+    attemptedAt: text("attempted_at"),
+    observedAt: text("observed_at"),
+    reasonCode: text("reason_code"),
+    nextAction: text("next_action"),
+    owner: text("owner"),
+    attemptReceiptId: text("attempt_receipt_id"),
+    attemptReceiptDigest: text("attempt_receipt_digest"),
+    attemptReceiptJson: text("attempt_receipt_json"),
+    providerReceiptId: text("provider_receipt_id"),
+    resourceIdentity: text("resource_identity"),
+    providerReceiptDigest: text("provider_receipt_digest"),
+    providerReceiptJson: text("provider_receipt_json"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => ({
+    numberIdx: uniqueIndex("governed_callback_attempts_number_idx").on(
+      table.localIntentId,
+      table.attemptNumber
+    ),
+    stateIdx: index("governed_callback_attempts_state_idx").on(table.localIntentId, table.state),
+    stateCheck: check(
+      "governed_callback_attempts_state_check",
+      sql`${table.state} IN ('pending', 'leased', 'sending', 'accepted', 'rejected', 'outcome_unknown', 'attention')`
+    ),
+    attemptNumberCheck: check(
+      "governed_callback_attempts_attempt_number_check",
+      sql`typeof(${table.attemptNumber}) = 'integer' AND ${table.attemptNumber} > 0`
+    )
+  })
+);
+
+export const governedCallbackReconciliations = sqliteTable(
+  "governed_callback_reconciliations",
+  {
+    reconciliationId: text("reconciliation_id").primaryKey(),
+    localIntentId: text("local_intent_id").notNull(),
+    localAttemptId: text("local_attempt_id").notNull(),
+    resolution: text("resolution").notNull(),
+    evidenceDigest: text("evidence_digest").notNull(),
+    evidenceJson: text("evidence_json").notNull(),
+    owner: text("owner").notNull(),
+    retryAttemptId: text("retry_attempt_id"),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({
+    intentIdx: index("governed_callback_reconciliations_intent_idx").on(
+      table.localIntentId,
+      table.createdAt
+    ),
+    attemptIdx: uniqueIndex("governed_callback_reconciliations_attempt_idx").on(
+      table.localAttemptId
+    ),
+    resolutionCheck: check(
+      "governed_callback_reconciliations_resolution_check",
+      sql`${table.resolution} IN ('accepted', 'rejected')`
+    )
   })
 );
 
@@ -650,6 +1027,98 @@ export const reassessmentObligations = sqliteTable(
       table.workThreadId,
       table.state,
       table.createdAt
+    )
+  })
+);
+
+export const controlPlaneProjectionOutbox = sqliteTable(
+  "control_plane_projection_outbox",
+  {
+    receiptId: text("receipt_id").notNull(),
+    destinationId: text("destination_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    runnerId: text("runner_id"),
+    runId: text("run_id"),
+    workThreadId: text("work_thread_id"),
+    receiptKind: text("receipt_kind").notNull(),
+    identityNamespace: text("identity_namespace").notNull(),
+    identityPartsJson: text("identity_parts_json").notNull(),
+    identityKey: text("identity_key").notNull(),
+    operationId: text("operation_id").notNull(),
+    dependsOnReceiptId: text("depends_on_receipt_id"),
+    requiresLifecycleOperationId: text("requires_lifecycle_operation_id"),
+    payloadDigest: text("payload_digest").notNull(),
+    receiptDigest: text("receipt_digest").notNull(),
+    envelopeJson: text("envelope_json").notNull(),
+    state: text("state").notNull(),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    nextAttemptAt: text("next_attempt_at"),
+    leaseOwner: text("lease_owner"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: text("lease_expires_at"),
+    lastReasonCode: text("last_reason_code"),
+    lastHttpStatus: integer("last_http_status"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    acknowledgedAt: text("acknowledged_at")
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "control_plane_projection_outbox_pk",
+      columns: [table.destinationId, table.organizationId, table.receiptId]
+    }),
+    destinationIdentityIdx: uniqueIndex("control_plane_projection_outbox_destination_identity_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.identityKey
+    ),
+    destinationOperationIdx: uniqueIndex("control_plane_projection_outbox_destination_operation_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.operationId
+    ),
+    dueIdx: index("control_plane_projection_outbox_due_idx").on(
+      table.destinationId,
+      table.state,
+      table.nextAttemptAt,
+      table.leaseExpiresAt,
+      table.createdAt,
+      table.receiptId
+    ),
+    tenantIdx: index("control_plane_projection_outbox_tenant_idx").on(
+      table.destinationId,
+      table.organizationId,
+      table.state,
+      table.createdAt
+    ),
+    attemptCountCheck: check(
+      "control_plane_projection_outbox_attempt_count_check",
+      sql`typeof(${table.attemptCount}) = 'integer' AND ${table.attemptCount} >= 0`
+    ),
+    httpStatusCheck: check(
+      "control_plane_projection_outbox_http_status_check",
+      sql`${table.lastHttpStatus} IS NULL OR (typeof(${table.lastHttpStatus}) = 'integer' AND ${table.lastHttpStatus} >= 100 AND ${table.lastHttpStatus} <= 599)`
+    ),
+    receiptKindCheck: check(
+      "control_plane_projection_outbox_receipt_kind_check",
+      sql`${table.receiptKind} IN ('runner_readiness', 'work_thread_ref', 'completion_contract_ref', 'completion_evidence_observation', 'completion_assessment', 'callback_intent_observation', 'callback_attempt_observation', 'callback_provider_observation')`
+    ),
+    jsonShapeCheck: check(
+      "control_plane_projection_outbox_json_shape_check",
+      sql`json_valid(${table.identityPartsJson}) AND json_type(${table.identityPartsJson}) = 'array' AND json_valid(${table.envelopeJson}) AND json_type(${table.envelopeJson}) = 'object'`
+    ),
+    digestShapeCheck: check(
+      "control_plane_projection_outbox_digest_shape_check",
+      sql`length(${table.payloadDigest}) = 71 AND substr(${table.payloadDigest}, 1, 7) = 'sha256:' AND substr(${table.payloadDigest}, 8) NOT GLOB '*[^0-9a-f]*' AND length(${table.receiptDigest}) = 71 AND substr(${table.receiptDigest}, 1, 7) = 'sha256:' AND substr(${table.receiptDigest}, 8) NOT GLOB '*[^0-9a-f]*'`
+    ),
+    stateShapeCheck: check(
+      "control_plane_projection_outbox_state_shape_check",
+      sql`(
+        (${table.state} = 'pending' AND ${table.nextAttemptAt} IS NOT NULL AND ${table.leaseOwner} IS NULL AND ${table.leaseToken} IS NULL AND ${table.leaseExpiresAt} IS NULL AND ${table.acknowledgedAt} IS NULL)
+        OR (${table.state} = 'leased' AND ${table.nextAttemptAt} IS NOT NULL AND ${table.leaseOwner} IS NOT NULL AND ${table.leaseToken} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL AND ${table.acknowledgedAt} IS NULL)
+        OR (${table.state} = 'acknowledged' AND ${table.nextAttemptAt} IS NULL AND ${table.leaseOwner} IS NULL AND ${table.leaseToken} IS NULL AND ${table.leaseExpiresAt} IS NULL AND ${table.acknowledgedAt} IS NOT NULL)
+        OR (${table.state} = 'attention' AND ${table.nextAttemptAt} IS NULL AND ${table.leaseOwner} IS NULL AND ${table.leaseToken} IS NULL AND ${table.leaseExpiresAt} IS NULL AND ${table.acknowledgedAt} IS NULL AND ${table.lastReasonCode} IS NOT NULL)
+      )`
     )
   })
 );
@@ -958,6 +1427,893 @@ function migrateReassessmentObligationSchema(sqlite: Database.Database): void {
   })();
 }
 
+function migrateControlPlaneProjectionOutboxSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-08-control-plane-projection-outbox-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS control_plane_projection_outbox (
+        receipt_id TEXT NOT NULL,
+        destination_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        runner_id TEXT,
+        run_id TEXT,
+        work_thread_id TEXT,
+        receipt_kind TEXT NOT NULL,
+        identity_namespace TEXT NOT NULL,
+        identity_parts_json TEXT NOT NULL,
+        identity_key TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        payload_digest TEXT NOT NULL,
+        receipt_digest TEXT NOT NULL,
+        envelope_json TEXT NOT NULL,
+        state TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempt_count) = 'integer' AND attempt_count >= 0),
+        next_attempt_at TEXT,
+        lease_owner TEXT,
+        lease_token TEXT,
+        lease_expires_at TEXT,
+        last_reason_code TEXT,
+        last_http_status INTEGER CHECK (last_http_status IS NULL OR (typeof(last_http_status) = 'integer' AND last_http_status >= 100 AND last_http_status <= 599)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        acknowledged_at TEXT,
+        CONSTRAINT control_plane_projection_outbox_pk PRIMARY KEY (destination_id, organization_id, receipt_id),
+        CONSTRAINT control_plane_projection_outbox_receipt_kind_check CHECK (
+          receipt_kind IN (
+            'runner_readiness', 'work_thread_ref', 'completion_contract_ref',
+            'completion_evidence_observation', 'completion_assessment', 'callback_intent_observation',
+            'callback_attempt_observation', 'callback_provider_observation'
+          )
+        ),
+        CONSTRAINT control_plane_projection_outbox_json_shape_check CHECK (
+          json_valid(identity_parts_json) AND json_type(identity_parts_json) = 'array'
+          AND json_valid(envelope_json) AND json_type(envelope_json) = 'object'
+        ),
+        CONSTRAINT control_plane_projection_outbox_digest_shape_check CHECK (
+          length(payload_digest) = 71 AND substr(payload_digest, 1, 7) = 'sha256:'
+          AND substr(payload_digest, 8) NOT GLOB '*[^0-9a-f]*'
+          AND length(receipt_digest) = 71 AND substr(receipt_digest, 1, 7) = 'sha256:'
+          AND substr(receipt_digest, 8) NOT GLOB '*[^0-9a-f]*'
+        ),
+        CONSTRAINT control_plane_projection_outbox_state_shape_check CHECK (
+          (state = 'pending' AND next_attempt_at IS NOT NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'leased' AND next_attempt_at IS NOT NULL AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL AND acknowledged_at IS NULL)
+          OR (state = 'acknowledged' AND next_attempt_at IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND acknowledged_at IS NOT NULL)
+          OR (state = 'attention' AND next_attempt_at IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND acknowledged_at IS NULL AND last_reason_code IS NOT NULL)
+        )
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS control_plane_projection_outbox_destination_identity_idx
+        ON control_plane_projection_outbox(destination_id, organization_id, identity_key);
+      CREATE UNIQUE INDEX IF NOT EXISTS control_plane_projection_outbox_destination_operation_idx
+        ON control_plane_projection_outbox(destination_id, organization_id, operation_id);
+      CREATE INDEX IF NOT EXISTS control_plane_projection_outbox_due_idx
+        ON control_plane_projection_outbox(destination_id, state, next_attempt_at, lease_expires_at, created_at, receipt_id);
+      CREATE INDEX IF NOT EXISTS control_plane_projection_outbox_tenant_idx
+        ON control_plane_projection_outbox(destination_id, organization_id, state, created_at);
+      CREATE TRIGGER IF NOT EXISTS control_plane_projection_outbox_duplicate_insert_guard
+      BEFORE INSERT ON control_plane_projection_outbox
+      WHEN EXISTS (
+        SELECT 1 FROM control_plane_projection_outbox existing
+        WHERE (
+            existing.destination_id = NEW.destination_id
+            AND existing.organization_id = NEW.organization_id
+            AND existing.receipt_id = NEW.receipt_id
+          )
+          OR (
+            existing.destination_id = NEW.destination_id
+            AND existing.organization_id = NEW.organization_id
+            AND existing.identity_key = NEW.identity_key
+          )
+          OR (
+            existing.destination_id = NEW.destination_id
+            AND existing.organization_id = NEW.organization_id
+            AND existing.operation_id = NEW.operation_id
+          )
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'control_plane_projection_outbox_duplicate_insert');
+      END;
+      CREATE TRIGGER IF NOT EXISTS control_plane_projection_outbox_insert_guard
+      BEFORE INSERT ON control_plane_projection_outbox
+      WHEN (
+        NEW.state = 'pending'
+        AND NEW.attempt_count = 0
+        AND NEW.next_attempt_at IS NOT NULL
+        AND NEW.lease_owner IS NULL
+        AND NEW.lease_token IS NULL
+        AND NEW.lease_expires_at IS NULL
+        AND NEW.last_reason_code IS NULL
+        AND NEW.last_http_status IS NULL
+        AND NEW.acknowledged_at IS NULL
+        AND NEW.created_at = NEW.updated_at
+        AND length(NEW.created_at) = 24
+        AND NEW.created_at GLOB '????-??-??T??:??:??.???Z'
+        AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW.created_at) = NEW.created_at
+        AND length(NEW.next_attempt_at) = 24
+        AND NEW.next_attempt_at GLOB '????-??-??T??:??:??.???Z'
+        AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW.next_attempt_at) = NEW.next_attempt_at
+        AND NEW.next_attempt_at >= NEW.created_at
+        AND json_extract(NEW.envelope_json, '$.receiptId') = NEW.receipt_id
+        AND json_extract(NEW.envelope_json, '$.organizationId') = NEW.organization_id
+        AND json_extract(NEW.envelope_json, '$.receiptKind') = NEW.receipt_kind
+        AND json_extract(NEW.envelope_json, '$.identity.namespace') = NEW.identity_namespace
+        AND json_extract(NEW.envelope_json, '$.identity.parts') = json(NEW.identity_parts_json)
+        AND json_extract(NEW.envelope_json, '$.operationId') = NEW.operation_id
+        AND json_extract(NEW.envelope_json, '$.payloadDigest') = NEW.payload_digest
+        AND json_extract(NEW.envelope_json, '$.receiptDigest') = NEW.receipt_digest
+        AND json_extract(NEW.envelope_json, '$.runId') IS NEW.run_id
+        AND json_extract(NEW.envelope_json, '$.workThreadId') IS NEW.work_thread_id
+        AND (
+          (NEW.receipt_kind = 'runner_readiness'
+            AND json_extract(NEW.envelope_json, '$.payload.runnerId') = NEW.runner_id)
+          OR (NEW.receipt_kind <> 'runner_readiness' AND NEW.runner_id IS NULL)
+        )
+      ) IS NOT TRUE
+      AND NOT EXISTS (
+        SELECT 1 FROM control_plane_projection_outbox existing
+        WHERE existing.destination_id = NEW.destination_id
+          AND existing.organization_id = NEW.organization_id
+          AND (
+            existing.receipt_id = NEW.receipt_id
+            OR existing.identity_key = NEW.identity_key
+            OR existing.operation_id = NEW.operation_id
+          )
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'control_plane_projection_outbox_insert_invalid');
+      END;
+      CREATE TRIGGER IF NOT EXISTS control_plane_projection_outbox_immutable_update_guard
+      BEFORE UPDATE OF
+        receipt_id, destination_id, organization_id, runner_id, run_id, work_thread_id,
+        receipt_kind, identity_namespace, identity_parts_json, identity_key, operation_id,
+        payload_digest, receipt_digest, envelope_json, created_at
+      ON control_plane_projection_outbox
+      BEGIN
+        SELECT RAISE(ABORT, 'control_plane_projection_outbox_immutable');
+      END;
+      CREATE TRIGGER IF NOT EXISTS control_plane_projection_outbox_transition_guard
+      BEFORE UPDATE OF
+        state, attempt_count, next_attempt_at, lease_owner, lease_token,
+        lease_expires_at, last_reason_code, last_http_status, updated_at,
+      acknowledged_at
+      ON control_plane_projection_outbox
+      WHEN (
+        length(NEW.updated_at) = 24
+        AND NEW.updated_at GLOB '????-??-??T??:??:??.???Z'
+        AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW.updated_at) = NEW.updated_at
+        AND NEW.updated_at >= OLD.updated_at
+        AND (NEW.last_http_status IS NULL OR (typeof(NEW.last_http_status) = 'integer' AND NEW.last_http_status >= 100 AND NEW.last_http_status <= 599))
+        AND (
+          NEW.last_reason_code IS NULL
+          OR (
+            length(NEW.last_reason_code) > 0
+            AND NEW.last_reason_code NOT GLOB '*[^A-Za-z0-9._:@/#-]*'
+            AND instr(lower(NEW.last_reason_code), '://') = 0
+            AND NEW.last_reason_code NOT LIKE '../%'
+            AND NEW.last_reason_code NOT LIKE '%/../%'
+            AND NEW.last_reason_code NOT LIKE '%/..'
+          )
+        )
+        AND (
+          NEW.lease_owner IS NULL
+          OR (
+            length(NEW.lease_owner) > 0
+            AND NEW.lease_owner NOT GLOB '*[^A-Za-z0-9._:@/#-]*'
+            AND instr(lower(NEW.lease_owner), '://') = 0
+            AND NEW.lease_owner NOT LIKE '../%'
+            AND NEW.lease_owner NOT LIKE '%/../%'
+            AND NEW.lease_owner NOT LIKE '%/..'
+          )
+        )
+        AND (
+          (
+            OLD.state = 'pending' AND NEW.state = 'leased'
+            AND NEW.attempt_count = OLD.attempt_count + 1
+            AND NEW.next_attempt_at IS OLD.next_attempt_at
+            AND length(NEW.next_attempt_at) = 24
+            AND NEW.next_attempt_at GLOB '????-??-??T??:??:??.???Z'
+            AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW.next_attempt_at) = NEW.next_attempt_at
+            AND NEW.lease_owner IS NOT NULL
+            AND NEW.lease_token IS NOT NULL
+            AND NEW.lease_expires_at IS NOT NULL
+            AND length(NEW.lease_expires_at) = 24
+            AND NEW.lease_expires_at GLOB '????-??-??T??:??:??.???Z'
+            AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW.lease_expires_at) = NEW.lease_expires_at
+            AND NEW.lease_expires_at > NEW.updated_at
+            AND NEW.last_reason_code IS OLD.last_reason_code
+            AND NEW.last_http_status IS OLD.last_http_status
+            AND NEW.acknowledged_at IS NULL
+          )
+          OR (
+            OLD.state = 'leased' AND NEW.state = 'pending'
+            AND NEW.attempt_count = OLD.attempt_count
+            AND NEW.next_attempt_at IS NOT NULL
+            AND length(NEW.next_attempt_at) = 24
+            AND NEW.next_attempt_at GLOB '????-??-??T??:??:??.???Z'
+            AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW.next_attempt_at) = NEW.next_attempt_at
+            AND NEW.next_attempt_at >= NEW.updated_at
+            AND NEW.lease_owner IS NULL AND NEW.lease_token IS NULL AND NEW.lease_expires_at IS NULL
+            AND NEW.last_reason_code IS NOT NULL
+            AND NEW.acknowledged_at IS NULL
+          )
+          OR (
+            OLD.state = 'leased' AND NEW.state = 'acknowledged'
+            AND NEW.attempt_count = OLD.attempt_count
+            AND NEW.next_attempt_at IS NULL
+            AND NEW.lease_owner IS NULL AND NEW.lease_token IS NULL AND NEW.lease_expires_at IS NULL
+            AND NEW.last_reason_code IS OLD.last_reason_code
+            AND NEW.acknowledged_at = NEW.updated_at
+          )
+          OR (
+            OLD.state = 'leased' AND NEW.state = 'attention'
+            AND NEW.attempt_count = OLD.attempt_count
+            AND NEW.next_attempt_at IS NULL
+            AND NEW.lease_owner IS NULL AND NEW.lease_token IS NULL AND NEW.lease_expires_at IS NULL
+            AND NEW.last_reason_code IS NOT NULL
+            AND NEW.acknowledged_at IS NULL
+          )
+        )
+      ) IS NOT TRUE
+      BEGIN
+        SELECT RAISE(ABORT, 'control_plane_projection_outbox_transition_invalid');
+      END;
+      CREATE TRIGGER IF NOT EXISTS control_plane_projection_outbox_delete_guard
+      BEFORE DELETE ON control_plane_projection_outbox
+      BEGIN
+        SELECT RAISE(ABORT, 'control_plane_projection_outbox_delete_forbidden');
+      END;
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateHostedRunImportSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-hosted-run-import-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS hosted_run_imports (
+        run_id TEXT PRIMARY KEY,
+        admission_id TEXT NOT NULL,
+        admission_operation_id TEXT NOT NULL,
+        claim_operation_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        fencing_token_digest TEXT NOT NULL,
+        source_identity_digest TEXT NOT NULL,
+        delivery_payload_digest TEXT NOT NULL,
+        admission_envelope_digest TEXT NOT NULL,
+        policy_receipt_id TEXT NOT NULL,
+        policy_payload_digest TEXT NOT NULL,
+        policy_receipt_digest TEXT NOT NULL,
+        event_digest TEXT NOT NULL,
+        context_packet_digest TEXT NOT NULL,
+        work_thread_id TEXT,
+        work_thread_digest TEXT,
+        claim_digest TEXT NOT NULL,
+        authority_digest TEXT NOT NULL,
+        authority_json TEXT NOT NULL,
+        imported_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_run_imports_admission_idx
+        ON hosted_run_imports(admission_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_run_imports_claim_operation_idx
+        ON hosted_run_imports(claim_operation_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_run_imports_attempt_idx
+        ON hosted_run_imports(attempt_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_run_imports_fence_idx
+        ON hosted_run_imports(fencing_token_digest);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_run_imports_source_idx
+        ON hosted_run_imports(source_identity_digest);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_run_imports_authority_idx
+        ON hosted_run_imports(authority_digest);
+      CREATE INDEX IF NOT EXISTS hosted_run_imports_work_thread_idx
+        ON hosted_run_imports(work_thread_id);
+      CREATE TRIGGER IF NOT EXISTS hosted_run_imports_immutable_update_guard
+      BEFORE UPDATE ON hosted_run_imports
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_run_imports_immutable');
+      END;
+      CREATE TRIGGER IF NOT EXISTS hosted_run_imports_delete_guard
+      BEFORE DELETE ON hosted_run_imports
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_run_imports_delete_forbidden');
+      END;
+      CREATE TABLE IF NOT EXISTS hosted_claim_operations (
+        operation_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        runner_id TEXT NOT NULL,
+        destination_id TEXT NOT NULL,
+        active_key TEXT,
+        request_digest TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'empty')),
+        run_id TEXT,
+        terminal_reason_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        acknowledged_at TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_claim_operations_request_idx
+        ON hosted_claim_operations(request_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_claim_operations_active_idx
+        ON hosted_claim_operations(active_key);
+      CREATE INDEX IF NOT EXISTS hosted_claim_operations_runner_state_idx
+        ON hosted_claim_operations(destination_id, organization_id, runner_id, state);
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateHostedExecutionStartSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-hosted-execution-start-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    const columns = sqlite.prepare("PRAGMA table_info(hosted_claim_operations)").all() as { name: string }[];
+    if (!columns.some((column) => column.name === "execution_started_at")) {
+      sqlite.exec("ALTER TABLE hosted_claim_operations ADD COLUMN execution_started_at TEXT");
+    }
+    if (!columns.some((column) => column.name === "terminal_reason_code")) {
+      sqlite.exec("ALTER TABLE hosted_claim_operations ADD COLUMN terminal_reason_code TEXT");
+    }
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateHostedClaimAuthorityShellSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-hosted-claim-authority-shell-v1";
+  if (sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId)) return;
+  sqlite.transaction(() => {
+    const columns = sqlite.prepare("PRAGMA table_info(hosted_claim_operations)").all() as { name: string }[];
+    const names = new Set(columns.map((column) => column.name));
+    const additions = [
+      ["claim_digest", "TEXT"], ["authority_digest", "TEXT"], ["authority_json", "TEXT"],
+      ["attempt_id", "TEXT"], ["attempt_number", "INTEGER"], ["fencing_token_digest", "TEXT"],
+      ["credential_id", "TEXT"], ["lease_expires_at", "TEXT"], ["executor_id", "TEXT"]
+    ] as const;
+    for (const [name, type] of additions) {
+      if (!names.has(name)) sqlite.exec(`ALTER TABLE hosted_claim_operations ADD COLUMN ${name} ${type}`);
+    }
+    sqlite.exec(`
+      DROP TRIGGER IF EXISTS hosted_claim_authority_shell_immutable_guard;
+      CREATE TRIGGER hosted_claim_authority_shell_immutable_guard
+      BEFORE UPDATE OF claim_digest, authority_digest, authority_json, attempt_id,
+        attempt_number, fencing_token_digest, credential_id, lease_expires_at, executor_id
+      ON hosted_claim_operations
+      WHEN OLD.claim_digest IS NOT NULL AND (
+        NEW.claim_digest IS NOT OLD.claim_digest
+        OR NEW.authority_digest IS NOT OLD.authority_digest
+        OR NEW.authority_json IS NOT OLD.authority_json
+        OR NEW.attempt_id IS NOT OLD.attempt_id
+        OR NEW.attempt_number IS NOT OLD.attempt_number
+        OR NEW.fencing_token_digest IS NOT OLD.fencing_token_digest
+        OR NEW.credential_id IS NOT OLD.credential_id
+        OR NEW.lease_expires_at IS NOT OLD.lease_expires_at
+        OR NEW.executor_id IS NOT OLD.executor_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_claim_authority_shell_immutable');
+      END;
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)")
+      .run(migrationId, new Date().toISOString());
+  })();
+}
+
+function migrateHostedAttemptImportSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-hosted-attempt-import-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS hosted_attempt_imports (
+        attempt_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL,
+        claim_operation_id TEXT NOT NULL,
+        fencing_token_digest TEXT NOT NULL,
+        claim_digest TEXT NOT NULL,
+        authority_digest TEXT NOT NULL,
+        authority_json TEXT NOT NULL,
+        imported_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_attempt_imports_run_number_idx
+        ON hosted_attempt_imports(run_id, attempt_number);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_attempt_imports_operation_idx
+        ON hosted_attempt_imports(claim_operation_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_attempt_imports_fence_idx
+        ON hosted_attempt_imports(fencing_token_digest);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_attempt_imports_authority_idx
+        ON hosted_attempt_imports(authority_digest);
+      CREATE INDEX IF NOT EXISTS hosted_attempt_imports_run_idx
+        ON hosted_attempt_imports(run_id);
+      CREATE TRIGGER IF NOT EXISTS hosted_attempt_imports_immutable_update_guard
+      BEFORE UPDATE ON hosted_attempt_imports
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_attempt_imports_immutable');
+      END;
+      CREATE TRIGGER IF NOT EXISTS hosted_attempt_imports_delete_guard
+      BEFORE DELETE ON hosted_attempt_imports
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_attempt_imports_delete_forbidden');
+      END;
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateHostedHeartbeatOperationSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-hosted-heartbeat-operation-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS hosted_heartbeat_operations (
+        destination_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        runner_id TEXT NOT NULL,
+        credential_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL,
+        fencing_token_digest TEXT NOT NULL,
+        expected_lease_expires_at TEXT NOT NULL,
+        request_digest TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        active_key TEXT,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged')),
+        receipt_digest TEXT,
+        receipt_json TEXT,
+        accepted_lease_expires_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        acknowledged_at TEXT,
+        PRIMARY KEY (destination_id, organization_id, runner_id, credential_id, operation_id),
+        CHECK (
+          (state = 'pending' AND active_key IS NOT NULL AND receipt_digest IS NULL
+            AND receipt_json IS NULL AND accepted_lease_expires_at IS NULL
+            AND acknowledged_at IS NULL)
+          OR
+          (state = 'acknowledged' AND active_key IS NULL AND receipt_digest IS NOT NULL
+            AND receipt_json IS NOT NULL AND accepted_lease_expires_at IS NOT NULL
+            AND acknowledged_at IS NOT NULL)
+        )
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_heartbeat_operations_request_idx
+        ON hosted_heartbeat_operations(destination_id, organization_id, runner_id, credential_id, request_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_heartbeat_operations_active_idx
+        ON hosted_heartbeat_operations(active_key);
+      CREATE INDEX IF NOT EXISTS hosted_heartbeat_operations_attempt_idx
+        ON hosted_heartbeat_operations(run_id, attempt_id, state);
+      CREATE TRIGGER IF NOT EXISTS hosted_heartbeat_operations_update_guard
+      BEFORE UPDATE ON hosted_heartbeat_operations
+      WHEN (
+        OLD.state <> 'pending' OR NEW.state <> 'acknowledged'
+        OR NEW.destination_id <> OLD.destination_id
+        OR NEW.organization_id <> OLD.organization_id
+        OR NEW.runner_id <> OLD.runner_id
+        OR NEW.credential_id <> OLD.credential_id
+        OR NEW.operation_id <> OLD.operation_id
+        OR NEW.request_id <> OLD.request_id
+        OR NEW.run_id <> OLD.run_id
+        OR NEW.attempt_id <> OLD.attempt_id
+        OR NEW.attempt_number <> OLD.attempt_number
+        OR NEW.fencing_token_digest <> OLD.fencing_token_digest
+        OR NEW.expected_lease_expires_at <> OLD.expected_lease_expires_at
+        OR NEW.request_digest <> OLD.request_digest
+        OR NEW.request_json <> OLD.request_json
+        OR NEW.created_at <> OLD.created_at
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_heartbeat_operations_transition_invalid');
+      END;
+      CREATE TRIGGER IF NOT EXISTS hosted_heartbeat_operations_delete_guard
+      BEFORE DELETE ON hosted_heartbeat_operations
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_heartbeat_operations_delete_forbidden');
+      END;
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateHostedLifecycleOperationSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-hosted-lifecycle-operation-v1";
+  const recreateGuards = (): void => {
+    sqlite.exec(`
+      DROP TRIGGER IF EXISTS hosted_lifecycle_operations_immutable_guard;
+      DROP TRIGGER IF EXISTS hosted_lifecycle_operations_delete_guard;
+      CREATE TRIGGER hosted_lifecycle_operations_immutable_guard
+      BEFORE UPDATE OF destination_id, organization_id, runner_id, credential_id, operation_id,
+        request_id, action, run_id, attempt_id, attempt_number, fencing_token_digest,
+        request_digest, business_key_digest, sequence, request_json, created_at
+      ON hosted_lifecycle_operations
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_lifecycle_operations_immutable');
+      END;
+      CREATE TRIGGER hosted_lifecycle_operations_delete_guard
+      BEFORE DELETE ON hosted_lifecycle_operations
+      BEGIN
+        SELECT RAISE(ABORT, 'hosted_lifecycle_operations_delete_forbidden');
+      END;
+    `);
+  };
+  const existingTable = sqlite.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'hosted_lifecycle_operations'"
+  ).get();
+  if (existingTable) {
+    const columns = sqlite.prepare("PRAGMA table_info(hosted_lifecycle_operations)").all() as Array<{
+      name: string;
+      notnull: number;
+    }>;
+    const businessKeyColumn = columns.find((column) => column.name === "business_key_digest");
+    const sequenceColumn = columns.find((column) => column.name === "sequence");
+    if (!businessKeyColumn || businessKeyColumn.notnull !== 1 || !sequenceColumn || sequenceColumn.notnull !== 1) {
+      throw new Error(
+        "hosted_lifecycle_operations_incompatible_partial_schema: business_key_digest and sequence must be present and NOT NULL",
+      );
+    }
+  }
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) {
+    sqlite.transaction(recreateGuards)();
+    return;
+  }
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS hosted_lifecycle_operations (
+        destination_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        runner_id TEXT NOT NULL,
+        credential_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('heartbeat', 'running', 'reject-start', 'progress', 'complete')),
+        run_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+        fencing_token_digest TEXT NOT NULL,
+        request_digest TEXT NOT NULL,
+        business_key_digest TEXT NOT NULL,
+        sequence INTEGER NOT NULL CHECK (sequence > 0),
+        request_json TEXT NOT NULL CHECK (json_valid(request_json) AND json_type(request_json) = 'object'),
+        state TEXT NOT NULL CHECK (state IN ('pending', 'leased', 'acknowledged', 'attention')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        next_attempt_at TEXT,
+        lease_owner TEXT,
+        lease_token TEXT,
+        lease_expires_at TEXT,
+        receipt_id TEXT,
+        receipt_digest TEXT,
+        receipt_json TEXT CHECK (receipt_json IS NULL OR (json_valid(receipt_json) AND json_type(receipt_json) = 'object')),
+        last_reason_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        acknowledged_at TEXT,
+        PRIMARY KEY (destination_id, organization_id, runner_id, credential_id, operation_id),
+        CHECK (
+          (state = 'pending' AND next_attempt_at IS NOT NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND receipt_id IS NULL AND receipt_digest IS NULL AND receipt_json IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'leased' AND next_attempt_at IS NOT NULL AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL AND receipt_id IS NULL AND receipt_digest IS NULL AND receipt_json IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'acknowledged' AND next_attempt_at IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND receipt_id IS NOT NULL AND receipt_digest IS NOT NULL AND receipt_json IS NOT NULL AND acknowledged_at IS NOT NULL)
+          OR (state = 'attention' AND next_attempt_at IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND receipt_id IS NULL AND receipt_digest IS NULL AND receipt_json IS NULL AND last_reason_code IS NOT NULL AND acknowledged_at IS NULL)
+        )
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_lifecycle_operations_request_idx
+        ON hosted_lifecycle_operations(destination_id, organization_id, runner_id, credential_id, request_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_lifecycle_operations_business_idx
+        ON hosted_lifecycle_operations(destination_id, organization_id, runner_id, credential_id, business_key_digest);
+      CREATE UNIQUE INDEX IF NOT EXISTS hosted_lifecycle_operations_sequence_idx
+        ON hosted_lifecycle_operations(destination_id, organization_id, run_id, attempt_id, sequence);
+      CREATE INDEX IF NOT EXISTS hosted_lifecycle_operations_due_idx
+        ON hosted_lifecycle_operations(destination_id, organization_id, state, next_attempt_at, created_at);
+      CREATE INDEX IF NOT EXISTS hosted_lifecycle_operations_attempt_idx
+        ON hosted_lifecycle_operations(run_id, attempt_id, state);
+    `);
+    recreateGuards();
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateControlPlaneProjectionDependenciesSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-10-control-plane-projection-dependencies-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    const columns = sqlite.prepare("PRAGMA table_info(control_plane_projection_outbox)").all() as Array<{ name: string }>;
+    const names = new Set(columns.map((column) => column.name));
+    if (!names.has("depends_on_receipt_id")) {
+      sqlite.exec("ALTER TABLE control_plane_projection_outbox ADD COLUMN depends_on_receipt_id TEXT");
+    }
+    if (!names.has("requires_lifecycle_operation_id")) {
+      sqlite.exec("ALTER TABLE control_plane_projection_outbox ADD COLUMN requires_lifecycle_operation_id TEXT");
+    }
+    sqlite.exec(`
+      DROP TRIGGER IF EXISTS control_plane_projection_outbox_immutable_update_guard;
+      CREATE TRIGGER control_plane_projection_outbox_immutable_update_guard
+      BEFORE UPDATE OF
+        receipt_id, destination_id, organization_id, runner_id, run_id, work_thread_id,
+        receipt_kind, identity_namespace, identity_parts_json, identity_key, operation_id,
+        depends_on_receipt_id, requires_lifecycle_operation_id,
+        payload_digest, receipt_digest, envelope_json, created_at
+      ON control_plane_projection_outbox
+      BEGIN
+        SELECT RAISE(ABORT, 'control_plane_projection_outbox_immutable');
+      END;
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateControlPlaneProjectionEvidenceKindSchema(
+  sqlite: Database.Database
+): void {
+  const migrationId = "2026-08-10-control-plane-projection-evidence-kind-v1";
+  const applied = sqlite.prepare(
+    "SELECT id FROM opentag_schema_migrations WHERE id = ?"
+  ).get(migrationId);
+  if (applied) return;
+
+  sqlite.transaction(() => {
+    const table = sqlite.prepare(`
+      SELECT sql
+      FROM sqlite_master
+      WHERE type = 'table' AND name = 'control_plane_projection_outbox'
+    `).get() as { sql: string } | undefined;
+    if (!table) {
+      throw new Error("control_plane_projection_outbox_missing");
+    }
+
+    if (!table.sql.includes("'completion_evidence_observation'")) {
+      const dependentSchema = sqlite.prepare(`
+        SELECT type, name, sql
+        FROM sqlite_master
+        WHERE tbl_name = 'control_plane_projection_outbox'
+          AND type IN ('index', 'trigger')
+          AND sql IS NOT NULL
+        ORDER BY CASE type WHEN 'index' THEN 0 ELSE 1 END, name
+      `).all() as Array<{
+        type: "index" | "trigger";
+        name: string;
+        sql: string;
+      }>;
+
+      for (const schema of dependentSchema) {
+        if (schema.type !== "trigger") continue;
+        const quotedName = schema.name.replaceAll('"', '""');
+        sqlite.exec(`DROP TRIGGER "${quotedName}"`);
+      }
+
+      sqlite.exec(`
+        ALTER TABLE control_plane_projection_outbox
+          RENAME TO control_plane_projection_outbox_legacy_evidence_kind;
+
+        CREATE TABLE control_plane_projection_outbox (
+          receipt_id TEXT NOT NULL,
+          destination_id TEXT NOT NULL,
+          organization_id TEXT NOT NULL,
+          runner_id TEXT,
+          run_id TEXT,
+          work_thread_id TEXT,
+          receipt_kind TEXT NOT NULL,
+          identity_namespace TEXT NOT NULL,
+          identity_parts_json TEXT NOT NULL,
+          identity_key TEXT NOT NULL,
+          operation_id TEXT NOT NULL,
+          depends_on_receipt_id TEXT,
+          requires_lifecycle_operation_id TEXT,
+          payload_digest TEXT NOT NULL,
+          receipt_digest TEXT NOT NULL,
+          envelope_json TEXT NOT NULL,
+          state TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL DEFAULT 0
+            CHECK (typeof(attempt_count) = 'integer' AND attempt_count >= 0),
+          next_attempt_at TEXT,
+          lease_owner TEXT,
+          lease_token TEXT,
+          lease_expires_at TEXT,
+          last_reason_code TEXT,
+          last_http_status INTEGER
+            CHECK (last_http_status IS NULL OR (
+              typeof(last_http_status) = 'integer'
+              AND last_http_status >= 100
+              AND last_http_status <= 599
+            )),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          acknowledged_at TEXT,
+          CONSTRAINT control_plane_projection_outbox_pk
+            PRIMARY KEY (destination_id, organization_id, receipt_id),
+          CONSTRAINT control_plane_projection_outbox_receipt_kind_check CHECK (
+            receipt_kind IN (
+              'runner_readiness', 'work_thread_ref', 'completion_contract_ref',
+              'completion_evidence_observation', 'completion_assessment',
+              'callback_intent_observation', 'callback_attempt_observation',
+              'callback_provider_observation'
+            )
+          ),
+          CONSTRAINT control_plane_projection_outbox_json_shape_check CHECK (
+            json_valid(identity_parts_json)
+            AND json_type(identity_parts_json) = 'array'
+            AND json_valid(envelope_json)
+            AND json_type(envelope_json) = 'object'
+          ),
+          CONSTRAINT control_plane_projection_outbox_digest_shape_check CHECK (
+            length(payload_digest) = 71
+            AND substr(payload_digest, 1, 7) = 'sha256:'
+            AND substr(payload_digest, 8) NOT GLOB '*[^0-9a-f]*'
+            AND length(receipt_digest) = 71
+            AND substr(receipt_digest, 1, 7) = 'sha256:'
+            AND substr(receipt_digest, 8) NOT GLOB '*[^0-9a-f]*'
+          ),
+          CONSTRAINT control_plane_projection_outbox_state_shape_check CHECK (
+            (state = 'pending' AND next_attempt_at IS NOT NULL
+              AND lease_owner IS NULL AND lease_token IS NULL
+              AND lease_expires_at IS NULL AND acknowledged_at IS NULL)
+            OR (state = 'leased' AND next_attempt_at IS NOT NULL
+              AND lease_owner IS NOT NULL AND lease_token IS NOT NULL
+              AND lease_expires_at IS NOT NULL AND acknowledged_at IS NULL)
+            OR (state = 'acknowledged' AND next_attempt_at IS NULL
+              AND lease_owner IS NULL AND lease_token IS NULL
+              AND lease_expires_at IS NULL AND acknowledged_at IS NOT NULL)
+            OR (state = 'attention' AND next_attempt_at IS NULL
+              AND lease_owner IS NULL AND lease_token IS NULL
+              AND lease_expires_at IS NULL AND acknowledged_at IS NULL
+              AND last_reason_code IS NOT NULL)
+          )
+        );
+
+        INSERT INTO control_plane_projection_outbox (
+          receipt_id, destination_id, organization_id, runner_id, run_id,
+          work_thread_id, receipt_kind, identity_namespace,
+          identity_parts_json, identity_key, operation_id,
+          depends_on_receipt_id, requires_lifecycle_operation_id,
+          payload_digest, receipt_digest, envelope_json, state, attempt_count,
+          next_attempt_at, lease_owner, lease_token, lease_expires_at,
+          last_reason_code, last_http_status, created_at, updated_at,
+          acknowledged_at
+        )
+        SELECT
+          receipt_id, destination_id, organization_id, runner_id, run_id,
+          work_thread_id, receipt_kind, identity_namespace,
+          identity_parts_json, identity_key, operation_id,
+          depends_on_receipt_id, requires_lifecycle_operation_id,
+          payload_digest, receipt_digest, envelope_json, state, attempt_count,
+          next_attempt_at, lease_owner, lease_token, lease_expires_at,
+          last_reason_code, last_http_status, created_at, updated_at,
+          acknowledged_at
+        FROM control_plane_projection_outbox_legacy_evidence_kind;
+
+        DROP TABLE control_plane_projection_outbox_legacy_evidence_kind;
+      `);
+
+      for (const schema of dependentSchema) {
+        sqlite.exec(schema.sql);
+      }
+    }
+
+    sqlite.prepare(
+      "INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)"
+    ).run(migrationId, new Date().toISOString());
+  })();
+}
+
+type LegacyGovernedCallbackTargetRow = {
+  localIntentId: string;
+  deliveryTarget: string | null;
+  eventJson: string | null;
+  eventDigest: string | null;
+};
+
+function deriveLegacyGovernedCallbackTargetDigest(
+  row: LegacyGovernedCallbackTargetRow
+): string | null {
+  try {
+    if (!row.eventJson || !row.eventDigest || !row.deliveryTarget) return null;
+    const event = JSON.parse(row.eventJson) as {
+      metadata?: {
+        owner?: unknown;
+        repo?: unknown;
+        issueNumber?: unknown;
+        pullRequestNumber?: unknown;
+      };
+    };
+    if (canonicalSha256Json(event) !== row.eventDigest) return null;
+    const owner = event.metadata?.owner;
+    const repo = event.metadata?.repo;
+    const issueNumber = event.metadata?.issueNumber
+      ?? event.metadata?.pullRequestNumber;
+    if (
+      typeof owner !== "string"
+      || typeof repo !== "string"
+      || !Number.isSafeInteger(issueNumber)
+      || (issueNumber as number) <= 0
+    ) return null;
+    const match = /^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)\/issues\/([1-9][0-9]*)\/comments$/u
+      .exec(row.deliveryTarget);
+    if (
+      !match
+      || match[1]!.toLowerCase() !== owner.toLowerCase()
+      || match[2]!.toLowerCase() !== repo.toLowerCase()
+      || Number(match[3]) !== issueNumber
+    ) return null;
+    return canonicalSha256Json({
+      provider: "github",
+      owner: owner.toLowerCase(),
+      repo: repo.toLowerCase(),
+      issueNumber
+    });
+  } catch {
+    return null;
+  }
+}
+
+function backfillLegacyGovernedCallbackTargetDigests(
+  sqlite: Database.Database
+): void {
+  const hostedImportsTable = sqlite.prepare(`SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name = 'hosted_run_imports'`).get();
+  const nullCount = sqlite.prepare(`SELECT count(*) AS count
+    FROM governed_callback_intents
+    WHERE target_identity_digest IS NULL`).get() as { count: number };
+  if (nullCount.count === 0) return;
+  if (!hostedImportsTable) {
+    throw new Error("governed_callback_target_backfill_requires_hosted_imports");
+  }
+  const rows = sqlite.prepare(`
+    SELECT
+      i.local_intent_id AS localIntentId,
+      d.uri AS deliveryTarget,
+      r.event_json AS eventJson,
+      h.event_digest AS eventDigest
+    FROM governed_callback_intents i
+    LEFT JOIN callback_deliveries d ON d.id = i.local_delivery_id
+    LEFT JOIN runs r ON r.id = i.run_id
+    LEFT JOIN hosted_run_imports h ON h.run_id = i.run_id
+    WHERE i.target_identity_digest IS NULL
+  `).all() as LegacyGovernedCallbackTargetRow[];
+  const derived = rows.map((row) => ({
+    row,
+    digest: deriveLegacyGovernedCallbackTargetDigest(row)
+  }));
+  if (derived.some((entry) => entry.digest === null)) {
+    throw new Error("governed_callback_target_backfill_attention_required");
+  }
+  const update = sqlite.prepare(`UPDATE governed_callback_intents
+    SET target_identity_digest = ? WHERE local_intent_id = ?`);
+  sqlite.transaction(() => {
+    for (const entry of derived) {
+      update.run(entry.digest, entry.row.localIntentId);
+    }
+  })();
+}
+
 export function migrateSchema(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS runs (
@@ -1209,6 +2565,99 @@ export function migrateSchema(sqlite: Database.Database): void {
       ON callback_deliveries(run_id);
     CREATE INDEX IF NOT EXISTS callback_deliveries_status_idx
       ON callback_deliveries(status);
+    CREATE TABLE IF NOT EXISTS governed_callback_intents (
+      local_intent_id TEXT PRIMARY KEY,
+      idempotency_key TEXT NOT NULL,
+      destination_id TEXT NOT NULL,
+      organization_id TEXT NOT NULL,
+      runner_id TEXT NOT NULL,
+      producer_id TEXT NOT NULL,
+      credential_id TEXT NOT NULL,
+      registration_generation INTEGER NOT NULL,
+      run_id TEXT NOT NULL,
+      work_thread_id TEXT NOT NULL,
+      run_attempt_id TEXT NOT NULL,
+      run_attempt_number INTEGER NOT NULL,
+      fencing_token_digest TEXT NOT NULL,
+      admission_id TEXT NOT NULL,
+      admission_operation_id TEXT NOT NULL,
+      claim_operation_id TEXT NOT NULL,
+      completion_operation_id TEXT,
+      assessment_receipt_id TEXT,
+      assessment_receipt_digest TEXT,
+      local_delivery_id INTEGER,
+      provider TEXT NOT NULL CHECK (provider = 'github'),
+      operation_id TEXT NOT NULL,
+      payload_digest TEXT NOT NULL,
+      intent_receipt_id TEXT NOT NULL,
+      intent_receipt_digest TEXT NOT NULL,
+      intent_receipt_json TEXT NOT NULL,
+      target_identity_digest TEXT,
+      state TEXT NOT NULL CHECK (state IN ('pending', 'leased', 'sending', 'accepted', 'rejected', 'outcome_unknown', 'attention')),
+      current_attempt_id TEXT,
+      current_attempt_number INTEGER NOT NULL DEFAULT 0 CHECK (current_attempt_number >= 0),
+      next_attempt_at TEXT,
+      lease_owner TEXT,
+      lease_token TEXT,
+      lease_expires_at TEXT,
+      last_reason_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      terminal_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_intents_idempotency_idx
+      ON governed_callback_intents(destination_id, organization_id, idempotency_key);
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_intents_operation_idx
+      ON governed_callback_intents(destination_id, organization_id, operation_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_intents_delivery_idx
+      ON governed_callback_intents(local_delivery_id);
+    CREATE INDEX IF NOT EXISTS governed_callback_intents_due_idx
+      ON governed_callback_intents(destination_id, organization_id, state, next_attempt_at, lease_expires_at);
+    CREATE TABLE IF NOT EXISTS governed_callback_attempts (
+      local_attempt_id TEXT PRIMARY KEY,
+      local_intent_id TEXT NOT NULL,
+      attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+      previous_attempt_id TEXT,
+      retry_authorization_id TEXT,
+      request_digest TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('pending', 'leased', 'sending', 'accepted', 'rejected', 'outcome_unknown', 'attention')),
+      lease_owner TEXT,
+      lease_token TEXT,
+      lease_expires_at TEXT,
+      attempted_at TEXT,
+      observed_at TEXT,
+      reason_code TEXT,
+      next_action TEXT,
+      owner TEXT,
+      attempt_receipt_id TEXT,
+      attempt_receipt_digest TEXT,
+      attempt_receipt_json TEXT,
+      provider_receipt_id TEXT,
+      resource_identity TEXT,
+      provider_receipt_digest TEXT,
+      provider_receipt_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_attempts_number_idx
+      ON governed_callback_attempts(local_intent_id, attempt_number);
+    CREATE INDEX IF NOT EXISTS governed_callback_attempts_state_idx
+      ON governed_callback_attempts(local_intent_id, state);
+    CREATE TABLE IF NOT EXISTS governed_callback_reconciliations (
+      reconciliation_id TEXT PRIMARY KEY,
+      local_intent_id TEXT NOT NULL,
+      local_attempt_id TEXT NOT NULL,
+      resolution TEXT NOT NULL CHECK (resolution IN ('accepted', 'rejected')),
+      evidence_digest TEXT NOT NULL,
+      evidence_json TEXT NOT NULL,
+      owner TEXT NOT NULL,
+      retry_attempt_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS governed_callback_reconciliations_intent_idx
+      ON governed_callback_reconciliations(local_intent_id, created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_reconciliations_attempt_idx
+      ON governed_callback_reconciliations(local_attempt_id);
     CREATE TABLE IF NOT EXISTS follow_up_requests (
       id TEXT PRIMARY KEY,
       source_event_id TEXT NOT NULL,
@@ -1230,6 +2679,165 @@ export function migrateSchema(sqlite: Database.Database): void {
       ON follow_up_requests(source_event_id);
     CREATE INDEX IF NOT EXISTS follow_up_requests_conversation_idx
       ON follow_up_requests(conversation_key, status);
+  `);
+  const governedIntentColumns = sqlite.prepare(
+    "PRAGMA table_info(governed_callback_intents)"
+  ).all() as { name: string }[];
+  const governedIntentColumnNames = new Set(governedIntentColumns.map((column) => column.name));
+  if (!governedIntentColumnNames.has("completion_operation_id")) {
+    sqlite.exec("ALTER TABLE governed_callback_intents ADD COLUMN completion_operation_id TEXT");
+  }
+  if (!governedIntentColumnNames.has("assessment_receipt_id")) {
+    sqlite.exec("ALTER TABLE governed_callback_intents ADD COLUMN assessment_receipt_id TEXT");
+  }
+  if (!governedIntentColumnNames.has("assessment_receipt_digest")) {
+    sqlite.exec("ALTER TABLE governed_callback_intents ADD COLUMN assessment_receipt_digest TEXT");
+  }
+  if (!governedIntentColumnNames.has("local_delivery_id")) {
+    sqlite.exec("ALTER TABLE governed_callback_intents ADD COLUMN local_delivery_id INTEGER");
+  }
+  if (!governedIntentColumnNames.has("target_identity_digest")) {
+    sqlite.exec("ALTER TABLE governed_callback_intents ADD COLUMN target_identity_digest TEXT");
+  }
+  backfillLegacyGovernedCallbackTargetDigests(sqlite);
+  const governedReconciliationColumns = sqlite.prepare(
+    "PRAGMA table_info(governed_callback_reconciliations)"
+  ).all() as { name: string }[];
+  if (!governedReconciliationColumns.some((column) => column.name === "evidence_json")) {
+    sqlite.exec("ALTER TABLE governed_callback_reconciliations ADD COLUMN evidence_json TEXT");
+  }
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_intents_delivery_idx
+      ON governed_callback_intents(local_delivery_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS governed_callback_reconciliations_attempt_idx
+      ON governed_callback_reconciliations(local_attempt_id);
+    DROP TRIGGER IF EXISTS governed_callback_intents_target_digest_guard;
+    CREATE TRIGGER governed_callback_intents_target_digest_guard
+    BEFORE INSERT ON governed_callback_intents
+    WHEN NEW.target_identity_digest IS NULL
+      OR NEW.target_identity_digest NOT GLOB 'sha256:[0-9a-f]*'
+      OR length(NEW.target_identity_digest) <> 71
+    BEGIN
+      SELECT RAISE(ABORT, 'governed callback target digest required');
+    END;
+    DROP TRIGGER IF EXISTS governed_callback_reconciliations_immutable_guard;
+    CREATE TRIGGER governed_callback_reconciliations_immutable_guard
+    BEFORE UPDATE OF reconciliation_id, local_intent_id, local_attempt_id,
+      resolution, evidence_digest, evidence_json, owner, retry_attempt_id, created_at
+    ON governed_callback_reconciliations
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_reconciliation_immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_reconciliations_delete_guard
+    BEFORE DELETE ON governed_callback_reconciliations
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_reconciliation_delete_forbidden');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_reconciliations_resolution_guard
+    BEFORE INSERT ON governed_callback_reconciliations
+    WHEN NEW.resolution NOT IN ('accepted', 'rejected') OR NEW.retry_attempt_id IS NOT NULL
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid governed callback reconciliation resolution');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_attempts_terminal_guard
+    BEFORE UPDATE ON governed_callback_attempts
+    WHEN OLD.state IN ('accepted', 'rejected', 'outcome_unknown', 'attention')
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_attempt_terminal_immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_attempts_delete_guard
+    BEFORE DELETE ON governed_callback_attempts
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_attempt_delete_forbidden');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_attempts_authority_immutable_guard
+    BEFORE UPDATE OF local_intent_id, attempt_number, previous_attempt_id,
+      retry_authorization_id, request_digest, created_at
+    ON governed_callback_attempts
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_attempt_authority_immutable');
+    END;
+    DROP TRIGGER IF EXISTS governed_callback_attempts_state_transition_guard;
+    CREATE TRIGGER governed_callback_attempts_state_transition_guard
+    BEFORE UPDATE OF state ON governed_callback_attempts
+    WHEN NEW.state <> OLD.state AND NOT (
+      (OLD.state = 'pending' AND NEW.state IN ('leased', 'attention'))
+      OR (OLD.state = 'leased' AND NEW.state IN ('pending', 'sending', 'attention'))
+      OR (OLD.state = 'sending' AND NEW.state IN
+        ('accepted', 'rejected', 'outcome_unknown', 'attention'))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid governed callback attempt state transition');
+    END;
+    DROP TRIGGER IF EXISTS governed_callback_attempts_terminal_receipt_guard;
+    CREATE TRIGGER governed_callback_attempts_terminal_receipt_guard
+    BEFORE UPDATE OF state ON governed_callback_attempts
+    WHEN (OLD.state = 'sending' OR (OLD.state = 'leased' AND NEW.state = 'attention')) AND (
+      (NEW.state IN ('accepted', 'rejected') AND (
+        NEW.attempt_receipt_id IS NULL OR NEW.attempt_receipt_digest IS NULL
+        OR NEW.attempt_receipt_json IS NULL OR NEW.provider_receipt_id IS NULL
+        OR NEW.resource_identity IS NULL OR NEW.provider_receipt_digest IS NULL
+        OR NEW.provider_receipt_json IS NULL
+      ))
+      OR (NEW.state = 'outcome_unknown' AND (
+        NEW.attempt_receipt_id IS NULL OR NEW.attempt_receipt_digest IS NULL
+        OR NEW.attempt_receipt_json IS NULL
+        OR NEW.provider_receipt_id IS NOT NULL OR NEW.resource_identity IS NOT NULL
+        OR NEW.provider_receipt_digest IS NOT NULL OR NEW.provider_receipt_json IS NOT NULL
+      ))
+      OR (NEW.state = 'attention' AND (
+        NEW.attempt_receipt_id IS NULL OR NEW.attempt_receipt_digest IS NULL
+        OR NEW.attempt_receipt_json IS NULL OR NEW.provider_receipt_id IS NOT NULL
+        OR NEW.resource_identity IS NOT NULL OR NEW.provider_receipt_digest IS NOT NULL
+        OR NEW.provider_receipt_json IS NOT NULL
+      ))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'incomplete governed callback terminal receipt tuple');
+    END;
+    DROP TRIGGER IF EXISTS governed_callback_attempts_receipt_write_guard;
+    CREATE TRIGGER governed_callback_attempts_receipt_write_guard
+    BEFORE UPDATE OF attempt_receipt_id, attempt_receipt_digest, attempt_receipt_json,
+      provider_receipt_id, resource_identity, provider_receipt_digest, provider_receipt_json
+    ON governed_callback_attempts
+    WHEN NEW.state = OLD.state OR NOT (
+      OLD.state = 'sending'
+      OR (OLD.state = 'leased' AND NEW.state = 'attention')
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'governed callback receipts require sending terminal transition');
+    END;
+    DROP TRIGGER IF EXISTS governed_callback_intents_authority_immutable_guard;
+    CREATE TRIGGER governed_callback_intents_authority_immutable_guard
+    BEFORE UPDATE OF destination_id, organization_id, runner_id, producer_id,
+      credential_id, registration_generation, run_id, work_thread_id,
+      run_attempt_id, run_attempt_number, fencing_token_digest, admission_id,
+      admission_operation_id, claim_operation_id, completion_operation_id,
+      assessment_receipt_id, assessment_receipt_digest, local_delivery_id,
+      provider, operation_id, payload_digest, intent_receipt_id,
+      intent_receipt_digest, intent_receipt_json, target_identity_digest
+    ON governed_callback_intents
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_intent_authority_immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_intents_delete_guard
+    BEFORE DELETE ON governed_callback_intents
+    BEGIN
+      SELECT RAISE(ABORT, 'governed_callback_intent_delete_forbidden');
+    END;
+    CREATE TRIGGER IF NOT EXISTS governed_callback_intents_state_transition_guard
+    BEFORE UPDATE OF state ON governed_callback_intents
+    WHEN NEW.state <> OLD.state AND NOT (
+      (OLD.state = 'pending' AND NEW.state IN ('leased', 'attention'))
+      OR (OLD.state = 'leased' AND NEW.state IN ('pending', 'sending', 'attention'))
+      OR (OLD.state = 'sending' AND NEW.state IN
+        ('accepted', 'rejected', 'outcome_unknown', 'attention'))
+      OR (OLD.state = 'outcome_unknown' AND NEW.state IN ('pending', 'accepted', 'rejected'))
+      OR (OLD.state = 'attention' AND NEW.state IN ('pending', 'accepted', 'rejected'))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid governed callback intent state transition');
+    END;
   `);
   const columns = sqlite.prepare("PRAGMA table_info(repo_bindings)").all() as { name: string }[];
   const columnNames = new Set(columns.map((column) => column.name));
@@ -1525,7 +3133,76 @@ export function migrateSchema(sqlite: Database.Database): void {
   if (!callbackColumnNames.has("idempotency_key")) {
     sqlite.exec("ALTER TABLE callback_deliveries ADD COLUMN idempotency_key TEXT");
   }
+  if (!callbackColumnNames.has("dispatch_mode")) {
+    sqlite.exec("ALTER TABLE callback_deliveries ADD COLUMN dispatch_mode TEXT NOT NULL DEFAULT 'legacy'");
+  }
+  if (!callbackColumnNames.has("governed_state")) {
+    sqlite.exec("ALTER TABLE callback_deliveries ADD COLUMN governed_state TEXT");
+  }
   sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS callback_deliveries_idempotency_key_idx ON callback_deliveries(idempotency_key)");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS callback_deliveries_dispatch_status_idx ON callback_deliveries(dispatch_mode, status)");
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS callback_deliveries_dispatch_mode_immutable
+    BEFORE UPDATE OF dispatch_mode ON callback_deliveries
+    WHEN NEW.dispatch_mode <> OLD.dispatch_mode
+    BEGIN SELECT RAISE(ABORT, 'callback delivery dispatch mode is immutable'); END;
+  `);
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS callback_deliveries_custody_insert_guard
+    BEFORE INSERT ON callback_deliveries
+    WHEN NEW.dispatch_mode NOT IN ('legacy', 'governed')
+      OR (NEW.dispatch_mode = 'legacy' AND NEW.governed_state IS NOT NULL)
+      OR (NEW.dispatch_mode = 'governed' AND NEW.governed_state NOT IN
+        ('pending', 'leased', 'sending', 'accepted', 'rejected', 'outcome_unknown', 'attention'))
+    BEGIN SELECT RAISE(ABORT, 'invalid callback delivery custody'); END;
+  `);
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS callback_deliveries_custody_update_guard
+    BEFORE UPDATE OF governed_state ON callback_deliveries
+    WHEN (NEW.dispatch_mode = 'legacy' AND NEW.governed_state IS NOT NULL)
+      OR (NEW.dispatch_mode = 'governed' AND NEW.governed_state NOT IN
+        ('pending', 'leased', 'sending', 'accepted', 'rejected', 'outcome_unknown', 'attention'))
+    BEGIN SELECT RAISE(ABORT, 'invalid callback delivery custody'); END;
+  `);
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS callback_deliveries_governed_immutable_guard
+    BEFORE UPDATE ON callback_deliveries
+    WHEN OLD.dispatch_mode = 'governed' AND (
+      NEW.run_id IS NOT OLD.run_id OR NEW.kind IS NOT OLD.kind
+      OR NEW.provider IS NOT OLD.provider OR NEW.uri IS NOT OLD.uri
+      OR NEW.body IS NOT OLD.body OR NEW.thread_key IS NOT OLD.thread_key
+      OR NEW.idempotency_key IS NOT OLD.idempotency_key
+      OR NEW.metadata_json IS NOT OLD.metadata_json
+      OR NEW.dispatch_mode IS NOT OLD.dispatch_mode
+      OR NEW.status IS NOT OLD.status OR NEW.attempts IS NOT OLD.attempts
+      OR NEW.last_error IS NOT OLD.last_error
+      OR NEW.next_attempt_at IS NOT OLD.next_attempt_at
+      OR NEW.created_at IS NOT OLD.created_at
+    )
+    BEGIN SELECT RAISE(ABORT, 'governed callback delivery custody is immutable'); END;
+  `);
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS callback_deliveries_governed_delete_guard
+    BEFORE DELETE ON callback_deliveries
+    WHEN OLD.dispatch_mode = 'governed'
+    BEGIN SELECT RAISE(ABORT, 'governed callback delivery delete forbidden'); END;
+  `);
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS callback_deliveries_governed_state_transition_guard
+    BEFORE UPDATE OF governed_state ON callback_deliveries
+    WHEN OLD.dispatch_mode = 'governed'
+      AND NEW.governed_state <> OLD.governed_state AND NOT (
+        (OLD.governed_state = 'pending' AND NEW.governed_state IN ('leased', 'attention'))
+        OR (OLD.governed_state = 'leased' AND NEW.governed_state IN ('pending', 'sending', 'attention'))
+        OR (OLD.governed_state = 'sending' AND NEW.governed_state IN
+          ('accepted', 'rejected', 'outcome_unknown', 'attention'))
+        OR (OLD.governed_state = 'outcome_unknown' AND NEW.governed_state IN
+          ('pending', 'accepted', 'rejected'))
+        OR (OLD.governed_state = 'attention' AND NEW.governed_state IN
+          ('pending', 'accepted', 'rejected'))
+      )
+    BEGIN SELECT RAISE(ABORT, 'invalid governed callback delivery state transition'); END;
+  `);
   const legacySlackTable = sqlite
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'slack_channel_bindings'")
     .get() as { name: string } | undefined;
@@ -1556,4 +3233,13 @@ export function migrateSchema(sqlite: Database.Database): void {
   migrateHumanEscalationAccessIdentitySchema(sqlite);
   migrateFactoryWorkstreamSchema(sqlite);
   migrateReassessmentObligationSchema(sqlite);
+  migrateControlPlaneProjectionOutboxSchema(sqlite);
+  migrateControlPlaneProjectionDependenciesSchema(sqlite);
+  migrateControlPlaneProjectionEvidenceKindSchema(sqlite);
+  migrateHostedRunImportSchema(sqlite);
+  migrateHostedExecutionStartSchema(sqlite);
+  migrateHostedClaimAuthorityShellSchema(sqlite);
+  migrateHostedAttemptImportSchema(sqlite);
+  migrateHostedHeartbeatOperationSchema(sqlite);
+  migrateHostedLifecycleOperationSchema(sqlite);
 }

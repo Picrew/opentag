@@ -1,6 +1,19 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  fchmodSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -8,8 +21,14 @@ import {
   OpenTagManagedChannelBindingOwnershipSchema
 } from "@opentag/core";
 import {
+  HostedControlRegistrationSchema,
+  TrustedRelayAuthorizationV1Schema,
+  assertHostedRelayAuthorization,
+  canonicalHostedRelayOrigin,
   formatConfigError as formatDaemonConfigError,
+  hostedRunnerAuthProblem,
   parseDaemonConfig,
+  runnerDispatcherToken,
   type LocalDispatcherRuntimeInput,
   type OpenTagDaemonConfig
 } from "@opentag/local-runtime";
@@ -255,7 +274,9 @@ const DaemonConfigSchema = z
     runnerToken: SecretStringSchema.optional(),
     runnerTokens: z.array(SecretStringSchema).optional(),
     revokedRunnerTokenFingerprints: z.array(z.string().trim().min(1)).optional(),
-    pairingToken: SecretStringSchema,
+    pairingToken: SecretStringSchema.optional(),
+    controlRegistration: HostedControlRegistrationSchema.optional(),
+    trustedRelay: TrustedRelayAuthorizationV1Schema.optional(),
     pollIntervalMs: PositiveIntegerSchema,
     heartbeatIntervalMs: PositiveIntegerSchema,
     runTimeoutMs: PositiveIntegerSchema.optional()
@@ -539,7 +560,59 @@ export const OpenTagCliConfigSchema = z
       })
       .strict()
   })
-  .strict();
+  .strict()
+  .superRefine((config, context) => {
+    if (!config.daemon.controlRegistration) {
+      if (!config.daemon.pairingToken) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["daemon", "pairingToken"],
+          message: "Legacy OpenTag configuration requires daemon.pairingToken."
+        });
+      }
+      return;
+    }
+    if (config.runtime?.mode !== "relay") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runtime", "mode"],
+        message: "Hosted Control V1 configuration requires runtime.mode=relay."
+      });
+      return;
+    }
+    let relayOrigin: string | undefined;
+    let dispatcherOrigin: string | undefined;
+    try {
+      relayOrigin = canonicalHostedRelayOrigin(config.runtime.relayUrl);
+      dispatcherOrigin = canonicalHostedRelayOrigin(config.daemon.dispatcherUrl);
+    } catch (error) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runtime", "relayUrl"],
+        message: error instanceof Error ? error.message : "Hosted relay URL is invalid."
+      });
+      return;
+    }
+    if (relayOrigin !== dispatcherOrigin) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runtime", "relayUrl"],
+        message: "Hosted Control V1 relay origin must match daemon.dispatcher origin."
+      });
+    }
+    try {
+      assertHostedRelayAuthorization({
+        dispatcherUrl: config.daemon.dispatcherUrl,
+        trustedRelay: config.daemon.trustedRelay
+      });
+    } catch (error) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["daemon", "trustedRelay"],
+        message: error instanceof Error ? error.message : "Hosted relay authorization is invalid."
+      });
+    }
+  });
 
 export type OpenTagCliConfig = Omit<z.infer<typeof OpenTagCliConfigSchema>, "daemon"> & {
   daemon: OpenTagDaemonConfig & {
@@ -587,7 +660,37 @@ export function formatCliConfigError(error: unknown): string {
   return formatDaemonConfigError(error);
 }
 
+function assertHostedControlRawTrust(value: unknown): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const raw = value as Record<string, unknown>;
+  if (!raw.daemon || typeof raw.daemon !== "object" || Array.isArray(raw.daemon)) return;
+  const daemon = raw.daemon as Record<string, unknown>;
+  if (daemon.controlRegistration === undefined) return;
+
+  if (!raw.runtime || typeof raw.runtime !== "object" || Array.isArray(raw.runtime)) {
+    throw new Error("Hosted Control V1 requires runtime.mode=relay before secrets or network access.");
+  }
+  const runtime = raw.runtime as Record<string, unknown>;
+  if (runtime.mode !== "relay") {
+    throw new Error("Hosted Control V1 requires runtime.mode=relay before secrets or network access.");
+  }
+  const relayUrl = z.string().url().parse(runtime.relayUrl);
+  const dispatcherUrl = z.string().url().parse(daemon.dispatcherUrl);
+  const relayOrigin = canonicalHostedRelayOrigin(relayUrl);
+  const dispatcherOrigin = canonicalHostedRelayOrigin(dispatcherUrl);
+  if (relayOrigin !== dispatcherOrigin) {
+    throw new Error("Hosted Control V1 relay origin does not match dispatcher origin.");
+  }
+  assertHostedRelayAuthorization({
+    dispatcherUrl,
+    trustedRelay: daemon.trustedRelay === undefined
+      ? undefined
+      : TrustedRelayAuthorizationV1Schema.parse(daemon.trustedRelay)
+  });
+}
+
 export function parseCliConfig(value: unknown): OpenTagCliConfig {
+  assertHostedControlRawTrust(value);
   const parsed = OpenTagCliConfigSchema.parse(value);
   return {
     ...parsed,
@@ -603,9 +706,7 @@ export function parseCliConfig(value: unknown): OpenTagCliConfig {
   };
 }
 
-export function runnerDispatcherToken(config: Pick<OpenTagDaemonConfig, "runnerToken" | "pairingToken">): string | undefined {
-  return config.runnerToken ?? config.pairingToken;
-}
+export { hostedRunnerAuthProblem, runnerDispatcherToken };
 
 export function runtimeModeFromConfig(config: OpenTagCliConfig): OpenTagRuntimeMode {
   return config.runtime?.mode ?? "local";
@@ -620,30 +721,479 @@ export function readCliConfig(path = defaultConfigPath()): OpenTagCliConfig {
   return parseCliConfig(JSON.parse(readFileSync(path, "utf8")));
 }
 
-export function ensurePrivateDirectory(path: string): void {
-  const createdPath = mkdirSync(path, { recursive: true, mode: 0o700 });
+export function readCliRawConfig(path = defaultConfigPath()): unknown {
+  assertPrivateConfigFile(path);
+  return JSON.parse(readFileSync(path, "utf8")) as unknown;
+}
+
+export function ensurePrivateDirectory(
+  path: string,
+  filesystem: CliConfigFilesystemOps = CLI_CONFIG_FILESYSTEM_OPS
+): void {
+  const createdPath = filesystem.mkdir(path, { recursive: true, mode: 0o700 });
   if (createdPath) {
-    chmodSync(path, 0o700);
+    filesystem.chmod(path, 0o700);
   }
 }
 
-export function writeCliConfigAtomic(path: string, config: OpenTagCliConfig): void {
-  ensurePrivateDirectory(dirname(path));
-  const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+export const CLI_CONFIG_DIRECTORY_DURABILITY =
+  process.platform === "win32" ? "atomic_replace" : "directory_fsync";
+
+export class CliConfigWriteOutcomeUnknownError extends Error {
+  readonly code = "config_write_outcome_unknown";
+
+  constructor(message: string, cause: unknown) {
+    super(message, { cause });
+    this.name = "CliConfigWriteOutcomeUnknownError";
+  }
+}
+
+export type CliConfigFilesystemOps = {
+  chmod(path: string, mode: number): void;
+  close(file: number): void;
+  fchmod(file: number, mode: number): void;
+  fsync(file: number): void;
+  lstat(path: string): {
+    isFile(): boolean;
+    isSymbolicLink(): boolean;
+    size: number;
+  };
+  mkdir(path: string, options: { recursive: true; mode: number }): string | undefined;
+  open(path: string, flags: string, mode?: number): number;
+  readFile(path: string): string;
+  rename(from: string, to: string): void;
+  remove(path: string): void;
+  stat(path: string): { mode: number };
+  writeFile(
+    target: string | number,
+    contents: string,
+    options: "utf8" | { mode: number; flag: string }
+  ): void;
+};
+
+export const CLI_CONFIG_FILESYSTEM_OPS: CliConfigFilesystemOps = {
+  chmod: chmodSync,
+  close: closeSync,
+  fchmod: fchmodSync,
+  fsync: fsyncSync,
+  lstat: lstatSync,
+  mkdir: (path, options) => mkdirSync(path, options),
+  open: openSync,
+  readFile: (path) => readFileSync(path, "utf8"),
+  rename: renameSync,
+  remove: (path) => rmSync(path, { force: true }),
+  stat: statSync,
+  writeFile: (target, contents, options) => writeFileSync(target, contents, options)
+};
+
+function combinedFailure(primary: unknown, cleanup: unknown, message: string): unknown {
+  if (primary === undefined) return cleanup;
+  if (cleanup === undefined) return primary;
+  return new AggregateError([primary, cleanup], message, { cause: primary });
+}
+
+function releaseConfigLock(
+  lockPath: string,
+  lockFile: number | undefined,
+  filesystem: CliConfigFilesystemOps
+): unknown {
+  let cleanupError: unknown;
+  if (lockFile !== undefined) {
+    try {
+      filesystem.close(lockFile);
+    } catch (error) {
+      cleanupError = error;
+    }
+  }
   try {
-    writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    chmodSync(tempPath, 0o600);
-    renameSync(tempPath, path);
-    chmodSync(path, 0o600);
+    filesystem.remove(lockPath);
   } catch (error) {
-    rmSync(tempPath, { force: true });
-    throw error;
+    cleanupError = combinedFailure(cleanupError, error, "OpenTag config lock cleanup failed.");
+  }
+  try {
+    fsyncDirectory(dirname(lockPath), filesystem);
+  } catch (error) {
+    cleanupError = combinedFailure(cleanupError, error, "OpenTag config lock cleanup failed.");
+  }
+  return cleanupError;
+}
+
+function configLockRecord(path: string): string {
+  return `${JSON.stringify({
+    schemaVersion: 1,
+    pid: process.pid,
+    configPath: path,
+    createdAt: new Date().toISOString()
+  })}\n`;
+}
+
+const MAX_CONFIG_LOCK_RECORD_BYTES = 4_096;
+
+function readableConfigLockRecord(lockPath: string, filesystem: CliConfigFilesystemOps): string {
+  try {
+    const stats = filesystem.lstat(lockPath);
+    if (
+      !stats.isFile()
+      || stats.isSymbolicLink()
+      || stats.size <= 0
+      || stats.size > MAX_CONFIG_LOCK_RECORD_BYTES
+    ) {
+      throw new Error("invalid lock record file");
+    }
+    const raw = filesystem.readFile(lockPath).trim();
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("invalid lock record");
+    }
+    const record = parsed as Record<string, unknown>;
+    const createdAt = record.createdAt;
+    const keys = Object.keys(record).sort();
+    if (
+      keys.join("\u0000") !== ["configPath", "createdAt", "pid", "schemaVersion"].join("\u0000")
+      || record.schemaVersion !== 1
+      || typeof record.pid !== "number"
+      || !Number.isSafeInteger(record.pid)
+      || record.pid <= 0
+      || typeof record.configPath !== "string"
+      || record.configPath.length === 0
+      || record.configPath.length > 4_096
+      || typeof createdAt !== "string"
+      || createdAt.length > 64
+    ) {
+      throw new Error("invalid lock record");
+    }
+    const createdAtMs = Date.parse(createdAt);
+    if (!Number.isFinite(createdAtMs) || new Date(createdAtMs).toISOString() !== createdAt) {
+      throw new Error("invalid lock record");
+    }
+    return JSON.stringify({
+      schemaVersion: 1,
+      pid: record.pid,
+      createdAt: new Date(createdAtMs).toISOString()
+    });
+  } catch {
+    return JSON.stringify({ schemaVersion: 1, status: "unreadable_or_invalid" });
   }
 }
 
-export function assertPrivateConfigFile(path: string): void {
+function withCliConfigLock<T>(
+  path: string,
+  operation: () => T,
+  filesystem: CliConfigFilesystemOps
+): T {
+  ensurePrivateDirectory(dirname(path), filesystem);
+  const lockPath = `${path}.lock`;
+  let lockFile: number | undefined;
+  try {
+    lockFile = filesystem.open(lockPath, "wx", 0o600);
+    filesystem.fchmod(lockFile, 0o600);
+    filesystem.writeFile(lockFile, configLockRecord(path), "utf8");
+    filesystem.fsync(lockFile);
+  } catch (error) {
+    // If openSync failed with EEXIST, lockFile is undefined and the adjacent
+    // lock belongs to another process. Never remove another writer's lock.
+    const cleanupError =
+      lockFile === undefined ? undefined : releaseConfigLock(lockPath, lockFile, filesystem);
+    if (
+      lockFile === undefined &&
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "EEXIST"
+    ) {
+      const lockRecord = readableConfigLockRecord(lockPath, filesystem);
+      throw new Error(
+        `OpenTag config is locked by another writer at ${lockPath}. Lock record: ${lockRecord}. `
+          + `Retry after that writer releases the lock. If the lock remains stale, verify the recorded process identity first; `
+          + `only after confirming that exact writer is no longer running, manually delete the exact lock path ${JSON.stringify(lockPath)}. `
+          + "OpenTag will not delete a lock based on PID alone.",
+        { cause: combinedFailure(error, cleanupError, "OpenTag config lock acquisition failed.") }
+      );
+    }
+    throw combinedFailure(error, cleanupError, "OpenTag config lock acquisition failed.");
+  }
+
+  let result: T | undefined;
+  let operationError: unknown;
+  try {
+    result = operation();
+  } catch (error) {
+    operationError = error;
+  }
+  const cleanupError = releaseConfigLock(lockPath, lockFile, filesystem);
+  if (operationError !== undefined) {
+    const failure = combinedFailure(
+      operationError,
+      cleanupError,
+      "OpenTag config write and lock cleanup failed."
+    );
+    if (operationError instanceof CliConfigWriteOutcomeUnknownError) {
+      if (cleanupError === undefined) throw operationError;
+      throw new CliConfigWriteOutcomeUnknownError(operationError.message, failure);
+    }
+    throw failure;
+  }
+  if (cleanupError !== undefined) {
+    throw new CliConfigWriteOutcomeUnknownError(
+      "OpenTag config write completed, but releasing its writer lock could not be confirmed.",
+      cleanupError
+    );
+  }
+  return result as T;
+}
+
+function replaceConfigFileDurably(
+  path: string,
+  contents: string,
+  validateReadback: (contents: string) => void,
+  filesystem: CliConfigFilesystemOps
+): void {
+  const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  let tempFile: number | undefined;
+  let renamed = false;
+  try {
+    tempFile = filesystem.open(tempPath, "wx", 0o600);
+    filesystem.fchmod(tempFile, 0o600);
+    filesystem.writeFile(tempFile, contents, "utf8");
+    filesystem.fsync(tempFile);
+    const fileToClose = tempFile;
+    tempFile = undefined;
+    filesystem.close(fileToClose);
+    filesystem.rename(tempPath, path);
+    renamed = true;
+    fsyncDirectory(dirname(path), filesystem);
+    validateReadback(filesystem.readFile(path));
+  } catch (error) {
+    let cleanupError: unknown;
+    if (tempFile !== undefined) {
+      const fileToClose = tempFile;
+      tempFile = undefined;
+      try {
+        filesystem.close(fileToClose);
+      } catch (closeError) {
+        cleanupError = closeError;
+      }
+    }
+    if (!renamed) {
+      try {
+        filesystem.remove(tempPath);
+      } catch (removeError) {
+        cleanupError = combinedFailure(
+          cleanupError,
+          removeError,
+          "OpenTag temporary config cleanup failed."
+        );
+      }
+    }
+    const failure = combinedFailure(error, cleanupError, "OpenTag config write cleanup failed.");
+    if (renamed) {
+      throw new CliConfigWriteOutcomeUnknownError(
+        "OpenTag config was replaced, but its durable readback could not be confirmed.",
+        failure
+      );
+    }
+    throw failure;
+  }
+}
+
+export function writeCliConfigAtomic(
+  path: string,
+  config: OpenTagCliConfig,
+  filesystem: CliConfigFilesystemOps = CLI_CONFIG_FILESYSTEM_OPS
+): void {
+  withCliConfigLock(path, () => {
+    replaceConfigFileDurably(path, `${JSON.stringify(config, null, 2)}\n`, (contents) => {
+      parseCliConfig(JSON.parse(contents));
+    }, filesystem);
+  }, filesystem);
+}
+
+export type HostedControlConfigPatch = {
+  controlRegistration: NonNullable<OpenTagDaemonConfig["controlRegistration"]>;
+  dispatcherUrl: string;
+  relayProvider?: string;
+  relayUrl: string;
+  trustedRelay?: NonNullable<OpenTagDaemonConfig["trustedRelay"]>;
+  removePairingToken?: boolean;
+  runnerToken?: string | null;
+};
+
+function requireRawConfigObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("OpenTag config must be a JSON object.");
+  }
+  return value as Record<string, unknown>;
+}
+
+function fsyncDirectory(
+  path: string,
+  filesystem: CliConfigFilesystemOps = CLI_CONFIG_FILESYSTEM_OPS
+): void {
+  // Node does not expose a portable Windows directory-fsync primitive. Windows
+  // therefore gets atomic replacement and readback, but not the POSIX crash-
+  // durability claim represented by CLI_CONFIG_DIRECTORY_DURABILITY.
+  if (CLI_CONFIG_DIRECTORY_DURABILITY === "atomic_replace") return;
+  const directory = filesystem.open(path, "r");
+  let fsyncError: unknown;
+  try {
+    filesystem.fsync(directory);
+  } catch (error) {
+    fsyncError = error;
+  }
+  let closeError: unknown;
+  try {
+    filesystem.close(directory);
+  } catch (error) {
+    closeError = error;
+  }
+  const failure = combinedFailure(
+    fsyncError,
+    closeError,
+    "OpenTag directory fsync and close both failed."
+  );
+  if (failure !== undefined) throw failure;
+}
+
+const RawSecretValueSchema = z.union([z.string().min(1), SecretRefSchema]);
+
+const RAW_SECRET_STRING_PATHS = [
+  ["daemon", "githubToken"],
+  ["daemon", "githubApplyToken"],
+  ["daemon", "runnerToken"],
+  ["daemon", "runnerTokens", "*"],
+  ["daemon", "pairingToken"],
+  ["platforms", "lark", "appSecret"],
+  ["platforms", "slack", "appToken"],
+  ["platforms", "slack", "signingSecret"],
+  ["platforms", "slack", "botToken"],
+  ["platforms", "github", "webhookSecret"],
+  ["platforms", "gitlab", "token"],
+  ["platforms", "gitlab", "webhookSecret"],
+  ["platforms", "linear", "token"],
+  ["platforms", "linear", "auth", "clientSecret"],
+  ["platforms", "linear", "auth", "refreshToken"],
+  ["platforms", "linear", "connections", "*", "token"],
+  ["platforms", "linear", "webhookSecret"],
+  ["platforms", "telegram", "botToken"],
+  ["platforms", "telegram", "secretToken"],
+  ["platforms", "discord", "botToken"],
+  ["platforms", "teams", "appPassword"]
+] as const satisfies readonly (readonly string[])[];
+
+function replaceKnownRawSecretField(
+  value: unknown,
+  path: readonly string[],
+  index = 0
+): unknown {
+  if (index === path.length) {
+    if (value === null || value === undefined) return value;
+    RawSecretValueSchema.parse(value);
+    return "raw-secret-ref";
+  }
+  const segment = path[index]!;
+  if (segment === "*") {
+    if (Array.isArray(value)) {
+      return value.map((entry) => replaceKnownRawSecretField(entry, path, index + 1));
+    }
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        replaceKnownRawSecretField(entry, path, index + 1)
+      ])
+    );
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  if (!(segment in record)) return value;
+  return {
+    ...record,
+    [segment]: replaceKnownRawSecretField(record[segment], path, index + 1)
+  };
+}
+
+function replaceKnownRawSecretFields(value: unknown): unknown {
+  return RAW_SECRET_STRING_PATHS.reduce(
+    (projected, path) => replaceKnownRawSecretField(projected, path),
+    value
+  );
+}
+
+export const OpenTagCliRawConfigSchema = z.preprocess(
+  replaceKnownRawSecretFields,
+  OpenTagCliConfigSchema
+);
+
+function validateHostedControlRawConfig(value: unknown): void {
+  const raw = requireRawConfigObject(value);
+  OpenTagCliRawConfigSchema.parse(raw);
+  const runtime = RuntimeConfigSchema.parse(raw.runtime);
+  if (runtime.mode !== "relay") {
+    throw new Error("Hosted Control V1 config requires runtime.mode=relay.");
+  }
+  const daemon = requireRawConfigObject(raw.daemon);
+  const dispatcherUrl = z.string().url().parse(daemon.dispatcherUrl);
+  const relayOrigin = canonicalHostedRelayOrigin(runtime.relayUrl);
+  const dispatcherOrigin = canonicalHostedRelayOrigin(dispatcherUrl);
+  if (relayOrigin !== dispatcherOrigin) {
+    throw new Error("Hosted Control V1 relay origin must match daemon.dispatcher origin.");
+  }
+  HostedControlRegistrationSchema.parse(daemon.controlRegistration);
+  assertHostedRelayAuthorization({
+    dispatcherUrl,
+    trustedRelay: TrustedRelayAuthorizationV1Schema.parse(daemon.trustedRelay)
+  });
+  if (daemon.runnerToken !== undefined) {
+    RawSecretValueSchema.parse(daemon.runnerToken);
+  }
+  if (daemon.pairingToken !== undefined) {
+    RawSecretValueSchema.parse(daemon.pairingToken);
+  }
+}
+
+export function writeHostedControlConfigAtomic(
+  path: string,
+  patch: HostedControlConfigPatch,
+  filesystem: CliConfigFilesystemOps = CLI_CONFIG_FILESYSTEM_OPS
+): void {
+  withCliConfigLock(path, () => {
+    assertPrivateConfigFile(path, filesystem);
+    const raw = requireRawConfigObject(JSON.parse(filesystem.readFile(path)));
+    const daemon = requireRawConfigObject(raw.daemon);
+    const patchedDaemon: Record<string, unknown> = {
+      ...daemon,
+      dispatcherUrl: patch.dispatcherUrl,
+      controlRegistration: patch.controlRegistration,
+      trustedRelay: patch.trustedRelay ?? daemon.trustedRelay
+    };
+    if (patch.removePairingToken) delete patchedDaemon.pairingToken;
+    if (patch.runnerToken === null) delete patchedDaemon.runnerToken;
+    else if (patch.runnerToken !== undefined) {
+      patchedDaemon.runnerToken = z.string().min(1).parse(patch.runnerToken);
+    }
+
+    const patched: Record<string, unknown> = {
+      ...raw,
+      runtime: {
+        mode: "relay",
+        relayUrl: patch.relayUrl,
+        ...(patch.relayProvider ? { relayProvider: patch.relayProvider } : {})
+      },
+      daemon: patchedDaemon
+    };
+    validateHostedControlRawConfig(patched);
+    replaceConfigFileDurably(path, `${JSON.stringify(patched, null, 2)}\n`, (contents) => {
+      validateHostedControlRawConfig(JSON.parse(contents));
+    }, filesystem);
+  }, filesystem);
+}
+
+export function assertPrivateConfigFile(
+  path: string,
+  filesystem: CliConfigFilesystemOps = CLI_CONFIG_FILESYSTEM_OPS
+): void {
   if (process.platform === "win32") return;
-  const mode = statSync(path).mode & 0o777;
+  const mode = filesystem.stat(path).mode & 0o777;
   if ((mode & 0o077) !== 0) {
     throw new Error(`OpenTag config contains secrets and must not be readable by group or others: ${path}\nFix it with: chmod 600 ${path}`);
   }

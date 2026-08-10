@@ -158,6 +158,7 @@ async function startHarness(input: {
     callbackSink: {
       async deliver(message) {
         input.callbackMessages.push(message);
+        return { handled: true, outcome: "accepted" } as const;
       }
     },
     sourceReceiptSink: {

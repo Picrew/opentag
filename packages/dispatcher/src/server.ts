@@ -126,7 +126,16 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import {
+  CallbackProviderOutcomeUnknownError,
+  type CallbackSinkWithPreflight
+} from "./callbacks.js";
+import {
+  createGovernedCallbackRuntime,
+  type GovernedCallbackRuntime
+} from "./governed-callback-runtime.js";
 import { createReassessmentObligationWorker } from "./reassessment-obligations.js";
+import { createReassessmentObligationProcessor } from "./reassessment-processor.js";
 
 /**
  * Parse and validate a request body, mapping ONLY request-body parse failures to
@@ -2428,12 +2437,32 @@ export type CallbackMessage = {
   };
 };
 
-export type CallbackDeliveryResult = {
-  externalMessageId?: string;
-};
+export type CallbackDeliveryResult =
+  | { handled: false; externalMessageId?: never }
+  | {
+      handled: true;
+      outcome: "accepted";
+      externalMessageId?: string;
+      providerReceiptId?: string;
+      providerResourceUri?: string;
+    }
+  | {
+      handled: true;
+      outcome: "rejected";
+      reasonCode: string;
+      externalMessageId?: never;
+    }
+  | {
+      handled: true;
+      outcome: "outcome_unknown";
+      reasonCode: string;
+      nextAction: string;
+      owner: string;
+      externalMessageId?: never;
+    };
 
 export type CallbackSink = {
-  deliver(message: CallbackMessage): Promise<void | CallbackDeliveryResult>;
+  deliver(message: CallbackMessage): Promise<CallbackDeliveryResult>;
 };
 
 export type SourceReceiptState = "received" | "running";
@@ -2655,7 +2684,7 @@ async function executeDirectApplyPlan(input: {
 
 const noopCallbackSink: CallbackSink = {
   async deliver() {
-    return;
+    return { handled: false };
   }
 };
 
@@ -2682,47 +2711,94 @@ async function deliverCallbackDelivery(input: {
   delivery: import("@opentag/store").CallbackDelivery;
   retry?: CallbackRetryOptions;
 }): Promise<boolean> {
-  try {
-    const externalMessageId =
-      input.delivery.externalMessageId ??
-      (input.delivery.statusMessageKey
-        ? await input.repo.findCallbackExternalMessageId({
-            runId: input.delivery.runId,
-            provider: input.delivery.provider,
-            ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
-            statusMessageKey: input.delivery.statusMessageKey
-          })
-        : undefined);
-    const deliveryResult = await input.sink.deliver({
-      runId: input.delivery.runId,
-      kind: input.delivery.kind,
-      provider: input.delivery.provider,
-      uri: input.delivery.uri,
-      body: input.delivery.body,
-      ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
-      ...(input.delivery.agentId ? { agentId: input.delivery.agentId } : {}),
-      ...(input.delivery.statusMessageKey ? { statusMessageKey: input.delivery.statusMessageKey } : {}),
-      ...(externalMessageId ? { externalMessageId } : {}),
-      ...(input.delivery.blocks ? { blocks: input.delivery.blocks as SlackBlock[] } : {}),
-      ...(input.delivery.rich ? { rich: input.delivery.rich as NonNullable<CallbackMessage["rich"]> } : {})
-    });
-    const deliveredExternalMessageId = deliveryResult?.externalMessageId ?? externalMessageId;
-    await input.repo.markCallbackDelivered({
+  const classification = await (async () => {
+    try {
+      const externalMessageId =
+        input.delivery.externalMessageId ??
+        (input.delivery.statusMessageKey
+          ? await input.repo.findCallbackExternalMessageId({
+              runId: input.delivery.runId,
+              provider: input.delivery.provider,
+              ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
+              statusMessageKey: input.delivery.statusMessageKey
+            })
+          : undefined);
+      const deliveryResult = await input.sink.deliver({
+        runId: input.delivery.runId,
+        kind: input.delivery.kind,
+        provider: input.delivery.provider,
+        uri: input.delivery.uri,
+        body: input.delivery.body,
+        ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
+        ...(input.delivery.agentId ? { agentId: input.delivery.agentId } : {}),
+        ...(input.delivery.statusMessageKey ? { statusMessageKey: input.delivery.statusMessageKey } : {}),
+        ...(externalMessageId ? { externalMessageId } : {}),
+        ...(input.delivery.blocks ? { blocks: input.delivery.blocks as SlackBlock[] } : {}),
+        ...(input.delivery.rich ? { rich: input.delivery.rich as NonNullable<CallbackMessage["rich"]> } : {})
+      });
+      if (!deliveryResult.handled) {
+        throw new Error(`No callback sink handled provider ${input.delivery.provider}.`);
+      }
+      if (deliveryResult.outcome === "rejected") {
+        return {
+          outcome: "attention" as const,
+          reasonCode: deliveryResult.reasonCode,
+          nextAction: "inspect-provider-rejection"
+        };
+      }
+      if (deliveryResult.outcome === "outcome_unknown") {
+        return {
+          outcome: "attention" as const,
+          reasonCode: deliveryResult.reasonCode,
+          nextAction: deliveryResult.nextAction,
+          owner: deliveryResult.owner
+        };
+      }
+      return {
+        outcome: "accepted" as const,
+        externalMessageId: deliveryResult.externalMessageId ?? externalMessageId
+      };
+    } catch (error) {
+      if (error instanceof CallbackProviderOutcomeUnknownError) {
+        return {
+          outcome: "attention" as const,
+          reasonCode: error.classification.reasonCode,
+          nextAction: error.classification.nextAction
+        };
+      }
+      return { outcome: "failed" as const, error };
+    }
+  })();
+
+  if (classification.outcome === "attention") {
+    await input.repo.markCallbackAttention({
       deliveryId: input.delivery.id,
-      ...(deliveredExternalMessageId ? { externalMessageId: deliveredExternalMessageId } : {})
+      reasonCode: classification.reasonCode,
+      nextAction: classification.nextAction,
+      ...("owner" in classification ? { owner: classification.owner } : {})
     });
-    return true;
-  } catch (error) {
+    return false;
+  }
+  if (classification.outcome === "failed") {
     const maxAttempts = input.retry?.maxAttempts ?? 5;
     const nextAttemptAt = nextCallbackAttemptAt({ attempts: input.delivery.attempts, ...(input.retry ?? {}) });
     await input.repo.markCallbackFailed({
       deliveryId: input.delivery.id,
-      error: error instanceof Error ? error.message : String(error),
+      error: classification.error instanceof Error
+        ? classification.error.message
+        : String(classification.error),
       maxAttempts,
       ...(nextAttemptAt ? { nextAttemptAt } : {})
     });
     return false;
   }
+  await input.repo.markCallbackDelivered({
+    deliveryId: input.delivery.id,
+    ...(classification.externalMessageId
+      ? { externalMessageId: classification.externalMessageId }
+      : {})
+  });
+  return true;
 }
 
 export async function processPendingCallbacks(input: {
@@ -2935,6 +3011,17 @@ export function openDispatcherDatabase(databasePath: string): InstanceType<typeo
   return new Database(databasePath);
 }
 
+export function openDispatcherGovernanceStore(databasePath: string) {
+  const sqlite = openDispatcherDatabase(databasePath);
+  migrateSchema(sqlite);
+  return {
+    repo: createOpenTagRepository(drizzle(sqlite)),
+    close() {
+      sqlite.close();
+    },
+  };
+}
+
 export function createDispatcherApp(input: {
   databasePath: string;
   sqlite?: InstanceType<typeof Database>;
@@ -2971,6 +3058,14 @@ export function createDispatcherApp(input: {
     retryBaseMs?: number;
     retryMaxMs?: number;
     maxAttempts?: number;
+  };
+  governedCallbackRuntime?: {
+    create?: (
+      options: Parameters<typeof createGovernedCallbackRuntime>[0]
+    ) => GovernedCallbackRuntime;
+    retryDelayMs?: number;
+    setTimeout?: typeof globalThis.setTimeout;
+    clearTimeout?: typeof globalThis.clearTimeout;
   };
 }) {
   const sqlite = input.sqlite ?? openDispatcherDatabase(input.databasePath);
@@ -3038,10 +3133,154 @@ export function createDispatcherApp(input: {
   const setLarkStatusCardTimeout = larkStatusCardOptions.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
   const clearLarkStatusCardTimeout = larkStatusCardOptions.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle));
   const delayedLarkStatusCards = new Map<string, DelayedLarkStatusState>();
+  let governedCallbackRuntime: GovernedCallbackRuntime | undefined;
+  let governedCallbackRuntimeStopping = false;
+  let governedCallbackRuntimeStartTask: Promise<void> | undefined;
+  let governedCallbackRuntimeRetryTimer:
+    | ReturnType<typeof globalThis.setTimeout>
+    | undefined;
+  const governedCallbackRuntimeOptions = input.governedCallbackRuntime ?? {};
+  const createCallbackRuntime =
+    governedCallbackRuntimeOptions.create ?? createGovernedCallbackRuntime;
+  const setGovernedCallbackRuntimeTimeout =
+    governedCallbackRuntimeOptions.setTimeout ?? globalThis.setTimeout;
+  const clearGovernedCallbackRuntimeTimeout =
+    governedCallbackRuntimeOptions.clearTimeout ?? globalThis.clearTimeout;
 
-  async function deliverCompletionTransition(workThreadId: string): Promise<void> {
-    const transition = await completionGovernance.getSourceThreadTransition(workThreadId);
-    if (!transition) return;
+  async function recordGovernedCallbackBlock(inputValue: {
+    runId: string;
+    workThreadId?: string;
+    assessmentId: string;
+    transitionKey: string;
+    reasonCode: string;
+    nextAction: string;
+  }): Promise<void> {
+    try {
+      await repo.appendControlPlaneEvent({
+        type: "callback.governed.enqueue_blocked",
+        severity: "error",
+        subject: inputValue.runId,
+        idempotencyKey: `governed-callback-blocked:${inputValue.transitionKey}:${inputValue.reasonCode}`,
+        payload: {
+          runId: inputValue.runId,
+          ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
+          assessmentId: inputValue.assessmentId,
+          reasonCode: inputValue.reasonCode,
+          nextAction: inputValue.nextAction
+        }
+      });
+    } catch {
+      // The durable reassessment obligation remains the retry authority.
+    }
+  }
+
+  async function deliverCallbackWithCompletionAuthority(inputValue: {
+    message: CallbackMessage;
+    assessmentId?: string;
+    transitionKey: string;
+    workThreadId?: string;
+    legacyFallback?: boolean;
+    deferOnGovernedFailure?: boolean;
+  }): Promise<"governed" | "legacy" | "deferred" | "skipped"> {
+    if (!inputValue.assessmentId) {
+      if (inputValue.legacyFallback === false) return "skipped";
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        retry: callbackRetry,
+        message: inputValue.message
+      });
+      return "legacy";
+    }
+    let governedContext: Awaited<ReturnType<typeof repo.getGovernedCallbackEnqueueContext>>;
+    try {
+      governedContext = await repo.getGovernedCallbackEnqueueContext({
+        runId: inputValue.message.runId,
+        assessmentId: inputValue.assessmentId
+      });
+    } catch {
+      await recordGovernedCallbackBlock({
+        runId: inputValue.message.runId,
+        ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
+        assessmentId: inputValue.assessmentId,
+        transitionKey: inputValue.transitionKey,
+        reasonCode: "governed_callback_context_unavailable",
+        nextAction: "inspect-local-callback-ledger"
+      });
+      if (inputValue.deferOnGovernedFailure) return "deferred";
+      throw new Error("governed_callback_context_unavailable");
+    }
+    if (governedContext.outcome === "authority_conflict") {
+      await recordGovernedCallbackBlock({
+        runId: inputValue.message.runId,
+        ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
+        assessmentId: inputValue.assessmentId,
+        transitionKey: inputValue.transitionKey,
+        reasonCode: "governed_callback_authority_conflict",
+        nextAction: "retry-after-hosted-authority-is-acknowledged"
+      });
+      if (inputValue.deferOnGovernedFailure) return "deferred";
+      throw new Error("governed_callback_authority_conflict");
+    }
+    if (governedContext.outcome === "ready") {
+      if (inputValue.message.provider !== "github" || !governedCallbackRuntime) {
+        const reasonCode = inputValue.message.provider !== "github"
+          ? "governed_callback_provider_not_supported"
+          : "governed_callback_runtime_unavailable";
+        await recordGovernedCallbackBlock({
+          runId: inputValue.message.runId,
+          ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
+          assessmentId: inputValue.assessmentId,
+          transitionKey: inputValue.transitionKey,
+          reasonCode,
+          nextAction: "repair-local-callback"
+        });
+        if (inputValue.deferOnGovernedFailure) return "deferred";
+        throw new Error(reasonCode);
+      }
+      try {
+        await governedCallbackRuntime.enqueue({
+          context: governedContext,
+          message: inputValue.message,
+          transitionKey: inputValue.transitionKey
+        });
+      } catch {
+        await recordGovernedCallbackBlock({
+          runId: inputValue.message.runId,
+          ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
+          assessmentId: inputValue.assessmentId,
+          transitionKey: inputValue.transitionKey,
+          reasonCode: "governed_callback_enqueue_failed",
+          nextAction: "inspect-local-callback-ledger"
+        });
+        if (inputValue.deferOnGovernedFailure) return "deferred";
+        throw new Error("governed_callback_enqueue_failed");
+      }
+      return "governed";
+    }
+    if (inputValue.legacyFallback === false) return "skipped";
+    await deliverAndAudit({
+      repo,
+      sink: callbackSink,
+      retry: callbackRetry,
+      message: inputValue.message
+    });
+    return "legacy";
+  }
+
+  async function deliverCompletionTransition(
+    workThreadId: string,
+    options: {
+      retryPendingTransition?: boolean;
+      forceCurrentAssessment?: boolean;
+      legacyFallback?: boolean;
+    } = {}
+  ): Promise<string | null> {
+    const transition = await completionGovernance.getSourceThreadTransition(
+      workThreadId,
+      options
+    );
+    if (!transition) return null;
     const state = transition.completion.completion;
     const projection = state === "satisfied"
       ? { state: "completed" as const, message: "Complete: provider-verified completion requirements are satisfied." }
@@ -3052,7 +3291,9 @@ export function createDispatcherApp(input: {
           : state === "unsatisfied"
             ? { state: "failed" as const, message: "Execution finished, but the completion requirements are not satisfied." }
             : { state: "running" as const, message: "Execution succeeded; work completion is waiting for verified evidence." };
-    if (!presentation.shouldDeliverStatusUpdate(transition.event.callback.provider)) return;
+    if (!presentation.shouldDeliverStatusUpdate(transition.event.callback.provider)) {
+      return transition.assessment.id;
+    }
     const semantic = presentation.runStatusPresentation({
       runId: transition.runId,
       state: projection.state,
@@ -3069,24 +3310,29 @@ export function createDispatcherApp(input: {
       provider: transition.event.callback.provider,
       runId: transition.runId
     });
-    await deliverAndAudit({
-      repo,
-      sink: callbackSink,
-      retry: callbackRetry,
-      message: {
-        runId: transition.runId,
-        kind: projection.state === "completed" ? "final" : "progress",
-        provider: transition.event.callback.provider,
-        uri: transition.event.callback.uri,
-        body: rendered.body,
-        ...(transition.event.target.agentId ? { agentId: transition.event.target.agentId } : {}),
-        ...(transition.event.callback.threadKey ? { threadKey: transition.event.callback.threadKey } : {}),
-        ...(statusMessageKey ? { statusMessageKey } : {}),
-        ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
-        ...(rendered.rich ? { rich: rendered.rich } : {}),
-        idempotencyKey: transition.transitionKey
-      }
+    const message: CallbackMessage = {
+      runId: transition.runId,
+      kind: projection.state === "completed" ? "final" : "progress",
+      provider: transition.event.callback.provider,
+      uri: transition.event.callback.uri,
+      body: rendered.body,
+      ...(transition.event.target.agentId ? { agentId: transition.event.target.agentId } : {}),
+      ...(transition.event.callback.threadKey ? { threadKey: transition.event.callback.threadKey } : {}),
+      ...(statusMessageKey ? { statusMessageKey } : {}),
+      ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
+      ...(rendered.rich ? { rich: rendered.rich } : {}),
+      idempotencyKey: transition.transitionKey
+    };
+    await deliverCallbackWithCompletionAuthority({
+      message,
+      assessmentId: transition.assessment.id,
+      transitionKey: transition.transitionKey,
+      workThreadId,
+      ...(options.legacyFallback !== undefined
+        ? { legacyFallback: options.legacyFallback }
+        : {})
     });
+    return transition.assessment.id;
   }
   const maxRequestBodyBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
   const runnerLeaseSeconds = input.runnerLeaseSeconds ?? 60;
@@ -3306,7 +3552,7 @@ export function createDispatcherApp(input: {
   async function deliverLinearRelayCallback(
     message: CallbackMessage,
     installation: NonNullable<Awaited<ReturnType<typeof linearRelayInstallationForCallback>>>
-  ): Promise<CallbackDeliveryResult | void> {
+  ): Promise<CallbackDeliveryResult> {
     const token = await resolveLinearRelayInstallationToken(installation);
     const agentSessionId = linearAgentSessionIdFromCallbackUri(message.uri);
     if (agentSessionId) {
@@ -3326,7 +3572,7 @@ export function createDispatcherApp(input: {
           ephemeral: message.kind === "progress"
         }
       });
-      return activityId ? { externalMessageId: activityId } : undefined;
+      return { handled: true, outcome: "accepted", ...(activityId ? { externalMessageId: activityId } : {}) };
     }
 
     const issueId = linearIssueIdFromCallbackUri(message.uri);
@@ -3340,7 +3586,7 @@ export function createDispatcherApp(input: {
         body: message.body,
         ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {})
       });
-      return { externalMessageId: message.externalMessageId };
+      return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId };
     }
     const comment = await createLinearIssueCommentRecord({
       token,
@@ -3349,15 +3595,64 @@ export function createDispatcherApp(input: {
       ...(linearParentCommentIdFromCallbackUri(message.uri) ? { parentId: linearParentCommentIdFromCallbackUri(message.uri)! } : {}),
       ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {})
     });
-    return message.statusMessageKey && comment.id ? { externalMessageId: comment.id } : undefined;
+    return {
+      handled: true,
+      outcome: "accepted",
+      ...(message.statusMessageKey && comment.id ? { externalMessageId: comment.id } : {})
+    };
   }
-  const callbackSink: CallbackSink = {
+  const callbackSink: CallbackSinkWithPreflight = {
+    async preflight(message) {
+      const configured = configuredCallbackSink as CallbackSink & {
+        preflight?: CallbackSinkWithPreflight["preflight"];
+      };
+      return configured.preflight
+        ? configured.preflight(message)
+        : { handled: false, reasonCode: "provider_not_configured" };
+    },
     async deliver(message) {
       const installation = await linearRelayInstallationForCallback(message);
       if (installation) return deliverLinearRelayCallback(message, installation);
       return configuredCallbackSink.deliver(message);
     }
   };
+  const recordGovernedCallbackRuntimeError = async (): Promise<void> => {
+    try {
+      await repo.appendControlPlaneEvent({
+        type: "callback.governed.worker_error",
+        severity: "error",
+        payload: {
+          reasonCode: "governed_callback_worker_error",
+          nextAction: "inspect-local-callback-ledger"
+        }
+      });
+    } catch {
+      // The callback ledger remains authoritative even when its audit surface is unavailable.
+    }
+  };
+  governedCallbackRuntime = createCallbackRuntime({
+    repo,
+    sink: callbackSink,
+    onError: recordGovernedCallbackRuntimeError
+  });
+  const startGovernedCallbackRuntime = (): void => {
+    if (governedCallbackRuntimeStopping || governedCallbackRuntimeStartTask) return;
+    governedCallbackRuntimeStartTask = governedCallbackRuntime!.start()
+      .catch(async () => {
+        await recordGovernedCallbackRuntimeError();
+        if (governedCallbackRuntimeStopping || governedCallbackRuntimeRetryTimer) return;
+        governedCallbackRuntimeRetryTimer = setGovernedCallbackRuntimeTimeout(() => {
+          governedCallbackRuntimeRetryTimer = undefined;
+          startGovernedCallbackRuntime();
+        }, governedCallbackRuntimeOptions.retryDelayMs
+          ?? Math.max(1_000, reassessmentOptions.pollIntervalMs ?? 1_000));
+        governedCallbackRuntimeRetryTimer.unref?.();
+      })
+      .finally(() => {
+        governedCallbackRuntimeStartTask = undefined;
+      });
+  };
+  startGovernedCallbackRuntime();
   const relayCapabilities: RelayCapabilities = {
     schemaVersion: 1,
     relay: true,
@@ -4124,191 +4419,46 @@ export function createDispatcherApp(input: {
   }): Promise<WorkstreamContinuationDispatch> {
     try {
       return await dispatchWorkstreamContinuation(inputValue);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+    } catch {
+      const reasonCode = "continuation_dispatch_failed";
       await recordControlPlaneEvent({
         type: "workstream.continuation.failed",
         severity: "error",
         subject: inputValue.workThreadId,
-        idempotencyKey: stableId("continuation_failed", [inputValue.workThreadId, inputValue.trigger.id, message]),
-        payload: { workThreadId: inputValue.workThreadId, trigger: inputValue.trigger, message }
+        idempotencyKey: stableId("continuation_failed", [
+          inputValue.workThreadId,
+          inputValue.trigger.id,
+          reasonCode
+        ]),
+        payload: {
+          workThreadId: inputValue.workThreadId,
+          trigger: inputValue.trigger,
+          reasonCode,
+          nextAction: "inspect-local-continuation"
+        }
       });
       return {
         outcome: "error",
         workThreadId: inputValue.workThreadId,
         trigger: inputValue.trigger,
         decisions: [],
-        reasonCode: "continuation_dispatch_failed"
+        reasonCode
       };
     }
   }
 
-  async function processReassessmentObligation(obligation: ReassessmentObligation) {
-    const workThread = await repo.getWorkThread({ workThreadId: obligation.workThreadId });
-    if (!workThread) {
-      return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The obligation WorkThread no longer exists." };
-    }
-
-    let sourceRun: Awaited<ReturnType<typeof repo.getRun>> | null = null;
-    let sourceEscalation: HumanEscalation | null = null;
-    let evidenceDelivery: { provider: string; deliveryId: string } | null = null;
-    if (obligation.sourceKind === "run_result_recorded") {
-      sourceRun = await repo.getRun({ runId: obligation.sourceId });
-      if (!sourceRun?.run.result || sourceRun.run.thread?.id !== obligation.workThreadId) {
-        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The recorded Run result source is unavailable." };
-      }
-    } else if (obligation.sourceKind === "verification_evidence_attached") {
-      const records = await repo.listVerificationEvidence({ workThreadId: obligation.workThreadId });
-      const matching = records.find((record) =>
-        [record.provider, record.deliveryId, record.subjectRef, obligation.workThreadId].join(":") === obligation.sourceId
-      );
-      if (!matching) {
-        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The attached verification evidence source is unavailable." };
-      }
-      evidenceDelivery = { provider: matching.provider, deliveryId: matching.deliveryId };
-    } else if (obligation.sourceKind === "human_escalation_changed") {
-      sourceEscalation = await repo.getHumanEscalation({ id: obligation.sourceId });
-      if (!sourceEscalation || sourceEscalation.workThreadId !== obligation.workThreadId) {
-        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The HumanEscalation source is unavailable." };
-      }
-    } else if (obligation.sourceKind === "completion_waiver_changed") {
-      const waivers = await repo.listCompletionWaivers({ workThreadId: obligation.workThreadId });
-      if (!waivers.some((waiver) => waiver.id === obligation.sourceId)) {
-        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The completion waiver source is unavailable." };
-      }
-    } else if (
-      obligation.sourceKind === "material_action_receipt_recorded"
-      || obligation.sourceKind === "material_action_reconciled"
-    ) {
-      const receipts = await repo.listMaterialActionReceiptsForWorkThread({ workThreadId: obligation.workThreadId });
-      if (!receipts.some((receipt) => receipt.actionId === obligation.sourceId)) {
-        return { outcome: "blocked" as const, reasonCode: "source_missing" as const, lastError: "The material-action receipt source is unavailable." };
-      }
-    }
-
-    const governanceResult = sourceRun
-      ? await completionGovernance.ingestRunResult(sourceRun.run.id)
-      : await completionGovernance.reassessWorkThread(
-          obligation.workThreadId,
-          `reassessment-obligation:${obligation.id}:${obligation.attemptCount}`
-        );
-    if (governanceResult) await deliverCompletionTransition(obligation.workThreadId);
-    const satisfiedAssessmentId = governanceResult?.assessment.id;
-
-    const promotableRunId = sourceRun?.run.result
-      && sourceRun.run.result.conclusion !== "needs_human"
-      && sourceRun.run.result.conclusion !== "cancelled"
-      ? sourceRun.run.id
-      : null;
-    const promotedFollowUp = promotableRunId
-      ? await promoteNextFollowUpAfterTerminalRun({ activeRunId: promotableRunId })
-      : null;
-    if (promotedFollowUp) {
-      return {
-        outcome: "satisfied" as const,
-        reasonCode: "continuation_dispatched" as const,
-        ...(satisfiedAssessmentId ? { satisfiedAssessmentId } : {})
-      };
-    }
-
-    let continuationInput: Parameters<typeof attemptWorkstreamContinuation>[0] | null = null;
-    if (sourceRun?.run.result && ["failure", "interrupted", "timed_out"].includes(sourceRun.run.result.conclusion)) {
-      continuationInput = {
-        workThreadId: obligation.workThreadId,
-        trigger: {
-          id: `run-terminal:${sourceRun.run.id}`,
-          kind: "retryable_run_failure",
-          occurredAt: sourceRun.run.updatedAt
-        },
-        preferredParentRunId: sourceRun.run.id
-      };
-    } else if (evidenceDelivery) {
-      continuationInput = {
-        workThreadId: obligation.workThreadId,
-        trigger: {
-          id: evidenceDelivery.provider === "github"
-            ? `github-evidence:${evidenceDelivery.deliveryId}`
-            : `completion-evidence:${evidenceDelivery.provider}:${evidenceDelivery.deliveryId}`,
-          kind: "completion_evidence_changed",
-          occurredAt: obligation.createdAt
-        }
-      };
-    } else if (sourceEscalation?.state === "resolved" && sourceEscalation.resolution) {
-      const resolutionContext = humanResolutionContinuationContext(sourceEscalation);
-      continuationInput = {
-        workThreadId: obligation.workThreadId,
-        trigger: {
-          id: `human-escalation:${sourceEscalation.id}`,
-          kind: "human_escalation_resolved",
-          occurredAt: sourceEscalation.resolution.resolvedAt
-        },
-        continuationActor: sourceEscalation.resolution.actor,
-        durableHumanResolution: sourceEscalation,
-        ...(resolutionContext ? { continuationContext: resolutionContext } : {}),
-        ...(sourceEscalation.runId ? { preferredParentRunId: sourceEscalation.runId } : {})
-      };
-    } else if (
-      obligation.sourceKind === "material_action_receipt_recorded"
-      || obligation.sourceKind === "material_action_reconciled"
-      || obligation.sourceKind === "completion_waiver_changed"
-    ) {
-      continuationInput = {
-        workThreadId: obligation.workThreadId,
-        trigger: {
-          id: `completion-evidence:${obligation.sourceKind}:${obligation.sourceId}:${obligation.sourceDigest}`,
-          kind: "completion_evidence_changed",
-          occurredAt: obligation.createdAt
-        }
-      };
-    }
-
-    if (!continuationInput) {
-      return satisfiedAssessmentId
-        ? { outcome: "satisfied" as const, reasonCode: "assessment_satisfied" as const, satisfiedAssessmentId }
-        : { outcome: "satisfied" as const, reasonCode: "continuation_terminal" as const };
-    }
-    const continuation = await attemptWorkstreamContinuation(continuationInput);
-    if (continuation.outcome === "error") {
-      throw new Error(continuation.reasonCode ?? "Continuation dispatch failed during reassessment delivery.");
-    }
-    if (continuation.outcome === "deferred") {
-      const notBefore = continuation.notBefore ?? new Date(
-        Date.parse(input.completionNow?.() ?? new Date().toISOString()) + reassessmentDeferralMs
-      ).toISOString();
-      return {
-        outcome: "rescheduled" as const,
-        reasonCode: "continuation_deferred" as const,
-        notBefore
-      };
-    }
-    if (continuation.outcome === "created" || continuation.outcome === "replayed") {
-      return {
-        outcome: "satisfied" as const,
-        reasonCode: "continuation_dispatched" as const,
-        ...(satisfiedAssessmentId ? { satisfiedAssessmentId } : {})
-      };
-    }
-    if (continuation.outcome === "needs_human" || continuation.outcome === "ambiguous") {
-      return {
-        outcome: "blocked" as const,
-        reasonCode: "needs_human" as const,
-        lastError: continuation.reasonCode ?? "Continuation requires an attributed human decision."
-      };
-    }
-    if (continuation.outcome === "rejected") {
-      return {
-        outcome: "blocked" as const,
-        reasonCode: "authority_missing" as const,
-        lastError: continuation.reasonCode ?? "Continuation authority was rejected."
-      };
-    }
-    return {
-      outcome: "satisfied" as const,
-      reasonCode: "continuation_terminal" as const,
-      ...(satisfiedAssessmentId ? { satisfiedAssessmentId } : {})
-    };
-  }
-
+  const processReassessmentObligation = createReassessmentObligationProcessor({
+    repo,
+    ingestRunResult: (runId) => completionGovernance.ingestRunResult(runId),
+    reassessWorkThread: (workThreadId, trigger) =>
+      completionGovernance.reassessWorkThread(workThreadId, trigger),
+    deliverCompletionTransition,
+    promoteNextFollowUpAfterTerminalRun,
+    attemptWorkstreamContinuation,
+    humanResolutionContinuationContext,
+    now: () => input.completionNow?.() ?? new Date().toISOString(),
+    deferralMs: reassessmentDeferralMs
+  });
   const reassessmentWorker = createReassessmentObligationWorker({
     repo,
     process: processReassessmentObligation,
@@ -6925,6 +7075,8 @@ export function createDispatcherApp(input: {
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     const completedResult = OpenTagRunResultSchema.parse(stored.run.result);
     const completionResult = await completionGovernance.ingestRunResult(runId);
+    const completionAssessmentId = completionResult?.assessment.id;
+    const completionWorkThreadId = stored.run.thread?.id;
     cancelPendingDelayedLarkStatusCard(runId);
     const linearApply = await linearApplyOptionsForEvent(stored.event);
     const receiptContext = await actionReceiptContextForFinal({
@@ -6957,10 +7109,10 @@ export function createDispatcherApp(input: {
         ...larkRenderLocaleRenderOption(stored.event),
         presentation: waitingPresentation
       });
-      await deliverAndAudit({
-        repo,
-        sink: callbackSink,
-        retry: callbackRetry,
+      const transitionKey = completionAssessmentId
+        ? `run-terminal-waiting:${completionAssessmentId}`
+        : `run-terminal-waiting:${runId}`;
+      await deliverCallbackWithCompletionAuthority({
         message: {
           runId,
           kind: "progress",
@@ -6971,8 +7123,13 @@ export function createDispatcherApp(input: {
           ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
           ...(waiting.blocks?.length ? { blocks: waiting.blocks } : {}),
           ...(waiting.rich ? { rich: waiting.rich } : {}),
-          statusMessageKey: `${runId}:status`
-        }
+          statusMessageKey: `${runId}:status`,
+          idempotencyKey: transitionKey
+        },
+        ...(completionAssessmentId ? { assessmentId: completionAssessmentId } : {}),
+        transitionKey,
+        ...(completionWorkThreadId ? { workThreadId: completionWorkThreadId } : {}),
+        deferOnGovernedFailure: true
       });
     }
     const strictExecutionWaiting = completedResult.conclusion === "success"
@@ -7019,10 +7176,10 @@ export function createDispatcherApp(input: {
       presentation: finalPresentation
     });
     const statusMessageKey = lifecycleStatusMessageKey({ provider: stored.event.callback.provider, runId });
-    await deliverAndAudit({
-      repo,
-      sink: callbackSink,
-      retry: callbackRetry,
+    const transitionKey = completionAssessmentId
+      ? `run-terminal:${completionAssessmentId}:${completedResult.conclusion}`
+      : `run-terminal:${runId}:${completedResult.conclusion}`;
+    await deliverCallbackWithCompletionAuthority({
       message: {
         runId,
         kind: "final",
@@ -7033,8 +7190,13 @@ export function createDispatcherApp(input: {
         ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
         ...(statusMessageKey ? { statusMessageKey } : {}),
         ...(finalCallback.blocks?.length ? { blocks: finalCallback.blocks } : {}),
-        ...(finalCallback.rich ? { rich: finalCallback.rich } : {})
-      }
+        ...(finalCallback.rich ? { rich: finalCallback.rich } : {}),
+        idempotencyKey: transitionKey
+      },
+      ...(completionAssessmentId ? { assessmentId: completionAssessmentId } : {}),
+      transitionKey,
+      ...(completionWorkThreadId ? { workThreadId: completionWorkThreadId } : {}),
+      deferOnGovernedFailure: true
     });
     clearDelayedLarkStatusCard(runId);
     const shouldPromoteFollowUp = completedResult.conclusion !== "needs_human" && completedResult.conclusion !== "cancelled";
@@ -7706,7 +7868,14 @@ export function createDispatcherApp(input: {
 
   return Object.assign(app, {
     async stopBackgroundWorkers() {
+      governedCallbackRuntimeStopping = true;
+      if (governedCallbackRuntimeRetryTimer) {
+        clearGovernedCallbackRuntimeTimeout(governedCallbackRuntimeRetryTimer);
+        governedCallbackRuntimeRetryTimer = undefined;
+      }
       await reassessmentWorker.stop();
+      await governedCallbackRuntimeStartTask;
+      await governedCallbackRuntime?.stop();
     }
   });
 }

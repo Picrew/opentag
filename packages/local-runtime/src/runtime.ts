@@ -1,5 +1,9 @@
 import { createDispatcherClient } from "@opentag/client";
 import {
+  OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1,
+  resolveGitHubSourceApiOrigin
+} from "@opentag/github";
+import {
   createAcpAgentExecutor,
   createBuiltInAcpExecutors,
   createEchoExecutor,
@@ -9,9 +13,15 @@ import {
   type RunnerSecurityPolicy
 } from "@opentag/runner";
 import type { RunnerExecutorRegistration } from "@opentag/core";
-import { runnerDispatcherToken, type OpenTagDaemonConfig } from "./config.js";
-import type { DaemonClient } from "./daemon.js";
+import {
+  assertHostedRelayAuthorization,
+  hostedRunnerAuthProblem,
+  runnerDispatcherToken,
+  type OpenTagDaemonConfig
+} from "./config.js";
+import type { DaemonClient, DaemonRuntimeInput } from "./daemon.js";
 import type { PullRequestOptions } from "./pr.js";
+import { createHostedControlLoop } from "./control-v1.js";
 
 export function securityFromConfig(config: OpenTagDaemonConfig): RunnerSecurityPolicy | undefined {
   const security = config.security;
@@ -103,6 +113,17 @@ export function runnerExecutorRegistrations(
 }
 
 export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
+  if (config.controlRegistration) {
+    assertHostedRelayAuthorization({
+      dispatcherUrl: config.dispatcherUrl,
+      trustedRelay: config.trustedRelay
+    });
+    const hostedAuthProblem = hostedRunnerAuthProblem(config);
+    if (hostedAuthProblem) throw new Error(hostedAuthProblem);
+    throw new Error(
+      "Hosted Control V1 does not expose a legacy claim-capable daemon client."
+    );
+  }
   const token = runnerDispatcherToken(config);
   return createDispatcherClient({
     dispatcherUrl: config.dispatcherUrl,
@@ -112,25 +133,73 @@ export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
 }
 
 export function pullRequestOptionsFromConfig(config: OpenTagDaemonConfig): PullRequestOptions | undefined {
-  if (!config.githubToken && config.preparePullRequestBranch === undefined && config.allowAutoCreatePullRequest === undefined) {
+  const githubToken = config.githubToken === OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1
+    ? undefined
+    : config.githubToken;
+  if (!githubToken && config.preparePullRequestBranch === undefined && config.allowAutoCreatePullRequest === undefined) {
     return undefined;
   }
 
   return {
-    ...(config.githubToken ? { githubToken: config.githubToken } : {}),
+    ...(githubToken ? { githubToken } : {}),
     ...(config.preparePullRequestBranch !== undefined ? { preparePullRequestBranch: config.preparePullRequestBranch } : {}),
     ...(config.allowAutoCreatePullRequest !== undefined ? { allowAutoCreatePullRequest: config.allowAutoCreatePullRequest } : {})
   };
 }
 
-export function createDaemonRuntimeInput(config: OpenTagDaemonConfig) {
+export function createDaemonRuntimeInput(
+  config: OpenTagDaemonConfig,
+  options: { databasePath?: string; githubApiOrigin?: string } = {},
+): DaemonRuntimeInput {
   const security = securityFromConfig(config);
   const pullRequestOptions = pullRequestOptionsFromConfig(config);
+  const executors = executorsFromConfig(config);
+  if (options.githubApiOrigin !== undefined && !config.controlRegistration) {
+    throw new Error(
+      "Hosted Control V1 E2E GitHub API origin requires paired Hosted Control V1."
+    );
+  }
+  if (config.controlRegistration) {
+    if (!options.databasePath) {
+      throw new Error(
+        "Hosted Control V1 requires the authoritative local dispatcher database path."
+      );
+    }
+    assertHostedRelayAuthorization({
+      dispatcherUrl: config.dispatcherUrl,
+      trustedRelay: config.trustedRelay
+    });
+    const hostedAuthProblem = hostedRunnerAuthProblem(config);
+    if (hostedAuthProblem) throw new Error(hostedAuthProblem);
+    const githubApiOrigin = options.githubApiOrigin !== undefined
+      ? resolveGitHubSourceApiOrigin({
+        token: config.githubToken ?? "",
+        apiOrigin: options.githubApiOrigin,
+      })
+      : undefined;
+    const controlLoop = createHostedControlLoop({
+      config,
+      databasePath: options.databasePath,
+      executors,
+      ...(security ? { security } : {}),
+      ...(pullRequestOptions ? { pullRequestOptions } : {}),
+      ...(githubApiOrigin !== undefined ? { githubApiOrigin } : {}),
+    });
+    if (!controlLoop) {
+      throw new Error("Hosted Control V1 sidecar could not be created.");
+    }
+    return {
+      mode: "control-v1-sidecar",
+      controlLoop,
+      ...(config.pollIntervalMs ? { pollIntervalMs: config.pollIntervalMs } : {}),
+    };
+  }
 
   return {
+    mode: "legacy",
     runnerId: config.runnerId,
     repositories: config.repositories,
-    executors: executorsFromConfig(config),
+    executors,
     scratchRoot: config.scratchRoot,
     keepScratch: config.keepScratch,
     approvalMode: config.approvalMode,

@@ -289,7 +289,7 @@ function completionExplanationFixture(): CompletionExplanation {
         gateId: "pull_request",
         targetKey: "primary_change",
         state: "passed" as const,
-        evidenceIds: [],
+        evidenceIds: ["artifact-pr-7"],
         reasonCode: "artifact_requirement_satisfied" as const,
         reason: "The pull request artifact exists.",
         evaluatedAt
@@ -475,6 +475,27 @@ function completionStatusFetch(input: {
 }
 
 describe("OpenTag CLI status", () => {
+  it("rejects invalid hosted auth before any status fetch", async () => {
+    const configured = config();
+    configured.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
+    configured.daemon.dispatcherUrl = "https://relay.example";
+    configured.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "unpaired",
+      flow: "registration",
+      operationId: "operation-1",
+      reason: "pending"
+    };
+    const fetchImpl = vi.fn();
+
+    await expect(statusFromConfig({
+      config: configured,
+      configPath: "/tmp/opentag/config.json",
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    })).rejects.toThrow("Hosted Control V1 runner is not paired");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("explains completion independently from executor success", () => {
     const formatted = formatCompletionExplanation(completionExplanationFixture()).join("\n");
 
@@ -512,6 +533,49 @@ describe("OpenTag CLI status", () => {
         .filter((request) => !request.url.endsWith("/completion"))
         .every((request) => request.authorization === "Bearer runner_mutation_token")
     ).toBe(true);
+  });
+
+  it("uses only the runtime runner credential for Hosted Control run status reads", async () => {
+    const configured = config();
+    configured.runtime = {
+      mode: "relay",
+      relayUrl: "https://relay.example",
+      relayProvider: "custom"
+    };
+    configured.daemon.dispatcherUrl = "https://relay.example";
+    configured.daemon.runnerToken = "hosted_runtime_token";
+    configured.daemon.pairingToken = "legacy_pairing_token";
+    configured.daemon.controlRegistration = {
+      kind: "hosted_control_v1",
+      state: "paired",
+      operationId: "operation-1",
+      registration: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        organizationId: "org_1",
+        runnerId: configured.daemon.runnerId,
+        registrationGeneration: 1,
+        credentialGeneration: 1,
+        credentialId: "credential-1",
+        credentialPurpose: "runtime",
+        createdAt: "2026-08-08T00:00:00.000Z"
+      }
+    };
+    const authorizations: Array<{ url: string; authorization: string | null }> = [];
+
+    const summary = await runStatusFromConfig({
+      config: configured,
+      configPath: "/tmp/opentag/config.json",
+      runId: "run_completion_auth",
+      fetchImpl: completionStatusFetch({
+        completionResponse: () => Response.json({ completion: completionExplanationFixture() }),
+        authorizations
+      })
+    });
+
+    expect(summary.completion?.completion).toBe("blocked");
+    expect(authorizations).not.toHaveLength(0);
+    expect(authorizations.every((request) => request.authorization === "Bearer hosted_runtime_token")).toBe(true);
   });
 
   it("keeps ordinary status reads available when only a runner credential is configured", async () => {

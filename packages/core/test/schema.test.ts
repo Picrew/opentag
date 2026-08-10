@@ -10,6 +10,8 @@ import {
   CompletionAssessmentSchema,
   CompletionContractSchema,
   CompletionGateSchema,
+  CompletionGateResultSchema,
+  CompletionWaiverSchema,
   ContextPacketSchema,
   HumanEscalationSchema,
   OpenTagEventSchema,
@@ -21,8 +23,62 @@ import {
   RunEventSchema,
   SuccessMetricNameSchema,
   SuggestedChangesSnapshotSchema,
-  WorkThreadSchema
+  WorkThreadSchema,
+  compareRfc3339Timestamps,
+  reduceCompletionGateStates,
+  runResultArtifactId,
+  runResultCreatedPullRequestArtifactId
 } from "../src/schema.js";
+
+describe("RFC3339 timestamp comparison", () => {
+  it("compares arbitrary fractional precision without millisecond truncation", () => {
+    expect(compareRfc3339Timestamps(
+      "2026-07-21T10:00:00.0001Z",
+      "2026-07-21T10:00:00.0009Z"
+    )).toBeLessThan(0);
+    expect(compareRfc3339Timestamps(
+      "2026-07-21T10:00:00Z",
+      "2026-07-21T10:00:00.0001Z"
+    )).toBeLessThan(0);
+    expect(compareRfc3339Timestamps(
+      "2026-07-21T10:00:00.1Z",
+      "2026-07-21T10:00:00.100Z"
+    )).toBe(0);
+    expect(compareRfc3339Timestamps(
+      "2026-07-21T11:00:00.100+01:00",
+      "2026-07-21T10:00:00.1Z"
+    )).toBe(0);
+  });
+
+  it.each([
+    "2026-02-30T00:00:00Z",
+    "2025-02-29T00:00:00Z",
+    "2026-01-01T24:00:00Z",
+    "2026-01-01T00:60:00Z",
+    "2026-01-01T00:00:60Z",
+    "2026-01-01T00:00:00+24:00",
+    "2026-01-01T00:00:00+00:60"
+  ])("rejects an invalid calendar or time value: %s", (value) => {
+    expect(() => compareRfc3339Timestamps(value, value)).toThrow(TypeError);
+  });
+});
+
+describe("run-result artifact identities", () => {
+  it("uses stable dedicated and one-based synthetic artifact IDs", () => {
+    expect(runResultCreatedPullRequestArtifactId("run_42")).toBe(
+      "run_42:created-pull-request"
+    );
+    expect(runResultArtifactId("run_42", 0)).toBe("run_42:artifact:1");
+    expect(runResultArtifactId("run_42", 1)).toBe("run_42:artifact:2");
+    expect(runResultArtifactId("run_42", 0)).not.toBe("run_42:artifact:0");
+  });
+
+  it("rejects invalid synthetic identity inputs", () => {
+    expect(() => runResultCreatedPullRequestArtifactId("")).toThrow(/non-empty run ID/u);
+    expect(() => runResultArtifactId("run_42", -1)).toThrow(/non-negative safe integer/u);
+    expect(() => runResultArtifactId("run_42", 0.5)).toThrow(/non-negative safe integer/u);
+  });
+});
 
 describe("ActionPermissionRequestSchema", () => {
   it("rejects credential-like titles before they enter durable action storage", () => {
@@ -642,7 +698,47 @@ describe("Completion governance schemas", () => {
     expect(contract.gates).toHaveLength(5);
     expect(() => CompletionContractSchema.parse({ ...contract, gates: [gates[0], gates[0]] })).toThrow(/must be unique/u);
     expect(() => CompletionContractSchema.parse({ ...contract, targetSelectors: [] })).toThrow(/must reference a target selector/u);
+    expect(() => CompletionContractSchema.parse({
+      ...contract,
+      gates: [{ ...gates[3], id: "human_escalation:configured" }]
+    })).toThrow(/reserved human_escalation/u);
     expect(() => CompletionGateSchema.parse({ ...gates[1], minimumAssurance: "unverifiable" })).toThrow();
+
+    const compatibilityContract = CompletionContractSchema.parse({
+      ...contract,
+      id: "contract_execution_compat_1",
+      mode: "execution_compat",
+      targetSelectors: [],
+      gates: [{
+        id: "execution",
+        kind: "material_action",
+        actionFamily: "executor_run",
+        requiredOutcome: "succeeded"
+      }]
+    });
+    expect(compatibilityContract.gates).toHaveLength(1);
+    expect(() => CompletionContractSchema.parse({
+      ...compatibilityContract,
+      gates: [...compatibilityContract.gates, {
+        id: "execution_2",
+        kind: "material_action",
+        actionFamily: "executor_run",
+        requiredOutcome: "succeeded"
+      }]
+    })).toThrow(/exactly one executor_run/u);
+    expect(() => CompletionContractSchema.parse({
+      ...compatibilityContract,
+      gates: [{
+        id: "execution",
+        kind: "material_action",
+        actionFamily: "release",
+        requiredOutcome: "succeeded"
+      }]
+    })).toThrow(/executor_run/u);
+    expect(() => CompletionContractSchema.parse({
+      ...compatibilityContract,
+      gates: [{ ...compatibilityContract.gates[0], id: "human_escalation:executor" }]
+    })).toThrow(/reserved human_escalation/u);
   });
 
   it("keeps execution success separate from attributed completion assessment", () => {
@@ -680,7 +776,42 @@ describe("Completion governance schemas", () => {
 
     expect(assessment.state).toBe("pending");
     expect(assessment.triggeredByRunId).toBe("run_1");
-    expect(() => CompletionAssessmentSchema.parse({ ...assessment, state: "waived" })).toThrow(/waiver attribution/u);
+    expect(CompletionAssessmentSchema.parse({
+      ...assessment,
+      gateResults: [{
+        ...assessment.gateResults[0],
+        evaluatedAt: "2026-07-21T08:00:00+08:00"
+      }],
+      assessedAt: "2026-07-20T20:00:00-04:00"
+    }).assessedAt).toBe("2026-07-20T20:00:00-04:00");
+    const invalidAssessedAt = CompletionAssessmentSchema.safeParse({
+      ...assessment,
+      assessedAt: "2026-02-30T00:00:00Z"
+    });
+    expect(invalidAssessedAt.success).toBe(false);
+    if (!invalidAssessedAt.success) {
+      expect(invalidAssessedAt.error.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: ["assessedAt"] })
+      ]));
+    }
+    const invalidEvaluatedAt = CompletionAssessmentSchema.safeParse({
+      ...assessment,
+      gateResults: [{
+        ...assessment.gateResults[0],
+        evaluatedAt: "2026-02-30T00:00:00Z"
+      }]
+    });
+    expect(invalidEvaluatedAt.success).toBe(false);
+    if (!invalidEvaluatedAt.success) {
+      expect(invalidEvaluatedAt.error.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: ["gateResults", 0, "evaluatedAt"] })
+      ]));
+    }
+    expect(() => CompletionAssessmentSchema.parse({ ...assessment, state: "waived" })).toThrow(/deterministic gate reduction/u);
+    expect(() => CompletionAssessmentSchema.parse({
+      ...assessment,
+      assessedBy: "human"
+    })).toThrow(/without a waiver must be assessed by OpenTag/u);
 
     const waived = CompletionAssessmentSchema.parse({
       ...assessment,
@@ -698,6 +829,7 @@ describe("Completion governance schemas", () => {
           evaluatedAt: createdAt
         }
       ],
+      acceptedAt: createdAt,
       waiver: {
         id: "waiver_1",
         contractId: "contract_github_1",
@@ -713,6 +845,115 @@ describe("Completion governance schemas", () => {
     });
 
     expect(waived.waiver?.gateIds).toEqual(["checks"]);
+    for (const timestampPatch of [
+      { waivedAt: "2026-02-30T00:00:00Z" },
+      { expiresAt: "2026-02-30T00:00:00Z" }
+    ]) {
+      expect(CompletionWaiverSchema.safeParse({
+        ...waived.waiver!,
+        ...timestampPatch
+      }).success).toBe(false);
+    }
+    expect(() => CompletionAssessmentSchema.parse({
+      ...waived,
+      acceptedAt: "2026-07-21T00:00:01.000Z"
+    })).toThrow(/acceptance cannot occur after/u);
+    expect(() => CompletionAssessmentSchema.parse({
+      ...waived,
+      assessedAt: "2026-07-21T00:00:00Z",
+      acceptedAt: "2026-07-21T00:00:00.100Z"
+    })).toThrow(/acceptance cannot occur after/u);
+    expect(() => CompletionAssessmentSchema.parse({
+      ...waived,
+      waiver: { ...waived.waiver!, waivedAt: "2026-07-21T00:00:01.000Z" }
+    })).toThrow(/before it is granted/u);
+    expect(() => CompletionAssessmentSchema.parse({
+      ...waived,
+      assessedAt: "2026-07-21T00:00:00Z",
+      waiver: {
+        ...waived.waiver!,
+        waivedAt: "2026-07-21T00:00:00.100Z"
+      }
+    })).toThrow(/before it is granted/u);
+    expect(() => CompletionAssessmentSchema.parse({
+      ...waived,
+      waiver: { ...waived.waiver!, expiresAt: createdAt }
+    })).toThrow(/expire after|expired/u);
+    expect(CompletionAssessmentSchema.parse({
+      ...waived,
+      assessedAt: "2026-07-21T00:00:00Z",
+      waiver: {
+        ...waived.waiver!,
+        expiresAt: "2026-07-21T00:00:00.100Z"
+      }
+    }).waiver?.expiresAt).toBe("2026-07-21T00:00:00.100Z");
+    expect(() => CompletionWaiverSchema.parse({
+      ...waived.waiver!,
+      waivedAt: "2026-07-21T00:00:00.100Z",
+      expiresAt: "2026-07-21T00:00:00Z"
+    })).toThrow(/expire after/u);
+    expect(CompletionAssessmentSchema.parse({
+      ...waived,
+      assessedAt: "2026-07-21T00:01:00.000Z",
+      acceptedAt: createdAt,
+      gateResults: waived.gateResults.map((gate) => ({
+        ...gate,
+        evaluatedAt: "2026-07-21T00:01:00.000Z"
+      }))
+    }).acceptedAt).toBe(createdAt);
+
+    expect(reduceCompletionGateStates(["passed", "waived"])).toBe("waived");
+    expect(reduceCompletionGateStates(["waived", "missing"])).toBe("pending");
+    expect(reduceCompletionGateStates(["failed", "missing", "waived"])).toBe("unsatisfied");
+    expect(reduceCompletionGateStates(["failed", "unknown"])).toBe("blocked");
+
+    expect(() => CompletionGateResultSchema.parse({
+      ...assessment.gateResults[0],
+      state: "failed"
+    })).toThrow(/reason and state/u);
+    expect(() => CompletionGateResultSchema.parse({
+      ...assessment.gateResults[0],
+      state: "passed",
+      reasonCode: "verification_passed",
+      evidenceIds: []
+    })).toThrow(/requires evidence/u);
+
+    const waivedWithMissing = CompletionAssessmentSchema.parse({
+      ...assessment,
+      id: "assessment_3",
+      state: "pending",
+      assessedBy: "human",
+      gateResults: [
+        waived.gateResults[0],
+        {
+          gateId: "merge",
+          state: "missing",
+          evidenceIds: [],
+          reasonCode: "external_state_missing",
+          reason: "Merge evidence is missing.",
+          evaluatedAt: createdAt
+        }
+      ],
+      waiver: waived.waiver
+    });
+    expect(waivedWithMissing).toMatchObject({ state: "pending", waiver: { id: "waiver_1" } });
+    expect(waivedWithMissing.acceptedAt).toBeUndefined();
+    expect(() => CompletionAssessmentSchema.parse({
+      ...waivedWithMissing,
+      waiver: { ...waivedWithMissing.waiver!, gateIds: ["merge"] }
+    })).toThrow(/exactly equal the waived gate ids/u);
+    expect(() => CompletionAssessmentSchema.parse({
+      ...waivedWithMissing,
+      waiver: { ...waivedWithMissing.waiver!, gateIds: ["checks", "unrelated"] }
+    })).toThrow(/exactly equal the waived gate ids/u);
+    expect(() => CompletionAssessmentSchema.parse({
+      ...waivedWithMissing,
+      gateResults: [...waivedWithMissing.gateResults].reverse()
+    })).toThrow(/canonical Unicode/u);
+    expect(() => CompletionAssessmentSchema.parse({
+      ...assessment,
+      gateResults: [{ ...assessment.gateResults[0], evaluatedAt: "2026-07-21T10:00:01.000Z" }]
+    })).toThrow(/evaluated after/u);
   });
 
   it("keeps accepted progress as a counted provenance projection", () => {

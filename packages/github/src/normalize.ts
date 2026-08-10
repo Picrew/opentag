@@ -8,6 +8,7 @@ export type GitHubIssueCommentInput = {
   apiCommentsUrl: string;
   issueUrl: string;
   issueNumber: number;
+  threadKind?: "issue" | "pull_request";
   owner: string;
   repo: string;
   actorId: number;
@@ -78,8 +79,8 @@ function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant
   return permissions;
 }
 
-function permissionsForPullRequestReviewCommentIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
-  const permissions = permissionsForIntent(intent);
+function permissionsForPullRequestIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
+  const permissions = permissionsForIntent(intent).filter((permission) => permission.scope !== "pr:create");
   if (intent === "review") {
     permissions.push({
       scope: "pr:update",
@@ -157,6 +158,7 @@ function commandMetadata(command: OpenTagCommand): Record<string, unknown> {
 export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): OpenTagEvent | null {
   const mention = parseOpenTagMention(input.commentBody);
   if (!mention.matched) return null;
+  const threadKind = input.threadKind ?? "issue";
 
   const command = {
     rawText: mention.rawText,
@@ -185,7 +187,7 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
     context: [
       {
         provider: "github",
-        kind: "issue",
+        kind: threadKind,
         uri: input.issueUrl,
         visibility: input.private ? "private" : "public"
       },
@@ -200,11 +202,13 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
     workItem: githubWorkItem({
       owner: input.owner,
       repo: input.repo,
-      kind: "issue",
+      kind: threadKind,
       number: input.issueNumber,
       uri: input.issueUrl
     }),
-    permissions: permissionsForIntent(mention.intent),
+    permissions: threadKind === "issue"
+      ? permissionsForIntent(mention.intent)
+      : permissionsForPullRequestIntent(mention.intent),
     callback: {
       provider: "github",
       uri: input.apiCommentsUrl,
@@ -214,7 +218,9 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
       repoProvider: "github",
       owner: input.owner,
       repo: input.repo,
-      issueNumber: input.issueNumber,
+      ...(threadKind === "pull_request"
+        ? { pullRequestNumber: input.issueNumber }
+        : { issueNumber: input.issueNumber }),
       ...(input.authorAssociation ? { authorAssociation: input.authorAssociation } : {}),
       ...commandMetadata(command),
       ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
@@ -276,7 +282,7 @@ export function normalizeGitHubPullRequestReviewComment(input: GitHubPullRequest
       number: input.pullRequestNumber,
       uri: input.pullRequestUrl
     }),
-    permissions: permissionsForPullRequestReviewCommentIntent(mention.intent),
+    permissions: permissionsForPullRequestIntent(mention.intent),
     callback: {
       provider: "github",
       uri: input.apiCommentsUrl,

@@ -28,7 +28,12 @@ import {
   type RunnerSecurityPolicy,
   executionPathForAttempt
 } from "@opentag/runner";
-import type { AgentSessionProfileConfig, RepositoryBindingConfig } from "./config.js";
+import {
+  canonicalRepositoryIdentity,
+  type AgentSessionProfileConfig,
+  type RepositoryBindingConfig,
+} from "./config.js";
+import type { HostedControlLoop } from "./control-v1.js";
 import { maybeCreatePullRequest, type PullRequestOptions } from "./pr.js";
 
 export type ClaimedRun = {
@@ -68,14 +73,15 @@ export type TrustedMaterialActionReceiptProvider = (input: {
 export function resolveRepositoryBinding(event: OpenTagEvent, repositories: RepositoryBindingConfig[]): RepositoryBindingConfig | null {
   const projectTargetRef = projectTargetRefFromEvent(event);
   if (!projectTargetRef) return null;
+  const targetIdentity = canonicalRepositoryIdentity(projectTargetRef);
 
   return (
-    repositories.find(
-      (candidate) =>
-        candidate.provider === projectTargetRef.provider &&
-        candidate.owner === projectTargetRef.owner &&
-        candidate.repo === projectTargetRef.repo
-    ) ?? null
+    repositories.find((candidate) => {
+      const candidateIdentity = canonicalRepositoryIdentity(candidate);
+      return candidateIdentity.provider === targetIdentity.provider
+        && candidateIdentity.owner === targetIdentity.owner
+        && candidateIdentity.repo === targetIdentity.repo;
+    }) ?? null
   );
 }
 
@@ -107,12 +113,13 @@ function claimedProjectTargetFailure(input: {
     };
   }
 
-  const allowed = input.repositories.some(
-    (repository) =>
-      repository.provider === input.projectTargetRef?.provider &&
-      repository.owner === input.projectTargetRef.owner &&
-      repository.repo === input.projectTargetRef.repo
-  );
+  const targetIdentity = canonicalRepositoryIdentity(input.projectTargetRef);
+  const allowed = input.repositories.some((repository) => {
+    const repositoryIdentity = canonicalRepositoryIdentity(repository);
+    return repositoryIdentity.provider === targetIdentity.provider
+      && repositoryIdentity.owner === targetIdentity.owner
+      && repositoryIdentity.repo === targetIdentity.repo;
+  });
   if (!allowed) {
     return {
       conclusion: "needs_human",
@@ -163,7 +170,8 @@ function runNoLongerClaimed(error: unknown): boolean {
 type ExecutorRunOutcome =
   | { kind: "result"; result: OpenTagRunResult }
   | { kind: "error"; error: unknown }
-  | { kind: "timeout" };
+  | { kind: "timeout" }
+  | { kind: "hosted_lease_expired" };
 
 function pullRequestPreparationFailureResult(result: OpenTagRunResult, error: unknown): OpenTagRunResult {
   return {
@@ -203,7 +211,8 @@ function executorMetadata(event: OpenTagEvent): Record<string, unknown> {
   };
 }
 
-export async function runOneDaemonIteration(input: {
+export type LegacyDaemonIterationInput = {
+  mode: "legacy";
   runnerId: string;
   repositories: RepositoryBindingConfig[];
   executors: Record<string, ExecutorAdapter>;
@@ -217,9 +226,58 @@ export async function runOneDaemonIteration(input: {
   runTimeoutMs?: number;
   agentSessionProfile?: AgentSessionProfileConfig;
   client: DaemonClient;
-}): Promise<boolean> {
+};
+
+export type ClaimedRunExecutionClient = Omit<DaemonClient, "claim">;
+
+export type ClaimedRunExecutionInput = Omit<
+  LegacyDaemonIterationInput,
+  "mode" | "client"
+> & {
+  claimed: ClaimedRun;
+  client: ClaimedRunExecutionClient;
+  hostedExecutionAuthority?: {
+    leaseExpiresAt: string;
+    assertCurrent(): Promise<boolean>;
+    readAcceptedLeaseExpiresAt?(): Promise<string | null>;
+    now?: () => Date;
+  };
+};
+
+export async function runOneDaemonIteration(
+  input: LegacyDaemonIterationInput
+): Promise<boolean> {
+  const runtimeInput = input as unknown as Record<string, unknown>;
+  if (
+    (runtimeInput.mode !== undefined && runtimeInput.mode !== "legacy")
+    || "controlLoop" in runtimeInput
+    || "controlV1SidecarOnly" in runtimeInput
+    || typeof input.client?.claim !== "function"
+  ) {
+    throw new Error(
+      "runOneDaemonIteration accepts only a legacy claim-capable daemon runtime."
+    );
+  }
   const claimed = await input.client.claim();
   if (!claimed) return false;
+  const { mode: _mode, ...executionInput } = input;
+  return executeClaimedRun({
+    ...executionInput,
+    claimed,
+  });
+}
+
+/**
+ * Executes one already-claimed Attempt without owning claim authority.
+ *
+ * The caller supplies the authoritative Run, Attempt ID, and fencing token.
+ * This helper only consumes those values through the claim-less lifecycle
+ * client and never allocates or recovers an Attempt itself.
+ */
+export async function executeClaimedRun(
+  input: ClaimedRunExecutionInput
+): Promise<boolean> {
+  const { claimed } = input;
   const lease: AttemptLease = { attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
   const runId = claimed.run.id;
 
@@ -423,22 +481,79 @@ export async function runOneDaemonIteration(input: {
   let heartbeatHandle: ReturnType<typeof setInterval> | undefined;
   let heartbeatInFlight: Promise<void> | undefined;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let hostedLeaseDeadlineHandle: ReturnType<typeof setTimeout> | undefined;
   let cancellationDetected = false;
   let cancelPromise: Promise<void> | undefined;
-  function requestExecutorCancel(error: unknown): void {
-    if (!runNoLongerClaimed(error)) {
-      console.warn(`OpenTag heartbeat failed for ${runId}:`, error);
-      return;
-    }
+  const hostedAuthority = input.hostedExecutionAuthority;
+  const hostedClock = hostedAuthority?.now ?? (() => new Date());
+  let hostedLeaseDeadline = hostedAuthority
+    ? Date.parse(hostedAuthority.leaseExpiresAt)
+    : undefined;
+  let hostedLeaseRevoked = false;
+  let armHostedLeaseDeadline: (() => void) | undefined;
+  if (hostedAuthority && !Number.isFinite(hostedLeaseDeadline)) {
+    throw new Error("hosted_execution_lease_deadline_invalid");
+  }
+  function beginExecutorCancellation(): void {
     cancellationDetected = true;
     cancelPromise ??= activeExecutor.cancel(runId, attemptId).catch((cancelError: unknown) => {
       console.warn(`OpenTag executor cancellation failed for ${runId}:`, cancelError);
     });
   }
+  function revokeHostedExecutionAuthority(): void {
+    hostedLeaseRevoked = true;
+    beginExecutorCancellation();
+  }
+  function requestExecutorCancel(error: unknown): void {
+    if (!runNoLongerClaimed(error)) {
+      console.warn(`OpenTag heartbeat failed for ${runId}:`, error);
+      return;
+    }
+    revokeHostedExecutionAuthority();
+  }
+  async function hostedExecutionIsCurrent(): Promise<boolean> {
+    if (!hostedAuthority || hostedLeaseDeadline === undefined) return true;
+    if (hostedLeaseRevoked || hostedClock().getTime() >= hostedLeaseDeadline) {
+      revokeHostedExecutionAuthority();
+      return false;
+    }
+    try {
+      if (!(await hostedAuthority.assertCurrent())) {
+        revokeHostedExecutionAuthority();
+        return false;
+      }
+    } catch {
+      revokeHostedExecutionAuthority();
+      return false;
+    }
+    if (hostedLeaseRevoked || hostedClock().getTime() >= hostedLeaseDeadline) {
+      revokeHostedExecutionAuthority();
+      return false;
+    }
+    return true;
+  }
+  if (!(await hostedExecutionIsCurrent())) {
+    if (cancelPromise) await cancelPromise;
+    return true;
+  }
   if (heartbeatIntervalMs > 0) {
     heartbeatHandle = setInterval(() => {
       if (heartbeatInFlight) return;
       heartbeatInFlight = input.client.heartbeat(runId, lease)
+        .then(async () => {
+          const acceptedLeaseExpiresAt = await hostedAuthority
+            ?.readAcceptedLeaseExpiresAt?.();
+          if (!acceptedLeaseExpiresAt || hostedLeaseRevoked) return;
+          const acceptedDeadline = Date.parse(acceptedLeaseExpiresAt);
+          if (
+            Number.isFinite(acceptedDeadline)
+            && hostedLeaseDeadline !== undefined
+            && acceptedDeadline > hostedLeaseDeadline
+          ) {
+            hostedLeaseDeadline = acceptedDeadline;
+            armHostedLeaseDeadline?.();
+          }
+        })
         .catch(requestExecutorCancel)
         .finally(() => {
           heartbeatInFlight = undefined;
@@ -458,6 +573,13 @@ export async function runOneDaemonIteration(input: {
         ...(claimed.run.contextPacket ? { contextPacket: claimed.run.contextPacket } : {}),
         permissions: claimed.event.permissions,
         permissionResolver: async (request) => {
+          const deniedActionId = `hosted_denied_${createHash("sha256")
+            .update(`${runId}:${attemptId}:${request.toolCallId}`)
+            .digest("hex")
+            .slice(0, 24)}`;
+          if (!(await hostedExecutionIsCurrent())) {
+            return { actionId: deniedActionId, decision: "deny" as const };
+          }
           let resolution = await input.client.requestActionPermission(runId, lease, {
             toolCallId: request.toolCallId,
             title: request.title,
@@ -475,12 +597,18 @@ export async function runOneDaemonIteration(input: {
           });
           while (resolution.state === "waiting") {
             await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+            if (!(await hostedExecutionIsCurrent())) {
+              return { actionId: resolution.action.id, decision: "deny" as const };
+            }
             try {
               resolution = await input.client.resolveActionPermission(runId, lease, resolution.action.id);
             } catch (error) {
               if (runNoLongerClaimed(error)) return { actionId: resolution.action.id, decision: "deny" as const };
               throw error;
             }
+          }
+          if (!(await hostedExecutionIsCurrent())) {
+            return { actionId: resolution.action.id, decision: "deny" as const };
           }
           if (resolution.state === "authorized") {
             return {
@@ -500,6 +628,9 @@ export async function runOneDaemonIteration(input: {
           return { actionId: resolution.action.id, decision: "deny" as const };
         },
         materialActionReporter: async (report) => {
+          if (!(await hostedExecutionIsCurrent())) {
+            throw new Error("hosted_execution_authority_expired");
+          }
           let trustedReceiptPromise = trustedReceiptsByActionId.get(report.actionId);
           if (!trustedReceiptPromise && input.trustedMaterialActionReceipt) {
             const createdReceiptPromise = input.trustedMaterialActionReceipt({ runId, attemptId: lease.attemptId, report });
@@ -507,6 +638,9 @@ export async function runOneDaemonIteration(input: {
             trustedReceiptPromise = createdReceiptPromise;
           }
           const trustedReceipt = await trustedReceiptPromise;
+          if (!(await hostedExecutionIsCurrent())) {
+            throw new Error("hosted_execution_authority_expired");
+          }
           await input.client.recordMaterialActionReceipt(runId, lease, report.actionId, trustedReceipt ?? {
             id: `receipt_${createHash("sha256").update(`${report.actionId}:${report.receiptRef}`).digest("hex").slice(0, 24)}`,
             actionId: report.actionId,
@@ -558,14 +692,54 @@ export async function runOneDaemonIteration(input: {
           timeoutHandle = setTimeout(() => resolve({ kind: "timeout" }), runTimeoutMs);
         })
       : undefined;
+  const hostedLeaseDeadlinePromise =
+    hostedAuthority && hostedLeaseDeadline !== undefined
+      ? new Promise<ExecutorRunOutcome>((resolveDeadline) => {
+          const armDeadline = () => {
+            if (hostedLeaseRevoked) return;
+            if (hostedLeaseDeadlineHandle) {
+              clearTimeout(hostedLeaseDeadlineHandle);
+              hostedLeaseDeadlineHandle = undefined;
+            }
+            const currentDeadline = hostedLeaseDeadline;
+            if (currentDeadline === undefined) return;
+            const remainingMs = currentDeadline - hostedClock().getTime();
+            if (remainingMs <= 0) {
+              hostedLeaseRevoked = true;
+              beginExecutorCancellation();
+              resolveDeadline({ kind: "hosted_lease_expired" });
+              return;
+            }
+            hostedLeaseDeadlineHandle = setTimeout(
+              armDeadline,
+              Math.min(remainingMs, 2_147_483_647),
+            );
+          };
+          armHostedLeaseDeadline = armDeadline;
+          armDeadline();
+        })
+      : undefined;
 
   let executorOutcome: ExecutorRunOutcome;
   try {
-    executorOutcome = await (timeoutPromise ? Promise.race([executorRunPromise, timeoutPromise]) : executorRunPromise);
+    const competingOutcomes = [
+      executorRunPromise,
+      ...(timeoutPromise ? [timeoutPromise] : []),
+      ...(hostedLeaseDeadlinePromise ? [hostedLeaseDeadlinePromise] : []),
+    ];
+    executorOutcome = await (competingOutcomes.length === 1
+      ? executorRunPromise
+      : Promise.race(competingOutcomes));
   } finally {
     if (heartbeatHandle) clearInterval(heartbeatHandle);
     if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (hostedLeaseDeadlineHandle) clearTimeout(hostedLeaseDeadlineHandle);
     if (heartbeatInFlight) await heartbeatInFlight;
+  }
+
+  if (executorOutcome.kind === "hosted_lease_expired") {
+    if (cancelPromise) await cancelPromise;
+    return true;
   }
 
   if (executorOutcome.kind === "timeout") {
@@ -581,6 +755,9 @@ export async function runOneDaemonIteration(input: {
       );
     });
     await cancelPromise;
+    if (!(await hostedExecutionIsCurrent())) {
+      return true;
+    }
     try {
       await input.client.complete(
         runId,
@@ -604,6 +781,10 @@ export async function runOneDaemonIteration(input: {
       if (cancelPromise) await cancelPromise;
       return true;
     }
+    if (!(await hostedExecutionIsCurrent())) {
+      if (cancelPromise) await cancelPromise;
+      return true;
+    }
     try {
       await input.client.complete(
         runId,
@@ -624,6 +805,10 @@ export async function runOneDaemonIteration(input: {
   if (cancellationDetected) {
     return true;
   }
+  if (!(await hostedExecutionIsCurrent())) {
+    if (cancelPromise) await cancelPromise;
+    return true;
+  }
 
   const executorResult = sanitizeCredentialLikeValue(executorOutcome.result, {
     secrets: [lease.fencingToken]
@@ -637,13 +822,24 @@ export async function runOneDaemonIteration(input: {
           event: claimed.event,
           binding,
           result: executorResult,
-          options: input.pullRequestOptions ?? {}
+          options: input.pullRequestOptions ?? {},
+          ...(hostedAuthority
+            ? { assertExecutionCurrent: hostedExecutionIsCurrent }
+            : {})
         })
       : executorResult;
   } catch (error) {
+    if (!(await hostedExecutionIsCurrent())) {
+      if (cancelPromise) await cancelPromise;
+      return true;
+    }
     result = sanitizeCredentialLikeValue(pullRequestPreparationFailureResult(executorResult, error), {
       secrets: [lease.fencingToken]
     });
+  }
+  if (!(await hostedExecutionIsCurrent())) {
+    if (cancelPromise) await cancelPromise;
+    return true;
   }
   try {
     await input.client.complete(runId, lease, result);
@@ -684,41 +880,92 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-export async function serveDaemon(input: {
-  runnerId: string;
-  repositories: RepositoryBindingConfig[];
-  executors: Record<string, ExecutorAdapter>;
-  scratchRoot?: string;
-  keepScratch?: "always" | "on_failure" | "never";
-  approvalMode?: ApprovalMode;
-  trustedMaterialActionReceipt?: TrustedMaterialActionReceiptProvider;
-  security?: RunnerSecurityPolicy;
-  pullRequestOptions?: PullRequestOptions;
-  heartbeatIntervalMs?: number;
-  runTimeoutMs?: number;
-  agentSessionProfile?: AgentSessionProfileConfig;
+export type LegacyDaemonRuntimeInput = LegacyDaemonIterationInput & {
   pollIntervalMs?: number;
   signal?: AbortSignal;
-  client: DaemonClient;
-}): Promise<void> {
+  controlLoop?: never;
+};
+
+export type ControlV1SidecarRuntimeInput = {
+  mode: "control-v1-sidecar";
+  pollIntervalMs?: number;
+  signal?: AbortSignal;
+  controlLoop: HostedControlLoop;
+  client?: never;
+};
+
+export type DaemonRuntimeInput =
+  | LegacyDaemonRuntimeInput
+  | ControlV1SidecarRuntimeInput;
+
+function assertDaemonRuntimeInput(input: DaemonRuntimeInput): void {
+  const runtimeInput = input as unknown as Record<string, unknown>;
+  if ("controlV1SidecarOnly" in runtimeInput) {
+    throw new Error(
+      "controlV1SidecarOnly is not a valid authority boundary; use a discriminated daemon runtime mode."
+    );
+  }
+  if (runtimeInput.mode === "legacy") {
+    if (
+      "controlLoop" in runtimeInput
+      || typeof (runtimeInput.client as { claim?: unknown } | undefined)?.claim
+        !== "function"
+    ) {
+      throw new Error(
+        "Legacy daemon runtime requires a claim-capable client and forbids a HostedControlLoop."
+      );
+    }
+    return;
+  }
+  if (runtimeInput.mode === "control-v1-sidecar") {
+    const loop = runtimeInput.controlLoop as Partial<HostedControlLoop> | undefined;
+    if (
+      "client" in runtimeInput
+      || !loop
+      || typeof loop.beforeIteration !== "function"
+      || typeof loop.afterIteration !== "function"
+      || typeof loop.abort !== "function"
+      || typeof loop.close !== "function"
+    ) {
+      throw new Error(
+        "Control V1 sidecar runtime requires a HostedControlLoop and forbids a claim-capable client."
+      );
+    }
+    return;
+  }
+  throw new Error("Unknown daemon runtime mode.");
+}
+
+export async function serveDaemon(input: DaemonRuntimeInput): Promise<void> {
+  assertDaemonRuntimeInput(input);
   const pollIntervalMs = input.pollIntervalMs ?? 5_000;
+  if (input.mode === "control-v1-sidecar") {
+    const abortControlLoop = () => input.controlLoop.abort();
+    input.signal?.addEventListener("abort", abortControlLoop, { once: true });
+    try {
+      while (!input.signal?.aborted) {
+        try {
+          const didWork = await input.controlLoop.beforeIteration();
+          await input.controlLoop.afterIteration();
+          if (!didWork) {
+            await sleep(pollIntervalMs, input.signal);
+          }
+        } catch (error) {
+          if (input.signal?.aborted) break;
+          console.warn("OpenTag Control V1 sidecar iteration failed; retrying:", error);
+          await sleep(pollIntervalMs, input.signal);
+        }
+      }
+    } finally {
+      input.signal?.removeEventListener("abort", abortControlLoop);
+      await input.controlLoop.close();
+    }
+    return;
+  }
+
   while (!input.signal?.aborted) {
     try {
-      const didWork = await runOneDaemonIteration({
-        runnerId: input.runnerId,
-        repositories: input.repositories,
-        executors: input.executors,
-        ...(input.scratchRoot ? { scratchRoot: input.scratchRoot } : {}),
-        ...(input.keepScratch ? { keepScratch: input.keepScratch } : {}),
-        ...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
-        ...(input.trustedMaterialActionReceipt ? { trustedMaterialActionReceipt: input.trustedMaterialActionReceipt } : {}),
-        ...(input.security ? { security: input.security } : {}),
-        ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
-        ...(input.heartbeatIntervalMs !== undefined ? { heartbeatIntervalMs: input.heartbeatIntervalMs } : {}),
-        ...(input.runTimeoutMs !== undefined ? { runTimeoutMs: input.runTimeoutMs } : {}),
-        ...(input.agentSessionProfile ? { agentSessionProfile: input.agentSessionProfile } : {}),
-        client: input.client
-      });
+      const didWork = await runOneDaemonIteration(input);
       if (!didWork) {
         await sleep(pollIntervalMs, input.signal);
       }
