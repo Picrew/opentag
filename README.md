@@ -47,7 +47,7 @@ OpenTag treats the thread where a request starts as the approval surface for age
 
 `Apply` appears only when the dispatcher confirms a configured adapter can execute the action. Otherwise the receipt shows setup or attention needed, and the local audit trail stays available through commands such as `opentag status --run <run_id>`.
 
-Each run also keeps a local agent work ledger: the source event, admission decision, context packet snapshot, executor capability snapshot, produced artifacts, callback delivery, and final outcome stay available through status and dispatcher audit APIs without flooding the human thread.
+Each run also keeps a local agent work ledger: the source event, admission decision, context packet snapshot, executor capability snapshot, produced artifacts, delivery intent audit, and final outcome stay available through status and dispatcher audit APIs without flooding the human thread. Provider outcomes remain authoritative in the delivery journal rather than being inferred from run events.
 
 ## Quick Start
 
@@ -303,7 +303,7 @@ the `@opentag` scope.
 | [`@opentag/teams`](https://www.npmjs.com/package/@opentag/teams) | Microsoft Teams Bot Framework ingest, channel replies, and action apply |
 | [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor contracts plus the generic ACP host and built-in launch profiles |
 | [`@opentag/store`](https://www.npmjs.com/package/@opentag/store) | SQLite persistence |
-| [`@opentag/dispatcher`](https://www.npmjs.com/package/@opentag/dispatcher) | Embeddable dispatcher and callback sinks |
+| [`@opentag/dispatcher`](https://www.npmjs.com/package/@opentag/dispatcher) | Embeddable dispatcher, delivery producer, and side-effect kernel |
 
 ## License
 

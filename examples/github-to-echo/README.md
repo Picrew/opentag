@@ -10,7 +10,7 @@ This demo proves the OpenTag v0 loop without needing a real coding agent.
 -> hosted dispatcher run
 -> opentagd local daemon
 -> echo executor
--> final callback text
+-> final delivery presentation intent
 ```
 
 ## Local Manual Path
@@ -21,7 +21,10 @@ This demo proves the OpenTag v0 loop without needing a real coding agent.
 OPENTAG_DATABASE_PATH=opentag.db pnpm --filter @opentag/dispatcher-app dev
 ```
 
-Set `OPENTAG_GITHUB_TOKEN` when you want the dispatcher to post callbacks to GitHub. For local smoke tests without a real GitHub thread, leave it unset and inspect `/events` instead.
+`OPENTAG_GITHUB_TOKEN` is for GitHub direct apply. Provider delivery requires an
+activated GitHub adapter in the unified registry; there is no token-based
+dispatcher fallback. For local smoke tests, inspect `/events` for queued intent
+or activation-blocked truth.
 
 Set `OPENTAG_PAIRING_TOKEN=dev_pairing_token` on the dispatcher if you want to exercise authenticated local pairing.
 

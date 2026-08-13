@@ -155,7 +155,7 @@ Supported now:
 - CLI setup through `opentag setup --platform telegram`.
 - Default local `getUpdates` polling with no public tunnel.
 - Advanced local dispatcher webhook at `/telegram/events/<bot_id>`.
-- Bot token callbacks and self-service replies.
+- Bot API delivery and self-service replies.
 - Private-chat binding through `/bind`.
 - Group-chat binding when `--telegram-binding-admin-user-ids` is configured.
 - Source-thread controls: `/help`, `/bind`, `/unbind confirm`, `/status`, `/doctor`, and `/stop [run_id]`.

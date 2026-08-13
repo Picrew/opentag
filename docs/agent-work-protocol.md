@@ -21,7 +21,7 @@ not as a full governance product.
 The primary product path is:
 
 ```text
-mention -> run -> executor -> final callback with suggested actions
+mention -> run -> executor -> final presentation with suggested actions
        -> source-thread reply such as apply 1 or continue 1
        -> ApprovalDecision -> ApplyPlan or explicit continuation run
 ```
@@ -31,12 +31,13 @@ The implemented loop should now be read as artifact-first and ledger-backed:
 ```text
 source event -> admission decision -> context packet snapshot
              -> executor capability snapshot -> artifacts / suggested actions
-             -> quiet callback -> agent work ledger
+             -> quiet source-thread presentation -> agent work ledger
 ```
 
 The ledger is not a new workspace surface. It is the local audit/status view that
-lets OpenTag keep source-thread callbacks concise while preserving source event,
-context, capability, artifact, approval, callback, and final-outcome evidence.
+lets OpenTag keep source-thread presentations concise while preserving source
+event, context, capability, artifact, approval, delivery-intent, and
+final-outcome evidence.
 
 Ingress apps and product integrations should prefer
 `@opentag/client.submitThreadAction(...)` for source-thread replies. That path
@@ -127,7 +128,7 @@ existing workspaces instead of laying another AI workspace on top of them.
 
 ## Product Position
 
-OpenTag is the open Agent Work Protocol for bounded context, quiet callbacks,
+OpenTag is the open Agent Work Protocol for bounded context, quiet presentations,
 and auditable execution in real team workflows.
 
 That means:
@@ -144,7 +145,7 @@ The core promise is:
 ```text
 Tag an agent where work already happens.
 OpenTag curates the context, scopes the permission, dispatches execution,
-records the timeline, and returns only the callbacks humans need.
+records the timeline, and returns only the presentations humans need.
 ```
 
 An equally important anti-promise is:
@@ -211,7 +212,7 @@ Deeper teams buy:
 
 - clearer authority boundaries;
 - safer external writes;
-- quieter callbacks;
+- quieter source-thread output;
 - stronger audit and routing guarantees.
 
 ## Core Thesis
@@ -273,7 +274,7 @@ not a universal default side effect.
 
 Default behavior:
 
-- write thread callbacks
+- enqueue source-thread presentations
 - attach artifacts
 - emit audit events
 
@@ -297,7 +298,7 @@ record.
 At a minimum, each capability should answer:
 
 - what semantic action it enables;
-- whether it is read-only, callback-only, or system-mutating;
+- whether it is read-only, presentation-only, or system-mutating;
 - whether it requires explicit user intent;
 - whether it may be auto-applied by policy;
 - which adapters can resolve it;
@@ -307,8 +308,8 @@ An initial capability matrix could look like this:
 
 | Capability | Default class | Requires explicit intent | May be policy-auto-applied | Typical adapter targets |
 | --- | --- | --- | --- | --- |
-| `reply_thread` | callback | No | Yes | GitHub, Slack, Lark |
-| `attach_artifact` | callback | No | Yes | GitHub, Slack, Lark |
+| `reply_thread` | presentation | No | Yes | GitHub, Slack, Lark |
+| `attach_artifact` | presentation | No | Yes | GitHub, Slack, Lark |
 | `create_pr` | external write | Usually yes | Yes, if allowed | GitHub |
 | `set_status` | external write | Usually yes | Yes, if allowed | GitHub, Linear, Jira, Lark-mapped |
 | `set_assignee` | external write | Usually yes | Yes, if allowed | GitHub, Linear, Jira, Lark-mapped |
@@ -376,7 +377,7 @@ adopt a new AI-shaped place as the center of collaboration.
 
 ### Human Attention Is A Scarce Resource
 
-Human-facing callbacks must justify why they enter the source thread. Full run
+Human-facing presentations must justify why they enter the source thread. Full run
 details belong in audit by default. The main thread should receive outcomes,
 blockers, approvals, and high-value progress only.
 
@@ -397,7 +398,7 @@ from leaking into human threads.
 OpenTag should not treat Claude, Codex, Hermes, OpenClaw, or any future agent
 runtime as the center of the product. Intelligence changes too quickly for
 teams to rebuild their workflows around one vendor. The stable layer should be
-invocation, governance, callbacks, and audit, not the current best model.
+invocation, governance, delivery, and audit, not the current best model.
 
 ### Result Artifacts Over Conversation Exhaust
 
@@ -418,12 +419,12 @@ executors, and organizations.
 
 ## Attention Budget
 
-Attention Budget treats human attention as a system resource. It turns callbacks
+Attention Budget treats human attention as a system resource. It turns presentations
 from "messages the bot feels like posting" into a policy-governed stream.
 
-### Callback Layers
+### Presentation Layers
 
-OpenTag callbacks should be grouped into four layers:
+OpenTag presentations should be grouped into four layers:
 
 | Layer | Purpose | Human-facing default |
 | --- | --- | --- |
@@ -448,7 +449,8 @@ type RunEventImportance = "low" | "normal" | "high" | "blocking";
 Examples:
 
 - `run.created` can be `audit`.
-- `callback.acknowledged` can be `human`.
+- `delivery.intent.queued` can be `human` only when presentation policy calls
+  for a visible acknowledgement.
 - `executor.log_chunk` should usually be `debug` or `audit`.
 - `run.waiting_for_permission` should be `human` and `blocking`.
 - `verification.failed` may be `human` if it changes the next action.
@@ -456,7 +458,7 @@ Examples:
 This lets adapters decide how to render events without losing the core policy
 intent.
 
-### Callback Defaults
+### Presentation Defaults
 
 For v0.x, the default policy should be conservative:
 
@@ -611,7 +613,7 @@ OpenTag should bias toward these rules:
 
 Quiet behavior should affect API and product design:
 
-- callback sinks need an audit-only path;
+- the delivery producer needs an audit-only presentation path;
 - run events need visibility metadata;
 - executors should be instructed to separate final user-facing output from
   internal logs;
@@ -725,7 +727,7 @@ Represents the normalized source event:
 - command;
 - raw context pointers;
 - permission grants;
-- callback route;
+- source-thread delivery target;
 - metadata.
 
 ### `ContextPointer`
@@ -769,10 +771,11 @@ network:restricted
 Future grants may need provider-specific extensions, but core should preserve
 the small-reversible-permissions principle.
 
-### `CallbackRoute`
+### Source-Thread Delivery Target
 
-Defines where OpenTag may respond. The callback route is not just a transport
-detail; it is the promise that work returns to the original context.
+Defines where OpenTag may present results. The target is not just a transport
+detail; it is the promise that work returns to the original context. The
+provider-specific request is resolved later by the delivery adapter.
 
 ### `OpenTagRun`
 
@@ -789,8 +792,9 @@ cancelled
 ```
 
 Before adding many organization-specific states, prefer run events for detail.
-For example, `waiting_for_input`, `waiting_for_permission`, or
-`callback_failed` can start as event types before becoming top-level statuses.
+For example, `waiting_for_input` and `waiting_for_permission` can start as event
+types before becoming top-level statuses. Delivery failure belongs to the
+delivery journal rather than the run-status vocabulary.
 
 ### `RunEvent`
 
@@ -800,7 +804,7 @@ RunEvent is the natural home for the Agent Work Protocol expansion:
 - progress checkpoint;
 - permission wait;
 - context packet generation;
-- callback delivery;
+- delivery intent enqueue or activation block;
 - verification result;
 - executor log reference;
 - audit/debug-only detail.
@@ -839,7 +843,7 @@ combination of:
 - **`workItemReference`**: the canonical external work item in the system of
   record;
 - **`conversationAnchor`**: the specific thread or comment context where this
-  invocation lives and where callbacks return by default.
+  invocation lives and where presentations return by default.
 
 `run` is then an execution instance attached to that pair.
 
@@ -898,7 +902,7 @@ of truth for the work item.**
 
 ### `ConversationAnchor`
 
-The anchor identifies where invocation and default callbacks occur.
+The anchor identifies where invocation and default presentations occur.
 
 Examples:
 
@@ -917,16 +921,16 @@ V1 should maintain:
 
 The primary anchor is the control plane by default:
 
-- default callbacks return here;
+- default presentations return here;
 - default approvals happen here;
 - default proposal lineage is presented here.
 
-Secondary anchors exist as linked context or optional callback routes. They are
+Secondary anchors exist as linked context or optional delivery targets. They are
 not equal peers in v1.
 
 By default:
 
-- secondary anchors do not receive callbacks unless explicitly subscribed or
+- secondary anchors do not receive presentations unless explicitly subscribed or
   selected by policy;
 - secondary anchors are read surfaces, not approval surfaces;
 - a secondary anchor only becomes a control plane if policy explicitly grants it
@@ -1241,7 +1245,7 @@ Core owns stable protocol primitives:
 - context pointer;
 - context packet;
 - permission grant;
-- callback route;
+- source-thread delivery target;
 - run state;
 - run event / timeline;
 - runner binding;
@@ -1254,9 +1258,9 @@ single executor, it may belong in core.
 
 Adapters connect workspace surfaces:
 
-- GitHub issue, PR, comment, diff, CI, callback comments;
+- GitHub issue, PR, comment, diff, CI, and source-thread presentations;
 - Slack app mentions, thread keys, channel bindings, thread replies;
-- Lark messages, threads, docs, Base links, callback replies;
+- Lark messages, threads, docs, Base links, and source-thread replies;
 - webhooks and CLI events.
 
 Adapters normalize platform shapes into core protocol. They should not define a
@@ -1281,7 +1285,7 @@ Policies govern organization-specific behavior:
 
 - stale run reminders;
 - needs-acceptance flow;
-- callback verbosity;
+- presentation verbosity;
 - approval thresholds;
 - context redaction;
 - Base sync field mapping;
@@ -1365,7 +1369,7 @@ A useful v1 metric set should include:
 | Metric | Why it matters |
 | --- | --- |
 | `time_to_first_useful_artifact` | Measures whether OpenTag helps users make progress quickly |
-| `thread_noise_ratio` | Human-facing callback count vs audit/debug event count; validates Attention Budget |
+| `thread_attention_cost` | Human-facing presentation count and importance; validates Attention Budget without treating audit-event volume as noise |
 | `artifact_acceptance_rate` | Measures whether `SuggestedChangesSnapshot` and related outputs are actually useful |
 | `context_reuse_rate` | Measures whether users are reducing manual copy-paste and re-explanation |
 | `external_write_approval_rate` | Measures whether explicit capability flows are understandable and trusted |
@@ -1380,8 +1384,9 @@ Goal: make a run understandable without flooding the source thread.
 
 - Add or document a first-class run event timeline.
 - Add event visibility and importance concepts.
-- Standardize ack/progress/final/audit callback layers.
-- Improve callback delivery auditability.
+- Standardize acknowledgement/progress/final/audit presentation phases.
+- Make delivery intent and journal evidence inspectable without inferring a
+  provider outcome.
 - Introduce the minimal Context Packet shape.
 - Keep source threads quiet by default.
 
@@ -1391,7 +1396,7 @@ Goal: support China-native workspace surfaces without baking Lark workflows into
 core.
 
 - Normalize Lark message mentions into OpenTag events.
-- Support Lark thread callback routes.
+- Support Lark source-thread delivery targets.
 - Add Lark context pointer kinds.
 - Treat Lark docs and Base records as pointers first, not mandatory storage.
 - Keep Base sync as optional recipe/policy behavior.
@@ -1403,7 +1408,7 @@ Goal: show the organizational pattern without making it universal.
 - Add `examples/lark-chatops-feedback`.
 - Demonstrate optional Base sync.
 - Demonstrate thread correction as recipe logic.
-- Demonstrate quiet callbacks and audit-only details.
+- Demonstrate quiet presentations and audit-only details.
 - Demonstrate stale-run reminder as policy.
 
 ### v0.5: Executor Routing And Oversight
@@ -1431,9 +1436,9 @@ Goal: let teams bring their own surfaces, executors, and governance rules.
 - Should `ContextPacket` become a required field on `OpenTagRun`, or remain an
   optional artifact generated by dispatcher/adapter policy?
 - Should event `visibility` and `importance` live in core schema immediately, or
-  first be documented as callback sink behavior?
-- Which Lark primitives should be supported first: message mention, thread
-  callback, doc context, or Base record context?
+  first be documented as presentation policy?
+- Which Lark primitives should be supported first: message mention,
+  source-thread delivery, doc context, or Base record context?
 - How should OpenTag expose audit logs: API only, CLI rendering, or a small web
   viewer?
 - Should `waiting_for_input` and `waiting_for_permission` become statuses, or

@@ -3,7 +3,7 @@
 OpenTag adapters bring new work apps into the same protocol loop:
 
 ```text
-work app event -> OpenTagEvent -> dispatcher -> runner -> callback
+work app event -> OpenTagEvent -> dispatcher -> runner -> delivery intent -> side-effect kernel
 ```
 
 Use this guide when adding a new GitHub-like, Slack-like, Lark-like, or webhook
@@ -17,7 +17,7 @@ OpenTag currently uses three adapter shapes:
 | --- | --- | --- |
 | Ingress normalizer | Converts a platform event into `OpenTagEvent` | `@opentag/github`, `@opentag/slack`, `@opentag/telegram` |
 | Ingress app | Receives signed webhooks/events and calls the dispatcher | `apps/github-probot`, `apps/slack-events`, `apps/telegram-events` |
-| Callback sink | Posts acknowledgement, progress, and final messages back to the source thread | `createGitHubCallbackSink`, `createSlackCallbackSink`, `createTelegramCallbackSink` |
+| Delivery adapter | Prepares one provider request for the side-effect kernel | `SlackDeliveryAdapter` |
 
 Future app support should arrive through these adapters, not by adding a new
 execution architecture. The dispatcher and runner contracts should stay shared.
@@ -118,10 +118,10 @@ than needed:
 Set `visibility` to `public`, `private`, or `organization` based on the source
 container. Do not mark private work as public just because the runner is local.
 
-## Callback Routes
+## Delivery Routes
 
-Callbacks are part of the adapter contract. A callback route must tell the
-dispatcher where human-facing updates belong:
+The event callback address is routing input for a delivery intent. It does not
+authorize direct Provider I/O from the dispatcher:
 
 ```ts
 callback: {
@@ -134,14 +134,14 @@ callback: {
 Use `threadKey` whenever a platform needs more than a URL to route replies. The
 Slack adapter encodes `teamId`, `channelId`, and `threadTs` for this reason.
 
-Callback sinks should:
+Delivery adapters should:
 
-- post acknowledgement and final results to the source thread;
+- prepare acknowledgement and final requests for the source thread;
 - keep routine progress audit-only unless the adapter policy says otherwise;
 - treat provider response bodies as authoritative when the provider can return
   HTTP 200 with an error payload;
-- be idempotent where possible, for example by updating one run comment instead
-  of flooding a thread.
+- return only bounded, non-secret evidence to the kernel;
+- perform Provider I/O only after the kernel durably records `provider_io_begun`.
 
 ## Binding Model
 

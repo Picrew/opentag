@@ -204,36 +204,15 @@ process after the receipt is visible. Record which platform was tested and the
 redacted evidence in the release notes; never record provider tokens, fencing
 tokens, raw ACP frames, or full private message IDs.
 
-For `0.9.0`, the required provider gate is the GitHub factory acceptance case,
-run with the registry-installed binary rather than the workspace CLI:
-
-```bash
-OPENTAG_GH_LIVE_CLI_BIN="$smoke_root/node_modules/.bin/opentag" \
-OPENTAG_GH_LIVE_EXPECTED_CLI_VERSION=0.9.0 \
-OPENTAG_GH_LIVE_EXECUTOR=phase1-fixture \
-OPENTAG_GH_LIVE_REPORT=.omx/live-e2e/github-factory-live-0.9.0.json \
-corepack pnpm smoke:live -- --case github-factory-live
-```
-
-The harness fails before starting the local stack unless the executable resolves
-to `@opentag/cli@0.9.0`, its `--version` output agrees, and the clean install's
-`package-lock.json` has an exact install-path entry with HTTPS registry
-resolution and sha512 integrity for `@opentag/cli`, the installed
-`@opentag/github` source normalizer, and the installed `@opentag/core` event
-schema. All three artifacts must resolve from `https://registry.npmjs.org`
-without URL credentials, queries, or fragments. Install from inside the fresh
-directory as shown above; do not use a detached `npm --prefix` invocation whose
-lockfile paths do not identify that installation exactly. npm verifies tarball
-bytes against the lockfile SRI value during installation; the harness retains
-that npm-generated receipt but does not independently redownload and hash the
-tarball. The source event is normalized and validated through those installed
-packages, not workspace source. The retained report must identify
-`runtimeSource: "registry_install"`, retain the sanitized
-package/version/registry/integrity receipt, and prove the same
-external-source, recipe admission, fenced local execution, current-head required
-status, provider merge, accepted completion, restart replay, source-receipt
-identity, and workstream metrics contract as the source-checkout acceptance. Do
-not promote `next` when that immutable registry path fails.
+The old GitHub factory live case depended on the removed provider-specific
+callback stack and is no longer a release gate. Do not replace it with a queued
+run event: `delivery.intent.queued` proves durable enqueue, not provider
+acceptance. Until a registry-installed provider adapter is active and its live
+acceptance retains delivery-journal begin and terminal outcome evidence, the
+unified delivery vertical remains non-releasable. Run the credential-free
+protocol, factory, and fixture checks documented in
+[Delivery Integration Verification](./real-integration-smoke-test.md), and
+record this activation limitation in the release notes.
 
 Also verify every package and its canary tag before promotion:
 

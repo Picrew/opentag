@@ -21,8 +21,9 @@ These are required for the self-hosted relay MVP:
   source webhook secret configuration, unsupported relay-mode platforms, and
   missing runner security policy.
 - Relay processes expose `/v1/relay/capabilities` without secrets so setup and
-  pairing flows can confirm whether source ingress, callback delivery, and
-  direct apply are ready before users point provider webhooks at the relay.
+  pairing flows can confirm source ingress and direct apply readiness before
+  users point provider webhooks at the relay. Outbound delivery readiness is
+  derived separately from the activated provider registry and delivery kernel.
 - The local daemon refuses claimed runs whose Project Target metadata is
   missing, outside the local config allowlist, or a GitHub source event pointing
   at a non-GitHub Project Target. This check happens before executor startup.
@@ -160,7 +161,7 @@ Runner running, progress, and completion calls accept an idempotency key,
 including from local `opentag ingest --idempotency-key ...` hook integrations.
 Replaying the same key for the same run returns success but does not append
 another `run.running` / `run.progress` / `run.completed` audit event or
-source-thread running/progress/final callback. Hosted relays still need durable
+source-thread running/progress/final presentation intent. Hosted relays still need durable
 idempotency-key retention across instances and for additional runner call types.
 
 Source webhook deliveries are also tracked by source delivery id when the

@@ -258,9 +258,9 @@ Legacy self-hosted relays can still use the global `/linear/webhooks` path plus 
 
 For new Linear setup, pass `--relay https://<your-relay-host>` to `opentag setup`. Setup validates the relay health endpoint. If the trusted relay advertises hosted OAuth install support, setup creates the pending OAuth install and prints the Linear authorization URL. Otherwise, for static-token relay configs, setup generates a unique Linear webhook path and calls `/v1/linear-relay-installations` while registering the runner/repo binding. It then writes `runtime.mode=relay` and prints the exact Linear webhook URL. For an existing config, run `opentag pair --relay https://<your-relay-host>` to pair the checkout with the relay; if the config already uses a static-token `/linear/webhooks/<install-id>` config, pair uploads that installation config again.
 
-If you explicitly configure the legacy `/linear/webhooks` path, setup/pair falls back to static relay readiness checks. When the relay exposes `/v1/relay/capabilities`, the CLI verifies Linear ingress, callback delivery, and direct apply readiness before writing relay mode.
+If you explicitly configure the legacy `/linear/webhooks` path, setup/pair falls back to static relay readiness checks. When the relay exposes `/v1/relay/capabilities`, the CLI verifies Linear ingress and direct apply readiness before writing relay mode. Outbound delivery is activated independently through the provider registry and delivery kernel.
 
-If the relay advertises Linear support but is missing callback/apply readiness,
+If the relay advertises Linear support but is missing ingress/apply readiness,
 `setup --relay` and `pair --relay` fail before writing relay mode and print a
 sanitized relay-side env template. The template includes the non-secret Project
 Target values and placeholders for the Linear token/signing secret, so secrets
