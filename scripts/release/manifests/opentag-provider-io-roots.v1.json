@@ -1,0 +1,2612 @@
+{
+  "schemaVersion": "ProviderIoRootInventoryV1",
+  "inventoryKind": "candidate_inventory_only",
+  "dynamicReachabilityProven": false,
+  "revision": "92c41240ea1d1173cbc4affc6c94f8136c3dddd3",
+  "framing": {
+    "contentDigest": "uint32be(path_utf8_bytes_length) || path_utf8_bytes || uint64be(content_bytes_length) || content_bytes",
+    "inventoryDigest": "sha256 of UTF-8 JSON.stringify(inventory without inventoryDigest)"
+  },
+  "candidateFileSetDigest": "sha256:50a539ebb9f4e36dc081912f6c28a6c75f5719ee69e93b201b12b96ac1392bda",
+  "candidateContentDigest": "sha256:f3dea3701967c1e5986740d0864b67a666fb01d126945a24288c062398cf4fd4",
+  "entrypoints": [
+    "apps/opentagd/src/index.ts",
+    "apps/slack-events/src/index.ts",
+    "packages/cli/src/index.ts",
+    "packages/client/src/index.ts",
+    "packages/local-runtime/src/daemon.ts",
+    "packages/local-runtime/src/dispatcher.ts",
+    "packages/local-runtime/src/runtime.ts"
+  ],
+  "candidateModules": [
+    "apps/opentagd/src/config.ts",
+    "apps/opentagd/src/daemon.ts",
+    "apps/opentagd/src/doctor.ts",
+    "apps/opentagd/src/index.ts",
+    "apps/opentagd/src/runtime.ts",
+    "apps/slack-events/src/config.ts",
+    "apps/slack-events/src/index.ts",
+    "packages/cli/src/cancel.ts",
+    "packages/cli/src/catalogs/capabilities.ts",
+    "packages/cli/src/catalogs/executors.ts",
+    "packages/cli/src/catalogs/languages.ts",
+    "packages/cli/src/catalogs/platforms.ts",
+    "packages/cli/src/commands/executors.ts",
+    "packages/cli/src/commands/platforms.ts",
+    "packages/cli/src/commands/setup.ts",
+    "packages/cli/src/completion.ts",
+    "packages/cli/src/config.ts",
+    "packages/cli/src/doctor.ts",
+    "packages/cli/src/factory.ts",
+    "packages/cli/src/health.ts",
+    "packages/cli/src/index.ts",
+    "packages/cli/src/ingest.ts",
+    "packages/cli/src/linear-backlog-config.ts",
+    "packages/cli/src/maintenance.ts",
+    "packages/cli/src/pair.ts",
+    "packages/cli/src/platforms/discord/display.ts",
+    "packages/cli/src/platforms/github/display.ts",
+    "packages/cli/src/platforms/gitlab/display.ts",
+    "packages/cli/src/platforms/lark/display.ts",
+    "packages/cli/src/platforms/lark/registration-ui.ts",
+    "packages/cli/src/platforms/lark/saved-config.ts",
+    "packages/cli/src/platforms/linear/display.ts",
+    "packages/cli/src/platforms/ports.ts",
+    "packages/cli/src/platforms/teams/display.ts",
+    "packages/cli/src/platforms/telegram/display.ts",
+    "packages/cli/src/project-target-summary.ts",
+    "packages/cli/src/relay-security.ts",
+    "packages/cli/src/secret-readiness.ts",
+    "packages/cli/src/service.ts",
+    "packages/cli/src/setup/builders.ts",
+    "packages/cli/src/setup/defaults.ts",
+    "packages/cli/src/setup/flow.ts",
+    "packages/cli/src/setup/guides.ts",
+    "packages/cli/src/setup/summary.ts",
+    "packages/cli/src/setup/types.ts",
+    "packages/cli/src/slack-linear-backlog.ts",
+    "packages/cli/src/start.ts",
+    "packages/cli/src/status.ts",
+    "packages/cli/src/ui/clack.ts",
+    "packages/cli/src/ui/messages.ts",
+    "packages/cli/src/ui/prompts.ts",
+    "packages/cli/src/version.ts",
+    "packages/client/src/index.ts",
+    "packages/core/src/action.ts",
+    "packages/core/src/capability.ts",
+    "packages/core/src/channel-protocol.ts",
+    "packages/core/src/credential-safety.ts",
+    "packages/core/src/factory.ts",
+    "packages/core/src/index.ts",
+    "packages/core/src/integration-protocol.ts",
+    "packages/core/src/json-schema.ts",
+    "packages/core/src/mention.ts",
+    "packages/core/src/permission-scope.ts",
+    "packages/core/src/presentation.ts",
+    "packages/core/src/project-target.ts",
+    "packages/core/src/protocol.ts",
+    "packages/core/src/request-body.ts",
+    "packages/core/src/routing.ts",
+    "packages/core/src/schema.ts",
+    "packages/discord/src/gateway.ts",
+    "packages/discord/src/index.ts",
+    "packages/discord/src/interactions-app.ts",
+    "packages/discord/src/normalize.ts",
+    "packages/discord/src/render.ts",
+    "packages/discord/src/signature.ts",
+    "packages/dispatcher/src/admission.ts",
+    "packages/dispatcher/src/callbacks.ts",
+    "packages/dispatcher/src/completion-governance.ts",
+    "packages/dispatcher/src/continuation-presentation.ts",
+    "packages/dispatcher/src/digest.ts",
+    "packages/dispatcher/src/index.ts",
+    "packages/dispatcher/src/presentation.ts",
+    "packages/dispatcher/src/reassessment-obligations.ts",
+    "packages/dispatcher/src/server.ts",
+    "packages/dispatcher/src/source-thread-control.ts",
+    "packages/github/src/apply.ts",
+    "packages/github/src/completion-evidence.ts",
+    "packages/github/src/index.ts",
+    "packages/github/src/ingress.ts",
+    "packages/github/src/normalize.ts",
+    "packages/github/src/pull-request.ts",
+    "packages/github/src/render.ts",
+    "packages/gitlab/src/apply.ts",
+    "packages/gitlab/src/index.ts",
+    "packages/gitlab/src/ingress.ts",
+    "packages/gitlab/src/merge-request.ts",
+    "packages/gitlab/src/normalize.ts",
+    "packages/gitlab/src/render.ts",
+    "packages/governance/src/accepted-progress.ts",
+    "packages/governance/src/continuation.ts",
+    "packages/governance/src/evaluate.ts",
+    "packages/governance/src/governance.ts",
+    "packages/governance/src/index.ts",
+    "packages/governance/src/routing.ts",
+    "packages/governance/src/types.ts",
+    "packages/governance/src/workstream.ts",
+    "packages/lark/src/inbound.ts",
+    "packages/lark/src/index.ts",
+    "packages/lark/src/ingress.ts",
+    "packages/lark/src/normalize.ts",
+    "packages/lark/src/outbound.ts",
+    "packages/lark/src/registration.ts",
+    "packages/lark/src/render.ts",
+    "packages/linear/src/agent.ts",
+    "packages/linear/src/apply.ts",
+    "packages/linear/src/backlog.ts",
+    "packages/linear/src/discovery.ts",
+    "packages/linear/src/graphql.ts",
+    "packages/linear/src/index.ts",
+    "packages/linear/src/ingress.ts",
+    "packages/linear/src/normalize.ts",
+    "packages/linear/src/oauth.ts",
+    "packages/linear/src/render.ts",
+    "packages/local-runtime/src/config.ts",
+    "packages/local-runtime/src/daemon.ts",
+    "packages/local-runtime/src/dispatcher.ts",
+    "packages/local-runtime/src/doctor.ts",
+    "packages/local-runtime/src/index.ts",
+    "packages/local-runtime/src/pr.ts",
+    "packages/local-runtime/src/runtime.ts",
+    "packages/runner/src/acp-agent.ts",
+    "packages/runner/src/acp-executor.ts",
+    "packages/runner/src/builtin-acp.ts",
+    "packages/runner/src/command.ts",
+    "packages/runner/src/echo.ts",
+    "packages/runner/src/executor-report.ts",
+    "packages/runner/src/executor.ts",
+    "packages/runner/src/git.ts",
+    "packages/runner/src/hermes-profile.ts",
+    "packages/runner/src/index.ts",
+    "packages/runner/src/openclaw-preflight.ts",
+    "packages/runner/src/result.ts",
+    "packages/runner/src/security.ts",
+    "packages/runner/src/session-profile.ts",
+    "packages/slack/src/dispatcher-events.ts",
+    "packages/slack/src/events.ts",
+    "packages/slack/src/index.ts",
+    "packages/slack/src/ingress.ts",
+    "packages/slack/src/normalize.ts",
+    "packages/slack/src/render.ts",
+    "packages/slack/src/socket-mode.ts",
+    "packages/store/src/canonical-json.ts",
+    "packages/store/src/index.ts",
+    "packages/store/src/repository.ts",
+    "packages/store/src/schema.ts",
+    "packages/teams/src/auth.ts",
+    "packages/teams/src/connector.ts",
+    "packages/teams/src/index.ts",
+    "packages/teams/src/normalize.ts",
+    "packages/teams/src/render.ts",
+    "packages/teams/src/thread-key.ts",
+    "packages/teams/src/token.ts",
+    "packages/teams/src/webhook-app.ts",
+    "packages/telegram/src/events-app.ts",
+    "packages/telegram/src/index.ts",
+    "packages/telegram/src/normalize.ts",
+    "packages/telegram/src/render.ts"
+  ],
+  "candidateFiles": [
+    {
+      "path": "apps/opentagd/src/config.ts",
+      "bytes": 47,
+      "digest": "sha256:3052bbda502019f78cc963e736939cbc2d3c9d540225d450c60032f758896319"
+    },
+    {
+      "path": "apps/opentagd/src/daemon.ts",
+      "bytes": 47,
+      "digest": "sha256:edc88c1aea79b552416f0f1d0caa01a2cc008cbe03c140ef670c112b0141838a"
+    },
+    {
+      "path": "apps/opentagd/src/doctor.ts",
+      "bytes": 47,
+      "digest": "sha256:e60aa4164259c0bd4f676aa5e8216c0e47d4d90edf0e7c250f56bf70b7b4dca3"
+    },
+    {
+      "path": "apps/opentagd/src/index.ts",
+      "bytes": 9436,
+      "digest": "sha256:924a6d5abd99c204a7d50af05d6aec30787f3b8ff6a58608a9a1e5ff5ddf8322"
+    },
+    {
+      "path": "apps/opentagd/src/runtime.ts",
+      "bytes": 48,
+      "digest": "sha256:1985e865724f76f8573b343a4ecbbe9dfdd3e1b7dab6f3a97aad20eb1d583e5c"
+    },
+    {
+      "path": "apps/slack-events/src/config.ts",
+      "bytes": 4271,
+      "digest": "sha256:bfdc1803148a4f8a6bed417c009f96cda98b3ed5fe7f3b9e07d3613606366700"
+    },
+    {
+      "path": "apps/slack-events/src/index.ts",
+      "bytes": 720,
+      "digest": "sha256:abf3a664e372fc52798006f4487fc830ede5e7b3290887cb4dca768bbc8ac428"
+    },
+    {
+      "path": "packages/cli/src/cancel.ts",
+      "bytes": 3721,
+      "digest": "sha256:09f6330786d384e2833636a64bea914f55e56435f06bced221d5b85fb12c7c18"
+    },
+    {
+      "path": "packages/cli/src/catalogs/capabilities.ts",
+      "bytes": 8154,
+      "digest": "sha256:5af1df454330a8adae963a6623deb9292d72159f09bf330646f0142e93944147"
+    },
+    {
+      "path": "packages/cli/src/catalogs/executors.ts",
+      "bytes": 5009,
+      "digest": "sha256:210b913476965059bc86b3270558b12a831d6f1e8faf20a97d80ebd088900470"
+    },
+    {
+      "path": "packages/cli/src/catalogs/languages.ts",
+      "bytes": 438,
+      "digest": "sha256:3cc3189659ad4a34eb39aaae7d7aa7b604c28fb1a4566f04e9f04b625abd2753"
+    },
+    {
+      "path": "packages/cli/src/catalogs/platforms.ts",
+      "bytes": 3412,
+      "digest": "sha256:b75c74eb121014c7ec5a82ec2b065fb25d73486a444a9d3816e35ed90881c262"
+    },
+    {
+      "path": "packages/cli/src/commands/executors.ts",
+      "bytes": 836,
+      "digest": "sha256:97129ba72d567ff8454cf9c11eb8e6cbb7873d588db8f4599172eef8fa14277a"
+    },
+    {
+      "path": "packages/cli/src/commands/platforms.ts",
+      "bytes": 744,
+      "digest": "sha256:5f86e885680bb7794c73d1ade3fd22837adc5c048030d13e535da7191a0ec39d"
+    },
+    {
+      "path": "packages/cli/src/commands/setup.ts",
+      "bytes": 8146,
+      "digest": "sha256:211dcd7f2e3d986fa1a4b6364892b75635090e00e63696bf30d406d4466e10a8"
+    },
+    {
+      "path": "packages/cli/src/completion.ts",
+      "bytes": 6680,
+      "digest": "sha256:0fe313102d20272e60187318c284c04d00d87dd6518a9c141273013adcd5ba5f"
+    },
+    {
+      "path": "packages/cli/src/config.ts",
+      "bytes": 24415,
+      "digest": "sha256:2fa026822aa497b17dd7b1fe8784104103c96986b713727f62195fab82a72ef9"
+    },
+    {
+      "path": "packages/cli/src/doctor.ts",
+      "bytes": 3263,
+      "digest": "sha256:53a81c5c9ab37fffa96e4d0409a5b3a16165fae30c730234af3fea01c75652c4"
+    },
+    {
+      "path": "packages/cli/src/factory.ts",
+      "bytes": 13098,
+      "digest": "sha256:d600171a6c68a3f7f3864afdf1d70fe6140941038e6eeb7ed873ec9d160161e7"
+    },
+    {
+      "path": "packages/cli/src/health.ts",
+      "bytes": 6535,
+      "digest": "sha256:e1091de3cdc413e760e7b53a226e89c9a2f33b633d2c4529e9ce43206232113b"
+    },
+    {
+      "path": "packages/cli/src/index.ts",
+      "bytes": 21819,
+      "digest": "sha256:effcef6e21fcc4da43ade535fbb0ded20dea3a7642084a021f04a76f959f24d1"
+    },
+    {
+      "path": "packages/cli/src/ingest.ts",
+      "bytes": 20848,
+      "digest": "sha256:fc2af7a93f219077b8c0ac09243471124b7c352359bfdae34be8e7e99a06d1ba"
+    },
+    {
+      "path": "packages/cli/src/linear-backlog-config.ts",
+      "bytes": 3127,
+      "digest": "sha256:fb05ebb3a26aee8391ad30994f74de414dee6d6edd1d95573a35edffb894da6e"
+    },
+    {
+      "path": "packages/cli/src/maintenance.ts",
+      "bytes": 3207,
+      "digest": "sha256:9e05462cdf7827307d8791c124b5b3cacfb4d0f3a3b504578a1d4a45f7ef2faf"
+    },
+    {
+      "path": "packages/cli/src/pair.ts",
+      "bytes": 10496,
+      "digest": "sha256:e63510c69bda6db1023ec8693684aa5f7fd3b6085b6f8624a1f4d75dc3099860"
+    },
+    {
+      "path": "packages/cli/src/platforms/discord/display.ts",
+      "bytes": 487,
+      "digest": "sha256:c4a3181e77aacfeb2e19ed873e0d2f4cc040afa88039a57304b0206a7698d535"
+    },
+    {
+      "path": "packages/cli/src/platforms/github/display.ts",
+      "bytes": 618,
+      "digest": "sha256:fa1364c2d1f97e0deebef47350fde4f61ba2b86bcdbbd0435479bd54823e1874"
+    },
+    {
+      "path": "packages/cli/src/platforms/gitlab/display.ts",
+      "bytes": 1007,
+      "digest": "sha256:9fbb95f0f556fd2f6ce5c96f7f3d547c963ea7ad35cb52a6cb15d1e05a63e446"
+    },
+    {
+      "path": "packages/cli/src/platforms/lark/display.ts",
+      "bytes": 1687,
+      "digest": "sha256:02b19bef6a16eb409c7f614e54ea2518eff578747c91865687b5114d40044650"
+    },
+    {
+      "path": "packages/cli/src/platforms/lark/registration-ui.ts",
+      "bytes": 3905,
+      "digest": "sha256:ee6cff0005a444cab583b3d313fc4b58cd1917ba9ddc981871544b5a42175746"
+    },
+    {
+      "path": "packages/cli/src/platforms/lark/saved-config.ts",
+      "bytes": 2081,
+      "digest": "sha256:6d2c8753537454d9c67dcd786ee52b353e13b73a8063d120e989681452ecad62"
+    },
+    {
+      "path": "packages/cli/src/platforms/linear/display.ts",
+      "bytes": 644,
+      "digest": "sha256:59a388c4dafee8eb8ed4ab44eaf4498f220d906def0e2aa6762df7710d142a87"
+    },
+    {
+      "path": "packages/cli/src/platforms/ports.ts",
+      "bytes": 544,
+      "digest": "sha256:f25379098f4b49c0ede48ac15361586e984f03f239e7cff0adec948af3f8fe2e"
+    },
+    {
+      "path": "packages/cli/src/platforms/teams/display.ts",
+      "bytes": 461,
+      "digest": "sha256:067fe78865548ecb950682a2ad1b296f02be4cd0e26a7c0ad8c51a2a537672b3"
+    },
+    {
+      "path": "packages/cli/src/platforms/telegram/display.ts",
+      "bytes": 878,
+      "digest": "sha256:9ecbc486df0daa74e5a9e98f33bfc899f37a1644c6cb5d35d1cf8dbc8ce1940a"
+    },
+    {
+      "path": "packages/cli/src/project-target-summary.ts",
+      "bytes": 511,
+      "digest": "sha256:7e6275e8e465df42bfb0ca77af201f67713b772bf141a6270a64b0db9332cd42"
+    },
+    {
+      "path": "packages/cli/src/relay-security.ts",
+      "bytes": 6096,
+      "digest": "sha256:e4ea9d74251d79d32fccbe6d207d0edc6e55278afd94ef3f4772a64e3a8abb87"
+    },
+    {
+      "path": "packages/cli/src/secret-readiness.ts",
+      "bytes": 3870,
+      "digest": "sha256:6ceddf6e55b42395595a0d7700e3c940fffeec88d3145f2cbbe12e9b4bf2ac94"
+    },
+    {
+      "path": "packages/cli/src/service.ts",
+      "bytes": 43545,
+      "digest": "sha256:4eac9214a872f4d41b9d71c306a303d9b2412a92ac71285c23d1653d63458b28"
+    },
+    {
+      "path": "packages/cli/src/setup/builders.ts",
+      "bytes": 11211,
+      "digest": "sha256:f788b49b71ae214667ff2865481048e973f6ca39869d3b03548cf96c77c76d7a"
+    },
+    {
+      "path": "packages/cli/src/setup/defaults.ts",
+      "bytes": 7582,
+      "digest": "sha256:76948d6c6f5d7d176f4e922e7c48bb0d1fa7882d9c49936a0da21a792efde180"
+    },
+    {
+      "path": "packages/cli/src/setup/flow.ts",
+      "bytes": 59906,
+      "digest": "sha256:51f2ee388f99f5203704b46babe1f47c29b1a5ae5bc72ebb5de8a40729dceb5b"
+    },
+    {
+      "path": "packages/cli/src/setup/guides.ts",
+      "bytes": 28900,
+      "digest": "sha256:f5225ff6d3bc1c3d8a1b4bc1d434828f26ad2e44d5aade7f890f7af1d14eaf3b"
+    },
+    {
+      "path": "packages/cli/src/setup/summary.ts",
+      "bytes": 29919,
+      "digest": "sha256:57ccf94f84eb8b935b68df8a30aca4b7eb92efee966c8dcf519a26e28067b800"
+    },
+    {
+      "path": "packages/cli/src/setup/types.ts",
+      "bytes": 4551,
+      "digest": "sha256:46b53031070b1286adfcfbd3a4128da1cffbf9b12005ffdce893d4474812adde"
+    },
+    {
+      "path": "packages/cli/src/slack-linear-backlog.ts",
+      "bytes": 6578,
+      "digest": "sha256:427fd320863da2c68dcb766f2d1ab1946d96a8844c909aca05b2766139535661"
+    },
+    {
+      "path": "packages/cli/src/start.ts",
+      "bytes": 54222,
+      "digest": "sha256:21c5da285eff02deb46d78c3b224662d2e764f536891ef7057ee178ddbe940a5"
+    },
+    {
+      "path": "packages/cli/src/status.ts",
+      "bytes": 54889,
+      "digest": "sha256:884c3b9725c710acb244f15df759f07fb03c41602a78b3b2c54eef252a740155"
+    },
+    {
+      "path": "packages/cli/src/ui/clack.ts",
+      "bytes": 2214,
+      "digest": "sha256:4781ded69feb2597d610e1c33b63fae6b6d211494c5b008580e60c84b61c91da"
+    },
+    {
+      "path": "packages/cli/src/ui/messages.ts",
+      "bytes": 10436,
+      "digest": "sha256:cd8c2166a8eabe862557d23445fc36aafc7351f7b1a1000e863394cee83af5e6"
+    },
+    {
+      "path": "packages/cli/src/ui/prompts.ts",
+      "bytes": 752,
+      "digest": "sha256:2f874574fea30f874d5950d133337638a420e799bdf4766f1aeef5471ae93609"
+    },
+    {
+      "path": "packages/cli/src/version.ts",
+      "bytes": 214,
+      "digest": "sha256:e6648b101584678483d2bb5bea831fce78de6b200319cc3d47f2f23fc7ca4036"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "bytes": 66875,
+      "digest": "sha256:9940d895c59407b924eb0a6e38305b469ddb85b7ea1117054d0a5e89b266fb69"
+    },
+    {
+      "path": "packages/core/src/action.ts",
+      "bytes": 21915,
+      "digest": "sha256:0e75d8e2ce01ddcf0b43b327e78712170c9ce88dd52940454011abf84a0818b2"
+    },
+    {
+      "path": "packages/core/src/capability.ts",
+      "bytes": 3866,
+      "digest": "sha256:0231712185c481cdbbdc8bae05c783d61633ecb3e04c4210fb24ed0a6b082cde"
+    },
+    {
+      "path": "packages/core/src/channel-protocol.ts",
+      "bytes": 3507,
+      "digest": "sha256:765ad6cbebe2b03f7b0dff000cae89a09cac3436155f04438008e3bacbc851de"
+    },
+    {
+      "path": "packages/core/src/credential-safety.ts",
+      "bytes": 8102,
+      "digest": "sha256:e95f4196b8e2175cd14218fac70da27a5df1c1175bf6b7a1004987fed2d9955a"
+    },
+    {
+      "path": "packages/core/src/factory.ts",
+      "bytes": 23759,
+      "digest": "sha256:3fca24463854f7e56384cb4c1d22ceeabd7083a6f19e8c23e38c3ee5faf58d0e"
+    },
+    {
+      "path": "packages/core/src/index.ts",
+      "bytes": 514,
+      "digest": "sha256:5295d07eb9037f507144562d82c57c87561c5756f0732b469746e6b9e49a7f31"
+    },
+    {
+      "path": "packages/core/src/integration-protocol.ts",
+      "bytes": 10483,
+      "digest": "sha256:f9b37ea6b5615390cff199bcf27145dc4b0700f1d53ae3b41ee7cb9347978e51"
+    },
+    {
+      "path": "packages/core/src/json-schema.ts",
+      "bytes": 11962,
+      "digest": "sha256:c8f1fdbc09e41147d76b1b20951e65f8ef41732b071b1c4dc2922a9a1c55763a"
+    },
+    {
+      "path": "packages/core/src/mention.ts",
+      "bytes": 15803,
+      "digest": "sha256:2b71070a63b6b16547922f8c02df7ec62896ec91f20f8adb78bd69bcc61eaec9"
+    },
+    {
+      "path": "packages/core/src/permission-scope.ts",
+      "bytes": 350,
+      "digest": "sha256:f345075400d457d0c1245ed1439215d9a926438b341be589b22d567d540a5330"
+    },
+    {
+      "path": "packages/core/src/presentation.ts",
+      "bytes": 29465,
+      "digest": "sha256:a13993b87cc76b65656612304ade85d67db87e9724a21875d2e3adf6326540bd"
+    },
+    {
+      "path": "packages/core/src/project-target.ts",
+      "bytes": 2898,
+      "digest": "sha256:e733082f68b6d93ee751c380b20fea4c1e33f2a2c4d70bd445fc38b5b7d71190"
+    },
+    {
+      "path": "packages/core/src/protocol.ts",
+      "bytes": 24360,
+      "digest": "sha256:8d9a0e60113b22dd9f4b76e465b45566b21b1d4f82d68488a86e23687082a48b"
+    },
+    {
+      "path": "packages/core/src/request-body.ts",
+      "bytes": 3017,
+      "digest": "sha256:55beb15859b6c46f8b6e7c1c2e2f788783b8d9b6d2bbb943f10f8e9547cb3cfd"
+    },
+    {
+      "path": "packages/core/src/routing.ts",
+      "bytes": 11191,
+      "digest": "sha256:faa1005e82cb0ee23d746e03ce12e755e3285fe2cda84bdfd0cbd126eb2498b4"
+    },
+    {
+      "path": "packages/core/src/schema.ts",
+      "bytes": 61696,
+      "digest": "sha256:cc47abb2a94d654ca3c4b136bf86fc28a67fd7fb42c5c35aa75387c8ca348abc"
+    },
+    {
+      "path": "packages/discord/src/gateway.ts",
+      "bytes": 16070,
+      "digest": "sha256:4e52fe627769211249612c1f9ad2f31ffbae898747c4a75d63710ce8630b50d3"
+    },
+    {
+      "path": "packages/discord/src/index.ts",
+      "bytes": 162,
+      "digest": "sha256:40b38a34ee1a2f6965fd8f30e8060eac64bd20e38d3ed0c89dff111b895d0ee7"
+    },
+    {
+      "path": "packages/discord/src/interactions-app.ts",
+      "bytes": 12457,
+      "digest": "sha256:df636a9c44e33a0a9b61c3b14d81660771b48cf6a5b5969a4910e8721a2afabf"
+    },
+    {
+      "path": "packages/discord/src/normalize.ts",
+      "bytes": 6646,
+      "digest": "sha256:d3fcfcf7f404e96b1d501899f3f73e3a717638334fd83a1135c43a08e053a30b"
+    },
+    {
+      "path": "packages/discord/src/render.ts",
+      "bytes": 1966,
+      "digest": "sha256:1ce22801a1b525bfe984a68a5bfdd3976abfef1f3fe831f8000dd8c87bb36082"
+    },
+    {
+      "path": "packages/discord/src/signature.ts",
+      "bytes": 1475,
+      "digest": "sha256:eef4e904d85a48067cbde2be50590cbdd18452841fc6d8656adf34ddb459236d"
+    },
+    {
+      "path": "packages/dispatcher/src/admission.ts",
+      "bytes": 19503,
+      "digest": "sha256:c00fa95fbb7ed48209b5367f7b9aa3e402f089a9721b8a275b760c92b6a4c185"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "bytes": 29261,
+      "digest": "sha256:8332fcc2f7da22b06ad09d92d8073972141094bfee970a3030f330cb084dcfa8"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "bytes": 48922,
+      "digest": "sha256:576c3073474c179defe25e01cefe0a69021c7b8742b5308539d4d088c62c95e2"
+    },
+    {
+      "path": "packages/dispatcher/src/continuation-presentation.ts",
+      "bytes": 4833,
+      "digest": "sha256:c2c63c95198d202b6ed66f3ca867ba7cd0b9df0ecec97eb744554805f0b0e1d2"
+    },
+    {
+      "path": "packages/dispatcher/src/digest.ts",
+      "bytes": 731,
+      "digest": "sha256:187a6b0108d7d426ca16a8e725ee54312bf94bf832358f1755fd51a594caf1dc"
+    },
+    {
+      "path": "packages/dispatcher/src/index.ts",
+      "bytes": 187,
+      "digest": "sha256:e6dba7723b7c35736d221e0bb3d11010e23a093f05a000ce80721582eeef31c9"
+    },
+    {
+      "path": "packages/dispatcher/src/presentation.ts",
+      "bytes": 15031,
+      "digest": "sha256:95201e9ed12bf31ad6f0cfad47de8694e2d9782acfc2941690db58f6be7ebab6"
+    },
+    {
+      "path": "packages/dispatcher/src/reassessment-obligations.ts",
+      "bytes": 9270,
+      "digest": "sha256:fba0b5ba2aa19570b2e87e6736fa3c4d2a1d0ecf7aa82d1a8f7e61de63ff6f65"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "bytes": 320082,
+      "digest": "sha256:bec6f8386141e351959e0f9711e5c882ed9f5eafeac1dfea0064df3f8243368c"
+    },
+    {
+      "path": "packages/dispatcher/src/source-thread-control.ts",
+      "bytes": 25146,
+      "digest": "sha256:a6b08e6fd55bfd807a2c94e7e3c4b44350a82cb29f68a8baeac0e54bf7b63b31"
+    },
+    {
+      "path": "packages/github/src/apply.ts",
+      "bytes": 23565,
+      "digest": "sha256:df3249fcf993574782d6d00900e66f147b10ce3a7922e58985bec93562924f7a"
+    },
+    {
+      "path": "packages/github/src/completion-evidence.ts",
+      "bytes": 13949,
+      "digest": "sha256:e549ebf2dac62772490eca7a66e68ad50770e6997a69c9cb1c1e4d986faa3708"
+    },
+    {
+      "path": "packages/github/src/index.ts",
+      "bytes": 196,
+      "digest": "sha256:18a825bd2a5e24bdea3c611e3c911588834a3593f8a3f89ff3251af7b93e1c79"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "bytes": 31763,
+      "digest": "sha256:d3194a5c833f01cb19de9c08ef007dcd868fd75b79a4fc478e0995eeb548fcf8"
+    },
+    {
+      "path": "packages/github/src/normalize.ts",
+      "bytes": 9280,
+      "digest": "sha256:0928d2552294b828c94bcbc67e2ee882c5381f2a714fa186f43221f1b8769318"
+    },
+    {
+      "path": "packages/github/src/pull-request.ts",
+      "bytes": 1682,
+      "digest": "sha256:9359bb0398def10b0905ee127f3b8d148eb82b95a862e711b7b5b6f03442cbdc"
+    },
+    {
+      "path": "packages/github/src/render.ts",
+      "bytes": 4183,
+      "digest": "sha256:3e3abb5de3ae3ba50cf8c25e5c475336083d5f12486123debbe72c2d048ffc7c"
+    },
+    {
+      "path": "packages/gitlab/src/apply.ts",
+      "bytes": 6361,
+      "digest": "sha256:77606457e6a2e86582ef6f3b4b21a36fbb0836a5c48604a38860dff209b8ad35"
+    },
+    {
+      "path": "packages/gitlab/src/index.ts",
+      "bytes": 155,
+      "digest": "sha256:638eaae18180e66df8b2004f8ebc436b04283256c4da63ef08899ff65ef045ab"
+    },
+    {
+      "path": "packages/gitlab/src/ingress.ts",
+      "bytes": 22089,
+      "digest": "sha256:0a96e826886d17c8871c836eb4e6e95eaece0848eae47f13be7a33f3fd7df8bc"
+    },
+    {
+      "path": "packages/gitlab/src/merge-request.ts",
+      "bytes": 1611,
+      "digest": "sha256:137cb32b1484faa4bd6b45fd945bbfd5c9e802da2f31777cc0c8842e24271b87"
+    },
+    {
+      "path": "packages/gitlab/src/normalize.ts",
+      "bytes": 13283,
+      "digest": "sha256:b82f640b4a85ac09eab6af82a0e20a910a57aeb3f76e74f0dab9fd7a120be364"
+    },
+    {
+      "path": "packages/gitlab/src/render.ts",
+      "bytes": 10520,
+      "digest": "sha256:9251f684029e171272ffdc048f6c82630f9afc32cd6b04ab1639410d5bb9837b"
+    },
+    {
+      "path": "packages/governance/src/accepted-progress.ts",
+      "bytes": 7266,
+      "digest": "sha256:b3ce791f1e8c929006e65ae45ab0391e716c16563fabcb21dc656de99be836c7"
+    },
+    {
+      "path": "packages/governance/src/continuation.ts",
+      "bytes": 7446,
+      "digest": "sha256:2e54bda99a9b5f199d0d8a73f36ccea26d35347cebec1f90f83116661cf4467d"
+    },
+    {
+      "path": "packages/governance/src/evaluate.ts",
+      "bytes": 30113,
+      "digest": "sha256:387fb75e7194ffb21e4a8ad3b66a7afee284815971a7909f1a15e63eabc78d53"
+    },
+    {
+      "path": "packages/governance/src/governance.ts",
+      "bytes": 5048,
+      "digest": "sha256:71e2611aafbbb27ed426bdf1606a48b450aec179dcfe16a961213fadd03cf4fd"
+    },
+    {
+      "path": "packages/governance/src/index.ts",
+      "bytes": 230,
+      "digest": "sha256:69793f67d74d6389a74ce7aac9f2cf1c7b26c87d4efa897f983cea7dd1ef2563"
+    },
+    {
+      "path": "packages/governance/src/routing.ts",
+      "bytes": 10936,
+      "digest": "sha256:bd3a21abbe6474f787e26ca0c5a05351fe0b7b3eba2407c13452cd824cba3739"
+    },
+    {
+      "path": "packages/governance/src/types.ts",
+      "bytes": 4422,
+      "digest": "sha256:da8f12e8a2d6fc1690042c7b5f483de8d0f00aa0f2ee3323957f4579a879cfbe"
+    },
+    {
+      "path": "packages/governance/src/workstream.ts",
+      "bytes": 4952,
+      "digest": "sha256:4b0592e3ee7308dfb153ecb75dc8cf2e207643d5379e72187f5b47b4ff6f50bb"
+    },
+    {
+      "path": "packages/lark/src/inbound.ts",
+      "bytes": 33197,
+      "digest": "sha256:213533e79c6abdea962ae36f247271982227df5d4515a5ee307c6a1eaa9351bf"
+    },
+    {
+      "path": "packages/lark/src/index.ts",
+      "bytes": 187,
+      "digest": "sha256:d58d5b132873ecee533615b7d2d2ffcc769d9cef93be6f21b81aa3d9db2d7acf"
+    },
+    {
+      "path": "packages/lark/src/ingress.ts",
+      "bytes": 22209,
+      "digest": "sha256:b21814d67efadfa0ca2747b7400ca9a01f6d4de5a6cc4723716a9ca9ab687a6e"
+    },
+    {
+      "path": "packages/lark/src/normalize.ts",
+      "bytes": 7541,
+      "digest": "sha256:a4601accc94f7bc1e9747aac857ca7401ec2c5fd507126fd89b6444a3ef5d39e"
+    },
+    {
+      "path": "packages/lark/src/outbound.ts",
+      "bytes": 4438,
+      "digest": "sha256:25fbcc557f90f39c9fac1e5daf062864fbfe52e4d6a16300b8c7883d78a7148b"
+    },
+    {
+      "path": "packages/lark/src/registration.ts",
+      "bytes": 7782,
+      "digest": "sha256:6bba5df01e877b516bc27eccfd6273b1e0e85f65decbaf1c3a681dc1beb935ec"
+    },
+    {
+      "path": "packages/lark/src/render.ts",
+      "bytes": 37081,
+      "digest": "sha256:68f98966e2d1cd143f1ae31c3a0026fb81e92bf76c03cce6140fe05ec2a5e9dc"
+    },
+    {
+      "path": "packages/linear/src/agent.ts",
+      "bytes": 13027,
+      "digest": "sha256:354fa88e92e51381d8f943f84bd1fe5d186322de523a687c65822f908cda5751"
+    },
+    {
+      "path": "packages/linear/src/apply.ts",
+      "bytes": 17243,
+      "digest": "sha256:3a195f9367db85eaf101de017635021d29fdfb4a6412a52d84cef0866c5cb8f2"
+    },
+    {
+      "path": "packages/linear/src/backlog.ts",
+      "bytes": 7099,
+      "digest": "sha256:5eaec51c576110d0cd7c5eab01bb0a36d0bd77d4382b713774fd281a5a8274b7"
+    },
+    {
+      "path": "packages/linear/src/discovery.ts",
+      "bytes": 11079,
+      "digest": "sha256:652b050abc4d3fbcc7c6275f572f4d6f945f19c89c64a595f6ce98152a08967d"
+    },
+    {
+      "path": "packages/linear/src/graphql.ts",
+      "bytes": 1781,
+      "digest": "sha256:49880ce77e49d74dcf0663cfa7429e3fa24ecf98b0d8adfaa98b8ae94ba7d91c"
+    },
+    {
+      "path": "packages/linear/src/index.ts",
+      "bytes": 267,
+      "digest": "sha256:dae3dcf4a9d3c502238d828218373548678e7a603181b637b3a3999fdd9e8c32"
+    },
+    {
+      "path": "packages/linear/src/ingress.ts",
+      "bytes": 24858,
+      "digest": "sha256:d1aaa4b3216fbad6a0ce9b0944da948b502ecd5ecdffbd9b0ea759a0c040e725"
+    },
+    {
+      "path": "packages/linear/src/normalize.ts",
+      "bytes": 7421,
+      "digest": "sha256:ca1bfb86607d5d511379c7e78e26e888d897de5603f318156d54eee2b9aaed83"
+    },
+    {
+      "path": "packages/linear/src/oauth.ts",
+      "bytes": 9615,
+      "digest": "sha256:6dfb4a0fd5e0a6dad496bb094025e8fde0ed25cc27bf4d7d4944af788ee5bfd4"
+    },
+    {
+      "path": "packages/linear/src/render.ts",
+      "bytes": 3711,
+      "digest": "sha256:c9d3d6d33737caa7d2835fd043c36c1c3c92978426a628023741e2a822c1892c"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "bytes": 21132,
+      "digest": "sha256:cb0014de79d7daaf0e46655005bf124e619e3ff42c41bf473842483e789dd04b"
+    },
+    {
+      "path": "packages/local-runtime/src/daemon.ts",
+      "bytes": 28625,
+      "digest": "sha256:36de33ab1b8f780b585e7fc8a91277bd1a3f5793ee228da15209530b6ea5a91d"
+    },
+    {
+      "path": "packages/local-runtime/src/dispatcher.ts",
+      "bytes": 55960,
+      "digest": "sha256:b3af18a92325948b384941971b0dd1e0a16649c90620e3c004d7dd69697bc69d"
+    },
+    {
+      "path": "packages/local-runtime/src/doctor.ts",
+      "bytes": 21029,
+      "digest": "sha256:e9c41190ed963209f6ec0d368142dfe99aea669fd13a47f2510f109e4ae84fcb"
+    },
+    {
+      "path": "packages/local-runtime/src/index.ts",
+      "bytes": 293,
+      "digest": "sha256:ea004e487bcf0388ccb1694f5382bbd82c3cc3b354737c9f24650c3ac9a02792"
+    },
+    {
+      "path": "packages/local-runtime/src/pr.ts",
+      "bytes": 4684,
+      "digest": "sha256:9d258a29c6ad555f462e5dce64f8337981b65b1cb7ff3706d25a4c9caf580879"
+    },
+    {
+      "path": "packages/local-runtime/src/runtime.ts",
+      "bytes": 6229,
+      "digest": "sha256:da20c1c640e0af89d7fb816059c96ec63ba990f573a366554dd78c62ea31f8d3"
+    },
+    {
+      "path": "packages/runner/src/acp-agent.ts",
+      "bytes": 2379,
+      "digest": "sha256:b399529c8ec242d5712a6c2cc576ae1bccba0df55c3da640ec99814363a3acf3"
+    },
+    {
+      "path": "packages/runner/src/acp-executor.ts",
+      "bytes": 47437,
+      "digest": "sha256:fbb801204d58207261d1ded60328cda1402e57191a9e2d9d34c54ccba6ee0b83"
+    },
+    {
+      "path": "packages/runner/src/builtin-acp.ts",
+      "bytes": 5133,
+      "digest": "sha256:e71a8f7cf05d594e09876cd04ae9b4b91126262d4f36c6c78918f1004f0a010f"
+    },
+    {
+      "path": "packages/runner/src/command.ts",
+      "bytes": 1953,
+      "digest": "sha256:98e2b25065328bade8043dc3ff1797c424a9a33a7174f3cfa28fea22abebd1f8"
+    },
+    {
+      "path": "packages/runner/src/echo.ts",
+      "bytes": 2688,
+      "digest": "sha256:8eb66f1634be051696d339f3d46c5ab3d9bdea68a8ed334ed896faa2d0e9fe91"
+    },
+    {
+      "path": "packages/runner/src/executor-report.ts",
+      "bytes": 8707,
+      "digest": "sha256:53dd6b070b7d94ab30059ed4641595be6d7ccbc1b766fa6d88d7a5cceef71a93"
+    },
+    {
+      "path": "packages/runner/src/executor.ts",
+      "bytes": 4801,
+      "digest": "sha256:163d2f4bce78842fde662f714b1c522e1e7918f7a217c877a9fcb79d7c3e7195"
+    },
+    {
+      "path": "packages/runner/src/git.ts",
+      "bytes": 7841,
+      "digest": "sha256:cbf88f7a4ad82fb3c628bea50f9094d0b1f9c63234a7ec84e81a9ceb8d7168fc"
+    },
+    {
+      "path": "packages/runner/src/hermes-profile.ts",
+      "bytes": 1355,
+      "digest": "sha256:edd5da4d078eae706bbadf9bee68b2a64c2a05c8bf5cadcae3a339e300943649"
+    },
+    {
+      "path": "packages/runner/src/index.ts",
+      "bytes": 350,
+      "digest": "sha256:3c46cc3a17ed11c76c5fa59f0a152866ff566a8233a2c2c86a72c593308e5716"
+    },
+    {
+      "path": "packages/runner/src/openclaw-preflight.ts",
+      "bytes": 3809,
+      "digest": "sha256:fa660fb2e6cc0b405af55cf4945a132a1f2841634e143ecb8a9288f9318fa808"
+    },
+    {
+      "path": "packages/runner/src/result.ts",
+      "bytes": 11804,
+      "digest": "sha256:e8aa28b49338c2bab3cafb937947c566ea6c784d6cb556508e880cb5f8ead270"
+    },
+    {
+      "path": "packages/runner/src/security.ts",
+      "bytes": 9945,
+      "digest": "sha256:407ff91cee19783fd041629c5e0b8ffce4873254108a713782ab81fd9ffb5190"
+    },
+    {
+      "path": "packages/runner/src/session-profile.ts",
+      "bytes": 5695,
+      "digest": "sha256:b586bf2dd5df2926aa732b89e9373a68de8adf7cab14e75917f9c9a4b18eb9b2"
+    },
+    {
+      "path": "packages/slack/src/dispatcher-events.ts",
+      "bytes": 13240,
+      "digest": "sha256:378444251314d0b0e9b39538d59658b0b385e4a34f4912b1f67a15fc0f3bc735"
+    },
+    {
+      "path": "packages/slack/src/events.ts",
+      "bytes": 30780,
+      "digest": "sha256:991ba73505dbef674026711674d86ec309c39073b7deee3557e75ba4f19220c7"
+    },
+    {
+      "path": "packages/slack/src/index.ts",
+      "bytes": 257,
+      "digest": "sha256:ade01b30a1f9d901d7330983d4cb5ddff6465b3fdcd5833d32376d61c31ba394"
+    },
+    {
+      "path": "packages/slack/src/ingress.ts",
+      "bytes": 19408,
+      "digest": "sha256:cdda146a7904d2e668bffc762f48a94e7a59a2f2a004878857a56675bf63174e"
+    },
+    {
+      "path": "packages/slack/src/normalize.ts",
+      "bytes": 12239,
+      "digest": "sha256:4b52f29965b16db62cad058fbf907bd4dbdf34114a6c903a365afa20591a10d2"
+    },
+    {
+      "path": "packages/slack/src/render.ts",
+      "bytes": 32009,
+      "digest": "sha256:f11265a0b6eda24452a8545ee102d4f3f69d807302d8c9bf86a4bdbe586380a8"
+    },
+    {
+      "path": "packages/slack/src/socket-mode.ts",
+      "bytes": 10018,
+      "digest": "sha256:415fd0514a376bbd39850439163cbc613b83ff0fabf83bfcea4482e1917da94c"
+    },
+    {
+      "path": "packages/store/src/canonical-json.ts",
+      "bytes": 721,
+      "digest": "sha256:23588349172d9d4d5d61bda0e57aa33bee5e4ec350ad9a6f83a1ef2397f29958"
+    },
+    {
+      "path": "packages/store/src/index.ts",
+      "bytes": 62,
+      "digest": "sha256:af5963caaa9e6b7b8aa8bdb361f859876be1956bc23ad433177463adb27d588f"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "bytes": 379696,
+      "digest": "sha256:6742654d2f57059547aff4c74546149261171d208ce97d27bdfa20fdd5d7832f"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "bytes": 62549,
+      "digest": "sha256:64c14a2abce660a2bf88aee5e8938aaa47f5297e20d0546e76af88ef04631420"
+    },
+    {
+      "path": "packages/teams/src/auth.ts",
+      "bytes": 7066,
+      "digest": "sha256:100fd6be76c3bba4a22f6f76e78fe38506977da2b22f9a51e04a21b5185e16a9"
+    },
+    {
+      "path": "packages/teams/src/connector.ts",
+      "bytes": 2045,
+      "digest": "sha256:91f7be36d7b4a9765bb6470dc5da4fc828366b75e415f3de9079182dfaa33c6e"
+    },
+    {
+      "path": "packages/teams/src/index.ts",
+      "bytes": 215,
+      "digest": "sha256:63ffb91085258e025f22495768ff97069d6884d5dea0eff3ff3addd48e1ecc7d"
+    },
+    {
+      "path": "packages/teams/src/normalize.ts",
+      "bytes": 9036,
+      "digest": "sha256:4b7e28f8b71a664a14f5f53300d2b6e270dbe97f8c135c126a068c8c8b210a99"
+    },
+    {
+      "path": "packages/teams/src/render.ts",
+      "bytes": 1432,
+      "digest": "sha256:477fd9cf73c98e4bd5c293ea4cbbbd51d4b51a47c95b5272bbe2e178fd22410b"
+    },
+    {
+      "path": "packages/teams/src/thread-key.ts",
+      "bytes": 869,
+      "digest": "sha256:158ff10cf380622f5a1d9276ef13bfec128048bbe8a86ec928464956cb68c7fa"
+    },
+    {
+      "path": "packages/teams/src/token.ts",
+      "bytes": 2098,
+      "digest": "sha256:6a26e6fd174464822ed7a3d6b2a9b52d63565aea9ec4af0c80d8e6d4aad44dbb"
+    },
+    {
+      "path": "packages/teams/src/webhook-app.ts",
+      "bytes": 7418,
+      "digest": "sha256:3614b439f142454e10fadda467b2cc5a69f845d1a5e6a4a77d5afa254c405f5e"
+    },
+    {
+      "path": "packages/telegram/src/events-app.ts",
+      "bytes": 23774,
+      "digest": "sha256:a46c74919152dc9118a61514c072e0ed50ea38848448e49290a56e19be7af3ea"
+    },
+    {
+      "path": "packages/telegram/src/index.ts",
+      "bytes": 94,
+      "digest": "sha256:dbffa55137e2271e1c9c390af17038e72d977a3d204066a6d4966195fee0a13d"
+    },
+    {
+      "path": "packages/telegram/src/normalize.ts",
+      "bytes": 7225,
+      "digest": "sha256:8f71da44ced14ecfdc96f59eff8101b9a3c8f7abac3ff9710f2e5440c516e76b"
+    },
+    {
+      "path": "packages/telegram/src/render.ts",
+      "bytes": 10929,
+      "digest": "sha256:bcb3524edb1ab4b4914b2994533fa68e7ce6332b7ac332c5994967a23e22ad07"
+    }
+  ],
+  "roots": [
+    {
+      "path": "packages/cli/src/commands/setup.ts",
+      "line": 108,
+      "kind": "token"
+    },
+    {
+      "path": "packages/cli/src/config.ts",
+      "line": 1,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/cli/src/config.ts",
+      "line": 585,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/cli/src/health.ts",
+      "line": 10,
+      "kind": "http"
+    },
+    {
+      "path": "packages/cli/src/service.ts",
+      "line": 1,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/cli/src/service.ts",
+      "line": 286,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/cli/src/service.ts",
+      "line": 298,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/cli/src/setup/flow.ts",
+      "line": 1,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/cli/src/setup/flow.ts",
+      "line": 10,
+      "kind": "token"
+    },
+    {
+      "path": "packages/cli/src/setup/flow.ts",
+      "line": 145,
+      "kind": "token"
+    },
+    {
+      "path": "packages/cli/src/setup/flow.ts",
+      "line": 260,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/cli/src/setup/flow.ts",
+      "line": 285,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/cli/src/setup/flow.ts",
+      "line": 1176,
+      "kind": "token"
+    },
+    {
+      "path": "packages/cli/src/slack-linear-backlog.ts",
+      "line": 63,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/cli/src/slack-linear-backlog.ts",
+      "line": 74,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/cli/src/slack-linear-backlog.ts",
+      "line": 95,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/cli/src/slack-linear-backlog.ts",
+      "line": 143,
+      "kind": "token"
+    },
+    {
+      "path": "packages/cli/src/start.ts",
+      "line": 18,
+      "kind": "token"
+    },
+    {
+      "path": "packages/cli/src/start.ts",
+      "line": 81,
+      "kind": "token"
+    },
+    {
+      "path": "packages/cli/src/start.ts",
+      "line": 617,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/cli/src/start.ts",
+      "line": 618,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/cli/src/start.ts",
+      "line": 690,
+      "kind": "token"
+    },
+    {
+      "path": "packages/cli/src/start.ts",
+      "line": 698,
+      "kind": "token"
+    },
+    {
+      "path": "packages/cli/src/start.ts",
+      "line": 922,
+      "kind": "token"
+    },
+    {
+      "path": "packages/cli/src/start.ts",
+      "line": 1027,
+      "kind": "token"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 244,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 247,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 294,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 497,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 536,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 741,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 750,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 758,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 772,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 780,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 789,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 797,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 798,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 803,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 807,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 818,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 827,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 835,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 845,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 853,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 863,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 871,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 881,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 891,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 903,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 914,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 938,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 949,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 958,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 967,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 983,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 994,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1005,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1016,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1026,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1037,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1046,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1055,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1065,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1106,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1115,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1129,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1147,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1156,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1170,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1181,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1192,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1202,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1203,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1203,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1213,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1219,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1235,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1254,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1268,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1282,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1299,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1311,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1320,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1339,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1372,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1389,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1406,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1435,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1454,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1462,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1470,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1478,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1486,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1494,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1503,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1511,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1519,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1527,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1546,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1554,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1570,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1578,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 1595,
+      "kind": "http"
+    },
+    {
+      "path": "packages/core/src/schema.ts",
+      "line": 287,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/core/src/schema.ts",
+      "line": 599,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/core/src/schema.ts",
+      "line": 911,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/core/src/schema.ts",
+      "line": 1068,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/core/src/schema.ts",
+      "line": 1118,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/core/src/schema.ts",
+      "line": 1270,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/discord/src/gateway.ts",
+      "line": 164,
+      "kind": "http"
+    },
+    {
+      "path": "packages/discord/src/gateway.ts",
+      "line": 184,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 103,
+      "kind": "token"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 135,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 158,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 208,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 328,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 386,
+      "kind": "token"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 451,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 577,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 616,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 621,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 629,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 665,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "line": 23,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "line": 755,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "line": 1009,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "line": 1010,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "line": 1058,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "line": 1065,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "line": 1092,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 78,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 98,
+      "kind": "token"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 99,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 103,
+      "kind": "token"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 796,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 2484,
+      "kind": "token"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 2942,
+      "kind": "delivery_callback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 3031,
+      "kind": "delivery_callback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 3136,
+      "kind": "token"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 3199,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 3450,
+      "kind": "delivery_callback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 3678,
+      "kind": "delivery_callback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 4181,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 4252,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 4366,
+      "kind": "delivery_callback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 4825,
+      "kind": "token"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 4837,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 5009,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 5029,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 5148,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 5169,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 5170,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 6649,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 6650,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 6651,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 6661,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 6662,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 6667,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 6679,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/server.ts",
+      "line": 6739,
+      "kind": "delivery_callback"
+    },
+    {
+      "path": "packages/dispatcher/src/source-thread-control.ts",
+      "line": 80,
+      "kind": "delivery_callback"
+    },
+    {
+      "path": "packages/dispatcher/src/source-thread-control.ts",
+      "line": 81,
+      "kind": "delivery_callback"
+    },
+    {
+      "path": "packages/dispatcher/src/source-thread-control.ts",
+      "line": 219,
+      "kind": "delivery_callback"
+    },
+    {
+      "path": "packages/dispatcher/src/source-thread-control.ts",
+      "line": 223,
+      "kind": "delivery_callback"
+    },
+    {
+      "path": "packages/github/src/apply.ts",
+      "line": 196,
+      "kind": "http"
+    },
+    {
+      "path": "packages/github/src/apply.ts",
+      "line": 220,
+      "kind": "http"
+    },
+    {
+      "path": "packages/github/src/apply.ts",
+      "line": 489,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/apply.ts",
+      "line": 507,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/completion-evidence.ts",
+      "line": 163,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/completion-evidence.ts",
+      "line": 182,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/completion-evidence.ts",
+      "line": 184,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/completion-evidence.ts",
+      "line": 240,
+      "kind": "http"
+    },
+    {
+      "path": "packages/github/src/completion-evidence.ts",
+      "line": 241,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/completion-evidence.ts",
+      "line": 250,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/completion-evidence.ts",
+      "line": 266,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/completion-evidence.ts",
+      "line": 267,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/completion-evidence.ts",
+      "line": 272,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/completion-evidence.ts",
+      "line": 284,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/completion-evidence.ts",
+      "line": 287,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/completion-evidence.ts",
+      "line": 291,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 19,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 83,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 86,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 102,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 103,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 115,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 131,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 284,
+      "kind": "http"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 478,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 479,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 485,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 500,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 506,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 507,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 509,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 593,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 596,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 600,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 619,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 621,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 637,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 646,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 649,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 657,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 662,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 664,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 669,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 672,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 674,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 677,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 685,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 688,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 758,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 759,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 772,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/ingress.ts",
+      "line": 805,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/github/src/pull-request.ts",
+      "line": 36,
+      "kind": "http"
+    },
+    {
+      "path": "packages/gitlab/src/merge-request.ts",
+      "line": 22,
+      "kind": "http"
+    },
+    {
+      "path": "packages/governance/src/continuation.ts",
+      "line": 146,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/governance/src/evaluate.ts",
+      "line": 285,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/governance/src/evaluate.ts",
+      "line": 289,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/governance/src/evaluate.ts",
+      "line": 511,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/governance/src/evaluate.ts",
+      "line": 512,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/lark/src/ingress.ts",
+      "line": 364,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/lark/src/outbound.ts",
+      "line": 78,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/lark/src/outbound.ts",
+      "line": 91,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/lark/src/outbound.ts",
+      "line": 102,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/lark/src/outbound.ts",
+      "line": 114,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/lark/src/outbound.ts",
+      "line": 116,
+      "kind": "http"
+    },
+    {
+      "path": "packages/lark/src/registration.ts",
+      "line": 124,
+      "kind": "http"
+    },
+    {
+      "path": "packages/lark/src/registration.ts",
+      "line": 154,
+      "kind": "http"
+    },
+    {
+      "path": "packages/linear/src/backlog.ts",
+      "line": 77,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/linear/src/backlog.ts",
+      "line": 78,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/linear/src/backlog.ts",
+      "line": 81,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/linear/src/backlog.ts",
+      "line": 86,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/linear/src/backlog.ts",
+      "line": 113,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/linear/src/backlog.ts",
+      "line": 174,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/linear/src/backlog.ts",
+      "line": 176,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/linear/src/backlog.ts",
+      "line": 177,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/linear/src/graphql.ts",
+      "line": 27,
+      "kind": "http"
+    },
+    {
+      "path": "packages/linear/src/oauth.ts",
+      "line": 4,
+      "kind": "token"
+    },
+    {
+      "path": "packages/linear/src/oauth.ts",
+      "line": 98,
+      "kind": "token"
+    },
+    {
+      "path": "packages/linear/src/oauth.ts",
+      "line": 125,
+      "kind": "token"
+    },
+    {
+      "path": "packages/linear/src/oauth.ts",
+      "line": 196,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/linear/src/oauth.ts",
+      "line": 230,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 1,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 346,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/local-runtime/src/daemon.ts",
+      "line": 492,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/daemon.ts",
+      "line": 496,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/dispatcher.ts",
+      "line": 689,
+      "kind": "http"
+    },
+    {
+      "path": "packages/local-runtime/src/dispatcher.ts",
+      "line": 763,
+      "kind": "http"
+    },
+    {
+      "path": "packages/local-runtime/src/dispatcher.ts",
+      "line": 836,
+      "kind": "delivery_callback"
+    },
+    {
+      "path": "packages/local-runtime/src/dispatcher.ts",
+      "line": 1054,
+      "kind": "http"
+    },
+    {
+      "path": "packages/local-runtime/src/dispatcher.ts",
+      "line": 1116,
+      "kind": "http"
+    },
+    {
+      "path": "packages/local-runtime/src/dispatcher.ts",
+      "line": 1223,
+      "kind": "token"
+    },
+    {
+      "path": "packages/runner/src/acp-executor.ts",
+      "line": 1,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/runner/src/acp-executor.ts",
+      "line": 478,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/runner/src/acp-executor.ts",
+      "line": 599,
+      "kind": "http"
+    },
+    {
+      "path": "packages/runner/src/acp-executor.ts",
+      "line": 932,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/runner/src/acp-executor.ts",
+      "line": 935,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/runner/src/acp-executor.ts",
+      "line": 951,
+      "kind": "http"
+    },
+    {
+      "path": "packages/runner/src/acp-executor.ts",
+      "line": 965,
+      "kind": "http"
+    },
+    {
+      "path": "packages/runner/src/command.ts",
+      "line": 1,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/runner/src/command.ts",
+      "line": 18,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/runner/src/executor.ts",
+      "line": 47,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/runner/src/openclaw-preflight.ts",
+      "line": 1,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/runner/src/openclaw-preflight.ts",
+      "line": 27,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/slack/src/dispatcher-events.ts",
+      "line": 281,
+      "kind": "http"
+    },
+    {
+      "path": "packages/slack/src/socket-mode.ts",
+      "line": 86,
+      "kind": "http"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 1040,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 1041,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 1042,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 5278,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 5407,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 6759,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 6762,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 6796,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 6938,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 6941,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 6966,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7006,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7196,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7202,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7211,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7227,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7228,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7232,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7241,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7251,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7252,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7253,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7275,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7279,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7283,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7294,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 7302,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/teams/src/auth.ts",
+      "line": 68,
+      "kind": "http"
+    },
+    {
+      "path": "packages/teams/src/connector.ts",
+      "line": 19,
+      "kind": "token"
+    },
+    {
+      "path": "packages/teams/src/connector.ts",
+      "line": 20,
+      "kind": "http"
+    },
+    {
+      "path": "packages/teams/src/token.ts",
+      "line": 22,
+      "kind": "token"
+    },
+    {
+      "path": "packages/teams/src/token.ts",
+      "line": 39,
+      "kind": "http"
+    },
+    {
+      "path": "packages/telegram/src/events-app.ts",
+      "line": 177,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/telegram/src/events-app.ts",
+      "line": 178,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/telegram/src/events-app.ts",
+      "line": 370,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/telegram/src/events-app.ts",
+      "line": 374,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/telegram/src/events-app.ts",
+      "line": 377,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/telegram/src/events-app.ts",
+      "line": 422,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/telegram/src/events-app.ts",
+      "line": 483,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/telegram/src/events-app.ts",
+      "line": 581,
+      "kind": "sdk"
+    }
+  ],
+  "counts": {
+    "candidateModules": 167,
+    "candidateBytes": 2610392,
+    "roots": 310
+  },
+  "exclusions": [
+    {
+      "pattern": "**/test/**",
+      "reason": "test_only"
+    },
+    {
+      "pattern": "**/*.test.ts",
+      "reason": "test_only"
+    },
+    {
+      "pattern": "**/dist/**",
+      "reason": "generated_build_output"
+    },
+    {
+      "pattern": "**/node_modules/**",
+      "reason": "third_party_dependency"
+    },
+    {
+      "pattern": "scripts/dev/**",
+      "reason": "developer_only_live_harness"
+    }
+  ],
+  "caveats": [
+    "Static relative-import and exact-revision workspace package-export traversal plus reviewed required candidates do not prove dynamic registration reachability.",
+    "Line matches are candidates for review; they do not prove that a Provider operation executes in production."
+  ],
+  "sourceRepository": "opentag",
+  "inventoryDigest": "sha256:05cd9d4854cb72eb0f1f18a90b53874d46857417e2f3a52d70f693ceef54779e"
+}
