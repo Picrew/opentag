@@ -57,6 +57,17 @@ function captureBusinessDeliveries(
   };
 }
 
+function hasExactRenderedUrl(body: string, expected: string): boolean {
+  const target = new URL(expected);
+  return [...body.matchAll(/https:\/\/[^\s()[\]<>"']+/gu)].some((match) => {
+    const actual = new URL(match[0].replace(/[.,;:!?]+$/u, ""));
+    return actual.origin === target.origin
+      && actual.pathname === target.pathname
+      && actual.search === target.search
+      && actual.hash === target.hash;
+  });
+}
+
 function createDispatcherApp(input: Parameters<typeof createRawDispatcherApp>[0]): ReturnType<typeof createRawDispatcherApp> {
   const app = createRawDispatcherApp({
     ...input,
@@ -7199,7 +7210,8 @@ describe("dispatcher API", () => {
         }
       }
     ]);
-    expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://github.com/acme/demo/pull/42"))).toBe(true);
+    expect(delivered.some((message) => message.kind === "final"
+      && hasExactRenderedUrl(message.body, "https://github.com/acme/demo/pull/42"))).toBe(true);
   });
 
   it("falls back with a quiet receipt when GitHub PR creation fails", async () => {
@@ -7656,7 +7668,8 @@ describe("dispatcher API", () => {
         }
       }
     ]);
-    expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://gitlab.example.com/acme/demo/-/merge_requests/42"))).toBe(true);
+    expect(delivered.some((message) => message.kind === "final"
+      && hasExactRenderedUrl(message.body, "https://gitlab.example.com/acme/demo/-/merge_requests/42"))).toBe(true);
   });
 
   it("applies a model-suggested Linear issue priority update from a Linear source-thread reply", async () => {
@@ -7765,7 +7778,8 @@ describe("dispatcher API", () => {
       }
     });
     expect(String((linearRequests[0]!.body as { query: string }).query)).toContain("issueUpdate");
-    expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://linear.app/acme/issue/ENG-1/demo"))).toBe(true);
+    expect(delivered.some((message) => message.kind === "final"
+      && hasExactRenderedUrl(message.body, "https://linear.app/acme/issue/ENG-1/demo"))).toBe(true);
   });
 
   it("falls back with a quiet receipt when GitLab MR creation fails", async () => {
@@ -7981,7 +7995,8 @@ describe("dispatcher API", () => {
         }
       }
     ]);
-    const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("https://github.com/acme/demo/pull/43"));
+    const finalMessage = delivered.find((message) => message.kind === "final"
+      && hasExactRenderedUrl(message.body, "https://github.com/acme/demo/pull/43"));
     expect(finalMessage?.body).toContain("Applied: Create PR for branch opentag/run_slack_create_pr.");
     expect(finalMessage?.body).not.toContain("..");
     expect(finalMessage?.body).not.toContain("proposal_slack_create_pr");
@@ -8137,7 +8152,11 @@ describe("dispatcher API", () => {
       }
     });
     expect(String((linearRequests[0]!.body as { query: string }).query)).toContain("issueCreate");
-    expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://linear.app/acme/issue/ENG-456/fix-oauth-callback-error"))).toBe(true);
+    expect(delivered.some((message) => message.kind === "final"
+      && hasExactRenderedUrl(
+        message.body,
+        "https://linear.app/acme/issue/ENG-456/fix-oauth-callback-error"
+      ))).toBe(true);
 
     const repeated = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
