@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   conversationKeysFromCallback,
   conversationKeysFromEvent,
@@ -14,29 +13,26 @@ import {
   type ProjectTargetRef,
   type ThreadControlCommand
 } from "@opentag/core";
-import type { SlackBlock } from "@opentag/slack";
 import {
   ChannelBindingCorruptionError,
   ManagedChannelAuthorityError,
   type createOpenTagRepository
 } from "@opentag/store";
-import type { CallbackPresentation } from "./presentation.js";
 import { continuationResumePresentation } from "./continuation-presentation.js";
+import type { UnifiedDeliveryEnqueuer } from "./delivery/producer.js";
+import type { PresentedProviderBody, ProviderPresentation } from "./presentation.js";
 
 type OpenTagRepository = ReturnType<typeof createOpenTagRepository>;
 
-type SourceThreadControlCallbackMessage = {
-  runId: string;
-  kind: "acknowledgement" | "progress" | "final";
-  provider: string;
-  uri: string;
-  body: string;
-  threadKey?: string;
-  blocks?: SlackBlock[];
-  rich?: {
-    provider: string;
-    payload: unknown;
+export type SourceThreadControlDeliveryPresentation = PresentedProviderBody & {
+  kind: "source_thread_control";
+  request: SourceThreadControlActionRequest;
+  command: ThreadControlCommand | {
+    verb: "bind" | "unbind" | "stop" | "linear" | "help" | "status" | "doctor";
+    rawText: string;
   };
+  textFormat?: "mrkdwn";
+  auditRunId?: string;
 };
 
 export type SourceThreadControlActionRequest = {
@@ -71,14 +67,13 @@ type RecordControlPlaneEvent = (input: {
 
 type SourceThreadControlOptions = {
   repo: OpenTagRepository;
-  presentation: CallbackPresentation;
+  presentation: Pick<ProviderPresentation, "render">;
   conversationKeysFromThreadAction(input: {
     callback: { provider: string; uri: string; threadKey?: string | undefined };
     metadata?: Record<string, unknown> | undefined;
   }): string[];
   latestRunTimeoutMs(events: Array<{ type: string; payload: unknown }>): number | undefined;
-  deliverAuditedMessage(message: SourceThreadControlCallbackMessage): Promise<unknown>;
-  deliverDirectMessage(message: SourceThreadControlCallbackMessage): Promise<unknown>;
+  deliveryProducer: UnifiedDeliveryEnqueuer<SourceThreadControlDeliveryPresentation>;
   recordControlPlaneEvent: RecordControlPlaneEvent;
   authorizeHumanEscalationChange?(
     escalation: HumanEscalation,
@@ -98,10 +93,6 @@ type SourceThreadControlOptions = {
   } | void>;
   now?: () => string;
 };
-
-function stableHash(value: string): string {
-  return createHash("sha256").update(value).digest("hex").slice(0, 12);
-}
 
 function metadataString(metadata: Record<string, unknown> | undefined, key: string): string | undefined {
   const value = metadata?.[key];
@@ -135,7 +126,7 @@ function projectTargetFromThreadAction(input: {
 }
 
 function sourceThreadLabel(input: { callback: { provider: string; uri: string; threadKey?: string | undefined } }): string {
-  return `${input.callback.provider}:${input.callback.threadKey ?? input.callback.uri}`;
+  return `${input.callback.provider}:${input.callback.threadKey ?? 'callback-target'}`;
 }
 
 function queuedFollowUpsForPresentation(followUps: FollowUpRequest[]) {
@@ -194,47 +185,27 @@ export function createSourceThreadControlHandler(options: SourceThreadControlOpt
     };
   }
 
-  async function deliverThreadControlReply(input: {
-    request: SourceThreadControlActionRequest;
-    command: ThreadControlCommand;
-    body: string;
-    auditRunId?: string;
-    blocks?: SlackBlock[];
-    rich?: SourceThreadControlCallbackMessage["rich"];
-  }): Promise<void> {
-    const runId =
-      input.auditRunId ??
-      `control_${stableHash(JSON.stringify([input.request.callback.provider, input.request.callback.threadKey ?? input.request.callback.uri, input.command.rawText]))}`;
-    const message: SourceThreadControlCallbackMessage = {
-      runId,
-      kind: "final",
-      provider: input.request.callback.provider,
-      uri: input.request.callback.uri,
-      body: input.body,
-      ...(input.request.callback.threadKey ? { threadKey: input.request.callback.threadKey } : {}),
-      ...(input.blocks?.length ? { blocks: input.blocks } : {}),
-      ...(input.rich ? { rich: input.rich } : {})
-    };
-    if (input.auditRunId) {
-      await options.deliverAuditedMessage(message);
-      return;
-    }
+  async function deliverThreadControlReply(
+    input: Omit<SourceThreadControlDeliveryPresentation, "kind">
+  ) {
+    const result = await options.deliveryProducer.enqueue({ kind: "source_thread_control", ...input });
 
-    await options.deliverDirectMessage(message);
     await options.recordControlPlaneEvent({
-      type: "source_thread_control.replied",
-      severity: "info",
-      subject: sourceThreadLabel({ callback: input.request.callback }),
+      type: result.outcome === "queued"
+        ? "source_thread_control.reply_enqueued"
+        : "source_thread_control.delivery_activation_blocked",
+      severity: result.outcome === "queued" ? "info" : "warn",
+      subject: `${input.request.callback.provider}:source-thread-control`,
       payload: {
         provider: input.request.callback.provider,
         command: input.command.verb,
-        callback: {
-          uri: input.request.callback.uri,
-          ...(input.request.callback.threadKey ? { threadKey: input.request.callback.threadKey } : {})
-        },
-        auditedOnRun: null
+        targetKind: input.request.callback.threadKey ? "thread_key" : "callback_uri",
+        auditedOnRun: input.auditRunId ?? null,
+        deliveryOutcome: result.outcome,
+        ...(result.outcome === "queued" ? { sideEffectIntentId: result.sideEffectIntentId } : {})
       }
     });
+    return result;
   }
 
   async function deliverThreadControlPresentation(input: {
@@ -569,6 +540,7 @@ export function createSourceThreadControlHandler(options: SourceThreadControlOpt
   }
 
   return {
+    deliver: deliverThreadControlReply,
     handle(input: {
       request: SourceThreadControlActionRequest;
       command: ThreadControlCommand;

@@ -1,10 +1,15 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createOpenTagClient } from "@opentag/client";
 import type { OpenTagEvent } from "@opentag/core";
+import { getUnifiedDeliveryActivationState, openDispatcherDatabase } from "@opentag/dispatcher";
 import { computeLinearSignature } from "@opentag/linear";
 import { describe, expect, it, vi } from "vitest";
 import {
   dispatcherRuntimeInputFromEnv,
+  relayCapabilitiesFromInput,
   reassessmentObligationTestRuntimeInputFromEnv,
   startDispatcher,
   type LocalDispatcherRuntimeInput
@@ -84,6 +89,205 @@ function managedChannelEvent(input: {
 }
 
 describe("local dispatcher runtime", () => {
+  it("constructs the dormant Slack delivery graph without journal or provider access", async () => {
+    const activation = getUnifiedDeliveryActivationState();
+    expect(activation).toEqual({
+      active: false,
+      status: "blocked",
+      releaseStatus: "non_releasable",
+      reasons: [
+        "full_provider_root_set_incomplete",
+        "cloud_consumer_cutover_incomplete",
+        "production_inventory_incomplete",
+        "migration_incomplete",
+        "operations_incomplete"
+      ]
+    });
+
+    const source = readFileSync(new URL("../src/dispatcher.ts", import.meta.url), "utf8");
+    expect(source).not.toMatch(/dormant_installation|slack_delivery_unconfigured|repeat\(64\)|resolveAuthority: async/);
+    expect(source).not.toContain("bootstrapDeliveryJournal");
+    expect(source.indexOf("getUnifiedDeliveryActivationState().active === false"))
+      .toBeLessThan(source.indexOf("supervised exact-installation composition"));
+
+    const directory = mkdtempSync(join(tmpdir(), "opentag-dormant-delivery-"));
+    const databasePath = join(directory, "dispatcher.sqlite");
+    const originalFetch = globalThis.fetch;
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const handle = startDispatcher({
+      port: 0,
+      databasePath,
+      channelPrincipals: [{ provider: "slack", applicationId: "A123", credential: "principal-only" }],
+      slackInstallations: [{
+        recordVersion: 1,
+        installationId: "install_1",
+        teamId: "T123",
+        appId: "A123",
+        providerInstanceId: "slack_install_1",
+        bindingDigest: `sha256:${"1".repeat(64)}`,
+        principalDigest: `sha256:${"2".repeat(64)}`,
+        principalAssurance: "provider_verified",
+        lifecycle: "active",
+        configGeneration: 3,
+        configGenerationDigest: `sha256:${"3".repeat(64)}`,
+        credentialReference: { custody: "local", id: "slack.bot.install_1" },
+        channelIds: ["C123"]
+      }],
+      deliveryActivation: true
+    } as LocalDispatcherRuntimeInput & { deliveryActivation: true });
+    try {
+      const address = handle.server.address();
+      expect(address && typeof address !== "string").toBe(true);
+      const baseUrl = `http://127.0.0.1:${(address as { port: number }).port}`;
+      const headers = {
+        "content-type": "application/json",
+        "x-opentag-channel-principal": "principal-only"
+      };
+      const binding = await originalFetch(`${baseUrl}/v1/channel-bindings`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          provider: "slack",
+          accountId: "T123",
+          conversationId: "C123",
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo",
+          ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+        })
+      });
+      expect(binding.status).toBe(201);
+      const run = await originalFetch(`${baseUrl}/v1/runs`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          runId: "run_dormant_delivery",
+          event: managedChannelEvent({
+            provider: "slack",
+            accountId: "T123",
+            conversationId: "C123",
+            suffix: "dormant_delivery"
+          })
+        })
+      });
+      expect(run.status).toBe(201);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      await Promise.all([handle.close(), handle.close()]);
+      const sqlite = openDispatcherDatabase(databasePath);
+      try {
+        const deliveryTables = sqlite.prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'delivery_%'"
+        ).all();
+        expect(deliveryTables).toEqual([]);
+      } finally {
+        sqlite.close();
+      }
+    } finally {
+      fetchSpy.mockRestore();
+      await handle.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps credentialed GitLab and Linear delivery capability blocked", () => {
+    const activation = getUnifiedDeliveryActivationState();
+    const reason = [
+      "provider_adapter_not_registered",
+      `unified_delivery_${activation.status}`,
+      activation.releaseStatus,
+      ...activation.reasons
+    ].join(":");
+
+    expect(
+      relayCapabilitiesFromInput({
+        port: 3030,
+        databasePath: ":memory:",
+        gitlabToken: "glpat_apply_only",
+        gitlabWebhookSecret: "gitlab_webhook_secret",
+        linearToken: "linear_apply_only",
+        linearWebhookSecret: "linear_webhook_secret"
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          provider: "gitlab",
+          callback: { enabled: false, reason },
+          apply: { enabled: true }
+        }),
+        expect.objectContaining({
+          provider: "linear",
+          callback: { enabled: false, reason },
+          apply: { enabled: true }
+        })
+      ])
+    );
+  });
+
+  it("does not send Telegram self-service replies outside the delivery kernel", async () => {
+    const port = await availablePort();
+    const providerRequests: string[] = [];
+    const originalFetch = globalThis.fetch;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const target = String(url);
+      if (target.startsWith("https://api.telegram.org/")) {
+        providerRequests.push(target);
+        return Response.json({ ok: true, result: {} });
+      }
+      return originalFetch(url, init);
+    });
+    const handle = startDispatcher({
+      port,
+      databasePath: ":memory:",
+      telegramBots: [
+        {
+          mode: "webhook",
+          botId: "123456789",
+          agentId: "opentag",
+          botToken: "123456789:telegram_secret",
+          secretToken: "telegram_webhook_secret"
+        }
+      ]
+    });
+
+    try {
+      const response = await originalFetch(
+        `http://127.0.0.1:${port}/telegram/events/123456789`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": "telegram_webhook_secret"
+          },
+          body: JSON.stringify({
+            update_id: 1,
+            message: {
+              message_id: 2,
+              text: "/help",
+              from: { id: 3 },
+              chat: { id: 4, type: "private" }
+            }
+          })
+        }
+      );
+      expect(response.status).toBe(500);
+      expect(providerRequests).toEqual([]);
+    } finally {
+      fetchSpy.mockRestore();
+      await handle.close();
+    }
+  });
+
+  it("contains no direct non-Slack delivery transport", () => {
+    const source = readFileSync(
+      new URL("../src/dispatcher.ts", import.meta.url),
+      "utf8"
+    );
+    expect(source).not.toContain("/sendMessage");
+    expect(source).not.toContain("discord.com/api/v10/channels");
+    expect(source).not.toContain("createTeamsConnector");
+    expect(source).not.toContain("postMessage(");
+  });
+
   it("holds reassessment only for the exact live-test switch", () => {
     expect(reassessmentObligationTestRuntimeInputFromEnv({
       OPENTAG_REASSESSMENT_OBLIGATION_TEST_HOLD: "true"
@@ -277,32 +481,14 @@ describe("local dispatcher runtime", () => {
     });
   });
 
-  it("parses per-agent Slack bot tokens from env", () => {
-    expect(
-      dispatcherRuntimeInputFromEnv({
-        OPENTAG_SLACK_BOT_TOKENS_JSON: JSON.stringify({ reviewer: "xoxb-reviewer" })
-      }).slackBotTokensByAgentId
-    ).toEqual({ reviewer: "xoxb-reviewer" });
-  });
-
-  it("rejects non-string per-agent bot tokens", () => {
-    expect(() =>
-      dispatcherRuntimeInputFromEnv({
-        OPENTAG_SLACK_BOT_TOKENS_JSON: JSON.stringify({ reviewer: 123 })
-      })
-    ).toThrow("Token for agent reviewer must be a non-empty string");
-  });
-
-  it("can split GitHub callback and apply tokens from env", () => {
+  it("uses GitHub tokens only for direct apply", () => {
     expect(
       dispatcherRuntimeInputFromEnv({
         OPENTAG_GITHUB_TOKEN: "ghp_callback_and_apply",
-        OPENTAG_GITHUB_CALLBACK_TOKEN: "ghp_callback",
         OPENTAG_GITHUB_APPLY_TOKEN: "ghp_apply"
       })
     ).toMatchObject({
       githubToken: "ghp_callback_and_apply",
-      githubCallbackToken: "ghp_callback",
       githubApplyToken: "ghp_apply"
     });
   });
@@ -791,21 +977,14 @@ describe("local dispatcher runtime", () => {
     }
   });
 
-  it("acknowledges Linear AgentSessionEvent webhooks from dispatcher-mounted relay ingress", async () => {
+  it("accepts Linear AgentSessionEvent ingress without direct delivery I/O", async () => {
     const port = await availablePort();
     const originalFetch = globalThis.fetch;
-    const linearRequests: Array<{ authorization: string | null; body: { query?: string; variables?: unknown } }> = [];
+    const linearRequests: string[] = [];
     vi.stubGlobal("fetch", (async (url, init) => {
       if (String(url) === "https://linear.example/graphql") {
-        const body = JSON.parse(String(init?.body)) as { query?: string; variables?: unknown };
-        linearRequests.push({
-          authorization: new Headers(init?.headers).get("authorization"),
-          body
-        });
-        if (body.query?.includes("agentActivityCreate")) {
-          return Response.json({ data: { agentActivityCreate: { success: true, agentActivity: { id: "activity_accepted" } } } });
-        }
-        return Response.json({ data: { agentSessionUpdate: { success: true } } });
+        linearRequests.push(String(url));
+        throw new Error("provider delivery I/O is forbidden in this Task 4 artifact");
       }
       return originalFetch(url, init);
     }) as typeof fetch);
@@ -876,31 +1055,23 @@ describe("local dispatcher runtime", () => {
       expect(webhook.status).toBe(200);
       await expect(webhook.json()).resolves.toEqual({ ok: true, runId: expect.any(String) });
 
-      await vi.waitFor(() => {
-        expect(linearRequests).toHaveLength(2);
+      const claim = await fetch(`${baseUrl}/v1/runners/runner_1/claim`, {
+        method: "POST"
       });
-      expect(linearRequests.map((request) => request.authorization)).toEqual(["Bearer app_access", "Bearer app_access"]);
-      expect(linearRequests[0]!.body.query).toContain("agentSessionUpdate");
-      expect(linearRequests[0]!.body.variables).toMatchObject({
-        agentSessionId: "agent_session_1",
-        input: {
-          plan: [
-            { content: "Accept the Linear agent session", status: "completed" },
-            { content: "Run OpenTag on the paired local checkout", status: "inProgress" },
-            { content: "Report the result back to Linear", status: "pending" }
-          ]
-        }
-      });
-      expect(linearRequests[1]!.body.query).toContain("agentActivityCreate");
-      expect(linearRequests[1]!.body.variables).toMatchObject({
-        input: {
-          agentSessionId: "agent_session_1",
-          content: {
-            type: "thought",
-            body: expect.stringContaining("OpenTag picked this up")
+      expect(claim.status).toBe(200);
+      await expect(claim.json()).resolves.toMatchObject({
+        event: {
+          source: "linear",
+          metadata: {
+            issueId: "issue_123",
+            issueIdentifier: "ENG-1"
           }
+        },
+        run: {
+          status: "assigned"
         }
       });
+      expect(linearRequests).toEqual([]);
     } finally {
       vi.unstubAllGlobals();
       await handle.close();

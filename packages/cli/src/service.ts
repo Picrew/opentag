@@ -494,26 +494,24 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
   const lines = ["Connectors:"];
   const github = config.platforms.github;
   if (github) {
-    const callbackReady = configured(config.daemon.githubToken);
     const applyReady = config.daemon.githubApplyToken === null ? "disabled" : configured(config.daemon.githubApplyToken ?? config.daemon.githubToken) ? "ready" : "missing";
     lines.push(
-      `  github: ingress=repository_webhook path=${github.webhookPath ?? "/github/webhooks"} port=${github.port ?? "default"}, callback=${connectorStatus(callbackReady, "daemon.githubToken")}, apply=${applyReady}, target=github:${github.owner}/${github.repo}`
+      `  github: ingress=repository_webhook path=${github.webhookPath ?? "/github/webhooks"} port=${github.port ?? "default"}, delivery=kernel_blocked, apply=${applyReady}, target=github:${github.owner}/${github.repo}`
     );
   }
 
   const gitlab = config.platforms.gitlab;
   if (gitlab) {
     lines.push(
-      `  gitlab: ingress=project_webhook path=${gitlab.webhookPath ?? "/gitlab/webhooks"} port=${gitlab.port ?? "default"}, callback=${connectorStatus(configured(gitlab.token), "token")}, target=gitlab:${gitlab.projectPathWithNamespace}, baseUrl=${gitlab.baseUrl}`
+      `  gitlab: ingress=project_webhook path=${gitlab.webhookPath ?? "/gitlab/webhooks"} port=${gitlab.port ?? "default"}, delivery=kernel_blocked, target=gitlab:${gitlab.projectPathWithNamespace}, baseUrl=${gitlab.baseUrl}`
     );
   }
 
   const linear = config.platforms.linear;
   if (linear) {
     const target = linear.projectTarget;
-    const callbackStatus = linear.auth?.method === "hosted_oauth_app" ? "hosted_oauth_install" : connectorStatus(configured(linear.token), "token");
     lines.push(
-      `  linear: ingress=workspace_webhook path=${linear.webhookPath ?? "/linear/webhooks"} port=${linear.port ?? "default"}, callback=${callbackStatus}, target=${target ? `${target.repoProvider}:${target.owner}/${target.repo}` : "unset"}`
+      `  linear: ingress=workspace_webhook path=${linear.webhookPath ?? "/linear/webhooks"} port=${linear.port ?? "default"}, delivery=kernel_blocked, target=${target ? `${target.repoProvider}:${target.owner}/${target.repo}` : "unset"}`
     );
   }
 
@@ -522,17 +520,17 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
     const mode = discord.mode ?? "gateway";
     if (mode === "webhook") {
       lines.push(
-        `  discord: ingress=dispatcher_interactions path=${discord.webhookPath ?? "/discord/interactions"}, callback=${connectorStatus(configured(discord.botToken), "botToken")}, signature=${connectorStatus(configured(discord.publicKey), "publicKey")}`
+        `  discord: ingress=dispatcher_interactions path=${discord.webhookPath ?? "/discord/interactions"}, delivery=kernel_blocked, signature=${connectorStatus(configured(discord.publicKey), "publicKey")}`
       );
     } else {
-      lines.push(`  discord: ingress=gateway ${connectorStatus(configured(discord.botToken), "botToken")}, callback=${connectorStatus(configured(discord.botToken), "botToken")}, tunnel=not required`);
+      lines.push(`  discord: ingress=gateway ${connectorStatus(configured(discord.botToken), "botToken")}, delivery=kernel_blocked, tunnel=not required`);
     }
   }
 
   const teams = config.platforms.teams;
   if (teams) {
     lines.push(
-      `  teams: ingress=dispatcher_messages path=${teams.webhookPath ?? "/teams/messages"}, callback=${connectorStatus(configured(teams.appId) && configured(teams.appPassword), "appId/appPassword")}, tenant=${teams.tenantId ?? "any"}`
+      `  teams: ingress=dispatcher_messages path=${teams.webhookPath ?? "/teams/messages"}, delivery=kernel_blocked, tenant=${teams.tenantId ?? "any"}`
     );
   }
 
@@ -542,7 +540,7 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
     const ingressReady = mode === "socket_mode" ? configured(slack.appToken) : configured(slack.signingSecret);
     const ingressDetail = mode === "socket_mode" ? "appToken" : `signingSecret port=${slack.port ?? "default"}`;
     lines.push(
-      `  slack: ingress=${mode} ${connectorStatus(ingressReady, ingressDetail)}, callback=${connectorStatus(configured(slack.botToken), "botToken")}, source=${slack.teamId}/${slack.channelId}`
+      `  slack: ingress=${mode} ${connectorStatus(ingressReady, ingressDetail)}, delivery=kernel_blocked, source=${slack.teamId}/${slack.channelId}`
     );
   }
 
@@ -551,7 +549,7 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
     const credentialsReady = configured(lark.appId) && configured(lark.appSecret);
     const addressing = lark.botOpenId ? "bot_open_id configured" : "bot identity may need discovery";
     lines.push(
-      `  lark: ingress=long_connection tenant=${lark.domain} ${connectorStatus(credentialsReady, "appId/appSecret")}, callback=${connectorStatus(credentialsReady, "appId/appSecret")}, addressing=${addressing}`
+      `  lark: ingress=long_connection tenant=${lark.domain} ${connectorStatus(credentialsReady, "appId/appSecret")}, delivery=kernel_blocked, addressing=${addressing}`
     );
   }
 

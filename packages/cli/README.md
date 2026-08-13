@@ -31,7 +31,7 @@ The recommended setup option keeps OpenTag running after the terminal closes. It
 
 For GitHub, GitLab, Linear, or Discord webhook deployments that use an already configured relay, `opentag setup --relay https://<relay-host>` writes relay mode directly and pairs the local checkout with that relay.
 
-`opentag status --run <run_id>` shows the local context packet, agent work ledger, produced artifacts, callback delivery, and safe next actions without turning the source thread into an agent log stream.
+`opentag status --run <run_id>` shows the local context packet, agent work ledger, produced artifacts, queued delivery intents or activation blocks, and safe next actions without turning the source thread into an agent log stream. Provider outcomes are reported only when backed by the delivery journal or signed provider observations.
 
 `opentag status --workstream <workstream_id>` shows the workstream state and next action first, followed by recipe budgets, accepted outcomes, and bounded exception detail. Healthy workstreams stay quiet. Add `--json` to receive structured `workstream`, `recipe`, `metrics`, and `evaluation` objects for automation.
 

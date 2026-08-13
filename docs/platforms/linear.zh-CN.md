@@ -246,9 +246,9 @@ Linear relay 模式适用于你自己运营的 relay，或者已经确认配置�
 
 新的 Linear setup 可以直接给 `opentag setup` 传入 `--relay https://<your-relay-host>`。setup 会校验 relay health endpoint；如果可信 relay 标明支持 hosted OAuth install，setup 会创建 pending OAuth install 并打印 Linear authorization URL。否则，对于 static-token relay config，setup 会生成唯一 Linear webhook path，并在注册 runner / repo binding 时调用 `/v1/linear-relay-installations`。之后 setup 会写入 `runtime.mode=relay` 并打印准确的 Linear webhook URL。已有 config 可以运行 `opentag pair --relay https://<your-relay-host>` 来完成配对；如果 config 已经是 static-token `/linear/webhooks/<install-id>` 形式，pair 会重新上传这份 installation config。
 
-如果你显式配置旧的 `/linear/webhooks` path，setup/pair 会回退到静态 relay readiness 检查：如果 relay 暴露 `/v1/relay/capabilities`，会在写入 relay 模式前确认 Linear ingress、callback delivery 和 direct apply 都已启用。
+如果你显式配置旧的 `/linear/webhooks` path，setup/pair 会回退到静态 relay readiness 检查：如果 relay 暴露 `/v1/relay/capabilities`，会在写入 relay 模式前确认 Linear ingress 和 direct apply 已启用。出站投递由 provider registry 与 delivery kernel 独立激活。
 
-如果 relay 宣称支持 Linear 但缺 callback/apply readiness，`setup --relay` 和
+如果 relay 宣称支持 Linear 但缺 ingress/apply readiness，`setup --relay` 和
 `pair --relay` 会在写入 relay 模式前失败，并打印一份脱敏的 relay 侧 env 模板。
 模板会包含非敏感的 Project Target 值，以及 Linear token / signing secret 的
 占位说明，避免把 secret 写进终端日志。

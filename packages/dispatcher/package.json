@@ -1,7 +1,7 @@
 {
   "name": "@opentag/dispatcher",
   "version": "0.10.0-next.0",
-  "description": "Embeddable OpenTag dispatcher Hono app and callback sinks.",
+  "description": "Embeddable OpenTag dispatcher Hono app and durable delivery coordination.",
   "type": "module",
   "engines": {
     "node": ">=22.14.0"
@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@opentag/core": "workspace:*",
+    "@opentag/delivery-contract": "workspace:*",
     "@opentag/governance": "workspace:*",
     "@opentag/github": "workspace:*",
     "@opentag/gitlab": "workspace:*",

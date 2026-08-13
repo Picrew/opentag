@@ -1,9 +1,10 @@
 # @opentag/telegram
 
-Telegram message normalization and callback helpers for OpenTag.
+Telegram message normalization and source-thread presentation helpers for
+OpenTag.
 
 Use this package to normalize Telegram bot messages into `OpenTagEvent` objects
-and to encode or parse Telegram callback thread keys.
+and to encode or parse Telegram source-thread keys.
 
 ## Install
 
@@ -14,8 +15,8 @@ pnpm add @opentag/telegram
 ## Exports
 
 - `normalizeTelegramMessage`: converts a Telegram message into an `OpenTagEvent`.
-- `encodeTelegramThreadKey`: encodes bot, chat, and message coordinates for callback routing.
-- `parseTelegramThreadKey`: decodes a Telegram callback thread key.
+- `encodeTelegramThreadKey`: encodes bot, chat, and message coordinates for source-thread delivery.
+- `parseTelegramThreadKey`: decodes a Telegram source-thread key.
 - `renderTelegramAcknowledgement`: renders the Telegram acknowledgement body.
 - `renderTelegramFinalResult`: renders the Telegram final result body.
 - `createTelegramSendMessagePayload`: creates a Telegram Bot API `sendMessage` payload.
@@ -51,5 +52,6 @@ if (event) {
 
 ## Stability
 
-Telegram thread key format is public because callback sinks depend on it.
-Change it only with a migration path.
+Telegram thread key format is part of the source-thread identity shared by
+ingress and delivery. A breaking format change must update both sides
+atomically.

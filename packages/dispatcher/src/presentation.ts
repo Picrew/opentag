@@ -3,8 +3,8 @@ import {
   createRunStatusPresentation,
   platformCapabilityForProvider,
   renderOpenTagPresentationPlainText,
-  shouldDeliverCallbackProgress,
-  shouldDeliverCallbackRunStatus,
+  shouldDeliverProgressPresentation,
+  shouldDeliverRunStatusPresentation,
   type ActionReceiptContext,
   type OpenTagActionReceiptPresentation,
   type OpenTagApprovalPromptPresentation,
@@ -61,22 +61,15 @@ import {
   renderTelegramFinalSummaryPresentation,
   renderTelegramProgress
 } from "@opentag/telegram";
-import type { CallbackMessage } from "./server.js";
-
-export type CallbackProvider = CallbackMessage["provider"];
 export type LarkRenderLocale = "en-US" | "zh-CN";
 
-export type PresentedCallbackBody = {
-  body: string;
-  blocks?: SlackBlock[];
-  rich?: CallbackMessage["rich"];
-};
+export type PresentedProviderBody = { body: string; blocks?: SlackBlock[]; rich?: { provider: string; payload: unknown } };
 
-export type CallbackPresentation = {
-  shouldDeliverAcknowledgement(provider: CallbackProvider): boolean;
-  shouldDeliverStatusUpdate(provider: CallbackProvider): boolean;
-  shouldDeliverRunStatusUpdate?(input: { provider: CallbackProvider; state: OpenTagRunStatusPresentation["state"] }): boolean;
-  shouldDeliverProgress(provider: CallbackProvider): boolean;
+export type ProviderPresentation = {
+  shouldDeliverAcknowledgement(provider: string): boolean;
+  shouldDeliverStatusUpdate(provider: string): boolean;
+  shouldDeliverRunStatusUpdate?(input: { provider: string; state: OpenTagRunStatusPresentation["state"] }): boolean;
+  shouldDeliverProgress(provider: string): boolean;
   runStatusPresentation(input: {
     runId: string;
     state: OpenTagRunStatusPresentation["state"];
@@ -87,28 +80,28 @@ export type CallbackPresentation = {
   acknowledgementPresentation(input: { runId: string }): OpenTagRunStatusPresentation;
   progressPresentation(input: { runId: string; message: string }): OpenTagRunStatusPresentation;
   finalPresentation(input: { result: OpenTagRunResult; runId?: string; receiptContext?: ActionReceiptContext }): OpenTagFinalSummaryPresentation;
-  render(input: { provider: CallbackProvider; presentation: OpenTagPresentation; larkRenderLocale?: LarkRenderLocale }): PresentedCallbackBody;
-  acknowledgement(input: { provider: CallbackProvider; runId: string }): string;
+  render(input: { provider: string; presentation: OpenTagPresentation; larkRenderLocale?: LarkRenderLocale }): PresentedProviderBody;
+  acknowledgement(input: { provider: string; runId: string }): string;
   runStatus(input: {
-    provider: CallbackProvider;
+    provider: string;
     runId: string;
     state: OpenTagRunStatusPresentation["state"];
     message?: string;
     nextAction?: string;
     detailVisibility?: OpenTagRunStatusPresentation["detailVisibility"];
     larkRenderLocale?: LarkRenderLocale;
-  }): PresentedCallbackBody;
-  progress(input: { provider: CallbackProvider; runId: string; message: string }): string;
+  }): PresentedProviderBody;
+  progress(input: { provider: string; runId: string; message: string }): string;
   final(input: {
-    provider: CallbackProvider;
+    provider: string;
     result: OpenTagRunResult;
     runId?: string;
     receiptContext?: ActionReceiptContext;
     larkRenderLocale?: LarkRenderLocale;
-  }): PresentedCallbackBody;
+  }): PresentedProviderBody;
 };
 
-function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunStatusPresentation): PresentedCallbackBody {
+function renderRunStatus(provider: string, presentation: OpenTagRunStatusPresentation): PresentedProviderBody {
   const canRenderRich = supportsRichPresentation(provider);
   if (canRenderRich && provider === "slack") {
     return {
@@ -161,11 +154,11 @@ function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunSta
   return { body: renderProgress({ runId: presentation.runId, message }) };
 }
 
-function supportsRichPresentation(provider: CallbackProvider): boolean {
+function supportsRichPresentation(provider: string): boolean {
   return platformCapabilityForProvider(provider)?.supportsRichPresentation === true;
 }
 
-function renderFinalSummary(provider: CallbackProvider, presentation: OpenTagFinalSummaryPresentation, options: { larkRenderLocale?: LarkRenderLocale } = {}): PresentedCallbackBody {
+function renderFinalSummary(provider: string, presentation: OpenTagFinalSummaryPresentation, options: { larkRenderLocale?: LarkRenderLocale } = {}): PresentedProviderBody {
   const canRenderRich = supportsRichPresentation(provider);
   if (canRenderRich && provider === "slack") {
     return {
@@ -209,7 +202,7 @@ function renderFinalSummary(provider: CallbackProvider, presentation: OpenTagFin
   return { body: renderFinalSummaryPresentation(presentation) };
 }
 
-function renderDoctorSummary(provider: CallbackProvider, presentation: OpenTagDoctorSummaryPresentation): PresentedCallbackBody {
+function renderDoctorSummary(provider: string, presentation: OpenTagDoctorSummaryPresentation): PresentedProviderBody {
   const body = renderOpenTagPresentationPlainText(presentation);
   const canRenderRich = supportsRichPresentation(provider);
   if (canRenderRich && provider === "slack") {
@@ -230,7 +223,7 @@ function renderDoctorSummary(provider: CallbackProvider, presentation: OpenTagDo
   return { body };
 }
 
-function renderSourceThreadStatus(provider: CallbackProvider, presentation: OpenTagSourceThreadStatusPresentation): PresentedCallbackBody {
+function renderSourceThreadStatus(provider: string, presentation: OpenTagSourceThreadStatusPresentation): PresentedProviderBody {
   const body = renderOpenTagPresentationPlainText(presentation);
   const canRenderRich = supportsRichPresentation(provider);
   if (canRenderRich && provider === "slack") {
@@ -251,7 +244,7 @@ function renderSourceThreadStatus(provider: CallbackProvider, presentation: Open
   return { body };
 }
 
-function renderActionReceipt(provider: CallbackProvider, presentation: OpenTagActionReceiptPresentation, options: { larkRenderLocale?: LarkRenderLocale } = {}): PresentedCallbackBody {
+function renderActionReceipt(provider: string, presentation: OpenTagActionReceiptPresentation, options: { larkRenderLocale?: LarkRenderLocale } = {}): PresentedProviderBody {
   const body =
     provider === "slack"
       ? renderSlackActionReceiptPresentation(presentation)
@@ -277,7 +270,7 @@ function renderActionReceipt(provider: CallbackProvider, presentation: OpenTagAc
   return { body };
 }
 
-function renderApprovalPrompt(provider: CallbackProvider, presentation: OpenTagApprovalPromptPresentation): PresentedCallbackBody {
+function renderApprovalPrompt(provider: string, presentation: OpenTagApprovalPromptPresentation): PresentedProviderBody {
   if (supportsRichPresentation(provider) && provider === "slack") {
     return { body: renderSlackApprovalPrompt(presentation), blocks: createSlackApprovalPromptBlocks(presentation) };
   }
@@ -290,15 +283,15 @@ function renderApprovalPrompt(provider: CallbackProvider, presentation: OpenTagA
   return { body: renderOpenTagPresentationPlainText(presentation) };
 }
 
-export function createDefaultCallbackPresentation(): CallbackPresentation {
+export function createDefaultProviderPresentation(): ProviderPresentation {
   return {
     shouldDeliverAcknowledgement(provider) {
-      return shouldDeliverCallbackRunStatus(provider);
+      return shouldDeliverRunStatusPresentation(provider);
     },
 
     shouldDeliverStatusUpdate(provider) {
       if (provider === "slack" || provider === "lark") return true;
-      return shouldDeliverCallbackRunStatus(provider);
+      return shouldDeliverRunStatusPresentation(provider);
     },
 
     shouldDeliverRunStatusUpdate(input) {
@@ -306,7 +299,7 @@ export function createDefaultCallbackPresentation(): CallbackPresentation {
     },
 
     shouldDeliverProgress(provider) {
-      return shouldDeliverCallbackProgress(provider);
+      return shouldDeliverProgressPresentation(provider);
     },
 
     runStatusPresentation(input) {

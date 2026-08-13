@@ -444,7 +444,7 @@ describe("OpenTag CLI service", () => {
     expect(formatServiceStatus(running)).toContain("OpenTag runtime: unverified");
     expect(formatServiceStatus(running)).toContain("Connectors:");
     expect(formatServiceStatus(running)).toContain(
-      "github: ingress=repository_webhook path=/github/webhooks port=3050, callback=ready (daemon.githubToken), apply=ready, target=github:acme/demo"
+      "github: ingress=repository_webhook path=/github/webhooks port=3050, delivery=kernel_blocked, apply=ready, target=github:acme/demo"
     );
     expect(formatServiceStatus(running)).toContain("Secrets:");
     expect(formatServiceStatus(running)).toContain("daemon.pairingToken: inline (redacted)");
@@ -495,6 +495,20 @@ describe("OpenTag CLI service", () => {
           repo: "demo"
         }
       };
+      config.platforms.gitlab = {
+        token: "gitlab_api_secret",
+        webhookSecret: "gitlab_webhook_secret",
+        projectPathWithNamespace: "acme/team/demo",
+        baseUrl: "https://gitlab.example.com",
+        webhookPath: "/gitlab/webhooks",
+        port: 3070
+      };
+      config.platforms.teams = {
+        appId: "teams_app_id",
+        appPassword: "teams_app_password",
+        tenantId: "teams_tenant_id",
+        webhookPath: "/teams/messages"
+      };
     });
     installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
 
@@ -503,11 +517,23 @@ describe("OpenTag CLI service", () => {
     );
 
     expect(formatted).toContain("Connectors:");
-    expect(formatted).toContain("slack: ingress=events_api ready (signingSecret port=3060), callback=ready (botToken), source=T123/C456");
-    expect(formatted).toContain("lark: ingress=long_connection tenant=lark ready (appId/appSecret), callback=ready (appId/appSecret)");
+    expect(formatted).toContain("slack: ingress=events_api ready (signingSecret port=3060), delivery=kernel_blocked, source=T123/C456");
+    expect(formatted).toContain("lark: ingress=long_connection tenant=lark ready (appId/appSecret), delivery=kernel_blocked");
     expect(formatted).toContain("addressing=bot_open_id configured");
-    expect(formatted).toContain("linear: ingress=workspace_webhook path=/linear/webhooks port=default, callback=ready (token), target=github:acme/demo");
-    expect(formatted).toContain("discord: ingress=dispatcher_interactions path=/discord/interactions, callback=ready (botToken), signature=ready (publicKey)");
+    expect(formatted).toContain(
+      "gitlab: ingress=project_webhook path=/gitlab/webhooks port=3070, delivery=kernel_blocked, target=gitlab:acme/team/demo, baseUrl=https://gitlab.example.com"
+    );
+    expect(formatted).toContain(
+      "linear: ingress=workspace_webhook path=/linear/webhooks port=default, delivery=kernel_blocked, target=github:acme/demo"
+    );
+    expect(formatted).toContain(
+      "discord: ingress=dispatcher_interactions path=/discord/interactions, delivery=kernel_blocked, signature=ready (publicKey)"
+    );
+    expect(formatted).toContain(
+      "teams: ingress=dispatcher_messages path=/teams/messages, delivery=kernel_blocked, tenant=teams_tenant_id"
+    );
+    expect(formatted).not.toContain("callback=");
+    expect(formatted).not.toContain("delivery=ready");
     expect(formatted).toContain("platforms.linear.token: inline (redacted)");
     expect(formatted).toContain("platforms.discord.botToken: inline (redacted)");
     expect(formatted).not.toContain("slack_signing_secret");
@@ -516,6 +542,9 @@ describe("OpenTag CLI service", () => {
     expect(formatted).not.toContain("linear_api_secret");
     expect(formatted).not.toContain("linear_webhook_secret");
     expect(formatted).not.toContain("discord_bot_secret");
+    expect(formatted).not.toContain("gitlab_api_secret");
+    expect(formatted).not.toContain("gitlab_webhook_secret");
+    expect(formatted).not.toContain("teams_app_password");
   });
 
   it("marks a running service ready only after dispatcher health succeeds", async () => {

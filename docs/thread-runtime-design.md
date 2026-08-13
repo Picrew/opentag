@@ -53,7 +53,7 @@ These remain future direction, not current implementation commitments:
 
 - durable `WorkThread` table or standalone work-thread lifecycle;
 - configurable `ProjectionPolicy`;
-- callback behavior driven directly by `RunEvent.visibility`;
+- delivery presentation policy driven directly by `RunEvent.visibility`;
 - live active-run input updates;
 - generalized guardrails for automatic run lineage;
 - operator review UI;
@@ -193,9 +193,12 @@ Suggested event names should follow the current code style:
 | `run.create_idempotent_replay` | A duplicate source event reused an existing run. |
 | `context_packet.generated` | A context packet snapshot was generated. |
 
-V0.2 should not rename existing callback events to projection events. Current
-callback events such as `callback.*.queued` and `callback.*.delivered` should
-remain callback events until a real projection policy layer exists.
+Delivery observations must preserve what OpenTag actually knows. The run
+timeline records `delivery.intent.queued` when the unified producer accepts an
+intent and `delivery.activation_blocked` when activation prevents submission.
+Provider acceptance and settlement belong to the delivery journal or a
+verified hosted observation; the run timeline must not infer a delivered
+outcome.
 
 ## Delta 4: Stable Context Packet Snapshot
 
@@ -363,9 +366,9 @@ or controlled restart semantics.
 
 ### Projection Policy
 
-Run event metadata can eventually drive callback behavior, but v0.2 should
-continue using the current acknowledgement, final-result, and provider callback
-logic.
+Run event metadata can eventually drive delivery presentation policy. The
+current runtime instead creates semantic acknowledgement/final presentations,
+then passes them through the single producer and kernel boundary.
 
 ### Durable Work Thread
 

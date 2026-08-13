@@ -1,0 +1,45 @@
+{
+  "name": "@opentag/delivery-contract",
+  "version": "0.10.0-next.0",
+  "description": "Canonical OpenTag side-effect intent and delivery observation contracts.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./node": {
+      "development": "./src/node.ts",
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js"
+    }
+  },
+  "files": [
+    "dist",
+    "fixtures",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "scripts": {
+    "build": "tsup && tsc -b tsconfig.json --emitDeclarationOnly --force",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentag/core": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  }
+}

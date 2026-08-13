@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createActionReceiptPresentation, createDoctorSummaryPresentation, createSourceThreadStatusPresentation } from "@opentag/core";
-import { createDefaultCallbackPresentation } from "../src/presentation.js";
+import { createDefaultProviderPresentation } from "../src/presentation.js";
 
 describe("default callback presentation", () => {
   it("uses platform liveness capability to decide callback acknowledgements", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
 
     expect(presentation.shouldDeliverAcknowledgement("lark")).toBe(false);
     expect(presentation.shouldDeliverAcknowledgement("slack")).toBe(false);
@@ -14,7 +14,7 @@ describe("default callback presentation", () => {
   });
 
   it("uses platform liveness capability to decide callback status and progress delivery", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
 
     expect(presentation.shouldDeliverStatusUpdate("slack")).toBe(true);
     expect(presentation.shouldDeliverStatusUpdate("lark")).toBe(true);
@@ -33,7 +33,7 @@ describe("default callback presentation", () => {
   });
 
   it("renders the same queued and running Run Card semantics for native Slack and Lark channels", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
 
     expect(presentation.shouldDeliverStatusUpdate("slack")).toBe(true);
     expect(presentation.shouldDeliverStatusUpdate("lark")).toBe(true);
@@ -61,7 +61,7 @@ describe("default callback presentation", () => {
   });
 
   it("renders GitHub and Slack with provider-specific markup", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
     const result = {
       conclusion: "success" as const,
       summary: "done",
@@ -122,7 +122,7 @@ describe("default callback presentation", () => {
   });
 
   it("produces semantic presentations before provider rendering", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
     const acknowledgement = presentation.acknowledgementPresentation({ runId: "run_1" });
     const final = presentation.finalPresentation({
       runId: "run_1",
@@ -151,7 +151,7 @@ describe("default callback presentation", () => {
   });
 
   it("renders lightweight run-status liveness states through semantic presentations", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
     const queued = presentation.runStatusPresentation({
       runId: "run_queued",
       state: "queued",
@@ -202,7 +202,7 @@ describe("default callback presentation", () => {
   });
 
   it("renders doctor summaries through semantic fallback and provider-native UI where supported", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
     const doctor = createDoctorSummaryPresentation({
       title: "OpenTag doctor (redacted)",
       checks: [
@@ -246,7 +246,7 @@ describe("default callback presentation", () => {
   });
 
   it("renders source-thread status as rich Slack and Lark status cards with plain-text fallback", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
     const status = createSourceThreadStatusPresentation({
       sourceContainer: "slack:T123/C456",
       projectTarget: "github:acme/demo",
@@ -308,7 +308,7 @@ describe("default callback presentation", () => {
   });
 
   it("escapes Slack fallbacks for plain doctor and source-thread presentations", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
     const doctor = createDoctorSummaryPresentation({
       title: "OpenTag doctor <redacted> & ready",
       checks: [{ status: "ok", name: "dispatcher <local>", message: "reachable & healthy" }]
@@ -338,7 +338,7 @@ describe("default callback presentation", () => {
   });
 
   it("renders standalone action receipts as Slack and Lark native UI with plain-text fallback", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
     const receipt = createActionReceiptPresentation({
       auditRunId: "run_action_receipt",
       result: {
@@ -405,7 +405,7 @@ describe("default callback presentation", () => {
   });
 
   it("renders Telegram progress as concise conversational states", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
 
     expect(presentation.progress({ provider: "telegram", runId: "run_1", message: "Starting ACP agent claude-code in scratch workspace" })).toBe(
       ["<b>OpenTag is thinking</b>", "Run: <code>run_1</code>", "Status: <b>running</b>"].join("\n")
@@ -428,7 +428,7 @@ describe("default callback presentation", () => {
   });
 
   it("renders structured next actions by summary", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
     const result = {
       conclusion: "needs_human" as const,
       summary: "Prepared a suggested change snapshot.",
@@ -464,7 +464,7 @@ describe("default callback presentation", () => {
   });
 
   it("renders suggested changes as thread-native actions", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
     const result = {
       conclusion: "needs_human" as const,
       summary: "Prepared a proposal.",
@@ -539,7 +539,7 @@ describe("default callback presentation", () => {
   });
 
   it("renders create PR suggested actions with PR-specific details", () => {
-    const presentation = createDefaultCallbackPresentation();
+    const presentation = createDefaultProviderPresentation();
     const result = {
       conclusion: "needs_human" as const,
       summary: "Prepared a PR proposal.",

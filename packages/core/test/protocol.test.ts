@@ -251,9 +251,13 @@ describe("protocol helpers", () => {
   });
 
   it("shares default run event metadata across runtime layers", () => {
-    expect(defaultRunEventMetadata("callback.final.delivered")).toEqual({
+    expect(defaultRunEventMetadata("delivery.intent.queued")).toEqual({
+      visibility: "audit",
+      importance: "normal"
+    });
+    expect(defaultRunEventMetadata("delivery.activation_blocked")).toEqual({
       visibility: "human",
-      importance: "high"
+      importance: "blocking"
     });
     expect(defaultRunEventMetadata("run.waiting_for_permission")).toEqual({
       visibility: "audit",

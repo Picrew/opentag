@@ -3,8 +3,8 @@ import {
   OPEN_TAG_PLATFORM_CAPABILITIES,
   isOpenTagPlatformId,
   platformCapabilityForProvider,
-  shouldDeliverCallbackProgress,
-  shouldDeliverCallbackRunStatus,
+  shouldDeliverProgressPresentation,
+  shouldDeliverRunStatusPresentation,
   shouldDeliverSourceReceipt
 } from "../src/capability.js";
 
@@ -29,22 +29,22 @@ describe("platform capability catalog", () => {
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.linear.supportsActionReplies).toBe(true);
   });
 
-  it("maps liveness strategies to callback delivery behavior", () => {
-    expect(shouldDeliverCallbackRunStatus("github")).toBe(true);
-    expect(shouldDeliverCallbackRunStatus("gitlab")).toBe(true);
-    expect(shouldDeliverCallbackRunStatus("linear")).toBe(true);
-    expect(shouldDeliverCallbackRunStatus("telegram")).toBe(true);
-    expect(shouldDeliverCallbackRunStatus("slack")).toBe(false);
-    expect(shouldDeliverCallbackRunStatus("lark")).toBe(false);
-    expect(shouldDeliverCallbackRunStatus("custom")).toBe(true);
+  it("maps liveness strategies to delivery presentation behavior", () => {
+    expect(shouldDeliverRunStatusPresentation("github")).toBe(true);
+    expect(shouldDeliverRunStatusPresentation("gitlab")).toBe(true);
+    expect(shouldDeliverRunStatusPresentation("linear")).toBe(true);
+    expect(shouldDeliverRunStatusPresentation("telegram")).toBe(true);
+    expect(shouldDeliverRunStatusPresentation("slack")).toBe(false);
+    expect(shouldDeliverRunStatusPresentation("lark")).toBe(false);
+    expect(shouldDeliverRunStatusPresentation("custom")).toBe(true);
 
-    expect(shouldDeliverCallbackProgress("github")).toBe(true);
-    expect(shouldDeliverCallbackProgress("gitlab")).toBe(false);
-    expect(shouldDeliverCallbackProgress("linear")).toBe(false);
-    expect(shouldDeliverCallbackProgress("telegram")).toBe(true);
-    expect(shouldDeliverCallbackProgress("slack")).toBe(false);
-    expect(shouldDeliverCallbackProgress("lark")).toBe(false);
-    expect(shouldDeliverCallbackProgress("custom")).toBe(true);
+    expect(shouldDeliverProgressPresentation("github")).toBe(true);
+    expect(shouldDeliverProgressPresentation("gitlab")).toBe(false);
+    expect(shouldDeliverProgressPresentation("linear")).toBe(false);
+    expect(shouldDeliverProgressPresentation("telegram")).toBe(true);
+    expect(shouldDeliverProgressPresentation("slack")).toBe(false);
+    expect(shouldDeliverProgressPresentation("lark")).toBe(false);
+    expect(shouldDeliverProgressPresentation("custom")).toBe(true);
 
     expect(shouldDeliverSourceReceipt("slack")).toBe(true);
     expect(shouldDeliverSourceReceipt("github")).toBe(false);
@@ -61,9 +61,9 @@ describe("teams platform capability", () => {
   it("registers teams as a known platform", () => {
     expect(isOpenTagPlatformId("teams")).toBe(true);
   });
-  it("uses the status_update liveness strategy so progress edits are delivered", () => {
+  it("uses the status_update liveness strategy so progress presentations are delivered", () => {
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.teams.livenessStrategy).toBe("status_update");
-    expect(shouldDeliverCallbackProgress("teams")).toBe(true);
+    expect(shouldDeliverProgressPresentation("teams")).toBe(true);
   });
   it("requires explicit addressing (the bot must be @mentioned)", () => {
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.teams.requiresExplicitAddressing).toBe(true);

@@ -14,7 +14,7 @@ control plane for governed software factories—see the repository-level
 
 ## One-Liner
 
-OpenTag turns an existing work thread into a governed agent work loop: tag any approved agent from a workspace surface, route the request through bounded context, scoped permissions, executor capability checks, an append-only work ledger, and artifact-first callbacks, then let a local or user-controlled runner execute the work and report back without creating a new AI workspace.
+OpenTag turns an existing work thread into a governed agent work loop: tag any approved agent from a workspace surface, route the request through bounded context, scoped permissions, executor capability checks, an append-only work ledger, and artifact-first delivery presentations, then let a local or user-controlled runner execute the work and report back without creating a new AI workspace.
 
 ## Why Now
 
@@ -25,7 +25,7 @@ vendor-neutral, and protocol-first:
 - OpenTag brings approved agents into existing workspace surfaces.
 - OpenTag supports multiple executors instead of binding the workflow to one model.
 - OpenTag treats local runners and auditable source-thread context as core product boundaries.
-- OpenTag treats artifacts and agent work ledger entries as the durable output of a run; chat callbacks are concise projections, not the system of record.
+- OpenTag treats artifacts and agent work ledger entries as the durable output of a run; chat presentations are concise projections, not the system of record.
 - OpenTag should stay protocol-first, executor-neutral, and local-runner friendly.
 
 The first release should move fast enough to ride the conversation while still proving the idea with a real end-to-end task flow.
@@ -54,10 +54,10 @@ The first release combines a fast open-source launch with one real MVP:
 
 - A public repository with a clear README, design document, and protocol draft.
 - A GitHub App MVP powered by Probot at the edge.
-- An extremely thin hosted dispatcher for public webhook ingress, run persistence, runner lease claiming, and callback coordination.
+- An extremely thin hosted dispatcher for public webhook ingress, run persistence, runner lease claiming, and delivery-intent enqueueing.
 - A local runner daemon that can receive or poll for OpenTag runs.
 - At least one executor adapter for a coding agent, plus a smoke-test executor.
-- A callback adapter that posts status and final results back to GitHub.
+- A provider delivery adapter that posts status and final results back to GitHub.
 
 The first release should not attempt to support every workspace, every agent, every permission model, or every deployment shape.
 
@@ -103,7 +103,7 @@ OpenTag Core
         v
 Dispatch Layer
   thin hosted dispatcher
-  run queue, leases, audit events, callbacks
+  run queue, leases, audit events, delivery intents
         |
         v
 OpenTag Local Daemon
@@ -116,7 +116,7 @@ Executor
   built-in / local CLI / hook-ingest / custom
         |
         v
-Callback Adapter
+Delivery Kernel + Provider Adapter
   GitHub status comment / PR / summary
   Slack thread reply
 ```
@@ -124,7 +124,7 @@ Callback Adapter
 ## Runtime Readiness And Interaction Model
 
 The next runtime hardening track should treat service health, credentials,
-platform capability, executor capability, source-thread commands, callback
+platform capability, executor capability, source-thread commands, delivery
 safety, and user-visible status as one product model instead of separate
 features. OpenTag should make it obvious whether a request can be accepted,
 executed, stopped, and reported back before a powerful local runner starts work.
@@ -147,7 +147,7 @@ Executor Runtime
         |
         v
 Presentation
-  concise callback, action receipt, status card, audit detail
+  concise presentation, action receipt, status card, audit detail
         |
         v
 Readiness Plane
@@ -167,7 +167,7 @@ Readiness checks should be grouped into four families:
 
 - `ServiceCapability`: whether the OS controller is installed/running, whether
   the OpenTag runtime has a recent heartbeat, whether connectors are connected,
-  and whether callback delivery is ready.
+  and whether an exact provider delivery adapter is activated.
 - `CredentialCapability`: where each secret comes from, whether the reference
   is resolvable, whether the credential has been verified against the provider,
   and whether it is safe to display only as a redacted reference.
@@ -203,7 +203,7 @@ least:
 
 - `controller`: unsupported, installed, running, or stopped.
 - `runtime`: ready, starting, degraded, stale heartbeat, or unreachable.
-- `connectors`: per-platform connection and callback readiness.
+- `connectors`: per-platform ingress, delivery, and direct-apply readiness.
 - `executor`: selected executor availability and important capability gaps.
 - `secrets`: redacted references plus verification status.
 
@@ -263,11 +263,11 @@ duplicate replay. This gives users predictable behavior:
 - cancellation acts on the active run unless a run ID is supplied.
 - timeout policy is visible before and during execution.
 
-Callback and reply delivery need duplicate-storm safety. Delivery should use
-idempotency keys at enqueue time, not only at provider-send time. A reasonable
-key is based on run ID, provider, thread key, callback kind, status message key,
-and body hash. Repeated failures or repeated equivalent messages should trip a
-circuit breaker that records audit detail but stops flooding the human thread.
+Source-thread delivery needs duplicate-storm safety. The unified producer
+creates an immutable delivery intent with an idempotency key before provider
+I/O. The side-effect kernel owns leasing, fenced settlement, and retry. A
+provider outcome is true only when recorded by the delivery journal or a signed
+provider observation; run events record queued intent or activation block only.
 
 The core `RunStatus` schema uses `succeeded`, `failed`, `cancelled`,
 `interrupted`, and `timed_out` for terminal run states. Higher-level terminal
@@ -282,7 +282,7 @@ reasons should still distinguish:
 `/stop` should not be treated as a successful completion signal. If the selected
 executor supports cancellation, OpenTag should call it. If it does not, OpenTag
 should mark the run as cancellation-requested, suppress further nonessential
-human callbacks, and report whether the underlying process may continue outside
+human-facing presentations, and report whether the underlying process may continue outside
 OpenTag's control.
 
 ### Presentation Model
@@ -317,10 +317,10 @@ Detailed progress can be pulled through `/status`, `opentag status`, logs, or
 the audit timeline. If an executor or hook requests human-visible progress but
 the platform liveness strategy keeps that source thread quiet, OpenTag should
 record an audit-visible suppression event with the provider strategy and reason
-instead of silently dropping the callback. `opentag status --run` should surface
-that liveness strategy, callback delivery state, source receipt delivery state,
-and any suppressed progress callbacks so quiet provider behavior is explainable
-during debugging.
+instead of silently dropping the presentation. `opentag status --run` should
+surface that liveness strategy, queued delivery intents, activation blocks, and
+any suppressed progress presentations. Provider outcomes come from the delivery
+journal or signed observations, never inference from the enqueue event.
 Final-summary renderers should preserve the audit/status pointer in both rich
 native UI and plain text fallback, so every provider has a source-thread-visible
 path back to local audit detail without exposing internal process messages by
@@ -329,11 +329,11 @@ default.
 OpenTag should support lightweight liveness where the platform allows it. A
 provider may show "received", "queued", "running", or "waiting for approval"
 through typing indicators, reactions, message updates, or short status cards.
-The capability catalog decides which mechanism is available, and callback
+The capability catalog decides which mechanism is available, and presentation
 renderers should consume that shared catalog instead of hard-coding provider
 names. Current liveness strategies are:
 
-- `status_update`: deliver callback run-status messages when the provider can
+- `status_update`: deliver concise run-status presentations when the provider can
   keep them concise or updatable.
 - `source_receipt`: use a native receipt/reaction path first, with text
   acknowledgement only as fallback. Receipt-capable platforms can represent
@@ -429,12 +429,13 @@ runtime integrations:
 3. Split service status into controller state and runtime readiness.
 4. Add the minimal platform and executor capability catalog needed by setup,
    doctor, status, and service status.
-5. Add callback delivery idempotency and duplicate-storm protection.
+5. Use one immutable delivery-intent journal with fenced settlement and
+   duplicate-storm protection.
 6. Improve source-thread `/help`, `/status`, and `/doctor` around Project
    Target binding, active runs, queued follow-ups, and safe next actions.
 7. Add `/stop` and explicit timeout UX on top of executor cancellation
    capability.
-8. Promote callback rendering into a semantic presentation model with rich-card
+8. Route semantic presentations through the unified producer with rich-card
    adapters where supported and plain-text fallback everywhere.
 9. Generalize agent session profiles across executors.
 10. Add authenticated local hook ingest for external agent runtimes after the
@@ -474,7 +475,7 @@ Responsibilities:
 - `OpenTagRun` lifecycle.
 - target parsing rules.
 - permission grant model.
-- callback route model.
+- source-thread delivery target model.
 - run status vocabulary.
 - serialization and validation.
 
@@ -492,7 +493,8 @@ Responsibilities:
 
 ### `packages/opentag-dispatcher`
 
-Owns the embeddable dispatcher application and provider callback sinks.
+Owns the embeddable dispatcher application, unified delivery producer, and
+side-effect kernel interfaces.
 
 Responsibilities:
 
@@ -502,11 +504,12 @@ Responsibilities:
 - expose runner pairing and polling endpoints.
 - implement lease-based run claiming.
 - receive runner status updates.
-- coordinate callback delivery through provider adapters.
+- enqueue provider-neutral presentations and record only truthful intent audit
+  events; provider outcomes are settled through the delivery journal.
 
 ### `packages/opentag-github`
 
-Owns GitHub-specific translation and callback behavior.
+Owns GitHub-specific ingress translation and presentation rendering.
 
 Responsibilities:
 
@@ -517,12 +520,12 @@ Responsibilities:
 
 ### `packages/opentag-slack`
 
-Owns Slack-specific translation and callback behavior.
+Owns Slack-specific ingress translation and delivery adaptation.
 
 Responsibilities:
 
 - convert Slack `app_mention` payloads into `OpenTagEvent`.
-- encode and decode Slack thread keys for callback routing.
+- encode and decode Slack thread keys for source-thread delivery.
 - map bound channels to repository context.
 
 ### `apps/github-probot`
@@ -557,10 +560,14 @@ Owns the runnable Node process for the extremely thin hosted control plane.
 Responsibilities:
 
 - read deployment configuration from environment variables.
-- compose callback sinks.
+- compose the unified delivery producer, provider registry, and side-effect
+  kernel.
 - start the `packages/opentag-dispatcher` Hono app with `@hono/node-server`.
 
-The dispatcher should stay boring. It is not an agent runtime, workflow engine, hosted IDE, or chat product. Its job is to relay public workspace events to private/local runners without requiring the user's machine to expose an inbound port.
+The dispatcher should stay boring. It is not an agent runtime, workflow engine,
+hosted IDE, or chat product. It admits public workspace events, coordinates
+private/local runners, and enqueues provider-neutral delivery presentations
+without requiring the user's machine to expose an inbound port.
 
 ### `packages/opentag-store`
 
@@ -620,7 +627,7 @@ type OpenTagEvent = {
   context: ContextPointer[];
   workItem?: WorkItemReference;
   permissions: PermissionGrant[];
-  callback: CallbackRoute;
+  deliveryTarget: SourceThreadDeliveryTarget;
   metadata: Record<string, unknown>;
 };
 ```
@@ -680,10 +687,10 @@ type PermissionGrant = {
 };
 ```
 
-### Callback Route
+### Source-Thread Delivery Target
 
 ```ts
-type CallbackRoute = {
+type SourceThreadDeliveryTarget = {
   provider: string;
   uri: string;
   threadKey?: string;
@@ -721,9 +728,12 @@ The v0 hosted dispatcher exists because GitHub webhooks need a public endpoint w
 - let paired local daemons poll for eligible runs.
 - lease a run to exactly one daemon at a time.
 - accept status/result updates from the daemon.
-- call provider callback adapters to post acknowledgements, progress, and final results.
+- enqueue acknowledgement, progress, and final presentations through the
+  unified delivery producer.
 
-The dispatcher should not inspect local files, hold repository credentials beyond what the GitHub App needs for callbacks, execute agent code, or own workspace-specific business logic.
+The dispatcher should not inspect local files, hold provider credentials,
+execute agent code, or own workspace-specific business logic. Provider
+credentials belong to exact provider-instance adapters.
 
 ### V0 Run State Machine
 
@@ -800,7 +810,7 @@ The GitHub adapter extracts:
 - comment URL and body.
 - actor login and ID.
 - installation ID.
-- callback location.
+- source-thread delivery target.
 
 It creates an `OpenTagEvent` and stores or enqueues it.
 
@@ -809,7 +819,7 @@ The Slack adapter extracts:
 - team ID and channel ID.
 - source user ID and thread timestamp.
 - bound repository owner/name from the channel mapping.
-- callback route via `chat.postMessage`.
+- source-thread target used by the Slack delivery adapter.
 
 It creates an `OpenTagEvent` and stores or enqueues it.
 
@@ -832,16 +842,16 @@ The local daemon:
 4. Streams status back to OpenTag.
 5. Produces a structured final result.
 
-### Callback
+### Delivery
 
-The GitHub callback adapter posts:
+The GitHub delivery adapter posts:
 
 - initial acknowledgement: "OpenTag picked this up."
 - progress checkpoints for long runs.
 - final success/failure summary.
 - optional PR link when the executor creates a change.
 
-The Slack callback adapter posts:
+The Slack delivery adapter posts:
 
 - initial acknowledgement in the source thread.
 - progress checkpoints in the same thread.
@@ -970,7 +980,7 @@ Each run should preserve:
 - executor adapter.
 - start/end timestamps.
 - status transitions.
-- callback messages posted.
+- delivery intent and provider-outcome evidence.
 - artifact or PR links.
 
 The audit log is part of the product, not an implementation detail. It is how OpenTag earns trust as an open alternative to opaque chat-agent execution.
@@ -1056,7 +1066,7 @@ Deliverables:
 - repository created.
 - README with one-liner, comparison, and demo target.
 - this design document.
-- protocol draft with `OpenTagEvent`, `OpenTagRun`, and callback types.
+- protocol draft with `OpenTagEvent`, `OpenTagRun`, and presentation types.
 
 Success:
 

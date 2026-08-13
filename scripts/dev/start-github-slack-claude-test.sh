@@ -64,7 +64,6 @@ echo "Starting GitHub Probot ingress on :$OPENTAG_GITHUB_PORT"
   export WEBHOOK_PATH="${WEBHOOK_PATH:-/github/webhooks}"
   export OPENTAG_DISPATCHER_URL="http://localhost:$OPENTAG_DISPATCHER_PORT"
   export OPENTAG_DISPATCHER_TOKEN="$OPENTAG_PAIRING_TOKEN"
-  export OPENTAG_DISPATCHER_OWNS_CALLBACKS=true
   pnpm --filter @opentag/github-probot exec probot run ./dist/index.js
 ) &
 PROBOT_PID=$!

@@ -76,6 +76,9 @@
     "@opentag/teams": "workspace:*",
     "@opentag/telegram": "workspace:*",
     "@opentag/runner": "workspace:*",
+    "@opentag/slack": "workspace:*",
+    "@opentag/store": "workspace:*",
+    "drizzle-orm": "^0.45.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {

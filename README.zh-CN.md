@@ -47,7 +47,7 @@ OpenTag 把请求发生的原始 thread 当成审批 agent 建议变更的地方
 
 只有 dispatcher 确认已有 adapter 可以执行该 action 时，OpenTag 才会显示 `Apply`。否则 receipt 会显示需要 setup 或需要注意的原因，同时保留本地 audit 入口，例如 `opentag status --run <run_id>`。
 
-每个 run 也会保留本地 agent work ledger：source event、admission decision、context packet snapshot、executor capability snapshot、产物、callback delivery 和最终结果都可以通过 status / audit API 查看，而不会把 agent 内部过程刷到人类 thread。
+每个 run 也会保留本地 agent work ledger：source event、admission decision、context packet snapshot、executor capability snapshot、产物、delivery intent audit 和最终结果都可以通过 status / audit API 查看，而不会把 agent 内部过程刷到人类 thread。Provider outcome 以 delivery journal 为准，不能从 run event 推断。
 
 ## 快速开始
 
@@ -292,7 +292,7 @@ opentag-dev setup
 | [`@opentag/teams`](https://www.npmjs.com/package/@opentag/teams) | Microsoft Teams Bot Framework 入口、频道回复和 action apply |
 | [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor 契约、通用 ACP host 和内置 launch profile |
 | [`@opentag/store`](https://www.npmjs.com/package/@opentag/store) | SQLite 持久化 |
-| [`@opentag/dispatcher`](https://www.npmjs.com/package/@opentag/dispatcher) | 可嵌入 dispatcher 和 callback sink |
+| [`@opentag/dispatcher`](https://www.npmjs.com/package/@opentag/dispatcher) | 可嵌入 dispatcher、delivery producer 和 side-effect kernel |
 
 ## 许可证
 

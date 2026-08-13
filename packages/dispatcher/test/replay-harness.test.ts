@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { OpenTagEventSchema, OpenTagRunResultSchema, type OpenTagEvent, type OpenTagRunResult } from "@opentag/core";
-import { createDispatcherApp } from "../src/server.js";
+import {
+  createDispatcherApp,
+  type DispatcherDeliveryPresentation
+} from "../src/server.js";
 
 type ReplayFixture = {
   name: string;
@@ -94,15 +97,18 @@ function expectSourceThreadBodyIsRedacted(body: string) {
 describe("source-thread replay harness", () => {
   for (const fixture of fixtures) {
     it(`replays ${fixture.name}`, async () => {
-      const delivered: Array<{ kind: string; body: string }> = [];
+      const delivered: DispatcherDeliveryPresentation[] = [];
       const managedChannel = managedChannelReplayConfig(fixture.event);
       const app = createDispatcherApp({
         databasePath: ":memory:",
         ...(managedChannel ? { channelPrincipals: [managedChannel.principal] } : {}),
-        callbackSink: {
-          async deliver(message) {
-            delivered.push({ kind: message.kind, body: message.body });
-            return { handled: true, outcome: "accepted" } as const;
+        deliveryProducer: {
+          async enqueue(delivery) {
+            delivered.push(delivery);
+            return {
+              outcome: "queued" as const,
+              sideEffectIntentId: `test-intent-${delivered.length}`
+            };
           }
         }
       });
@@ -193,7 +199,9 @@ describe("source-thread replay harness", () => {
         expect.arrayContaining(["source_event.received", "context_packet.generated", "executor.capability.snapshot", "artifact.created", "run.completed"])
       );
 
-      const final = delivered.find((message) => message.kind === "final");
+      const final = delivered.find((delivery) =>
+        delivery.kind === "business" && delivery.phase === "final"
+      );
       expect(final).toBeDefined();
       for (const expectedText of fixture.expected.finalBodyContains) {
         expect(final?.body).toContain(expectedText);

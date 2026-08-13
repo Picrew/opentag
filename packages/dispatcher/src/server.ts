@@ -66,7 +66,8 @@ import {
   RequestBodyTooLargeError,
   platformCapabilityForProvider,
   readRequestTextWithLimit,
-  shouldDeliverSourceReceipt
+  shouldDeliverSourceReceipt,
+  SlackSelfServiceDeliverySchema
 } from "@opentag/core";
 import { evaluateWorkstream, evaluateWorkstreamContinuation } from "@opentag/governance";
 import {
@@ -84,12 +85,9 @@ import {
 } from "@opentag/gitlab";
 import type { GitLabMutationOperation } from "@opentag/gitlab";
 import {
-  acknowledgeLinearAgentSession,
   applyLinearMutationOperation,
   buildLinearOAuthAuthorizationUrl,
-  createLinearAgentActivity,
   createLinearAdapterMappingDrafts,
-  createLinearIssueCommentRecord,
   createLinearMutationCompiler,
   createLinearWebhookApp,
   DEFAULT_LINEAR_COMMENT_RUN_DEFER_MS,
@@ -97,12 +95,7 @@ import {
   discoverLinearMetadata,
   exchangeLinearOAuthCode,
   fetchLinearWorkspaceIdentity,
-  linearAgentSessionIdFromCallbackUri,
-  linearIssueIdFromCallbackUri,
-  linearParentCommentIdFromCallbackUri,
   refreshLinearOAuthToken,
-  updateLinearAgentSession,
-  updateLinearComment,
   verifyLinearSignature,
   verifyLinearWebhookTimestamp,
   type FetchLike as LinearFetchLike,
@@ -126,16 +119,9 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import {
-  CallbackProviderOutcomeUnknownError,
-  type CallbackSinkWithPreflight
-} from "./callbacks.js";
-import {
-  createGovernedCallbackRuntime,
-  type GovernedCallbackRuntime
-} from "./governed-callback-runtime.js";
 import { createReassessmentObligationWorker } from "./reassessment-obligations.js";
 import { createReassessmentObligationProcessor } from "./reassessment-processor.js";
+import { UnifiedDeliveryProducer, type UnifiedDeliveryEnqueuer } from "./delivery/producer.js";
 
 /**
  * Parse and validate a request body, mapping ONLY request-body parse failures to
@@ -357,27 +343,19 @@ function createDispatcherRateLimitMiddleware(options: DispatcherRateLimitOptions
 import { createAdmissionRuntime, sourceRepoIsPublic, type AgentAccessProfileCheck } from "./admission.js";
 import { continuationResumePresentation } from "./continuation-presentation.js";
 import { sha256Digest } from "./digest.js";
-import { createDefaultCallbackPresentation, type CallbackPresentation, type LarkRenderLocale } from "./presentation.js";
+import { createDefaultProviderPresentation, type PresentedProviderBody, type ProviderPresentation, type LarkRenderLocale } from "./presentation.js";
 import {
   createDispatcherCompletionGovernance,
   currentWorkThreadRun,
   type GitHubCompletionPolicy,
   type GitHubDefaultCompletionMode
 } from "./completion-governance.js";
-import { createSourceThreadControlHandler } from "./source-thread-control.js";
+import {
+  createSourceThreadControlHandler,
+  type SourceThreadControlDeliveryPresentation
+} from "./source-thread-control.js";
 
-type CallbackRunStatusState = Parameters<CallbackPresentation["runStatusPresentation"]>[0]["state"];
-type DelayedLarkStatusPhase = "queued" | "running" | "progress";
-type DelayedLarkStatusTimer = ReturnType<typeof globalThis.setTimeout>;
-
-export type LarkDelayedStatusCardOptions = {
-  enabled?: boolean;
-  delayMs?: number;
-  minUpdateIntervalMs?: number;
-  now?(): number;
-  setTimeout?(callback: () => void, delayMs: number): DelayedLarkStatusTimer;
-  clearTimeout?(handle: DelayedLarkStatusTimer): void;
-};
+type ProviderRunStatusState = Parameters<ProviderPresentation["runStatusPresentation"]>[0]["state"];
 
 export type LinearOAuthInstallOptions = {
   clientId: string;
@@ -395,12 +373,6 @@ export type LinearOAuthInstallOptions = {
   now?(): Date;
 };
 
-type DelayedLarkStatusState = {
-  timer?: DelayedLarkStatusTimer;
-  cardCreated: boolean;
-  lastPhase?: DelayedLarkStatusPhase;
-  lastUpdateAt?: number;
-};
 
 function larkRenderLocaleFromEvent(event: OpenTagEvent): LarkRenderLocale | undefined {
   const locale = event.metadata?.["larkRenderLocale"];
@@ -417,8 +389,8 @@ function larkRenderLocaleRenderOption(event: OpenTagEvent): { larkRenderLocale: 
 }
 
 function shouldDeliverRunStatusUpdate(
-  presentation: CallbackPresentation,
-  input: { provider: string; state: CallbackRunStatusState }
+  presentation: ProviderPresentation,
+  input: { provider: string; state: ProviderRunStatusState }
 ): boolean {
   return presentation.shouldDeliverRunStatusUpdate?.(input) ?? presentation.shouldDeliverStatusUpdate(input.provider);
 }
@@ -456,14 +428,6 @@ function linearAccessTokenExpiresAt(input: { token: LinearOAuthTokenResponse; no
 
 function isTerminalRun(run: OpenTagRun): boolean {
   return ["succeeded", "failed", "cancelled", "interrupted", "timed_out"].includes(run.status);
-}
-
-function shouldUseDelayedLarkStatusCard(
-  provider: string,
-  options: LarkDelayedStatusCardOptions,
-  nativeStatusDelivery: boolean
-): boolean {
-  return provider === "lark" && options.enabled !== false && !nativeStatusDelivery;
 }
 
 function safeExecutorLabel(executor: string | undefined): string {
@@ -2419,76 +2383,21 @@ async function createChildRunForThreadAction(input: {
   return run;
 }
 
-export type CallbackMessage = {
-  runId: string;
-  kind: "acknowledgement" | "progress" | "final";
-  provider: string;
-  uri: string;
-  body: string;
-  idempotencyKey?: string;
-  agentId?: string;
-  threadKey?: string;
-  statusMessageKey?: string;
-  externalMessageId?: string;
-  blocks?: SlackBlock[];
-  rich?: {
-    provider: string;
-    payload: unknown;
-  };
-};
-
-export type CallbackDeliveryResult =
-  | { handled: false; externalMessageId?: never }
-  | {
-      handled: true;
-      outcome: "accepted";
-      externalMessageId?: string;
-      providerReceiptId?: string;
-      providerResourceUri?: string;
-    }
-  | {
-      handled: true;
-      outcome: "rejected";
-      reasonCode: string;
-      externalMessageId?: never;
-    }
-  | {
-      handled: true;
-      outcome: "outcome_unknown";
-      reasonCode: string;
-      nextAction: string;
-      owner: string;
-      externalMessageId?: never;
-    };
-
-export type CallbackSink = {
-  deliver(message: CallbackMessage): Promise<CallbackDeliveryResult>;
-};
-
-export type SourceReceiptState = "received" | "running";
-
-export type SourceReceiptDelivery = {
-  delivered: boolean;
-};
-
-export type SourceReceipt = {
-  runId: string;
-  provider: string;
-  state: SourceReceiptState;
-  event: OpenTagEvent;
-  agentId?: string;
-};
-
-export type SourceReceiptSink = {
-  deliver(receipt: SourceReceipt): Promise<SourceReceiptDelivery>;
-};
-
-export type CallbackRetryOptions = {
-  maxAttempts?: number;
-  baseDelayMs?: number;
-  maxDelayMs?: number;
-  now?: Date;
-};
+export type DispatcherDeliveryPresentation =
+  | ({
+      runId: string;
+      kind: "business" | "source_receipt";
+      provider: string;
+      uri: string;
+      body?: string;
+      idempotencyKey?: string;
+      agentId?: string;
+      threadKey?: string;
+      statusMessageKey?: string;
+      phase: "acknowledgement" | "progress" | "final" | "received" | "running";
+      sourceEvent?: OpenTagEvent;
+    } & Partial<PresentedProviderBody>)
+  | SourceThreadControlDeliveryPresentation;
 
 export type GitHubApplyOptions = {
   token: string;
@@ -2682,221 +2591,6 @@ async function executeDirectApplyPlan(input: {
   return await updateExecutedApplyPlan({ repo: input.repo, plan: input.plan, resolved: input.resolved, executedOutcomes });
 }
 
-const noopCallbackSink: CallbackSink = {
-  async deliver() {
-    return { handled: false };
-  }
-};
-
-const noopSourceReceiptSink: SourceReceiptSink = {
-  async deliver() {
-    return { delivered: false };
-  }
-};
-
-function nextCallbackAttemptAt(input: { attempts: number } & CallbackRetryOptions): string | undefined {
-  const maxAttempts = input.maxAttempts ?? 5;
-  const nextAttempt = input.attempts + 1;
-  if (nextAttempt >= maxAttempts) return undefined;
-
-  const baseDelayMs = input.baseDelayMs ?? 5_000;
-  const maxDelayMs = input.maxDelayMs ?? 300_000;
-  const delayMs = Math.min(maxDelayMs, baseDelayMs * 2 ** Math.max(0, input.attempts));
-  return new Date((input.now ?? new Date()).getTime() + delayMs).toISOString();
-}
-
-async function deliverCallbackDelivery(input: {
-  repo: ReturnType<typeof createOpenTagRepository>;
-  sink: CallbackSink;
-  delivery: import("@opentag/store").CallbackDelivery;
-  retry?: CallbackRetryOptions;
-}): Promise<boolean> {
-  const classification = await (async () => {
-    try {
-      const externalMessageId =
-        input.delivery.externalMessageId ??
-        (input.delivery.statusMessageKey
-          ? await input.repo.findCallbackExternalMessageId({
-              runId: input.delivery.runId,
-              provider: input.delivery.provider,
-              ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
-              statusMessageKey: input.delivery.statusMessageKey
-            })
-          : undefined);
-      const deliveryResult = await input.sink.deliver({
-        runId: input.delivery.runId,
-        kind: input.delivery.kind,
-        provider: input.delivery.provider,
-        uri: input.delivery.uri,
-        body: input.delivery.body,
-        ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
-        ...(input.delivery.agentId ? { agentId: input.delivery.agentId } : {}),
-        ...(input.delivery.statusMessageKey ? { statusMessageKey: input.delivery.statusMessageKey } : {}),
-        ...(externalMessageId ? { externalMessageId } : {}),
-        ...(input.delivery.blocks ? { blocks: input.delivery.blocks as SlackBlock[] } : {}),
-        ...(input.delivery.rich ? { rich: input.delivery.rich as NonNullable<CallbackMessage["rich"]> } : {})
-      });
-      if (!deliveryResult.handled) {
-        throw new Error(`No callback sink handled provider ${input.delivery.provider}.`);
-      }
-      if (deliveryResult.outcome === "rejected") {
-        return {
-          outcome: "attention" as const,
-          reasonCode: deliveryResult.reasonCode,
-          nextAction: "inspect-provider-rejection"
-        };
-      }
-      if (deliveryResult.outcome === "outcome_unknown") {
-        return {
-          outcome: "attention" as const,
-          reasonCode: deliveryResult.reasonCode,
-          nextAction: deliveryResult.nextAction,
-          owner: deliveryResult.owner
-        };
-      }
-      return {
-        outcome: "accepted" as const,
-        externalMessageId: deliveryResult.externalMessageId ?? externalMessageId
-      };
-    } catch (error) {
-      if (error instanceof CallbackProviderOutcomeUnknownError) {
-        return {
-          outcome: "attention" as const,
-          reasonCode: error.classification.reasonCode,
-          nextAction: error.classification.nextAction
-        };
-      }
-      return { outcome: "failed" as const, error };
-    }
-  })();
-
-  if (classification.outcome === "attention") {
-    await input.repo.markCallbackAttention({
-      deliveryId: input.delivery.id,
-      reasonCode: classification.reasonCode,
-      nextAction: classification.nextAction,
-      ...("owner" in classification ? { owner: classification.owner } : {})
-    });
-    return false;
-  }
-  if (classification.outcome === "failed") {
-    const maxAttempts = input.retry?.maxAttempts ?? 5;
-    const nextAttemptAt = nextCallbackAttemptAt({ attempts: input.delivery.attempts, ...(input.retry ?? {}) });
-    await input.repo.markCallbackFailed({
-      deliveryId: input.delivery.id,
-      error: classification.error instanceof Error
-        ? classification.error.message
-        : String(classification.error),
-      maxAttempts,
-      ...(nextAttemptAt ? { nextAttemptAt } : {})
-    });
-    return false;
-  }
-  await input.repo.markCallbackDelivered({
-    deliveryId: input.delivery.id,
-    ...(classification.externalMessageId
-      ? { externalMessageId: classification.externalMessageId }
-      : {})
-  });
-  return true;
-}
-
-export async function processPendingCallbacks(input: {
-  repo: ReturnType<typeof createOpenTagRepository>;
-  sink: CallbackSink;
-  limit?: number;
-  retry?: CallbackRetryOptions;
-}): Promise<{ processed: number; delivered: number; failed: number }> {
-  const maxAttempts = input.retry?.maxAttempts ?? 5;
-  const deliveries = await input.repo.claimPendingCallbackDeliveries({
-    limit: input.limit ?? 20,
-    ...(input.retry?.now ? { now: input.retry.now } : {}),
-    maxAttempts
-  });
-  const result = { processed: 0, delivered: 0, failed: 0 };
-  for (const delivery of deliveries) {
-    result.processed += 1;
-    const delivered = await deliverCallbackDelivery({
-      repo: input.repo,
-      sink: input.sink,
-      delivery,
-      ...(input.retry ? { retry: input.retry } : {})
-    });
-    if (delivered) {
-      result.delivered += 1;
-    } else {
-      result.failed += 1;
-    }
-  }
-  return result;
-}
-
-async function deliverAndAudit(input: {
-  repo: ReturnType<typeof createOpenTagRepository>;
-  sink: CallbackSink;
-  message: CallbackMessage;
-  retry?: CallbackRetryOptions;
-}): Promise<boolean> {
-  const safeMessage = sanitizeCredentialLikeValue(input.message);
-  const delivery = await input.repo.enqueueCallbackDelivery({
-    runId: safeMessage.runId,
-    kind: safeMessage.kind,
-    provider: safeMessage.provider,
-    uri: safeMessage.uri,
-    body: safeMessage.body,
-    ...(safeMessage.idempotencyKey ? { idempotencyKey: safeMessage.idempotencyKey } : {}),
-    ...(safeMessage.threadKey ? { threadKey: safeMessage.threadKey } : {}),
-    ...(safeMessage.agentId ? { agentId: safeMessage.agentId } : {}),
-    ...(safeMessage.statusMessageKey ? { statusMessageKey: safeMessage.statusMessageKey } : {}),
-    ...(safeMessage.blocks ? { blocks: safeMessage.blocks } : {}),
-    ...(safeMessage.rich ? { rich: safeMessage.rich } : {})
-  });
-  if (delivery.enqueueOutcome === "duplicate") return delivery.status === "delivered";
-  return deliverCallbackDelivery({
-    repo: input.repo,
-    sink: input.sink,
-    delivery,
-    ...(input.retry ? { retry: input.retry } : {})
-  });
-}
-
-async function deliverSourceReceiptBestEffort(input: {
-  repo: ReturnType<typeof createOpenTagRepository>;
-  sink: SourceReceiptSink;
-  receipt: SourceReceipt;
-}): Promise<SourceReceiptDelivery> {
-  try {
-    const result = await input.sink.deliver(input.receipt);
-    if (!result.delivered) return result;
-    await input.repo.appendRunEvent({
-      runId: input.receipt.runId,
-      type: "source_receipt.delivered",
-      payload: {
-        provider: input.receipt.provider,
-        state: input.receipt.state
-      },
-      visibility: "audit",
-      importance: "low",
-      message: `Source ${input.receipt.state} receipt delivered.`
-    });
-    return result;
-  } catch (error) {
-    await input.repo.appendRunEvent({
-      runId: input.receipt.runId,
-      type: "source_receipt.failed",
-      payload: {
-        provider: input.receipt.provider,
-        state: input.receipt.state,
-        error: error instanceof Error ? error.message : String(error)
-      },
-      visibility: "audit",
-      importance: "low",
-      message: `Source ${input.receipt.state} receipt failed.`
-    });
-    return { delivered: false };
-  }
-}
-
 type DispatcherAuthScope = "pairing" | "runner_runtime" | "runner_operator";
 type DispatcherAuthResult =
   | { ok: true }
@@ -3025,20 +2719,17 @@ export function openDispatcherGovernanceStore(databasePath: string) {
 export function createDispatcherApp(input: {
   databasePath: string;
   sqlite?: InstanceType<typeof Database>;
-  callbackSink?: CallbackSink;
-  sourceReceiptSink?: SourceReceiptSink;
+  deliveryProducer?: UnifiedDeliveryEnqueuer<DispatcherDeliveryPresentation>;
   pairingToken?: string;
   runnerToken?: string;
   runnerTokens?: string[];
   revokedRunnerTokenFingerprints?: string[];
   channelPrincipals?: ChannelPrincipalCredential[];
-  presentation?: CallbackPresentation;
+  presentation?: ProviderPresentation;
   githubApply?: GitHubApplyOptions;
   gitlabApply?: GitLabApplyOptions;
   linearApply?: LinearApplyOptions;
   linearOAuthInstall?: LinearOAuthInstallOptions;
-  callbackRetry?: CallbackRetryOptions;
-  larkStatusCards?: LarkDelayedStatusCardOptions;
   agentAccessProfileCheck?: AgentAccessProfileCheck;
   maxRequestBodyBytes?: number;
   rateLimit?: DispatcherRateLimitOptions | false;
@@ -3058,14 +2749,6 @@ export function createDispatcherApp(input: {
     retryBaseMs?: number;
     retryMaxMs?: number;
     maxAttempts?: number;
-  };
-  governedCallbackRuntime?: {
-    create?: (
-      options: Parameters<typeof createGovernedCallbackRuntime>[0]
-    ) => GovernedCallbackRuntime;
-    retryDelayMs?: number;
-    setTimeout?: typeof globalThis.setTimeout;
-    clearTimeout?: typeof globalThis.clearTimeout;
   };
 }) {
   const sqlite = input.sqlite ?? openDispatcherDatabase(input.databasePath);
@@ -3122,150 +2805,58 @@ export function createDispatcherApp(input: {
   });
   const app = new Hono();
   const channelPrincipals = configuredChannelPrincipals(input.channelPrincipals);
-  const configuredCallbackSink = input.callbackSink ?? noopCallbackSink;
-  const sourceReceiptSink = input.sourceReceiptSink ?? noopSourceReceiptSink;
-  const presentation = input.presentation ?? createDefaultCallbackPresentation();
-  const callbackRetry = input.callbackRetry ?? {};
-  const larkStatusCardOptions = input.larkStatusCards ?? {};
-  const larkStatusCardDelayMs = larkStatusCardOptions.delayMs ?? 10_000;
-  const larkStatusCardMinUpdateIntervalMs = larkStatusCardOptions.minUpdateIntervalMs ?? 5_000;
-  const larkStatusCardNow = larkStatusCardOptions.now ?? (() => Date.now());
-  const setLarkStatusCardTimeout = larkStatusCardOptions.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
-  const clearLarkStatusCardTimeout = larkStatusCardOptions.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle));
-  const delayedLarkStatusCards = new Map<string, DelayedLarkStatusState>();
-  let governedCallbackRuntime: GovernedCallbackRuntime | undefined;
-  let governedCallbackRuntimeStopping = false;
-  let governedCallbackRuntimeStartTask: Promise<void> | undefined;
-  let governedCallbackRuntimeRetryTimer:
-    | ReturnType<typeof globalThis.setTimeout>
-    | undefined;
-  const governedCallbackRuntimeOptions = input.governedCallbackRuntime ?? {};
-  const createCallbackRuntime =
-    governedCallbackRuntimeOptions.create ?? createGovernedCallbackRuntime;
-  const setGovernedCallbackRuntimeTimeout =
-    governedCallbackRuntimeOptions.setTimeout ?? globalThis.setTimeout;
-  const clearGovernedCallbackRuntimeTimeout =
-    governedCallbackRuntimeOptions.clearTimeout ?? globalThis.clearTimeout;
+  const deliveryProducer = input.deliveryProducer
+    ?? new UnifiedDeliveryProducer<DispatcherDeliveryPresentation>({});
+  const presentation = input.presentation ?? createDefaultProviderPresentation();
 
-  async function recordGovernedCallbackBlock(inputValue: {
-    runId: string;
-    workThreadId?: string;
-    assessmentId: string;
-    transitionKey: string;
-    reasonCode: string;
-    nextAction: string;
-  }): Promise<void> {
-    try {
-      await repo.appendControlPlaneEvent({
-        type: "callback.governed.enqueue_blocked",
-        severity: "error",
-        subject: inputValue.runId,
-        idempotencyKey: `governed-callback-blocked:${inputValue.transitionKey}:${inputValue.reasonCode}`,
-        payload: {
-          runId: inputValue.runId,
-          ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
-          assessmentId: inputValue.assessmentId,
-          reasonCode: inputValue.reasonCode,
-          nextAction: inputValue.nextAction
-        }
-      });
-    } catch {
-      // The durable reassessment obligation remains the retry authority.
-    }
+  async function enqueueDelivery(delivery: DispatcherDeliveryPresentation) {
+    const result = await deliveryProducer.enqueue(delivery);
+    const runId = delivery.kind === "source_thread_control"
+      ? delivery.auditRunId
+      : delivery.runId;
+    if (!runId || !(await repo.getRun({ runId }))) return result;
+    await repo.appendRunEvent({
+      runId,
+      type: result.outcome === "queued" ? "delivery.intent.queued" : "delivery.activation_blocked",
+      payload: {
+        presentationKind: delivery.kind,
+        deliveryOutcome: result.outcome,
+        ...(result.outcome === "queued" ? { sideEffectIntentId: result.sideEffectIntentId } : {})
+      },
+      visibility: "audit",
+      importance: result.outcome === "queued" ? "normal" : "blocking",
+      message: result.outcome === "queued"
+        ? "Delivery intent queued for the provider side-effect kernel."
+        : "Delivery activation is blocked; no provider I/O was attempted."
+    });
+    return result;
   }
 
-  async function deliverCallbackWithCompletionAuthority(inputValue: {
-    message: CallbackMessage;
-    assessmentId?: string;
-    transitionKey: string;
-    workThreadId?: string;
-    legacyFallback?: boolean;
-    deferOnGovernedFailure?: boolean;
-  }): Promise<"governed" | "legacy" | "deferred" | "skipped"> {
-    if (!inputValue.assessmentId) {
-      if (inputValue.legacyFallback === false) return "skipped";
-      await deliverAndAudit({
-        repo,
-        sink: callbackSink,
-        retry: callbackRetry,
-        message: inputValue.message
-      });
-      return "legacy";
-    }
-    let governedContext: Awaited<ReturnType<typeof repo.getGovernedCallbackEnqueueContext>>;
-    try {
-      governedContext = await repo.getGovernedCallbackEnqueueContext({
-        runId: inputValue.message.runId,
-        assessmentId: inputValue.assessmentId
-      });
-    } catch {
-      await recordGovernedCallbackBlock({
-        runId: inputValue.message.runId,
-        ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
-        assessmentId: inputValue.assessmentId,
-        transitionKey: inputValue.transitionKey,
-        reasonCode: "governed_callback_context_unavailable",
-        nextAction: "inspect-local-callback-ledger"
-      });
-      if (inputValue.deferOnGovernedFailure) return "deferred";
-      throw new Error("governed_callback_context_unavailable");
-    }
-    if (governedContext.outcome === "authority_conflict") {
-      await recordGovernedCallbackBlock({
-        runId: inputValue.message.runId,
-        ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
-        assessmentId: inputValue.assessmentId,
-        transitionKey: inputValue.transitionKey,
-        reasonCode: "governed_callback_authority_conflict",
-        nextAction: "retry-after-hosted-authority-is-acknowledged"
-      });
-      if (inputValue.deferOnGovernedFailure) return "deferred";
-      throw new Error("governed_callback_authority_conflict");
-    }
-    if (governedContext.outcome === "ready") {
-      if (inputValue.message.provider !== "github" || !governedCallbackRuntime) {
-        const reasonCode = inputValue.message.provider !== "github"
-          ? "governed_callback_provider_not_supported"
-          : "governed_callback_runtime_unavailable";
-        await recordGovernedCallbackBlock({
-          runId: inputValue.message.runId,
-          ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
-          assessmentId: inputValue.assessmentId,
-          transitionKey: inputValue.transitionKey,
-          reasonCode,
-          nextAction: "repair-local-callback"
-        });
-        if (inputValue.deferOnGovernedFailure) return "deferred";
-        throw new Error(reasonCode);
-      }
-      try {
-        await governedCallbackRuntime.enqueue({
-          context: governedContext,
-          message: inputValue.message,
-          transitionKey: inputValue.transitionKey
-        });
-      } catch {
-        await recordGovernedCallbackBlock({
-          runId: inputValue.message.runId,
-          ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
-          assessmentId: inputValue.assessmentId,
-          transitionKey: inputValue.transitionKey,
-          reasonCode: "governed_callback_enqueue_failed",
-          nextAction: "inspect-local-callback-ledger"
-        });
-        if (inputValue.deferOnGovernedFailure) return "deferred";
-        throw new Error("governed_callback_enqueue_failed");
-      }
-      return "governed";
-    }
-    if (inputValue.legacyFallback === false) return "skipped";
-    await deliverAndAudit({
-      repo,
-      sink: callbackSink,
-      retry: callbackRetry,
-      message: inputValue.message
+  function enqueueRenderedDelivery(
+    runId: string,
+    event: OpenTagEvent | z.infer<typeof ThreadActionInputSchema>["callback"],
+    rendered: ReturnType<ProviderPresentation["render"]>,
+    options: {
+      phase?: "acknowledgement" | "progress" | "final";
+      statusMessageKey?: string;
+      idempotencyKey?: string;
+    } = {}
+  ) {
+    const callback = "callback" in event ? event.callback : event;
+    const agentId = "target" in event ? event.target.agentId : undefined;
+    return enqueueDelivery({
+      runId,
+      kind: "business",
+      provider: callback.provider,
+      uri: callback.uri,
+      body: rendered.body,
+      ...(agentId ? { agentId } : {}),
+      ...(callback.threadKey ? { threadKey: callback.threadKey } : {}),
+      ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
+      ...(rendered.rich ? { rich: rendered.rich } : {}),
+      phase: "progress",
+      ...options
     });
-    return "legacy";
   }
 
   async function deliverCompletionTransition(
@@ -3310,28 +2901,16 @@ export function createDispatcherApp(input: {
       provider: transition.event.callback.provider,
       runId: transition.runId
     });
-    const message: CallbackMessage = {
-      runId: transition.runId,
-      kind: projection.state === "completed" ? "final" : "progress",
-      provider: transition.event.callback.provider,
-      uri: transition.event.callback.uri,
-      body: rendered.body,
-      ...(transition.event.target.agentId ? { agentId: transition.event.target.agentId } : {}),
-      ...(transition.event.callback.threadKey ? { threadKey: transition.event.callback.threadKey } : {}),
-      ...(statusMessageKey ? { statusMessageKey } : {}),
-      ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
-      ...(rendered.rich ? { rich: rendered.rich } : {}),
-      idempotencyKey: transition.transitionKey
-    };
-    await deliverCallbackWithCompletionAuthority({
-      message,
-      assessmentId: transition.assessment.id,
-      transitionKey: transition.transitionKey,
-      workThreadId,
-      ...(options.legacyFallback !== undefined
-        ? { legacyFallback: options.legacyFallback }
-        : {})
-    });
+    await enqueueRenderedDelivery(
+      transition.runId,
+      transition.event,
+      rendered,
+      {
+        phase: projection.state === "completed" ? "final" : "progress",
+        ...(statusMessageKey ? { statusMessageKey } : {}),
+        idempotencyKey: transition.transitionKey
+      }
+    );
     return transition.assessment.id;
   }
   const maxRequestBodyBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
@@ -3418,11 +2997,6 @@ export function createDispatcherApp(input: {
       inFlightLinearInstallationTokenRefreshes.delete(installation.id);
     }
   }
-  async function linearRelayInstallationForCallback(message: CallbackMessage) {
-    if (message.provider !== "linear") return null;
-    const stored = await repo.getRun({ runId: message.runId });
-    return stored ? linearRelayInstallationFromEvent(stored.event) : null;
-  }
   async function linearApplyOptionsForEvent(event: OpenTagEvent): Promise<LinearApplyOptions | undefined> {
     if (input.linearApply) return input.linearApply;
     const installation = await linearRelayInstallationFromEvent(event);
@@ -3491,15 +3065,6 @@ export function createDispatcherApp(input: {
       ...(input.installation.auth?.method === "oauth_app" && input.installation.auth.appUserId
         ? { appUserId: input.installation.auth.appUserId }
         : {}),
-      onAgentSessionAccepted: async ({ agentSessionId, runId }) => {
-        const token = await resolveLinearRelayInstallationToken(input.installation);
-        await acknowledgeLinearAgentSession({
-          token,
-          agentSessionId,
-          ...(runId ? { runId } : {}),
-          ...(input.installation.graphqlUrl ? { graphqlUrl: input.installation.graphqlUrl } : {})
-        });
-      },
       async createRun(event) {
         const runId = `run_${randomUUID()}`;
         const eventWithInstallation: OpenTagEvent = {
@@ -3541,118 +3106,6 @@ export function createDispatcherApp(input: {
   function isLinearOAuthAppRevokedPayload(payload: LinearWebhookPayload): boolean {
     return payload.type === "OAuthApp" && payload.action === "revoked";
   }
-  function linearAgentSessionPlanFor(message: CallbackMessage) {
-    const finished = message.kind === "final";
-    return [
-      { content: "Accept the Linear agent session", status: "completed" as const },
-      { content: "Run OpenTag on the paired local checkout", status: finished ? ("completed" as const) : ("inProgress" as const) },
-      { content: "Report the result back to Linear", status: finished ? ("completed" as const) : ("pending" as const) }
-    ];
-  }
-  async function deliverLinearRelayCallback(
-    message: CallbackMessage,
-    installation: NonNullable<Awaited<ReturnType<typeof linearRelayInstallationForCallback>>>
-  ): Promise<CallbackDeliveryResult> {
-    const token = await resolveLinearRelayInstallationToken(installation);
-    const agentSessionId = linearAgentSessionIdFromCallbackUri(message.uri);
-    if (agentSessionId) {
-      await updateLinearAgentSession({
-        token,
-        ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {}),
-        agentSessionId,
-        plan: linearAgentSessionPlanFor(message)
-      });
-      const activityId = await createLinearAgentActivity({
-        token,
-        ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {}),
-        activity: {
-          agentSessionId,
-          type: message.kind === "final" ? "response" : "thought",
-          body: message.body,
-          ephemeral: message.kind === "progress"
-        }
-      });
-      return { handled: true, outcome: "accepted", ...(activityId ? { externalMessageId: activityId } : {}) };
-    }
-
-    const issueId = linearIssueIdFromCallbackUri(message.uri);
-    if (!issueId) {
-      throw new Error(`deliver Linear relay callback failed: invalid callback URI ${message.uri}`);
-    }
-    if (message.statusMessageKey && message.externalMessageId) {
-      await updateLinearComment({
-        token,
-        commentId: message.externalMessageId,
-        body: message.body,
-        ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {})
-      });
-      return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId };
-    }
-    const comment = await createLinearIssueCommentRecord({
-      token,
-      issueId,
-      body: message.body,
-      ...(linearParentCommentIdFromCallbackUri(message.uri) ? { parentId: linearParentCommentIdFromCallbackUri(message.uri)! } : {}),
-      ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {})
-    });
-    return {
-      handled: true,
-      outcome: "accepted",
-      ...(message.statusMessageKey && comment.id ? { externalMessageId: comment.id } : {})
-    };
-  }
-  const callbackSink: CallbackSinkWithPreflight = {
-    async preflight(message) {
-      const configured = configuredCallbackSink as CallbackSink & {
-        preflight?: CallbackSinkWithPreflight["preflight"];
-      };
-      return configured.preflight
-        ? configured.preflight(message)
-        : { handled: false, reasonCode: "provider_not_configured" };
-    },
-    async deliver(message) {
-      const installation = await linearRelayInstallationForCallback(message);
-      if (installation) return deliverLinearRelayCallback(message, installation);
-      return configuredCallbackSink.deliver(message);
-    }
-  };
-  const recordGovernedCallbackRuntimeError = async (): Promise<void> => {
-    try {
-      await repo.appendControlPlaneEvent({
-        type: "callback.governed.worker_error",
-        severity: "error",
-        payload: {
-          reasonCode: "governed_callback_worker_error",
-          nextAction: "inspect-local-callback-ledger"
-        }
-      });
-    } catch {
-      // The callback ledger remains authoritative even when its audit surface is unavailable.
-    }
-  };
-  governedCallbackRuntime = createCallbackRuntime({
-    repo,
-    sink: callbackSink,
-    onError: recordGovernedCallbackRuntimeError
-  });
-  const startGovernedCallbackRuntime = (): void => {
-    if (governedCallbackRuntimeStopping || governedCallbackRuntimeStartTask) return;
-    governedCallbackRuntimeStartTask = governedCallbackRuntime!.start()
-      .catch(async () => {
-        await recordGovernedCallbackRuntimeError();
-        if (governedCallbackRuntimeStopping || governedCallbackRuntimeRetryTimer) return;
-        governedCallbackRuntimeRetryTimer = setGovernedCallbackRuntimeTimeout(() => {
-          governedCallbackRuntimeRetryTimer = undefined;
-          startGovernedCallbackRuntime();
-        }, governedCallbackRuntimeOptions.retryDelayMs
-          ?? Math.max(1_000, reassessmentOptions.pollIntervalMs ?? 1_000));
-        governedCallbackRuntimeRetryTimer.unref?.();
-      })
-      .finally(() => {
-        governedCallbackRuntimeStartTask = undefined;
-      });
-  };
-  startGovernedCallbackRuntime();
   const relayCapabilities: RelayCapabilities = {
     schemaVersion: 1,
     relay: true,
@@ -3679,7 +3132,7 @@ export function createDispatcherApp(input: {
     requestId: string;
     event: OpenTagEvent;
     decision: import("@opentag/core").RunAdmissionDecision;
-    deliverSourceCallback?: boolean;
+    deliverSourcePresentation?: boolean;
   }): Promise<{ escalation?: HumanEscalation; resolutionUnavailableReason?: string }> {
     const protocol = protocolRunFieldsFromEvent(inputValue.event, inputValue.decision.decidedAt);
     if (!protocol.thread) {
@@ -3726,7 +3179,7 @@ export function createDispatcherApp(input: {
     });
     const opened = await repo.openHumanEscalation({ escalation });
     if (
-      inputValue.deliverSourceCallback !== false
+      inputValue.deliverSourcePresentation !== false
       && opened.created
       && presentation.shouldDeliverStatusUpdate(inputValue.event.callback.provider)
     ) {
@@ -3742,16 +3195,8 @@ export function createDispatcherApp(input: {
         ...larkRenderLocaleRenderOption(inputValue.event),
         presentation: semantic
       });
-      await callbackSink.deliver({
-        runId: inputValue.requestId,
-        kind: "final",
-        provider: inputValue.event.callback.provider,
-        uri: inputValue.event.callback.uri,
-        body: rendered.body,
-        ...(inputValue.event.target.agentId ? { agentId: inputValue.event.target.agentId } : {}),
-        ...(inputValue.event.callback.threadKey ? { threadKey: inputValue.event.callback.threadKey } : {}),
-        ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
-        ...(rendered.rich ? { rich: rendered.rich } : {})
+      await enqueueRenderedDelivery(inputValue.requestId, inputValue.event, rendered, {
+        phase: "final"
       });
     }
     return { escalation: opened.escalation };
@@ -3847,7 +3292,7 @@ export function createDispatcherApp(input: {
         requestId: inputValue.runId,
         event: admittedEvent,
         decision: admitted.decision,
-        deliverSourceCallback: !inputValue.quiet
+        deliverSourcePresentation: !inputValue.quiet
       });
       return {
         body: { decision: admitted.decision, ...humanDecision },
@@ -3894,22 +3339,8 @@ export function createDispatcherApp(input: {
           ...larkRenderLocaleRenderOption(event),
           presentation: queuedPresentation
         });
-        await deliverAndAudit({
-          repo,
-          sink: callbackSink,
-          retry: callbackRetry,
-          message: {
-            runId: activeRunId,
-            kind: "progress",
-            provider: event.callback.provider,
-            uri: event.callback.uri,
-            body: queued.body,
-            ...(event.target.agentId ? { agentId: event.target.agentId } : {}),
-            ...(event.callback.threadKey ? { threadKey: event.callback.threadKey } : {}),
-            ...(queued.blocks?.length ? { blocks: queued.blocks } : {}),
-            ...(queued.rich ? { rich: queued.rich } : {}),
-            statusMessageKey: `${activeRunId}:status`
-          }
+        await enqueueRenderedDelivery(activeRunId, event, queued, {
+          statusMessageKey: `${activeRunId}:status`
         });
       }
       return {
@@ -3968,21 +3399,17 @@ export function createDispatcherApp(input: {
     }
     const { run } = createdRun;
     if (!inputValue.quiet) {
-      const sourceReceiptDelivery = await deliverSourceReceiptBestEffort({
-        repo,
-        sink: sourceReceiptSink,
-        receipt: {
+      await enqueueDelivery({
+          kind: "source_receipt",
           runId: run.id,
           provider: inputValue.event.callback.provider,
-          state: "received",
-          event: inputValue.event,
+          phase: "received",
+          sourceEvent: inputValue.event,
+          uri: inputValue.event.callback.uri,
           ...(inputValue.event.target.agentId ? { agentId: inputValue.event.target.agentId } : {})
-        }
       });
-      if (sourceReceiptDelivery.delivered) scheduleDelayedLarkStatusCard({ run, event: inputValue.event });
       const shouldDeliverAcknowledgement =
-        presentation.shouldDeliverAcknowledgement(inputValue.event.callback.provider)
-        || (shouldDeliverSourceReceipt(inputValue.event.callback.provider) && !sourceReceiptDelivery.delivered);
+        presentation.shouldDeliverAcknowledgement(inputValue.event.callback.provider);
       if (shouldDeliverAcknowledgement) {
         const acknowledgementPresentation = presentation.acknowledgementPresentation({ runId: run.id });
         const acknowledgement = presentation.render({
@@ -3991,22 +3418,9 @@ export function createDispatcherApp(input: {
           presentation: acknowledgementPresentation
         });
         const statusMessageKey = lifecycleStatusMessageKey({ provider: inputValue.event.callback.provider, runId: run.id });
-        await deliverAndAudit({
-          repo,
-          sink: callbackSink,
-          retry: callbackRetry,
-          message: {
-            runId: run.id,
-            kind: "acknowledgement",
-            provider: inputValue.event.callback.provider,
-            uri: inputValue.event.callback.uri,
-            body: acknowledgement.body,
-            ...(inputValue.event.target.agentId ? { agentId: inputValue.event.target.agentId } : {}),
-            ...(inputValue.event.callback.threadKey ? { threadKey: inputValue.event.callback.threadKey } : {}),
-            ...(statusMessageKey ? { statusMessageKey } : {}),
-            ...(acknowledgement.blocks?.length ? { blocks: acknowledgement.blocks } : {}),
-            ...(acknowledgement.rich ? { rich: acknowledgement.rich } : {})
-          }
+        await enqueueRenderedDelivery(run.id, inputValue.event, acknowledgement, {
+          phase: "acknowledgement",
+          ...(statusMessageKey ? { statusMessageKey } : {})
         });
       }
     }
@@ -4338,7 +3752,7 @@ export function createDispatcherApp(input: {
         requestId: runId,
         event,
         decision: admitted.decision,
-        deliverSourceCallback: false
+        deliverSourcePresentation: false
       });
       return {
         ...base,
@@ -4512,8 +3926,7 @@ export function createDispatcherApp(input: {
     presentation,
     conversationKeysFromThreadAction,
     latestRunTimeoutMs,
-    deliverAuditedMessage: (message) => deliverAndAudit({ repo, sink: callbackSink, retry: callbackRetry, message }),
-    deliverDirectMessage: (message) => callbackSink.deliver(message),
+    deliveryProducer: { enqueue: enqueueDelivery },
     recordControlPlaneEvent,
     authorizeHumanEscalationChange: authorizeManagedHumanEscalationChange,
     onHumanEscalationChanged: async (escalation, actor, channelPrincipal) => {
@@ -4586,15 +3999,15 @@ export function createDispatcherApp(input: {
     }
   };
 
-  const appendSuppressedRunStatusCallback = async (input: {
+  const appendSuppressedRunStatusDelivery = async (input: {
     runId: string;
     provider: string;
-    state: CallbackRunStatusState;
+    state: ProviderRunStatusState;
   }): Promise<void> => {
     const capability = platformCapabilityForProvider(input.provider);
     await repo.appendRunEvent({
       runId: input.runId,
-      type: "callback.progress.suppressed",
+      type: "delivery.progress.suppressed",
       payload: {
         provider: input.provider,
         reason: "platform_liveness_strategy",
@@ -4606,182 +4019,6 @@ export function createDispatcherApp(input: {
       message: "Run status callback suppressed by platform liveness strategy; use status or audit for details."
     });
   };
-
-  function delayedLarkStatusMessage(input: { run: OpenTagRun; phase: DelayedLarkStatusPhase }): string {
-    if (input.phase === "queued") return "Waiting for the local runner.";
-    if (input.phase === "progress") return "OpenTag is still working.";
-    return `Running with ${safeExecutorLabel(input.run.executor)}.`;
-  }
-
-  function delayedLarkStatusState(input: { run: OpenTagRun; phase: DelayedLarkStatusPhase }): CallbackRunStatusState {
-    if (input.phase === "queued") return "queued";
-    return "running";
-  }
-
-  async function appendDelayedLarkStatusFailure(input: { runId: string; error: unknown }): Promise<void> {
-    await repo.appendRunEvent({
-      runId: input.runId,
-      type: "callback.progress.failed",
-      payload: {
-        provider: "lark",
-        reason: "delayed_status_card",
-        error: input.error instanceof Error ? input.error.message : String(input.error)
-      },
-      visibility: "audit",
-      importance: "low",
-      message: "Delayed Lark status card update failed."
-    });
-  }
-
-  async function deliverDelayedLarkStatusCard(input: {
-    run: OpenTagRun;
-    event: OpenTagEvent;
-    phase: DelayedLarkStatusPhase;
-    createIfMissing?: boolean;
-  }): Promise<boolean> {
-    if (!shouldUseDelayedLarkStatusCard(
-      input.event.callback.provider,
-      larkStatusCardOptions,
-      presentation.shouldDeliverStatusUpdate(input.event.callback.provider)
-    )) return false;
-    if (!input.event.callback.threadKey) return false;
-    if (isTerminalRun(input.run)) return false;
-
-    const statusMessageKey = lifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
-    if (!statusMessageKey) return false;
-
-    const state = delayedLarkStatusCards.get(input.run.id) ?? { cardCreated: false };
-    delayedLarkStatusCards.set(input.run.id, state);
-
-    if (!input.createIfMissing && !state.cardCreated) return false;
-
-    const now = larkStatusCardNow();
-    const phaseChanged = state.lastPhase !== input.phase;
-    const intervalElapsed = !state.lastUpdateAt || now - state.lastUpdateAt >= larkStatusCardMinUpdateIntervalMs;
-    if (!input.createIfMissing && !phaseChanged && !intervalElapsed) return false;
-
-    const statusPresentation = presentation.runStatusPresentation({
-      runId: input.run.id,
-      state: delayedLarkStatusState({ run: input.run, phase: input.phase }),
-      message: delayedLarkStatusMessage({ run: input.run, phase: input.phase }),
-      nextAction: "Use /status here for active-run and queue state, or wait for the final result.",
-      detailVisibility: "source_thread"
-    });
-    const rendered = presentation.render({
-      provider: input.event.callback.provider,
-      ...larkRenderLocaleRenderOption(input.event),
-      presentation: statusPresentation
-    });
-
-    const delivered = await deliverAndAudit({
-      repo,
-      sink: callbackSink,
-      retry: callbackRetry,
-      message: {
-        runId: input.run.id,
-        kind: "progress",
-        provider: input.event.callback.provider,
-        uri: input.event.callback.uri,
-        body: rendered.body,
-        ...(input.event.target.agentId ? { agentId: input.event.target.agentId } : {}),
-        threadKey: input.event.callback.threadKey,
-        ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
-        ...(rendered.rich ? { rich: rendered.rich } : {}),
-        statusMessageKey
-      }
-    });
-    if (!delivered) return false;
-
-    state.cardCreated = true;
-    state.lastPhase = input.phase;
-    state.lastUpdateAt = now;
-    return true;
-  }
-
-  function scheduleDelayedLarkStatusCard(input: { run: OpenTagRun; event: OpenTagEvent }): void {
-    if (!shouldUseDelayedLarkStatusCard(
-      input.event.callback.provider,
-      larkStatusCardOptions,
-      presentation.shouldDeliverStatusUpdate(input.event.callback.provider)
-    )) return;
-    if (!input.event.callback.threadKey) return;
-    if (larkStatusCardDelayMs < 0) return;
-    const existing = delayedLarkStatusCards.get(input.run.id);
-    if (existing?.timer || existing?.cardCreated) return;
-
-    const state = existing ?? { cardCreated: false };
-    const timer = setLarkStatusCardTimeout(() => {
-      delete state.timer;
-      void (async () => {
-        try {
-          const latestRun = await repo.getRun({ runId: input.run.id });
-          if (!latestRun || isTerminalRun(latestRun.run)) {
-            delayedLarkStatusCards.delete(input.run.id);
-            return;
-          }
-          const phase: DelayedLarkStatusPhase = latestRun.run.status === "queued" ? "queued" : "running";
-          await deliverDelayedLarkStatusCard({
-            run: latestRun.run,
-            event: input.event,
-            phase,
-            createIfMissing: true
-          });
-        } catch (error) {
-          await appendDelayedLarkStatusFailure({ runId: input.run.id, error });
-        }
-      })();
-    }, larkStatusCardDelayMs);
-    if (timer && typeof timer === "object" && "unref" in timer && typeof timer.unref === "function") {
-      timer.unref();
-    }
-    state.timer = timer;
-    delayedLarkStatusCards.set(input.run.id, state);
-  }
-
-  function cancelPendingDelayedLarkStatusCard(runId: string): void {
-    const state = delayedLarkStatusCards.get(runId);
-    if (!state?.timer) return;
-    clearLarkStatusCardTimeout(state.timer);
-    delete state.timer;
-  }
-
-  function clearDelayedLarkStatusCard(runId: string): void {
-    cancelPendingDelayedLarkStatusCard(runId);
-    delayedLarkStatusCards.delete(runId);
-  }
-
-  async function patchDelayedLarkStatusCard(input: {
-    run: OpenTagRun;
-    event: OpenTagEvent;
-    phase: DelayedLarkStatusPhase;
-  }): Promise<void> {
-    let state = delayedLarkStatusCards.get(input.run.id);
-    if (!state?.cardCreated) {
-      const statusMessageKey = lifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
-      const externalMessageId =
-        statusMessageKey && input.event.callback.threadKey
-          ? await repo.findCallbackExternalMessageId({
-              runId: input.run.id,
-              provider: input.event.callback.provider,
-              threadKey: input.event.callback.threadKey,
-              statusMessageKey
-            })
-          : undefined;
-      if (!externalMessageId) return;
-      state = state ?? { cardCreated: true };
-      state.cardCreated = true;
-      delayedLarkStatusCards.set(input.run.id, state);
-    }
-    try {
-      await deliverDelayedLarkStatusCard({
-        run: input.run,
-        event: input.event,
-        phase: input.phase
-      });
-    } catch (error) {
-      await appendDelayedLarkStatusFailure({ runId: input.run.id, error });
-    }
-  }
 
   async function deliverPromotedFollowUpAcknowledgement(input: {
     run: OpenTagRun;
@@ -4795,22 +4032,9 @@ export function createDispatcherApp(input: {
       presentation: acknowledgementPresentation
     });
     const statusMessageKey = lifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
-    await deliverAndAudit({
-      repo,
-      sink: callbackSink,
-      retry: callbackRetry,
-      message: {
-        runId: input.run.id,
-        kind: "acknowledgement",
-        provider: input.event.callback.provider,
-        uri: input.event.callback.uri,
-        body: acknowledgement.body,
-        ...(input.event.target.agentId ? { agentId: input.event.target.agentId } : {}),
-        ...(input.event.callback.threadKey ? { threadKey: input.event.callback.threadKey } : {}),
-        ...(statusMessageKey ? { statusMessageKey } : {}),
-        ...(acknowledgement.blocks?.length ? { blocks: acknowledgement.blocks } : {}),
-        ...(acknowledgement.rich ? { rich: acknowledgement.rich } : {})
-      }
+    await enqueueRenderedDelivery(input.run.id, input.event, acknowledgement, {
+      phase: "acknowledgement",
+      ...(statusMessageKey ? { statusMessageKey } : {})
     });
   }
 
@@ -6202,6 +5426,25 @@ export function createDispatcherApp(input: {
     return c.json(result.body, result.status);
   });
 
+  app.post("/v1/delivery-presentations/slack-self-service", async (c) => {
+    const { cause, presentation: selfServicePresentation } = await parseDispatcherBody(c, SlackSelfServiceDeliverySchema);
+    const rawText = `/${cause.command}`;
+    const result = await sourceThreadControl.deliver({
+      request: {
+        rawText,
+        actor: { provider: "slack", providerUserId: cause.userId },
+        callback: { provider: "slack", uri: "slack:source-thread", threadKey: `${cause.teamId}|${cause.channelId}|${cause.threadTs}` },
+        metadata: { assurance: cause.assurance, slackEventId: cause.eventId, eventTime: cause.eventTime, teamId: cause.teamId,
+          channelId: cause.channelId, threadTs: cause.threadTs, userId: cause.userId, ...(cause.appId ? { appId: cause.appId } : {}) }
+      },
+      command: { verb: cause.command, rawText },
+      body: selfServicePresentation.text,
+      ...(selfServicePresentation.textFormat ? { textFormat: selfServicePresentation.textFormat } : {}),
+      ...(selfServicePresentation.blocks?.length ? { blocks: selfServicePresentation.blocks as SlackBlock[] } : {})
+    });
+    return c.json(result, 202);
+  });
+
   app.post("/v1/thread-actions", async (c) => {
     const parsed = await parseDispatcherBody(c, ThreadActionInputSchema);
     const controlCommand = parseThreadControlCommand(parsed.rawText);
@@ -6227,19 +5470,7 @@ export function createDispatcherApp(input: {
     });
     if (!resolved.ok) {
       if (resolved.runId) {
-        await deliverAndAudit({
-          repo,
-          sink: callbackSink,
-          retry: callbackRetry,
-          message: {
-            runId: resolved.runId,
-            kind: "final",
-            provider: parsed.callback.provider,
-            uri: parsed.callback.uri,
-            body: resolved.message,
-            ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
-          }
-        });
+        await enqueueRenderedDelivery(resolved.runId, parsed.callback, { body: resolved.message }, { phase: "final" });
       }
       return c.json({ outcome: resolved.reason, message: resolved.message }, resolved.reason === "no_proposal" ? 404 : 409);
     }
@@ -6252,6 +5483,9 @@ export function createDispatcherApp(input: {
     if (!authorization.ok) {
       return c.json({ outcome: "unauthorized", reason: authorization.reason, message: authorization.message }, 403);
     }
+    const reply = (body: string) => enqueueRenderedDelivery(
+      resolved.resolved.proposal.runId, parsed.callback, { body }, { phase: "final" }
+    );
 
     const proposalMetadata = resolved.resolved.proposal.snapshot.metadata;
     const governedPermission = proposalMetadata?.["kind"] === "acp_permission";
@@ -6290,43 +5524,21 @@ export function createDispatcherApp(input: {
       if (existingPlan) {
         const existingDecision = await repo.getApprovalDecision({ id: existingPlan.approvalDecisionId });
         if (selectedIntentsAlreadyApplied({ plan: existingPlan, selectedIntentIds: resolved.resolved.selectedIntentIds })) {
-          await deliverAndAudit({
-            repo,
-            sink: callbackSink,
-            retry: callbackRetry,
-            message: {
-              runId: resolved.resolved.proposal.runId,
-              kind: "final",
-              provider: parsed.callback.provider,
-              uri: parsed.callback.uri,
-              body: renderAlreadyAppliedThreadActionBody({ selectionText }),
-              ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
-            }
-          });
+          await reply(renderAlreadyAppliedThreadActionBody({ selectionText }));
           return c.json({ outcome: "already_applied", decision: existingDecision, plan: existingPlan }, 200);
         }
         const isStale = selectedIntentsHaveStaleOutcome({
           plan: existingPlan,
           selectedIntentIds: resolved.resolved.selectedIntentIds
         });
-        await deliverAndAudit({
-          repo,
-          sink: callbackSink,
-          retry: callbackRetry,
-          message: {
-            runId: resolved.resolved.proposal.runId,
-            kind: "final",
-            provider: parsed.callback.provider,
-            uri: parsed.callback.uri,
-            body: isStale
-              ? renderStaleThreadActionBody({
-                  selectionText,
-                  continueIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1
-                })
-              : renderAlreadyPlannedThreadActionBody({ selectionText }),
-            ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
-          }
-        });
+        await reply(
+          isStale
+            ? renderStaleThreadActionBody({
+                selectionText,
+                continueIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1
+              })
+            : renderAlreadyPlannedThreadActionBody({ selectionText })
+        );
         return c.json({ outcome: isStale ? "stale" : "already_planned", decision: existingDecision, plan: existingPlan }, 200);
       }
     }
@@ -6389,19 +5601,7 @@ export function createDispatcherApp(input: {
       const body = governedPermission && requestedPermissionDecision
         ? renderGovernedPermissionDecisionBody({ decision: requestedPermissionDecision, selectionText })
         : renderThreadActionRecordedBody({ verb: "reject", selectionText });
-      await deliverAndAudit({
-        repo,
-        sink: callbackSink,
-        retry: callbackRetry,
-        message: {
-          runId: resolved.resolved.proposal.runId,
-          kind: "final",
-          provider: parsed.callback.provider,
-          uri: parsed.callback.uri,
-          body,
-          ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
-        }
-      });
+      await reply(body);
       return c.json({ outcome: "rejected", decision }, 201);
     }
 
@@ -6429,19 +5629,7 @@ export function createDispatcherApp(input: {
           directApply
         });
       }
-      await deliverAndAudit({
-        repo,
-        sink: callbackSink,
-        retry: callbackRetry,
-        message: {
-          runId: resolved.resolved.proposal.runId,
-          kind: "final",
-          provider: parsed.callback.provider,
-          uri: parsed.callback.uri,
-          body,
-          ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
-        }
-      });
+      await reply(body);
       return c.json({ outcome: "approved", decision }, 201);
     }
 
@@ -6472,19 +5660,7 @@ export function createDispatcherApp(input: {
         selectionText,
         approvalDecisionId: decision.id
       });
-      await deliverAndAudit({
-        repo,
-        sink: callbackSink,
-        retry: callbackRetry,
-        message: {
-          runId: resolved.resolved.proposal.runId,
-          kind: "final",
-          provider: parsed.callback.provider,
-          uri: parsed.callback.uri,
-          body,
-          ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
-        }
-      });
+      await reply(body);
       return c.json({ outcome: "child_run_created", decision, run: childRun }, 201);
     }
 
@@ -6500,43 +5676,21 @@ export function createDispatcherApp(input: {
     }
     if (!planResult.created) {
       if (selectedIntentsAlreadyApplied({ plan: planResult.plan, selectedIntentIds: resolved.resolved.selectedIntentIds })) {
-        await deliverAndAudit({
-          repo,
-          sink: callbackSink,
-          retry: callbackRetry,
-          message: {
-            runId: resolved.resolved.proposal.runId,
-            kind: "final",
-            provider: parsed.callback.provider,
-            uri: parsed.callback.uri,
-            body: renderAlreadyAppliedThreadActionBody({ selectionText }),
-            ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
-          }
-        });
+        await reply(renderAlreadyAppliedThreadActionBody({ selectionText }));
         return c.json({ outcome: "already_applied", decision, plan: planResult.plan }, 200);
       }
       const isStale = selectedIntentsHaveStaleOutcome({
         plan: planResult.plan,
         selectedIntentIds: resolved.resolved.selectedIntentIds
       });
-      await deliverAndAudit({
-        repo,
-        sink: callbackSink,
-        retry: callbackRetry,
-        message: {
-          runId: resolved.resolved.proposal.runId,
-          kind: "final",
-          provider: parsed.callback.provider,
-          uri: parsed.callback.uri,
-          body: isStale
-            ? renderStaleThreadActionBody({
-                selectionText,
-                continueIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1
-              })
-            : renderAlreadyPlannedThreadActionBody({ selectionText }),
-          ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
-        }
-      });
+      await reply(
+        isStale
+          ? renderStaleThreadActionBody({
+              selectionText,
+              continueIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1
+            })
+          : renderAlreadyPlannedThreadActionBody({ selectionText })
+      );
       return c.json({ outcome: isStale ? "stale" : "already_planned", decision, plan: planResult.plan }, 200);
     }
     const plan = planResult.plan;
@@ -6557,39 +5711,17 @@ export function createDispatcherApp(input: {
         selectedIntentIds: resolved.resolved.selectedIntentIds,
         outcomes
       });
-      await deliverAndAudit({
-        repo,
-        sink: callbackSink,
-        retry: callbackRetry,
-        message: {
-          runId: resolved.resolved.proposal.runId,
-          kind: "final",
-          provider: parsed.callback.provider,
-          uri: parsed.callback.uri,
-          body,
-          ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
-        }
-      });
+      await reply(body);
       return c.json({ outcome: "applied", decision, plan: execution.plan }, 201);
     }
 
     if (selectedIntentsHaveStaleOutcome({ plan: execution.plan, selectedIntentIds: resolved.resolved.selectedIntentIds })) {
-      await deliverAndAudit({
-        repo,
-        sink: callbackSink,
-        retry: callbackRetry,
-        message: {
-          runId: resolved.resolved.proposal.runId,
-          kind: "final",
-          provider: parsed.callback.provider,
-          uri: parsed.callback.uri,
-          body: renderStaleThreadActionBody({
-            selectionText,
-            continueIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1
-          }),
-          ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
-        }
-      });
+      await reply(
+        renderStaleThreadActionBody({
+          selectionText,
+          continueIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1
+        })
+      );
       return c.json({ outcome: "stale", decision, plan: execution.plan }, 200);
     }
 
@@ -6629,19 +5761,7 @@ export function createDispatcherApp(input: {
       sourceApplyPlanId: execution.plan.id,
       fallbackReason: execution.fallbackReason ?? "The adapter could not execute the selected intent."
     });
-    await deliverAndAudit({
-      repo,
-      sink: callbackSink,
-      retry: callbackRetry,
-      message: {
-        runId: resolved.resolved.proposal.runId,
-        kind: "final",
-        provider: parsed.callback.provider,
-        uri: parsed.callback.uri,
-        body,
-        ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
-      }
-    });
+    await reply(body);
     return c.json({ outcome: "child_run_created", decision, plan: execution.plan, run: childRun }, 201);
   });
 
@@ -6744,22 +5864,9 @@ export function createDispatcherApp(input: {
           ...larkRenderLocaleRenderOption(stored.event),
           presentation: approvalPrompt
         });
-        await deliverAndAudit({
-          repo,
-          sink: callbackSink,
-          retry: callbackRetry,
-          message: {
-            runId,
-            kind: "progress",
-            provider: stored.event.callback.provider,
-            uri: stored.event.callback.uri,
-            body: rendered.body,
-            ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
-            ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
-            ...(rendered.rich ? { rich: rendered.rich } : {}),
-            idempotencyKey: `action-permission:${resolution.action.id}`,
-            statusMessageKey: `${runId}:status`
-          }
+        await enqueueRenderedDelivery(runId, stored.event, rendered, {
+          idempotencyKey: `action-permission:${resolution.action.id}`,
+          statusMessageKey: `${runId}:status`
         });
       }
     }
@@ -6815,19 +5922,15 @@ export function createDispatcherApp(input: {
       const stored = await repo.getRun({ runId: result.action.runId });
       if (stored) {
         const bodyText = `Material action ${result.action.id} reconciled as ${result.action.status}.`;
-        await deliverAndAudit({
-          repo,
-          sink: callbackSink,
-          retry: callbackRetry,
-          message: {
+        await enqueueDelivery({
+            kind: "business",
             runId: result.action.runId,
-            kind: "progress",
+            phase: "progress",
             provider: stored.event.callback.provider,
             uri: stored.event.callback.uri,
             body: bodyText,
             ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
             idempotencyKey: `material-action-reconciliation:${body.idempotencyKey}`
-          }
         });
       }
     }
@@ -6884,16 +5987,14 @@ export function createDispatcherApp(input: {
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     const provider = stored.event.callback.provider;
     if (shouldDeliverSourceReceipt(provider)) {
-      await deliverSourceReceiptBestEffort({
-        repo,
-        sink: sourceReceiptSink,
-        receipt: {
+      await enqueueDelivery({
+          kind: "source_receipt",
           runId,
           provider,
-          state: "running",
-          event: stored.event,
+          phase: "running",
+          sourceEvent: stored.event,
+          uri: stored.event.callback.uri,
           ...(stored.event.target.agentId ? { agentId: stored.event.target.agentId } : {})
-        }
       });
     }
     if (shouldDeliverRunStatusUpdate(presentation, { provider, state: "running" })) {
@@ -6909,31 +6010,12 @@ export function createDispatcherApp(input: {
         ...larkRenderLocaleRenderOption(stored.event),
         presentation: runningPresentation
       });
-      await deliverAndAudit({
-        repo,
-        sink: callbackSink,
-        retry: callbackRetry,
-        message: {
-          runId,
-          kind: "progress",
-          provider,
-          uri: stored.event.callback.uri,
-          body: running.body,
-          ...(stored.event.target.agentId ? { agentId: stored.event.target.agentId } : {}),
-          ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
-          ...(running.blocks?.length ? { blocks: running.blocks } : {}),
-          ...(running.rich ? { rich: running.rich } : {}),
-          statusMessageKey: `${runId}:status`
-        }
+      await enqueueRenderedDelivery(runId, stored.event, running, {
+        statusMessageKey: `${runId}:status`
       });
     } else if (presentation.shouldDeliverStatusUpdate(provider)) {
-      await appendSuppressedRunStatusCallback({ runId, provider, state: "running" });
+      await appendSuppressedRunStatusDelivery({ runId, provider, state: "running" });
     }
-    await patchDelayedLarkStatusCard({
-      run: stored.run,
-      event: stored.event,
-      phase: "running"
-    });
     return c.json({ ok: true });
   });
 
@@ -6985,29 +6067,15 @@ export function createDispatcherApp(input: {
         ...larkRenderLocaleRenderOption(stored.event),
         presentation: progressPresentation
       });
-      await deliverAndAudit({
-        repo,
-        sink: callbackSink,
-        retry: callbackRetry,
-        message: {
-          runId,
-          kind: "progress",
-          provider: stored.event.callback.provider,
-          uri: stored.event.callback.uri,
-          body: progress.body,
-          ...(stored.event.target.agentId ? { agentId: stored.event.target.agentId } : {}),
-          ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
-          ...(progress.blocks?.length ? { blocks: progress.blocks } : {}),
-          ...(progress.rich ? { rich: progress.rich } : {}),
-          ...(typeof progressOutcome === "object" ? { idempotencyKey: `run-progress:${progressOutcome.event.id}` } : {}),
-          statusMessageKey: `${runId}:status`
-        }
+      await enqueueRenderedDelivery(runId, stored.event, progress, {
+        ...(typeof progressOutcome === "object" ? { idempotencyKey: `run-progress:${progressOutcome.event.id}` } : {}),
+        statusMessageKey: `${runId}:status`
       });
     } else if (progressVisibility === "human") {
       const capability = platformCapabilityForProvider(stored.event.callback.provider);
       await repo.appendRunEvent({
         runId,
-        type: "callback.progress.suppressed",
+        type: "delivery.progress.suppressed",
         payload: {
           provider: stored.event.callback.provider,
           reason: "platform_liveness_strategy",
@@ -7019,11 +6087,6 @@ export function createDispatcherApp(input: {
         message: "Progress callback suppressed by platform liveness strategy; use status or audit for details."
       });
     }
-    await patchDelayedLarkStatusCard({
-      run: stored.run,
-      event: stored.event,
-      phase: "progress"
-    });
     return c.json({ ok: true });
   });
 
@@ -7075,9 +6138,6 @@ export function createDispatcherApp(input: {
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     const completedResult = OpenTagRunResultSchema.parse(stored.run.result);
     const completionResult = await completionGovernance.ingestRunResult(runId);
-    const completionAssessmentId = completionResult?.assessment.id;
-    const completionWorkThreadId = stored.run.thread?.id;
-    cancelPendingDelayedLarkStatusCard(runId);
     const linearApply = await linearApplyOptionsForEvent(stored.event);
     const receiptContext = await actionReceiptContextForFinal({
       event: stored.event,
@@ -7109,27 +6169,8 @@ export function createDispatcherApp(input: {
         ...larkRenderLocaleRenderOption(stored.event),
         presentation: waitingPresentation
       });
-      const transitionKey = completionAssessmentId
-        ? `run-terminal-waiting:${completionAssessmentId}`
-        : `run-terminal-waiting:${runId}`;
-      await deliverCallbackWithCompletionAuthority({
-        message: {
-          runId,
-          kind: "progress",
-          provider: stored.event.callback.provider,
-          uri: stored.event.callback.uri,
-          body: waiting.body,
-          ...(stored.event.target.agentId ? { agentId: stored.event.target.agentId } : {}),
-          ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
-          ...(waiting.blocks?.length ? { blocks: waiting.blocks } : {}),
-          ...(waiting.rich ? { rich: waiting.rich } : {}),
-          statusMessageKey: `${runId}:status`,
-          idempotencyKey: transitionKey
-        },
-        ...(completionAssessmentId ? { assessmentId: completionAssessmentId } : {}),
-        transitionKey,
-        ...(completionWorkThreadId ? { workThreadId: completionWorkThreadId } : {}),
-        deferOnGovernedFailure: true
+      await enqueueRenderedDelivery(runId, stored.event, waiting, {
+        statusMessageKey: `${runId}:status`
       });
     }
     const strictExecutionWaiting = completedResult.conclusion === "success"
@@ -7170,35 +6211,16 @@ export function createDispatcherApp(input: {
           runId,
           receiptContext
         });
-    const finalCallback = presentation.render({
+    const renderedFinalPresentation = presentation.render({
       provider: stored.event.callback.provider,
       ...larkRenderLocaleRenderOption(stored.event),
       presentation: finalPresentation
     });
     const statusMessageKey = lifecycleStatusMessageKey({ provider: stored.event.callback.provider, runId });
-    const transitionKey = completionAssessmentId
-      ? `run-terminal:${completionAssessmentId}:${completedResult.conclusion}`
-      : `run-terminal:${runId}:${completedResult.conclusion}`;
-    await deliverCallbackWithCompletionAuthority({
-      message: {
-        runId,
-        kind: "final",
-        provider: stored.event.callback.provider,
-        uri: stored.event.callback.uri,
-        body: finalCallback.body,
-        ...(stored.event.target.agentId ? { agentId: stored.event.target.agentId } : {}),
-        ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
-        ...(statusMessageKey ? { statusMessageKey } : {}),
-        ...(finalCallback.blocks?.length ? { blocks: finalCallback.blocks } : {}),
-        ...(finalCallback.rich ? { rich: finalCallback.rich } : {}),
-        idempotencyKey: transitionKey
-      },
-      ...(completionAssessmentId ? { assessmentId: completionAssessmentId } : {}),
-      transitionKey,
-      ...(completionWorkThreadId ? { workThreadId: completionWorkThreadId } : {}),
-      deferOnGovernedFailure: true
+    await enqueueRenderedDelivery(runId, stored.event, renderedFinalPresentation, {
+      phase: "final",
+      ...(statusMessageKey ? { statusMessageKey } : {})
     });
-    clearDelayedLarkStatusCard(runId);
     const shouldPromoteFollowUp = completedResult.conclusion !== "needs_human" && completedResult.conclusion !== "cancelled";
     const promotedFollowUp = shouldPromoteFollowUp ? await promoteNextFollowUpAfterTerminalRun({ activeRunId: runId }) : null;
     const retryableFailure = ["failure", "interrupted", "timed_out"].includes(completedResult.conclusion);
@@ -7868,14 +6890,7 @@ export function createDispatcherApp(input: {
 
   return Object.assign(app, {
     async stopBackgroundWorkers() {
-      governedCallbackRuntimeStopping = true;
-      if (governedCallbackRuntimeRetryTimer) {
-        clearGovernedCallbackRuntimeTimeout(governedCallbackRuntimeRetryTimer);
-        governedCallbackRuntimeRetryTimer = undefined;
-      }
       await reassessmentWorker.stop();
-      await governedCallbackRuntimeStartTask;
-      await governedCallbackRuntime?.stop();
     }
   });
 }

@@ -98,7 +98,15 @@ describe("Slack Events API delivery lanes", () => {
 
     queryGate.resolve();
     await vi.waitFor(() =>
-      expect(reply).toHaveBeenCalledWith({ channelId: "C123", threadTs: expect.any(String), text: "Linear backlog" })
+      expect(reply).toHaveBeenCalledWith({
+        cause: expect.objectContaining({
+          assurance: "verified_http_signature",
+          channelId: "C123",
+          command: "linear",
+          threadTs: expect.any(String)
+        }),
+        presentation: { text: "Linear backlog" }
+      })
     );
   });
 

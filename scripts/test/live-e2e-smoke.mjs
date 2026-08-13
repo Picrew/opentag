@@ -9,7 +9,6 @@ const openclawCommand = process.env.OPENTAG_OPENCLAW_COMMAND || "openclaw";
 const hermesCommand = process.env.OPENTAG_HERMES_COMMAND || "hermes";
 const builtInAcpAgents = process.env.OPENTAG_BUILTIN_ACP_AGENTS?.split(",").map((value) => value.trim())
   ?? ["codex", "claude-code", "cursor", "opencode", "hermes", "openclaw"];
-const githubWebhookExecutor = process.env.OPENTAG_GH_LIVE_EXECUTOR || "claude-code";
 
 function requiredCommandsForBuiltInAcpAgent(agent) {
   if (["codex", "claude-code", "opencode"].includes(agent)) return ["npx"];
@@ -77,68 +76,6 @@ const cases = [
     ]
   },
   {
-    id: "github-webhook-live",
-    label: "Live GitHub completion-governance smoke",
-    live: true,
-    command: "scripts/dev/run-github-webhook-live-test.sh",
-    requiredCommands: [
-      "corepack",
-      "curl",
-      "gh",
-      "lsof",
-      "node",
-      "python3",
-      "sqlite3",
-      ...requiredCommandsForBuiltInAcpAgent(githubWebhookExecutor)
-    ],
-    optionalCommands: ["ngrok"],
-    notes: [
-      "Requires gh auth with ADMIN or MAINTAIN access to OPENTAG_GH_REPO.",
-      "Requires npx plus working local authentication for the selected Registry-backed ACP launch.",
-      "Set OPENTAG_GH_LIVE_EXECUTOR=phase1-fixture to isolate the real GitHub/governance chain from model-provider readiness while retaining a real ACP worktree write.",
-      "Set OPENTAG_GH_PUBLIC_URL or allow ngrok with OPENTAG_GH_LIVE_START_NGROK=true.",
-      "Strict mode creates and merges a real PR, records a current-head GitHub status, and writes sanitized evidence under .omx/live-e2e."
-    ]
-  },
-  {
-    id: "github-factory-live",
-    label: "Live GitHub recipe-driven factory acceptance",
-    live: true,
-    command: "OPENTAG_GH_LIVE_FACTORY=true OPENTAG_GH_LIVE_REASSESSMENT_CRASH=true scripts/dev/run-github-webhook-live-test.sh",
-    requiredCommands: [
-      "corepack",
-      "curl",
-      "gh",
-      "lsof",
-      "node",
-      "python3",
-      "sqlite3",
-      ...requiredCommandsForBuiltInAcpAgent(githubWebhookExecutor)
-    ],
-    optionalCommands: ["ngrok"],
-    notes: [
-      "Uses a real GitHub issue comment as the external planning source, then admits it through WorkThread ensure, an immutable recipe, a WorkThread-only workstream, and a durable batch.",
-      "Executes locally, creates and merges a real PR, verifies the required check against the current head, and requires provider-verified accepted completion.",
-      "Terminates the first stack after real merged-provider evidence and its pending ReassessmentObligation commit but before reassessment, then restarts without replaying the webhook or completion request.",
-      "Proves restart claims and satisfies that exact obligation, then restarts again to verify neither the assessment transition nor source-thread receipt duplicates.",
-      "Replays the exact batch receipt only after recovery and proves accepted gate advances remain fully attributed to the fenced Attempt runner and executor.",
-      "Set OPENTAG_GH_LIVE_EXECUTOR=phase1-fixture to prove the GitHub/factory/governance chain with the deterministic local ACP worktree writer.",
-      "This case keeps planning external and explicitly excludes a DAG and operator console."
-    ]
-  },
-  {
-    id: "github-cli-live",
-    label: "Live GitHub dispatcher-assisted local executor smoke",
-    live: true,
-    command: "scripts/dev/run-gh-claude-local-test.sh",
-    requiredCommands: ["gh", "node", "npx"],
-    requiredOneOfEnv: [["OPENTAG_GH_TEST_ISSUE", "OPENTAG_GH_CREATE_ISSUE=true"]],
-    notes: [
-      "Uses gh auth to create or reuse a real GitHub issue thread.",
-      "Set OPENTAG_WORKSPACE_PATH to a clean checkout when not testing this repo."
-    ]
-  },
-  {
     id: "slack-linear-registry-live",
     label: "Registry-installed live Slack /linear acceptance",
     live: true,
@@ -149,65 +86,6 @@ const cases = [
       "Installs the exact expected @opentag/cli release from npm, verifies CLI/Slack/Linear/Core lockfile sha512 receipts, and runs the installed CLI in Slack Socket Mode.",
       "Requires one real human Slack message containing exactly @OpenTag /linear, then verifies the provider-delivered source event, real Linear GraphQL reads, and provider-visible Slack thread reply.",
       "The Linear audit proxy fails closed on mutations; retained evidence is mode 0600 and contains hashes/counts instead of credentials, Linear issue titles, or raw Slack messages."
-    ]
-  },
-  {
-    id: "slack-local-live",
-    label: "Live Slack dispatcher-assisted local executor smoke",
-    live: true,
-    command: "scripts/dev/run-slack-claude-local-test.sh",
-    requiredCommands: ["node", "python3", "npx"],
-    optionalCommands: ["gh"],
-    requiredEnv: ["OPENTAG_CONFIG_PATH", "OPENTAG_SLACK_BOT_TOKEN"],
-    notes: [
-      "Usually load OPENTAG_CONFIG_PATH and OPENTAG_SLACK_BOT_TOKEN from .env.slack-test.",
-      "Set OPENTAG_SLACK_APPLY_PR_ACTION=true only when GitHub apply credentials are ready."
-    ]
-  },
-  {
-    id: "slack-ui-live",
-    label: "Live Slack UI-triggered source-thread smoke",
-    live: true,
-    command: "scripts/dev/run-slack-ui-trigger-local-test.sh",
-    requiredCommands: ["curl", "node", "python3", "sqlite3", "lsof", "npx"],
-    optionalCommands: ["ngrok"],
-    requiredEnv: ["OPENTAG_CONFIG_PATH", "OPENTAG_SLACK_BOT_TOKEN"],
-    requiredOneOfEnv: [["OPENTAG_SLACK_APP_TOKEN", "SLACK_APP_TOKEN", "SLACK_SIGNING_SECRET"]],
-    notes: [
-      "Socket Mode uses OPENTAG_SLACK_APP_TOKEN or SLACK_APP_TOKEN.",
-      "Events API mode uses SLACK_SIGNING_SECRET plus a public URL or ngrok."
-    ]
-  },
-  {
-    id: "lark-patch-live",
-    label: "Live Lark card reply and patch smoke",
-    live: true,
-    command:
-      "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/dev/run-lark-message-patch-live-test.ts",
-    requiredCommands: [process.env.OPENTAG_LARK_CLI || "lark-cli"],
-    notes: [
-      "Requires lark-cli auth status to report a ready bot identity and either a ready user identity or cached user openId.",
-      "Optionally set OPENTAG_LARK_LIVE_CHAT_ID and OPENTAG_LARK_LIVE_SOURCE_MESSAGE_ID together."
-    ]
-  },
-  {
-    id: "linear-workspace-live",
-    label: "Live Linear workspace webhook, comment, and issue update smoke",
-    live: true,
-    command:
-      "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/dev/run-linear-workspace-live-test.ts",
-    requiredCommands: ["corepack", "node"],
-    requiredEnv: ["OPENTAG_LINEAR_SMOKE_TOKEN"],
-    requiredOneOfEnv: [["OPENTAG_LINEAR_SMOKE_ISSUE", "OPENTAG_LINEAR_SMOKE_ISSUE_ID"]],
-    notes: [
-      "Uses a real Linear workspace issue for GraphQL commentCreate and issueUpdate.",
-      "By default the token must resolve to a Linear OAuth app actor (viewer.app=true); set OPENTAG_LINEAR_SMOKE_ALLOW_NON_APP_TOKEN=true only for API-key compatibility smoke runs.",
-      "Also runs Linear metadata discovery for teams, users, workflow states, and labels, then verifies mapping generation.",
-      "OPENTAG_LINEAR_SMOKE_ISSUE accepts a Linear issue key, model UUID, or issue URL; OPENTAG_LINEAR_SMOKE_ISSUE_ID remains supported for compatibility.",
-      "The script registers a temporary relay installation and submits signed webhook payloads locally to the fixed /linear/oauth/webhooks hosted OAuth path, so no public tunnel is required for this smoke.",
-      "Optionally set OPENTAG_LINEAR_SMOKE_AGENT_SESSION_ID to validate AgentSessionEvent created/prompted, queued follow-up promotion, agentSessionUpdate, and agentActivityCreate.",
-      "Optionally set OPENTAG_LINEAR_SMOKE_OAUTH_WEBHOOK_SECRET, OPENTAG_LINEAR_SMOKE_OAUTH_WEBHOOK_PATH, or OPENTAG_LINEAR_SMOKE_ORGANIZATION_ID to match a specific hosted OAuth relay setup.",
-      "Set OPENTAG_LINEAR_SMOKE_GRAPHQL_URL only when testing a non-default Linear GraphQL endpoint."
     ]
   }
 ];

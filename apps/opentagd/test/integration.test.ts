@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpenTagEvent } from "@opentag/core";
 import { createOpenTagClient, createDispatcherAdminClient, createDispatcherClient } from "@opentag/client";
-import { createDispatcherApp } from "@opentag/dispatcher";
+import {
+  createDispatcherApp,
+  type DispatcherDeliveryPresentation
+} from "@opentag/dispatcher";
 import { createEchoExecutor } from "@opentag/runner";
 import { describe, expect, it } from "vitest";
 import { runOneDaemonIteration } from "../src/daemon.js";
@@ -40,6 +43,17 @@ function fetchForApp(app: ReturnType<typeof createDispatcherApp>): typeof fetch 
     const parsed = new URL(String(url));
     return app.request(`${parsed.pathname}${parsed.search}`, init);
   }) as typeof fetch;
+}
+
+function captureDeliveries(delivered: string[]) {
+  return {
+    async enqueue(presentation: DispatcherDeliveryPresentation) {
+      if (presentation.kind === "business") {
+        delivered.push(`${presentation.phase}:${presentation.body}`);
+      }
+      return { outcome: "queued" as const, sideEffectIntentId: "intent_integration" };
+    }
+  };
 }
 
 function runOpentagd(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
@@ -116,12 +130,7 @@ describe("opentagd local integration", () => {
     const delivered: string[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
-          delivered.push(`${message.kind}:${message.body}`);
-          return { handled: true, outcome: 'accepted' } as const;
-        }
-      }
+      deliveryProducer: captureDeliveries(delivered)
     });
     const fetchImpl = fetchForApp(app);
     const dispatcherUrl = "http://dispatcher.test";
@@ -171,21 +180,19 @@ describe("opentagd local integration", () => {
       "run.created",
       "context_packet.generated",
       "agent_access_profile.captured",
-      "callback.acknowledgement.queued",
-      "callback.acknowledgement.delivered",
+      "delivery.intent.queued",
+      "delivery.intent.queued",
       "routing.decided",
       "run.claimed",
       "run.running",
       "executor.capability.snapshot",
-      "callback.progress.queued",
-      "callback.progress.delivered",
+      "delivery.intent.queued",
       "run.progress",
       "run.progress",
       "artifact.created",
       "run.completed",
       "success_metric.observed",
-      "callback.final.queued",
-      "callback.final.delivered"
+      "delivery.intent.queued"
     ]);
     expect(events.filter((item) => (item as { type: string }).type === "run.progress")).toEqual([
       expect.objectContaining({ visibility: "audit", message: "Echo executor started for run_integration" }),
@@ -197,12 +204,7 @@ describe("opentagd local integration", () => {
     const delivered: string[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
-          delivered.push(`${message.kind}:${message.body}`);
-          return { handled: true, outcome: 'accepted' } as const;
-        }
-      }
+      deliveryProducer: captureDeliveries(delivered)
     });
     const fetchImpl = fetchForApp(app);
     const dispatcherUrl = "http://dispatcher.test";
@@ -270,16 +272,14 @@ describe("opentagd local integration", () => {
       "run.created",
       "context_packet.generated",
       "agent_access_profile.captured",
-      "callback.acknowledgement.queued",
-      "callback.acknowledgement.delivered",
+      "delivery.intent.queued",
+      "delivery.intent.queued",
       "routing.decided",
       "run.claimed",
       "run.progress",
       "run.completed",
-      "callback.progress.queued",
-      "callback.progress.delivered",
-      "callback.final.queued",
-      "callback.final.delivered"
+      "delivery.intent.queued",
+      "delivery.intent.queued"
     ]);
     expect(events.find((item) => (item as { type: string }).type === "run.progress")).toMatchObject({
       visibility: "audit"

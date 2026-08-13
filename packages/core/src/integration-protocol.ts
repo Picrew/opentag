@@ -213,6 +213,27 @@ export const OpenTagRunTargetsSchema = z
 export const OpenTagReplyPurposeSchema = z.enum(["all", "progress", "final", "error", "approval"]);
 export const OpenTagReplyDeliveryPurposeSchema = OpenTagReplyPurposeSchema.exclude(["all"]);
 
+const SlackMrkdwnTextSchema = z.object({ type: z.literal("mrkdwn"), text: z.string().min(1).max(3_000) }).strict();
+const SlackButtonSchema = z.object({ type: z.literal("button"),
+  text: z.object({ type: z.literal("plain_text"), text: z.string().min(1).max(75), emoji: z.boolean().optional() }).strict(),
+  action_id: z.string().min(1).max(255), value: z.string().min(1).max(2_000), style: z.enum(["primary", "danger"]).optional() }).strict();
+const SlackBlockSchema = z.union([
+  z.object({ type: z.literal("section"), text: SlackMrkdwnTextSchema }).strict(), z.object({ type: z.literal("divider") }).strict(),
+  z.object({ type: z.literal("context"), elements: z.array(SlackMrkdwnTextSchema).min(1).max(10) }).strict(),
+  z.object({ type: z.literal("actions"), block_id: z.string().min(1).max(255).optional(), elements: z.array(SlackButtonSchema).min(1).max(25) }).strict()
+]);
+export const SlackSelfServiceDeliverySchema = z.object({
+  cause: z.object({
+    assurance: z.enum(["verified_http_signature", "authenticated_socket_mode"]), eventId: z.string().min(1).max(256),
+    eventTime: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), teamId: z.string().min(1).max(256), channelId: z.string().min(1).max(256),
+    threadTs: z.string().min(1).max(64).regex(/^\d+(?:\.\d+)?$/u),
+    userId: z.string().min(1).max(256), appId: z.string().min(1).max(256).optional(),
+    command: z.enum(["bind", "unbind", "stop", "linear", "help", "status", "doctor"])
+  }).strict(),
+  presentation: z.object({ text: z.string().min(1).max(4_000), textFormat: z.literal("mrkdwn").optional(),
+    blocks: z.array(SlackBlockSchema).max(50).optional() }).strict()
+}).strict();
+
 export const OpenTagReplyTargetRefSchema = z
   .object({
     channel: OpenTagChannelRefSchema,
@@ -223,6 +244,9 @@ export const OpenTagReplyTargetRefSchema = z
   .strict();
 
 export type OpenTagIntegrationProtocolVersion = z.infer<typeof OpenTagIntegrationProtocolVersionSchema>;
+export type SlackSelfServiceDeliveryInput = z.infer<typeof SlackSelfServiceDeliverySchema>;
+export type SlackSelfServiceDeliveryCommand = SlackSelfServiceDeliveryInput["cause"]["command"];
+export type SlackSelfServiceDeliveryResult = { outcome: "queued"; sideEffectIntentId: string } | { outcome: "activation_blocked" };
 export type OpenTagAgentProtocol = z.infer<typeof OpenTagAgentProtocolSchema>;
 export type OpenTagAgentProtocolVersion = z.infer<typeof OpenTagAgentProtocolVersionSchema>;
 export type OpenTagChannelProtocol = z.infer<typeof OpenTagChannelProtocolSchema>;

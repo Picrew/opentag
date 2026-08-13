@@ -1,5 +1,17 @@
+import type { Probot } from "probot";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { handleIssueCommentCreated, handlePullRequestReviewCommentCreated, newRunId } from "../src/app.js";
+
+const client = vi.hoisted(() => ({ createRun: vi.fn() }));
+
+vi.mock("@opentag/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@opentag/client")>()),
+  createOpenTagClient: () => ({
+    createRun: client.createRun,
+    submitThreadAction: vi.fn()
+  })
+}));
+
+import { createOpenTagProbotApp, handleIssueCommentCreated, handlePullRequestReviewCommentCreated, newRunId } from "../src/app.js";
 
 describe("newRunId", () => {
   afterEach(() => {
@@ -22,9 +34,8 @@ describe("newRunId", () => {
 });
 
 describe("GitHub Probot handler", () => {
-  it("creates a dispatcher run for an opentag mention", async () => {
+  it("creates a dispatcher run without posting from the ingress process", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_1" }));
-    const postComment = vi.fn(async () => undefined);
 
     await handleIssueCommentCreated({
       payload: {
@@ -49,17 +60,14 @@ describe("GitHub Probot handler", () => {
         }
       },
       createRun,
-      postComment,
       now: () => "2026-06-24T00:00:00.000Z"
     });
 
     expect(createRun).toHaveBeenCalledOnce();
-    expect(postComment).toHaveBeenCalledWith("OpenTag picked this up. Run: `run_1`");
   });
 
   it("uses resolved GitHub repository permission for run actor write access", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_permission" }));
-    const postComment = vi.fn(async () => undefined);
     const resolveActorWriteAccess = vi.fn(async () => true);
 
     await handleIssueCommentCreated({
@@ -87,7 +95,6 @@ describe("GitHub Probot handler", () => {
       },
       createRun,
       resolveActorWriteAccess,
-      postComment,
       now: () => "2026-06-24T00:00:00.000Z"
     });
 
@@ -100,7 +107,6 @@ describe("GitHub Probot handler", () => {
 
   it("ignores comments without an opentag mention", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_1" }));
-    const postComment = vi.fn(async () => undefined);
     const resolveActorWriteAccess = vi.fn(async () => true);
 
     await handleIssueCommentCreated({
@@ -127,19 +133,16 @@ describe("GitHub Probot handler", () => {
       },
       createRun,
       resolveActorWriteAccess,
-      postComment,
       now: () => "2026-06-24T00:00:00.000Z"
     });
 
     expect(createRun).not.toHaveBeenCalled();
     expect(resolveActorWriteAccess).not.toHaveBeenCalled();
-    expect(postComment).not.toHaveBeenCalled();
   });
 
   it("submits source-thread action replies instead of creating a new issue run", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_1" }));
     const submitThreadAction = vi.fn(async () => ({}));
-    const postComment = vi.fn(async () => undefined);
 
     await handleIssueCommentCreated({
       payload: {
@@ -165,12 +168,10 @@ describe("GitHub Probot handler", () => {
       },
       createRun,
       submitThreadAction,
-      postComment,
       now: () => "2026-06-24T00:00:00.000Z"
     });
 
     expect(createRun).not.toHaveBeenCalled();
-    expect(postComment).not.toHaveBeenCalled();
     expect(submitThreadAction).toHaveBeenCalledWith({
       id: "approval_github_comment_124",
       rawText: "apply 1",
@@ -193,7 +194,6 @@ describe("GitHub Probot handler", () => {
   it("uses resolved repository permission for source-thread action actors", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_1" }));
     const submitThreadAction = vi.fn(async () => ({}));
-    const postComment = vi.fn(async () => undefined);
     const resolveActorWriteAccess = vi.fn(async () => false);
 
     await handleIssueCommentCreated({
@@ -222,7 +222,6 @@ describe("GitHub Probot handler", () => {
       createRun,
       submitThreadAction,
       resolveActorWriteAccess,
-      postComment,
       now: () => "2026-06-24T00:00:00.000Z"
     });
 
@@ -232,80 +231,62 @@ describe("GitHub Probot handler", () => {
     });
   });
 
-  it("does not post a local acknowledgement when dispatcher owns callbacks", async () => {
-    const createRun = vi.fn(async () => ({ runId: "run_1" }));
-    const postComment = vi.fn(async () => undefined);
+  it("never calls GitHub createComment even when the removed toggle is present", async () => {
+    const handlers = new Map<string, (context: unknown) => Promise<void>>();
+    const app = {
+      on: vi.fn((event: string, handler: (context: unknown) => Promise<void>) => {
+        handlers.set(event, handler);
+      })
+    } as unknown as Probot;
+    const createComment = vi.fn(async () => ({}));
+    const legacyToggle = ["OPENTAG", "DISPATCHER", "OWNS", "CALLBACKS"].join("_");
+    const previousDispatcherUrl = process.env.OPENTAG_DISPATCHER_URL;
+    const previousLegacyToggle = process.env[legacyToggle];
+    process.env.OPENTAG_DISPATCHER_URL = "http://dispatcher.test";
+    process.env[legacyToggle] = "false";
+    client.createRun.mockResolvedValue({ outcome: "run_created", run: { id: "run_1" } });
 
-    await handleIssueCommentCreated({
-      payload: {
-        comment: {
-          id: 123,
-          body: "@opentag fix this",
-          html_url: "https://github.com/acme/demo/issues/1#issuecomment-123"
+    try {
+      createOpenTagProbotApp(app);
+      await handlers.get("issue_comment.created")!({
+        payload: {
+          comment: {
+            id: 127,
+            body: "@opentag fix this",
+            html_url: "https://github.com/acme/demo/issues/1#issuecomment-127"
+          },
+          issue: {
+            html_url: "https://github.com/acme/demo/issues/1",
+            comments_url: "https://api.github.com/repos/acme/demo/issues/1/comments",
+            number: 1
+          },
+          repository: { name: "demo", private: false, owner: { login: "acme" } },
+          sender: { id: 42, login: "octocat" }
         },
-        issue: {
-          html_url: "https://github.com/acme/demo/issues/1",
-          comments_url: "https://api.github.com/repos/acme/demo/issues/1/comments",
-          number: 1
-        },
-        repository: {
-          name: "demo",
-          private: false,
-          owner: { login: "acme" }
-        },
-        sender: {
-          id: 42,
-          login: "octocat"
+        issue: vi.fn(),
+        log: { warn: vi.fn() },
+        octokit: {
+          rest: {
+            issues: { createComment },
+            repos: {
+              getCollaboratorPermissionLevel: vi.fn(async () => ({ data: { permission: "write" } }))
+            }
+          }
         }
-      },
-      createRun,
-      postComment,
-      now: () => "2026-06-24T00:00:00.000Z",
-      dispatcherOwnsCallbacks: true
-    });
+      });
+    } finally {
+      if (previousDispatcherUrl === undefined) delete process.env.OPENTAG_DISPATCHER_URL;
+      else process.env.OPENTAG_DISPATCHER_URL = previousDispatcherUrl;
+      if (previousLegacyToggle === undefined) delete process.env[legacyToggle];
+      else process.env[legacyToggle] = previousLegacyToggle;
+    }
 
-    expect(createRun).toHaveBeenCalledOnce();
-    expect(postComment).not.toHaveBeenCalled();
+    expect(client.createRun).toHaveBeenCalledOnce();
+    expect(createComment).not.toHaveBeenCalled();
   });
 
-  it("does not post a local acknowledgement when the dispatcher does not create a run", async () => {
-    const createRun = vi.fn(async () => ({}));
-    const postComment = vi.fn(async () => undefined);
-
-    await handleIssueCommentCreated({
-      payload: {
-        comment: {
-          id: 123,
-          body: "@opentag fix this",
-          html_url: "https://github.com/acme/demo/issues/1#issuecomment-123"
-        },
-        issue: {
-          html_url: "https://github.com/acme/demo/issues/1",
-          comments_url: "https://api.github.com/repos/acme/demo/issues/1/comments",
-          number: 1
-        },
-        repository: {
-          name: "demo",
-          private: false,
-          owner: { login: "acme" }
-        },
-        sender: {
-          id: 42,
-          login: "octocat"
-        }
-      },
-      createRun,
-      postComment,
-      now: () => "2026-06-24T00:00:00.000Z"
-    });
-
-    expect(createRun).toHaveBeenCalledOnce();
-    expect(postComment).not.toHaveBeenCalled();
-  });
-
-  it("creates a dispatcher run for an opentag PR review comment", async () => {
+  it("creates a dispatcher run for a PR review without posting from ingress", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_2" }));
-    const postComment = vi.fn(async () => undefined);
 
     await handlePullRequestReviewCommentCreated({
       payload: {
@@ -329,18 +310,15 @@ describe("GitHub Probot handler", () => {
         }
       },
       createRun,
-      postComment,
       now: () => "2026-06-24T00:00:00.000Z"
     });
 
     expect(createRun).toHaveBeenCalledOnce();
-    expect(postComment).toHaveBeenCalledWith("OpenTag picked this up. Run: `run_2`");
   });
 
   it("submits source-thread action replies from PR review comments", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_2" }));
     const submitThreadAction = vi.fn(async () => ({}));
-    const postComment = vi.fn(async () => undefined);
 
     await handlePullRequestReviewCommentCreated({
       payload: {
@@ -365,12 +343,10 @@ describe("GitHub Probot handler", () => {
       },
       createRun,
       submitThreadAction,
-      postComment,
       now: () => "2026-06-24T00:00:00.000Z"
     });
 
     expect(createRun).not.toHaveBeenCalled();
-    expect(postComment).not.toHaveBeenCalled();
     expect(submitThreadAction).toHaveBeenCalledWith({
       id: "approval_github_pr_review_comment_457",
       rawText: "continue 1",

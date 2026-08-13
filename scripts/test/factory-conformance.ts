@@ -11,9 +11,8 @@ import type { OpenTagEvent, WorkstreamAdmissionBatchInput } from "../../packages
 import {
   createDispatcherApp,
   openDispatcherDatabase,
-  type CallbackMessage,
+  type DispatcherDeliveryPresentation,
   type GitHubCompletionPolicy,
-  type SourceReceipt
 } from "../../packages/dispatcher/src/index.js";
 import { runOneDaemonIteration } from "../../packages/local-runtime/src/index.js";
 import {
@@ -146,8 +145,7 @@ function observedExecutor(adapter: ExecutorAdapter, observations: ExecutorObserv
 
 async function startHarness(input: {
   databasePath: string;
-  callbackMessages: CallbackMessage[];
-  sourceReceipts: SourceReceipt[];
+  deliveries: DispatcherDeliveryPresentation[];
 }): Promise<DispatcherHarness> {
   const sqlite = openDispatcherDatabase(input.databasePath);
   const app = createDispatcherApp({
@@ -155,16 +153,13 @@ async function startHarness(input: {
     sqlite,
     pairingToken,
     completionPolicies: [completionPolicy],
-    callbackSink: {
-      async deliver(message) {
-        input.callbackMessages.push(message);
-        return { handled: true, outcome: "accepted" } as const;
-      }
-    },
-    sourceReceiptSink: {
-      async deliver(receipt) {
-        input.sourceReceipts.push(receipt);
-        return { delivered: true };
+    deliveryProducer: {
+      async enqueue(presentation) {
+        input.deliveries.push(presentation);
+        return {
+          outcome: "queued",
+          sideEffectIntentId: `intent_factory_conformance_${input.deliveries.length}`
+        };
       }
     }
   });
@@ -313,8 +308,7 @@ async function main(): Promise<void> {
   const databasePath = join(fixtureRoot, "dispatcher.sqlite");
   const scratchRoot = join(fixtureRoot, "scratch");
   const checkoutPath = join(fixtureRoot, "repository");
-  const callbackMessages: CallbackMessage[] = [];
-  const sourceReceipts: SourceReceipt[] = [];
+  const deliveries: DispatcherDeliveryPresentation[] = [];
   const observations: ExecutorObservation[] = [];
   const echoExecutor = observedExecutor(createEchoExecutor(), observations);
   const acpExecutor = observedExecutor(createAcpAgentExecutor({
@@ -335,7 +329,7 @@ async function main(): Promise<void> {
 
   try {
     initRepository(checkoutPath);
-    firstHarness = await startHarness({ databasePath, callbackMessages, sourceReceipts });
+    firstHarness = await startHarness({ databasePath, deliveries });
     const firstClient = createOpenTagClient({ dispatcherUrl: firstHarness.baseUrl, pairingToken });
     await firstClient.registerRunner({
       runnerId,
@@ -376,8 +370,7 @@ async function main(): Promise<void> {
     }), "run_phase4b_seed_acp");
     await firstClient.cancelRun({ runId: "run_phase4b_seed_echo", reason: "Seeded durable WorkThread." });
     await firstClient.cancelRun({ runId: "run_phase4b_seed_acp", reason: "Seeded durable WorkThread." });
-    callbackMessages.length = 0;
-    sourceReceipts.length = 0;
+    deliveries.length = 0;
 
     const { recipe } = await firstClient.createFactoryRecipeSnapshot({
       id: "recipe_phase4b_conformance",
@@ -443,12 +436,11 @@ async function main(): Promise<void> {
       exceptions: [],
       omittedExceptionCount: 0
     });
-    assert.equal(callbackMessages.length, 0, "Batch admission must not emit routine callbacks.");
-    assert.equal(sourceReceipts.length, 0, "Batch admission must not emit routine source receipts.");
+    assert.equal(deliveries.length, 0, "Batch admission must not enqueue routine delivery presentations.");
 
     await firstHarness.close();
     firstHarness = undefined;
-    recoveredHarness = await startHarness({ databasePath, callbackMessages, sourceReceipts });
+    recoveredHarness = await startHarness({ databasePath, deliveries });
     const recoveredClient = createOpenTagClient({ dispatcherUrl: recoveredHarness.baseUrl, pairingToken });
     const durableBeforeReplay = await recoveredClient.getWorkstreamAdmissionBatch({ id: acceptedBatch.id });
     assert.deepEqual(durableBeforeReplay.receipt, admittedReceipt, "Restart must preserve the exact durable receipt.");
@@ -599,8 +591,7 @@ async function main(): Promise<void> {
       };
     }));
 
-    const callbacksBeforeInvalidBatch = callbackMessages.length;
-    const sourceReceiptsBeforeInvalidBatch = sourceReceipts.length;
+    const deliveriesBeforeInvalidBatch = deliveries.length;
     const invalidBatch: WorkstreamAdmissionBatchInput = {
       id: "batch_phase4b_bounded_exceptions",
       workstreamId: workstream.id,
@@ -628,14 +619,9 @@ async function main(): Promise<void> {
       entry.status === "rejected" && entry.reasonCode === "event_work_thread_mismatch"
     )));
     assert.equal(
-      callbackMessages.length - callbacksBeforeInvalidBatch,
+      deliveries.length - deliveriesBeforeInvalidBatch,
       0,
-      "Exceptional batch admission must remain quiet on source callbacks."
-    );
-    assert.equal(
-      sourceReceipts.length - sourceReceiptsBeforeInvalidBatch,
-      0,
-      "Exceptional batch admission must remain quiet on source receipts."
+      "Exceptional batch admission must not enqueue delivery presentations."
     );
 
     writeReport({
@@ -683,8 +669,7 @@ async function main(): Promise<void> {
         exceptionCount: invalidReceipt.result?.summary.exceptionCount,
         recordedExceptionCount: invalidReceipt.result?.summary.exceptions.length,
         omittedExceptionCount: invalidReceipt.result?.summary.omittedExceptionCount,
-        callbackCount: callbackMessages.length - callbacksBeforeInvalidBatch,
-        sourceReceiptCount: sourceReceipts.length - sourceReceiptsBeforeInvalidBatch
+        deliveryPresentationCount: deliveries.length - deliveriesBeforeInvalidBatch
       },
       authoritativeAcceptedOutcomes: acceptedMetrics,
       acceptedOutcomeAuthorityTransition: {

@@ -292,15 +292,21 @@ describe("Slack Socket Mode", () => {
     expect(createRun).not.toHaveBeenCalled();
     expect(socket.sent).toEqual([JSON.stringify({ envelope_id: "envelope_doctor_1" })]);
     expect(reply).toHaveBeenCalledWith({
-      channelId: "C123",
-      threadTs: "1719187200.000100",
-      text: expect.stringContaining("OpenTag doctor (redacted):"),
-      blocks: expect.arrayContaining([
-        expect.objectContaining({
-          type: "section",
-          text: expect.objectContaining({ text: "*OpenTag doctor (redacted):*" })
-        })
-      ])
+      cause: expect.objectContaining({
+        assurance: "authenticated_socket_mode",
+        channelId: "C123",
+        command: "doctor",
+        threadTs: "1719187200.000100"
+      }),
+      presentation: {
+        text: expect.stringContaining("OpenTag doctor (redacted):"),
+        blocks: expect.arrayContaining([
+          expect.objectContaining({
+            type: "section",
+            text: expect.objectContaining({ text: "*OpenTag doctor (redacted):*" })
+          })
+        ])
+      }
     });
 
     await handle.close();
@@ -379,9 +385,8 @@ describe("Slack Socket Mode", () => {
       requestedBy: "slack:U456"
     });
     expect(reply).toHaveBeenCalledWith({
-      channelId: "C123",
-      threadTs: "1719187200.000100",
-      text: "No active run was found for this Slack channel and Project Target."
+      cause: expect.objectContaining({ channelId: "C123", command: "stop", threadTs: "1719187200.000100" }),
+      presentation: { text: "No active run was found for this Slack channel and Project Target." }
     });
 
     await handle.close();
@@ -456,9 +461,8 @@ describe("Slack Socket Mode", () => {
     expect(createRun).not.toHaveBeenCalled();
     expect(unbindChannel).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
-      channelId: "C123",
-      threadTs: "1719187200.000100",
-      text: expect.stringContaining("/unbind confirm")
+      cause: expect.objectContaining({ channelId: "C123", command: "unbind", threadTs: "1719187200.000100" }),
+      presentation: { text: expect.stringContaining("/unbind confirm") }
     });
 
     await handle.close();
@@ -537,9 +541,8 @@ describe("Slack Socket Mode", () => {
       channelId: "C123"
     });
     expect(reply).toHaveBeenCalledWith({
-      channelId: "C123",
-      threadTs: "1719187200.000100",
-      text: expect.stringContaining("Disconnected this Slack channel from Project Target github:acme/demo")
+      cause: expect.objectContaining({ channelId: "C123", command: "unbind", threadTs: "1719187200.000100" }),
+      presentation: { text: expect.stringContaining("Disconnected this Slack channel from Project Target github:acme/demo") }
     });
 
     await handle.close();

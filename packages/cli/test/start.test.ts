@@ -262,7 +262,7 @@ function abortedSignal(): AbortSignal {
 }
 
 describe("OpenTag CLI start wiring", () => {
-  it("derives dispatcher input with the Lark callback sink credentials", () => {
+  it("derives dispatcher input with the Lark ingress credentials", () => {
     const built = config();
     built.daemon.runnerToken = "runner_token";
     built.daemon.runnerTokens = ["runner_old"];
@@ -341,7 +341,6 @@ describe("OpenTag CLI start wiring", () => {
       port: 3030,
       databasePath: built.state.databasePath,
       pairingToken: built.daemon.pairingToken,
-      slackBotToken: "xoxb-token",
       channelPrincipals: [
         {
           provider: "slack",
@@ -379,18 +378,38 @@ describe("OpenTag CLI start wiring", () => {
     const built = slackSocketModeConfig();
     built.daemon.runTimeoutMs = 30_000;
 
-    expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
-      slackBotToken: "xoxb-token"
-    });
+    expect(dispatcherRuntimeInputFromCliConfig(built)).not.toHaveProperty("slackBotToken");
     expect(slackSocketModeIngressConfigFromCliConfig(built)).toMatchObject({
       appToken: "xapp-token",
       dispatcherUrl: "http://localhost:3030",
       dispatcherToken: built.daemon.pairingToken,
-      botToken: "xoxb-token",
       appId: "A123",
       channelPrincipalCredential: expect.any(String),
       runTimeoutMs: 30_000
     });
+  });
+
+  it("passes explicit Slack installation records to the local dispatcher", () => {
+    const built = slackConfig();
+    const digest = `sha256:${"a".repeat(64)}`;
+    built.platforms.slack!.installations = [{
+      recordVersion: 1,
+      installationId: "install_1",
+      teamId: "T123",
+      appId: "A123",
+      providerInstanceId: "slack_install_1",
+      bindingDigest: digest,
+      principalDigest: digest,
+      principalAssurance: "provider_verified",
+      lifecycle: "active",
+      configGeneration: 4,
+      configGenerationDigest: digest,
+      credentialReference: { custody: "local", id: "slack.bot.install_1" },
+      channelIds: ["C123"]
+    }];
+
+    expect(dispatcherRuntimeInputFromCliConfig(built).slackInstallations)
+      .toEqual(built.platforms.slack.installations);
   });
 
   it("derives dispatcher and ingress input for GitHub without Lark", () => {
@@ -401,7 +420,6 @@ describe("OpenTag CLI start wiring", () => {
       databasePath: built.state.databasePath,
       pairingToken: built.daemon.pairingToken,
       githubToken: "ghp_token",
-      githubCallbackToken: "ghp_token",
       githubApplyToken: "ghp_token"
     });
     expect(githubIngressConfigFromCliConfig(built)).toMatchObject({
@@ -755,7 +773,6 @@ describe("OpenTag CLI start wiring", () => {
       port: 3030,
       databasePath: built.state.databasePath,
       pairingToken: built.daemon.pairingToken,
-      telegramBotToken: "123456789:telegram_secret",
       telegramBots: [
         {
           botId: "123456789",
@@ -797,13 +814,12 @@ describe("OpenTag CLI start wiring", () => {
     });
   });
 
-  it("can keep GitHub callbacks enabled while disabling direct apply capability", () => {
+  it("can disable GitHub direct apply capability", () => {
     const built = githubConfig();
     built.daemon.githubApplyToken = null;
 
     expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
       githubToken: "ghp_token",
-      githubCallbackToken: "ghp_token",
       githubApplyToken: null
     });
   });
@@ -1732,6 +1748,10 @@ describe("OpenTag CLI start wiring", () => {
     expect(logs.join("\n")).toContain("Telegram tunnel: not required in polling mode");
     expect(logs.join("\n")).toContain("Discord: using Gateway connection");
     expect(logs.join("\n")).toContain("Discord tunnel: not required in Gateway mode");
+    expect(logs.join("\n")).toContain("Unified delivery: blocked (non_releasable)");
+    expect(logs.join("\n")).toContain(
+      "Unified delivery blockers: full_provider_root_set_incomplete, cloud_consumer_cutover_incomplete, production_inventory_incomplete, migration_incomplete, operations_incomplete"
+    );
   });
 
   it("logs the Teams endpoint with the configured dispatcher port", async () => {

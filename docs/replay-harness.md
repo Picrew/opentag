@@ -9,7 +9,7 @@ Use replay fixtures for source-thread behavior that should stay stable:
 - executor capability ledger entries;
 - artifact-first final results;
 - source-thread action receipt shape;
-- callback delivery without internal process noise;
+- delivery-intent projection without internal process noise;
 - agent work ledger categories;
 - completion governance from executor success through provider-verified
   current-head checks and merge.
@@ -28,7 +28,8 @@ Each fixture is JSON so it can be reviewed independently from test code. A fixtu
 - `event`: an `OpenTagEvent` source-thread event.
 - `executorCapability`: the capability snapshot the runner reports at `running`.
 - `result`: an `OpenTagRunResult` with artifacts and optional suggested actions.
-- `expected`: compact assertions for artifact types, ledger categories, and final callback text.
+- `expected`: compact assertions for artifact types, ledger categories, and the
+  final source-thread presentation text.
 
 The strict GitHub completion fixture also carries a sanitized
 `completionPolicy` and `verifiedSnapshot`. These are test inputs for the local
@@ -117,5 +118,5 @@ Replay fixtures should reinforce OpenTag's boundary:
 - The source thread remains the human workflow surface.
 - The local runner remains the execution boundary.
 - The agent work ledger is the durable audit surface.
-- Final callbacks compress the outcome and point to artifacts/status.
+- Final presentations compress the outcome and point to artifacts/status.
 - OpenTag does not become a new AI workspace or a stream of internal agent logs.

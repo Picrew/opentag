@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createOpenTagClient, type ChannelRuntimeStatus } from "@opentag/client";
 import { createDoctorSummaryPresentation, createSourceThreadStatusPresentation, renderOpenTagPresentationPlainText } from "@opentag/core";
 import type { SlackEventProcessorInput, SlackSelfServiceReply, SlackStopRunResult } from "./events.js";
-import { createSlackDoctorSummaryBlocks, createSlackPostMessagePayload, createSlackSourceThreadStatusBlocks } from "./render.js";
+import { createSlackDoctorSummaryBlocks, createSlackSourceThreadStatusBlocks } from "./render.js";
 
 export type SlackChannelPrincipalConfig =
   | { appId: string; channelPrincipalCredential: string }
@@ -11,7 +11,6 @@ export type SlackChannelPrincipalConfig =
 export type SlackDispatcherEventConfig = {
   dispatcherUrl: string;
   dispatcherToken?: string;
-  botToken?: string;
   callbackUri?: string;
   bindingAdminUserIds?: string[];
   runTimeoutMs?: number;
@@ -273,35 +272,9 @@ export function createSlackDispatcherEventProcessorInput(config: SlackDispatcher
         return doctorUnavailable({ teamId: input.teamId, channelId: input.channelId, binding: input.binding, error });
       }
     },
+    async reply(input) { await dispatcherClient.submitSlackSelfServiceDelivery(input); },
     ...(config.linear ? { linear: config.linear } : {}),
     now: () => new Date().toISOString()
   };
-  if (config.botToken) {
-    processorInput.reply = async (input) => {
-      const response = await fetchImpl(config.callbackUri ?? "https://slack.com/api/chat.postMessage", {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${config.botToken}`,
-          "content-type": "application/json"
-        },
-        body: JSON.stringify(
-          createSlackPostMessagePayload({
-            channelId: input.channelId,
-            threadTs: input.threadTs,
-            text: input.text,
-            ...(input.textFormat ? { textFormat: input.textFormat } : {}),
-            ...(input.blocks?.length ? { blocks: input.blocks } : {})
-          })
-        )
-      });
-      if (!response.ok) {
-        throw new Error(`deliver Slack self-service reply failed: ${response.status} ${await response.text()}`);
-      }
-      const body = (await response.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (body.ok === false) {
-        throw new Error(`deliver Slack self-service reply failed: ${body.error ?? "unknown_error"}`);
-      }
-    };
-  }
   return processorInput;
 }

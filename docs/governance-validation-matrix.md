@@ -23,10 +23,10 @@ corepack pnpm smoke:governance -- --list
 | --- | --- |
 | `permission-boundaries` | Token and permission failures remain explicit; public repos are denied by default without write access; `allowedActors` can allow or deny; bot permission failures are surfaced; daemon Project Target allowlists block unsafe runs. |
 | `source-thread-controls` | GitHub, GitLab, Slack, and Lark action replies reach `submitThreadAction`; `apply 1`, `reject 1`, `continue 1`, and `stop` have durable effects; duplicate and concurrent action replies are idempotent. |
-| `recovery-idempotency` | Runner leases, duplicate source deliveries, lifecycle idempotency keys, callback dedupe/retry/suppression, heartbeats, timeout cancellation, and status evidence survive failure or retry paths. |
-| `artifact-ledger-quality` | `opentag status --run <run_id>` remains useful after live-shaped runs: artifacts, Agent Work Ledger, callback delivery, liveness, and apply outcome metrics are visible while source-thread receipts stay concise. |
-| `apply-failure-ux` | PR/MR apply cleanup and failure paths are explicit: missing branches disable apply before writes, create failures fall back to child runs, repeated replies do not duplicate external writes, and provider tokens/headers stay out of callbacks. |
-| `replay-parity` | GitHub, Slack, GitLab, and Lark live-shaped fixtures replay in memory with the same receipt, artifact, ledger, callback, and executor-capability strategy. |
+| `recovery-idempotency` | Runner leases, duplicate source deliveries, lifecycle idempotency keys, delivery-intent dedupe, fenced settlement, heartbeats, timeout cancellation, and status evidence survive failure or retry paths. |
+| `artifact-ledger-quality` | `opentag status --run <run_id>` remains useful after live-shaped runs: artifacts, Agent Work Ledger, queued delivery intents, activation blocks, and apply outcome metrics are visible while source-thread receipts stay concise. Provider delivery outcomes come only from the delivery journal or signed provider observations. |
+| `apply-failure-ux` | PR/MR apply cleanup and failure paths are explicit: missing branches disable apply before writes, create failures fall back to child runs, repeated replies do not duplicate external writes, and provider tokens/headers stay out of delivery presentations. |
+| `replay-parity` | GitHub, Slack, GitLab, and Lark live-shaped fixtures replay in memory with the same receipt, artifact, ledger, delivery-intent, and executor-capability strategy. |
 | `completion-governance` | One sanitized GitHub fixture proves admission, Context Packet generation, durable WorkThread identity, fencing, executor success pending verification, current-head checks, merge, superseding assessment lineage, concise source-thread projection, CLI explanation, restart recovery, and the end-to-end completion metric. |
 | `work-loop-actions` | Completion gates, human escalations, material-action receipts, and run outcomes produce structured causes and ActionHint primitives; WorkThread status and bounded attention expose one canonical WorkLoop view; the golden loop moves from evidence refresh to no action. |
 | `privacy-redaction` | Replay fixtures, public governance documentation, installed public-package manifests/README files during `release:check`, and existing `.omx/live-e2e` and `.omx/governance-matrix` reports are scanned for token-like values, private keys, webhook secrets, Slack bot tokens, GitHub/GitLab tokens, full Lark message IDs, and local absolute paths. |
@@ -85,6 +85,6 @@ external fixture are unavailable, keep the PR draft and name the missing live
 proof explicitly.
 
 The matrix is still valuable before a live pass because it exercises the exact
-dispatcher, adapter, store, and daemon contracts that live provider callbacks
-enter after ingestion. After a live pass, rerun `privacy-redaction` and promote
-only sanitized evidence into replay fixtures.
+dispatcher, adapter, store, delivery-kernel, and daemon contracts used after
+ingestion. After a live pass, rerun `privacy-redaction` and promote only
+sanitized evidence into replay fixtures.

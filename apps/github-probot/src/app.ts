@@ -5,7 +5,6 @@ import {
   githubPermissionHasWriteAccess,
   normalizeGitHubIssueComment,
   normalizeGitHubPullRequestReviewComment,
-  renderAcknowledgement,
   type GitHubActorWriteAccessResolver
 } from "@opentag/github";
 import type { Probot } from "probot";
@@ -47,9 +46,7 @@ export async function handleIssueCommentCreated(input: {
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: ThreadActionInput): Promise<unknown>;
   resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
-  postComment(body: string): Promise<void>;
   now(): string;
-  dispatcherOwnsCallbacks?: boolean;
 }): Promise<void> {
   const owner = input.payload.repository.owner.login;
   const repo = input.payload.repository.name;
@@ -103,10 +100,7 @@ export async function handleIssueCommentCreated(input: {
     event.actor.writeAccess = actorWriteAccess;
   }
 
-  const { runId } = await input.createRun(event);
-  if (runId && !input.dispatcherOwnsCallbacks) {
-    await input.postComment(renderAcknowledgement(runId));
-  }
+  await input.createRun(event);
 }
 
 export async function handlePullRequestReviewCommentCreated(input: {
@@ -114,9 +108,7 @@ export async function handlePullRequestReviewCommentCreated(input: {
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: ThreadActionInput): Promise<unknown>;
   resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
-  postComment(body: string): Promise<void>;
   now(): string;
-  dispatcherOwnsCallbacks?: boolean;
 }): Promise<void> {
   const owner = input.payload.repository.owner.login;
   const repo = input.payload.repository.name;
@@ -170,10 +162,7 @@ export async function handlePullRequestReviewCommentCreated(input: {
     event.actor.writeAccess = actorWriteAccess;
   }
 
-  const { runId } = await input.createRun(event);
-  if (runId && !input.dispatcherOwnsCallbacks) {
-    await input.postComment(renderAcknowledgement(runId));
-  }
+  await input.createRun(event);
 }
 
 export function newRunId(): string {
@@ -232,11 +221,7 @@ export function createOpenTagProbotApp(app: Probot): void {
           return undefined;
         }
       },
-      postComment: async (body) => {
-        await context.octokit.rest.issues.createComment(context.issue({ body }));
-      },
-      now: () => new Date().toISOString(),
-      dispatcherOwnsCallbacks: process.env.OPENTAG_DISPATCHER_OWNS_CALLBACKS === "true"
+      now: () => new Date().toISOString()
     });
   });
 
@@ -255,16 +240,7 @@ export function createOpenTagProbotApp(app: Probot): void {
           return undefined;
         }
       },
-      postComment: async (body) => {
-        await context.octokit.rest.issues.createComment({
-          owner: payload.repository.owner.login,
-          repo: payload.repository.name,
-          issue_number: payload.pull_request.number,
-          body
-        });
-      },
-      now: () => new Date().toISOString(),
-      dispatcherOwnsCallbacks: process.env.OPENTAG_DISPATCHER_OWNS_CALLBACKS === "true"
+      now: () => new Date().toISOString()
     });
   });
 }

@@ -101,8 +101,8 @@ export type LarkMessageHandlerConfig = {
   doctor?(input: LarkSelfServiceContext): Promise<LarkSelfServiceReply | string>;
   // Reply into the originating thread (onboarding hints, bind confirmations); optional.
   reply?(input: { messageId: string; text: string; card?: LarkCard }): Promise<void>;
-  // OpenTag dispatcher callbacks can acknowledge accepted runs through provider-native receipts.
-  // When that lifecycle callback is enabled, avoid also posting the legacy ingress text acknowledgement.
+  // Unified delivery can acknowledge accepted runs through provider-native receipts.
+  // When that lifecycle path is enabled, avoid also posting the ingress text acknowledgement.
   suppressRunCreatedReply?: boolean;
   now?(): number;
 };

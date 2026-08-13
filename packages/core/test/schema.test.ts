@@ -494,8 +494,11 @@ describe("Agent Work Protocol schemas", () => {
     expect(resolution.decision).toBe("allow");
   });
 
-  it("exposes protocol success metric names", () => {
-    expect(SuccessMetricNameSchema.parse("thread_noise_ratio")).toBe("thread_noise_ratio");
+  it("does not expose the legacy thread-noise ratio as a success metric", () => {
+    expect(SuccessMetricNameSchema.safeParse("thread_noise_ratio").success).toBe(false);
+    expect(SuccessMetricNameSchema.parse("time_to_first_useful_artifact")).toBe(
+      "time_to_first_useful_artifact"
+    );
   });
 
   it("models immutable suggested changes, subset approval, and apply outcomes", () => {

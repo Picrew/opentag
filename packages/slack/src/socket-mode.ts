@@ -130,7 +130,7 @@ async function handleSocketMessage(input: {
     return;
   }
 
-  await input.processor.process(envelope.payload, input.slackApp);
+  await input.processor.process(envelope.payload, input.slackApp, { transportAssurance: "authenticated_socket_mode" });
 }
 
 function wait(ms: number): Promise<void> {

@@ -128,9 +128,9 @@ function actionId(interactionId: string, rawBody: string): string {
  * within Discord's 3-second deadline with a `type 4` message and performs
  * binding resolution / run creation / thread-action submission as deferred
  * work (floating promise — fine in the long-lived dispatcher process);
- * progress/final are delivered later by the callback sink over the bot-token
- * REST API (never the 15-minute interaction token). Mount via `app.route`
- * into the dispatcher, or serve standalone.
+ * progress/final are delivered later by the provider adapter over the bot-token
+ * REST API (never the 15-minute interaction token). Mount via `app.route` into
+ * the dispatcher, or serve standalone.
  */
 export function createDiscordInteractionsApp(input: DiscordInteractionsAppInput) {
   const app = new Hono();
@@ -257,7 +257,7 @@ export function createDiscordInteractionsApp(input: DiscordInteractionsAppInput)
       }
 
       // The run id is not included in the ACK — the dispatcher's acknowledgement
-      // callback (delivered through the sink) carries it.
+      // presentation carries it after durable enqueue.
       runDeferred(async () => {
         const binding = await input.resolveChannelBinding({
           applicationId: interaction.applicationId,

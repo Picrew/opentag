@@ -137,15 +137,15 @@ OpenTag already has much of the control-plane substrate.
 | Context | Stable `ContextPacket` snapshot passed to executors | Add policy provenance, retention classification, and managed/local disclosure rules |
 | Permission | Grants, capability contracts, action permission requests, receipts, reconciliation | Resolve grants through an agent access profile and organization/repository policy snapshot |
 | Execution | Runner claims, leases, fencing, attempts, cancellation, timeouts, executor capability snapshots | Add an explainable routing decision over eligible runners and executors |
-| Output | Artifacts, verification evidence, structured run results, callbacks | Evaluate evidence against completion gates independent of run conclusion |
+| Output | Artifacts, verification evidence, structured run results, delivery presentations | Evaluate evidence against completion gates independent of run conclusion |
 | Human handling | `needs_human`, `needs_approval`, source-thread commands | Add a durable, deduplicated escalation model that distinguishes approval, missing input, configuration, verification, reconciliation, and security |
 | Metrics | Run, repository, work-thread, artifact, noise, and approval metrics | Add accepted-completion, queue, retry, intervention, evidence, and cost metrics |
 | Factory orchestration | Durable single-scope queue and follow-up promotion | Add optional recipes, concurrency budgets, workstream admission, and evals only after the single-loop contract is proven |
 
-This is an additive evolution. Existing adapters and executors should continue
-to work under a compatibility completion contract that treats a successful run
-as the only required gate until a repository or organization configures
-stronger requirements.
+This roadmap now assumes a breaking delivery epoch. Old callback transports are
+removed rather than projected into the new contract. Adapters become usable
+only after they implement the exact provider-instance delivery contract and
+pass live evidence gates.
 
 ### Terminology note: conversation control surface
 
@@ -213,7 +213,7 @@ independent callers or adapter implementations.
 ```mermaid
 flowchart LR
   W["Work systems and source threads\nLinear · GitHub · GitLab · Slack · Lark"]
-  A["Workspace adapters\nnormalize references, events, and callbacks"]
+  A["Workspace adapters\nnormalize references, events, and presentations"]
   C["OpenTag control plane\nadmission · policy · context · routing\nstate · receipts · evidence · completion · attention"]
   R["Runner directory and leases\nlocal · private · hosted"]
   E["Executor adapters\nCodex · Claude Code · OpenCode · ACP · custom"]
@@ -232,7 +232,7 @@ flowchart LR
 #### Workspace adapters
 
 Workspace adapters own provider-specific ingress, identity normalization,
-context pointers, work-item references, callback routes, and native rendering.
+context pointers, work-item references, source-thread targets, and native rendering.
 They do not decide completion or runner selection.
 
 #### Governance module
@@ -399,8 +399,9 @@ sequenceDiagram
 7. **Record effects.** Material external actions pass through permission and
    receipt flows. Unknown or stale outcomes remain unresolved and block any gate
    that depends on them.
-8. **Collect evidence.** Artifacts and provider callbacks become typed evidence
-   with explicit assurance.
+8. **Collect evidence.** Artifacts and signed provider observations become
+   typed evidence with explicit assurance. A queued delivery intent is not a
+   provider outcome.
 9. **Assess completion.** Evaluate every configured gate independently of the
    executor conclusion.
 10. **Continue or stop.** Policy may accept, retry within budget, request human
@@ -1071,7 +1072,8 @@ target contract, not a description of every current relay deployment.
 - Permission, policy, capability, context, routing, and completion snapshots are
   immutable historical evidence.
 - Secret values never enter durable protocol fields or human-visible output.
-- Provider callbacks are idempotent and protected against duplicate storms.
+- Provider side effects originate from immutable, idempotent delivery intents;
+  leases and fenced settlement prevent duplicate storms.
 - A hosted relay cannot silently become an execution principal.
 - A local-required policy cannot fall back to hosted execution without a new,
   explicit authorization decision.
@@ -1209,7 +1211,7 @@ Factory metrics must distinguish activity, execution, and accepted outcomes.
 | `unknown_material_action_rate` | Unknown or stale material actions divided by material actions | External-write safety |
 | `cost_per_accepted_completion` | Tracked execution cost divided by satisfied or explicitly waived work loops | Economic efficiency |
 | `executor_acceptance_rate` | Satisfied completions attributable to an executor divided by its completed runs | Better than process success rate alone |
-| `thread_noise_ratio` | Human-visible messages divided by audit/debug events | Attention-budget health |
+| `thread_attention_cost` | Human-visible presentations weighted by importance | Attention-budget health without coupling human output to audit volume |
 
 Metrics must be segmentable by organization, project, repository, workstream,
 executor, runner locality, completion profile, and time window without exposing
@@ -1281,7 +1283,7 @@ The open-source product should include:
 
 A managed offering may provide:
 
-- reliable ingress/relay and callback delivery;
+- reliable ingress/relay and exact provider-instance delivery;
 - organization identity and access profiles;
 - fleet-wide runner/device registry and readiness;
 - centralized policy distribution and explanation;
@@ -1306,7 +1308,7 @@ Deliver:
 - additive `CompletionContract`, `CompletionGateResult`,
   `CompletionAssessment`, and `HumanEscalation` schemas;
 - durable contract, assessment, and escalation records and events;
-- compatibility completion contract;
+- an explicit default completion contract;
 - GitHub PR, required-check, and merge evidence ingestion;
 - completion evaluation on new result/evidence/receipt events;
 - concise source-thread and CLI completion projections;
@@ -1329,7 +1331,7 @@ Suggested code ownership:
 - `packages/store`: durable assessments, events, idempotency, and metrics;
 - `packages/governance`: evaluation and command/query orchestration;
 - `packages/github`: normalized PR/check/merge evidence;
-- `packages/dispatcher`: thin ingress and callback wiring;
+- `packages/dispatcher`: thin ingress and unified delivery enqueueing;
 - `packages/cli`: status and explanation projection.
 
 Exit gate:
@@ -1556,70 +1558,46 @@ does not replace the separate provider-live GitHub loop required below for a
 public factory-control-plane claim. Phase 4B does not add dependency edges, a
 DAG scheduler, mutable workstream planning state, or an operator console.
 
-#### Phase 5 implementation boundary — provider-live factory acceptance
+#### Phase 5 implementation boundary — unified provider-live acceptance
 
-Phase 5 proves one externally planned factory loop without expanding OpenTag
-into a backlog or workflow product:
+The historical GitHub factory acceptance case exercised the removed callback
+transport and is no longer a release proof. Phase 5 must be re-established
+through the unified delivery architecture without expanding OpenTag into a
+backlog or workflow product:
 
-- a real GitHub issue and issue comment remain the canonical work request and
-  source conversation;
-- a pairing-authorized ensure command derives and persists the canonical
-  WorkThread from the normalized external event without creating a seed Run;
-- an immutable recipe and WorkThread-only workstream admit that event through
-  one durable batch;
-- the normal local daemon claims a fenced Attempt, writes an isolated worktree,
-  and creates a real pull request;
-- GitHub provides the current-head required-check and merge facts; executor
-  success alone cannot satisfy completion;
-- accepted-outcome metrics advance only from the authoritative current
-  CompletionAssessment for the WorkThread;
-- closing and reopening the stack preserves satisfied completion, exact batch
-  replay, accepted metrics, and source-thread receipt deduplication.
+- a real provider work item and source conversation remain authoritative;
+- the normal local daemon completes one fenced Attempt and produces a real
+  artifact;
+- the unified producer durably enqueues one exact delivery intent;
+- the provider-instance adapter is resolved through the registry and invoked
+  only by the side-effect kernel;
+- the journal preserves lease, provider-I/O-begun, and terminal settlement
+  evidence across restart;
+- a signed provider observation, not an enqueue event, proves provider
+  acceptance;
+- completion metrics advance only from the authoritative current
+  `CompletionAssessment`.
 
-The acceptance report is fail-closed: it is derived from retained GitHub
-objects, durable Run/Attempt rows, batch receipts, assessment snapshots, and
-workstream metrics. A stale check head, premature accepted metric, changed
-restart receipt, missing execution snapshot, or duplicate final callback makes
-the case fail rather than producing a positive assertion.
+The acceptance report is fail-closed. A stale check head, premature accepted
+metric, changed restart receipt, missing execution snapshot, ambiguous provider
+outcome, or duplicate terminal settlement makes the case fail. Until one full
+vertical satisfies these requirements, the provider-live factory claim remains
+unproven.
 
-Phase 5 adds no dependency edges, DAG scheduler, mutable planning state, or
-operator console. Recipe JSON identifies governance and budget policy; GitHub
-continues to own prioritization, discussion, and business status. See
-[Live E2E Smoke Harness](./live-e2e-smoke-harness.md#github-factory-acceptance)
-for the command and evidence contract.
+## Breaking migration
 
-Acceptance receipt, 2026-07-26 UTC (2026-07-27 Asia/Shanghai):
-
-- external source: [`amplifthq/opentag-test` issue #77](https://github.com/amplifthq/opentag-test/issues/77)
-  and its durable `@opentag run` comment;
-- governed change: [pull request #78](https://github.com/amplifthq/opentag-test/pull/78),
-  required status bound to head `3a65b9788bf26c2e26401ba688c176d0c0c3d239`,
-  merged as `3eb6d9a354b6a7140cf396f371aba444cec409d2`;
-- runtime authority: one factory-attributed succeeded Run and one succeeded
-  fenced local ACP Attempt;
-- completion authority: terminal Runs remained one while accepted WorkThreads
-  advanced `0 -> 1` only after provider-verified merge evidence;
-- recovery authority: restart preserved the satisfied assessment and metrics,
-  returned the exact durable batch receipt, and did not duplicate the single
-  final source-thread completion receipt.
-
-The source issue remains open. That is intentional evidence that accepted
-OpenTag completion does not silently overwrite the external planning system's
-business status.
-
-## Compatibility and migration
-
-1. Add schemas and tables without changing existing required fields.
-2. Preserve `OpenTagRunResult.conclusion` and terminal run statuses.
-3. The default completion contract maps current successful runs to satisfied
-   completion.
-4. Introduce new completion callbacks only when an adapter supports them; keep
-   existing final callbacks as a compatibility projection.
-5. Route one GitHub vertical slice through `@opentag/governance` before
-   migrating all providers.
-6. Keep current admission, follow-up, lease, receipt, and callback semantics
-   unless a versioned protocol decision explicitly changes them.
-7. Derive work-loop views from existing work-thread/run identity before adding
+1. Remove the callback transport, tables, retry loop, and compatibility flags.
+2. Preserve run and completion domain facts only where they remain valid under
+   the new delivery epoch.
+3. Route every acknowledgement, progress, final, receipt, and control reply
+   through the unified producer.
+4. Keep provider credentials and I/O exclusively inside exact
+   provider-instance adapters invoked by the side-effect kernel.
+5. Report enqueue and activation truth in run events; report provider outcomes
+   only from the delivery journal or signed provider observations.
+6. Activate one provider vertical only after restart, duplicate, timeout, and
+   live-provider evidence gates pass. There is no legacy fallback.
+7. Derive work-loop views from durable work-thread/run identity before adding
    cached projections.
 8. Add managed policy and fleet features behind adapters, not conditionals
    spread across core.
@@ -1628,7 +1606,7 @@ business status.
 
 ### Schema and transition tests
 
-- Old runs parse and render without completion fields.
+- Run and completion records created in the new delivery epoch parse and render.
 - Policy and assessment snapshots are immutable.
 - Assessment supersession is monotonic and idempotent.
 - A run result cannot directly mark completion without gate evaluation.
@@ -1649,7 +1627,7 @@ business status.
 - Batch input and all item identities are durable before the first item is
   admitted; exact replay resumes, while a conflicting replay is rejected.
 - A recovered batch does not repeat completed items or routine source-thread
-  callbacks, and emits at most one idempotent exception summary.
+  presentations, and emits at most one idempotent exception summary.
 - Workstream accepted-outcome metrics use the current authoritative assessment
   for each member WorkThread rather than Run success or executor self-report.
 - A stopped run does not auto-pass completion or auto-promote paused follow-ups.
@@ -1658,9 +1636,10 @@ business status.
 
 - GitHub and GitLab evidence adapters normalize equivalent PR/MR concepts
   without leaking provider-specific fields into completion core.
-- Provider callbacks render execution success separately from completion pass.
+- Provider adapters render execution success separately from completion pass.
 - Unsupported rich UI falls back to equivalent plain text.
-- Callback dedupe keys prevent duplicate decision or completion storms.
+- Delivery-intent idempotency and fenced settlement prevent duplicate decision
+  or completion storms.
 
 ### Live proof
 

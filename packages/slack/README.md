@@ -2,7 +2,9 @@
 
 Slack adapter helpers for OpenTag.
 
-Use this package to normalize Slack `app_mention` events into `OpenTagEvent` objects and to encode or parse Slack callback thread keys.
+Use this package to normalize Slack `app_mention` events into `OpenTagEvent`
+objects, encode or parse Slack source-thread keys, and adapt unified delivery
+presentations for Slack.
 
 ## Install
 
@@ -13,7 +15,7 @@ pnpm add @opentag/slack
 ## Exports
 
 - `normalizeSlackAppMention`: converts a Slack app mention into an `OpenTagEvent`.
-- `slackThreadKey`: encodes team, channel, and thread timestamp for callback routing.
+- `slackThreadKey`: encodes team, channel, and thread timestamp for source-thread delivery.
 - `parseSlackThreadKey`: decodes a Slack thread key for `chat.postMessage`.
 - `SlackChannelBinding`: Slack compatibility binding contract that maps into the generic channel binding layer.
 
@@ -47,4 +49,5 @@ if (event) {
 
 ## Stability
 
-Thread key format is public because callback sinks depend on it. Change it only with a migration path.
+Thread key format is part of the source-thread identity used by ingress and the
+delivery adapter. A breaking format change must update both sides atomically.

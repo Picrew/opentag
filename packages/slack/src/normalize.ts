@@ -70,8 +70,9 @@ export function encodeSlackThreadKey(input: { teamId: string; channelId: string;
 }
 
 export function parseSlackThreadKey(threadKey: string): { teamId: string; channelId: string; threadTs: string } {
-  const [teamId, channelId, threadTs] = threadKey.split("|");
-  if (!teamId || !channelId || !threadTs) {
+  const segments = threadKey.split("|");
+  const [teamId, channelId, threadTs] = segments;
+  if (segments.length !== 3 || !teamId || !channelId || !threadTs) {
     throw new Error(`Invalid Slack thread key: ${threadKey}`);
   }
   return { teamId, channelId, threadTs };

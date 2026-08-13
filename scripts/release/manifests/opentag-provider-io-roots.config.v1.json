@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "ProviderIoRootInventoryConfigV1",
+  "revision": "e421fd2dbb18cbb5a5602227415a955a0e23eea5",
+  "entrypoints": [
+    "apps/opentagd/src/index.ts",
+    "apps/slack-events/src/index.ts",
+    "packages/cli/src/index.ts",
+    "packages/client/src/index.ts",
+    "packages/local-runtime/src/daemon.ts",
+    "packages/local-runtime/src/dispatcher.ts",
+    "packages/local-runtime/src/runtime.ts"
+  ],
+  "requiredCandidates": [
+    "packages/cli/src/setup/flow.ts",
+    "packages/dispatcher/src/callbacks.ts",
+    "packages/dispatcher/src/server.ts",
+    "packages/dispatcher/src/source-thread-control.ts",
+    "packages/github/src/apply.ts",
+    "packages/github/src/completion-evidence.ts",
+    "packages/github/src/ingress.ts",
+    "packages/github/src/pull-request.ts",
+    "packages/gitlab/src/apply.ts",
+    "packages/gitlab/src/ingress.ts",
+    "packages/gitlab/src/merge-request.ts",
+    "packages/linear/src/apply.ts",
+    "packages/linear/src/discovery.ts",
+    "packages/linear/src/graphql.ts",
+    "packages/linear/src/oauth.ts",
+    "packages/lark/src/outbound.ts",
+    "packages/teams/src/connector.ts",
+    "packages/teams/src/token.ts"
+  ],
+  "requiredRootKinds": [
+    "http",
+    "sdk",
+    "token",
+    "readback",
+    "delivery_callback",
+    "external_process"
+  ],
+  "exclusions": [
+    { "pattern": "**/test/**", "reason": "test_only" },
+    { "pattern": "**/*.test.ts", "reason": "test_only" },
+    { "pattern": "**/dist/**", "reason": "generated_build_output" },
+    { "pattern": "**/node_modules/**", "reason": "third_party_dependency" },
+    { "pattern": "scripts/dev/**", "reason": "developer_only_live_harness" }
+  ]
+}
