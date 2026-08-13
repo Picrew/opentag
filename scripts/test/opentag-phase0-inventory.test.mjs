@@ -11,7 +11,7 @@ const expectedInventory = JSON.parse(
   readFileSync(new URL('../release/manifests/opentag-provider-io-roots.v1.json', import.meta.url), 'utf8'),
 );
 
-test('the exact 92c412 candidate inventory covers every required Provider I/O root family', () => {
+test('the exact accepted-base candidate inventory covers every required Provider I/O root family', () => {
   const inventory = inventoryProviderIoRoots({
     repository: process.cwd(),
     revision: config.revision,

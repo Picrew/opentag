@@ -252,6 +252,17 @@ test('pins the semantic harness and the exact nine regression inputs', () => {
       expected: 'absent',
     },
   );
+  for (const file of [
+    'packages/dispatcher/src/governed-callback-runtime.ts',
+    'packages/dispatcher/src/governed-callback-worker.ts',
+  ]) {
+    assert.equal(
+      TASK4_SEMANTIC_INPUT_SPEC.productionSources.find(
+        (input) => input.file === file,
+      )?.expected,
+      'absent',
+    );
+  }
   const verifierSource = readFileSync(
     new URL('../release/verify-slack-kernel-cutover.mjs', import.meta.url),
     'utf8',

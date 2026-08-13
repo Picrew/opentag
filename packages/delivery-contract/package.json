@@ -1,6 +1,6 @@
 {
   "name": "@opentag/delivery-contract",
-  "version": "0.9.0",
+  "version": "0.10.0-next.0",
   "description": "Canonical OpenTag side-effect intent and delivery observation contracts.",
   "type": "module",
   "engines": {

@@ -4774,18 +4774,15 @@ describe("dispatcher API", () => {
     await expect(claim.json()).resolves.toMatchObject({ run: { id: "run_scratch_dispatcher" } });
   });
 
-  it("uses legacy terminal callback delivery for a hosted run without a completion assessment", async () => {
+  it("queues hosted terminal delivery through the unified producer without a completion assessment", async () => {
     const sqlite = new Database(":memory:");
-    const delivered: CallbackMessage[] = [];
+    const delivered: CapturedBusinessDelivery[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
       sqlite,
-      callbackSink: {
-        async deliver(message) {
-          delivered.push(message);
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      deliveryProducer: captureBusinessDeliveries((message) => {
+        delivered.push(message);
+      })
     });
     onTestFinished(async () => {
       await app.stopBackgroundWorkers();
@@ -4863,9 +4860,11 @@ describe("dispatcher API", () => {
         kind: "final"
       })
     ]);
-    expect(sqlite.prepare(`SELECT dispatch_mode AS dispatchMode, status
-      FROM callback_deliveries WHERE run_id = ? AND kind = 'final'`).get(runId))
-      .toEqual({ dispatchMode: "legacy", status: "delivered" });
+    const events = await (await app.request(`/v1/runs/${runId}/events`)).json() as {
+      events: Array<{ type: string }>;
+    };
+    expect(events.events.map((event) => event.type)).toContain("delivery.intent.queued");
+    expect(events.events.some((event) => event.type.includes("delivered"))).toBe(false);
   });
 
   it("deletes generic channel bindings", async () => {

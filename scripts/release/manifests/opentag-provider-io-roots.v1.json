@@ -2,13 +2,13 @@
   "schemaVersion": "ProviderIoRootInventoryV1",
   "inventoryKind": "candidate_inventory_only",
   "dynamicReachabilityProven": false,
-  "revision": "92c41240ea1d1173cbc4affc6c94f8136c3dddd3",
+  "revision": "e421fd2dbb18cbb5a5602227415a955a0e23eea5",
   "framing": {
     "contentDigest": "uint32be(path_utf8_bytes_length) || path_utf8_bytes || uint64be(content_bytes_length) || content_bytes",
     "inventoryDigest": "sha256 of UTF-8 JSON.stringify(inventory without inventoryDigest)"
   },
-  "candidateFileSetDigest": "sha256:50a539ebb9f4e36dc081912f6c28a6c75f5719ee69e93b201b12b96ac1392bda",
-  "candidateContentDigest": "sha256:f3dea3701967c1e5986740d0864b67a666fb01d126945a24288c062398cf4fd4",
+  "candidateFileSetDigest": "sha256:ce2eaafccc2edcfcb364652638f1f1c7f75c2f93d2ef3a56db563f5c4130b2f2",
+  "candidateContentDigest": "sha256:db93a1fad688e64c36007e8bb087d0fe3b8c36cc217d21faf0a9644543356cc5",
   "entrypoints": [
     "apps/opentagd/src/index.ts",
     "apps/slack-events/src/index.ts",
@@ -73,8 +73,10 @@
     "packages/cli/src/version.ts",
     "packages/client/src/index.ts",
     "packages/core/src/action.ts",
+    "packages/core/src/canonical-json.ts",
     "packages/core/src/capability.ts",
     "packages/core/src/channel-protocol.ts",
+    "packages/core/src/control-protocol.ts",
     "packages/core/src/credential-safety.ts",
     "packages/core/src/factory.ts",
     "packages/core/src/index.ts",
@@ -99,9 +101,12 @@
     "packages/dispatcher/src/completion-governance.ts",
     "packages/dispatcher/src/continuation-presentation.ts",
     "packages/dispatcher/src/digest.ts",
+    "packages/dispatcher/src/governed-callback-runtime.ts",
+    "packages/dispatcher/src/governed-callback-worker.ts",
     "packages/dispatcher/src/index.ts",
     "packages/dispatcher/src/presentation.ts",
     "packages/dispatcher/src/reassessment-obligations.ts",
+    "packages/dispatcher/src/reassessment-processor.ts",
     "packages/dispatcher/src/server.ts",
     "packages/dispatcher/src/source-thread-control.ts",
     "packages/github/src/apply.ts",
@@ -111,6 +116,7 @@
     "packages/github/src/normalize.ts",
     "packages/github/src/pull-request.ts",
     "packages/github/src/render.ts",
+    "packages/github/src/source-refetch.ts",
     "packages/gitlab/src/apply.ts",
     "packages/gitlab/src/index.ts",
     "packages/gitlab/src/ingress.ts",
@@ -143,6 +149,7 @@
     "packages/linear/src/oauth.ts",
     "packages/linear/src/render.ts",
     "packages/local-runtime/src/config.ts",
+    "packages/local-runtime/src/control-v1.ts",
     "packages/local-runtime/src/daemon.ts",
     "packages/local-runtime/src/dispatcher.ts",
     "packages/local-runtime/src/doctor.ts",
@@ -205,8 +212,8 @@
     },
     {
       "path": "apps/opentagd/src/index.ts",
-      "bytes": 9436,
-      "digest": "sha256:924a6d5abd99c204a7d50af05d6aec30787f3b8ff6a58608a9a1e5ff5ddf8322"
+      "bytes": 9831,
+      "digest": "sha256:5a89025beb29ea5965459b33cee60f9710fe2ffb6a3800f6c39a2aa18d63dd21"
     },
     {
       "path": "apps/opentagd/src/runtime.ts",
@@ -270,8 +277,8 @@
     },
     {
       "path": "packages/cli/src/config.ts",
-      "bytes": 24415,
-      "digest": "sha256:2fa026822aa497b17dd7b1fe8784104103c96986b713727f62195fab82a72ef9"
+      "bytes": 42824,
+      "digest": "sha256:75aacf59601f0bd0686c20f3c630111a12f5d4ff35fef078cbc8a4e86f98a62a"
     },
     {
       "path": "packages/cli/src/doctor.ts",
@@ -285,13 +292,13 @@
     },
     {
       "path": "packages/cli/src/health.ts",
-      "bytes": 6535,
-      "digest": "sha256:e1091de3cdc413e760e7b53a226e89c9a2f33b633d2c4529e9ce43206232113b"
+      "bytes": 9478,
+      "digest": "sha256:e3e2d40f3195faa741510b83fbae7304f8d207469d8e8f7a75a836297baf11b6"
     },
     {
       "path": "packages/cli/src/index.ts",
-      "bytes": 21819,
-      "digest": "sha256:effcef6e21fcc4da43ade535fbb0ded20dea3a7642084a021f04a76f959f24d1"
+      "bytes": 22077,
+      "digest": "sha256:27a5af734f795d914a4eb8cd3d7d3e56f8d3d869a95ef4409c912c99645bbf40"
     },
     {
       "path": "packages/cli/src/ingest.ts",
@@ -310,8 +317,8 @@
     },
     {
       "path": "packages/cli/src/pair.ts",
-      "bytes": 10496,
-      "digest": "sha256:e63510c69bda6db1023ec8693684aa5f7fd3b6085b6f8624a1f4d75dc3099860"
+      "bytes": 30173,
+      "digest": "sha256:a84202fe183463cf15dd961fc4c35348a15dd80816d3a742fe58ea29e563e103"
     },
     {
       "path": "packages/cli/src/platforms/discord/display.ts",
@@ -370,8 +377,8 @@
     },
     {
       "path": "packages/cli/src/relay-security.ts",
-      "bytes": 6096,
-      "digest": "sha256:e4ea9d74251d79d32fccbe6d207d0edc6e55278afd94ef3f4772a64e3a8abb87"
+      "bytes": 6274,
+      "digest": "sha256:7277e8718e846b7508c9d3ec35f33f36edbf37cf595eae39815bead7a4bc9809"
     },
     {
       "path": "packages/cli/src/secret-readiness.ts",
@@ -420,13 +427,13 @@
     },
     {
       "path": "packages/cli/src/start.ts",
-      "bytes": 54222,
-      "digest": "sha256:21c5da285eff02deb46d78c3b224662d2e764f536891ef7057ee178ddbe940a5"
+      "bytes": 56598,
+      "digest": "sha256:79c80b9ce70291107044970780eec9bb187eb795697173c8bff0998315509f8c"
     },
     {
       "path": "packages/cli/src/status.ts",
-      "bytes": 54889,
-      "digest": "sha256:884c3b9725c710acb244f15df759f07fb03c41602a78b3b2c54eef252a740155"
+      "bytes": 55935,
+      "digest": "sha256:e24f91f31bd155e6f4ae09241993d3bf65e0cade24f1deeb1ca6d7145504eeef"
     },
     {
       "path": "packages/cli/src/ui/clack.ts",
@@ -450,13 +457,18 @@
     },
     {
       "path": "packages/client/src/index.ts",
-      "bytes": 66875,
-      "digest": "sha256:9940d895c59407b924eb0a6e38305b469ddb85b7ea1117054d0a5e89b266fb69"
+      "bytes": 122195,
+      "digest": "sha256:70d18586487e9509784f6d33880f659e6eab2c2aaf204ee1240d132c6f1f746c"
     },
     {
       "path": "packages/core/src/action.ts",
       "bytes": 21915,
       "digest": "sha256:0e75d8e2ce01ddcf0b43b327e78712170c9ce88dd52940454011abf84a0818b2"
+    },
+    {
+      "path": "packages/core/src/canonical-json.ts",
+      "bytes": 2774,
+      "digest": "sha256:f902b68cb64bbeb1a184f3e5c849ef9cd5663c90a3cb9749a888da427961ddd9"
     },
     {
       "path": "packages/core/src/capability.ts",
@@ -467,6 +479,11 @@
       "path": "packages/core/src/channel-protocol.ts",
       "bytes": 3507,
       "digest": "sha256:765ad6cbebe2b03f7b0dff000cae89a09cac3436155f04438008e3bacbc851de"
+    },
+    {
+      "path": "packages/core/src/control-protocol.ts",
+      "bytes": 131189,
+      "digest": "sha256:e285a2e71eb0f6c06d6eb06b922a2a97d55220ede28868ecceec7c9574bcc1e9"
     },
     {
       "path": "packages/core/src/credential-safety.ts",
@@ -480,8 +497,8 @@
     },
     {
       "path": "packages/core/src/index.ts",
-      "bytes": 514,
-      "digest": "sha256:5295d07eb9037f507144562d82c57c87561c5756f0732b469746e6b9e49a7f31"
+      "bytes": 590,
+      "digest": "sha256:6086f7ef07cad34e5cd019085f5d157fe3cb87246fd0b8674b96379fa72167cf"
     },
     {
       "path": "packages/core/src/integration-protocol.ts",
@@ -530,8 +547,8 @@
     },
     {
       "path": "packages/core/src/schema.ts",
-      "bytes": 61696,
-      "digest": "sha256:cc47abb2a94d654ca3c4b136bf86fc28a67fd7fb42c5c35aa75387c8ca348abc"
+      "bytes": 75408,
+      "digest": "sha256:cdee0d774104ffedc65e63f00f06f91b8fdffb2221d093ab9152215a08330836"
     },
     {
       "path": "packages/discord/src/gateway.ts",
@@ -570,13 +587,13 @@
     },
     {
       "path": "packages/dispatcher/src/callbacks.ts",
-      "bytes": 29261,
-      "digest": "sha256:8332fcc2f7da22b06ad09d92d8073972141094bfee970a3030f330cb084dcfa8"
+      "bytes": 59753,
+      "digest": "sha256:4c98134df6bf72025c7f9a87eddc26ccc42fd3d60820d3c161a6eed3e95f96b4"
     },
     {
       "path": "packages/dispatcher/src/completion-governance.ts",
-      "bytes": 48922,
-      "digest": "sha256:576c3073474c179defe25e01cefe0a69021c7b8742b5308539d4d088c62c95e2"
+      "bytes": 51227,
+      "digest": "sha256:1e8240cbd44aa8de9e376639e76c3b8e0f892bf17cca8a77d4bc89d5040be925"
     },
     {
       "path": "packages/dispatcher/src/continuation-presentation.ts",
@@ -589,9 +606,19 @@
       "digest": "sha256:187a6b0108d7d426ca16a8e725ee54312bf94bf832358f1755fd51a594caf1dc"
     },
     {
+      "path": "packages/dispatcher/src/governed-callback-runtime.ts",
+      "bytes": 13291,
+      "digest": "sha256:4e0ca5bb77cefd663b9c6a4ba61098916eb6a12025bce9d2c3ebcce8ddbb8603"
+    },
+    {
+      "path": "packages/dispatcher/src/governed-callback-worker.ts",
+      "bytes": 23949,
+      "digest": "sha256:b21770cf7e57e5e50f3647d910babab71ac238bad40b58bfad5c88a1366c4395"
+    },
+    {
       "path": "packages/dispatcher/src/index.ts",
-      "bytes": 187,
-      "digest": "sha256:e6dba7723b7c35736d221e0bb3d11010e23a093f05a000ce80721582eeef31c9"
+      "bytes": 327,
+      "digest": "sha256:d3e080a00bb6ee152b606a0be141864820bd7fcb931251486eac382861bfa894"
     },
     {
       "path": "packages/dispatcher/src/presentation.ts",
@@ -604,9 +631,14 @@
       "digest": "sha256:fba0b5ba2aa19570b2e87e6736fa3c4d2a1d0ecf7aa82d1a8f7e61de63ff6f65"
     },
     {
+      "path": "packages/dispatcher/src/reassessment-processor.ts",
+      "bytes": 10610,
+      "digest": "sha256:4067a00024ecee2f2e093fe57e61d69cc082a01ca5c179854af19b376ab8365a"
+    },
+    {
       "path": "packages/dispatcher/src/server.ts",
-      "bytes": 320082,
-      "digest": "sha256:bec6f8386141e351959e0f9711e5c882ed9f5eafeac1dfea0064df3f8243368c"
+      "bytes": 324567,
+      "digest": "sha256:6a8f77ff967ab4401e5b475321823df01c44b35c56bce07d5422b3039ab67cf5"
     },
     {
       "path": "packages/dispatcher/src/source-thread-control.ts",
@@ -625,8 +657,8 @@
     },
     {
       "path": "packages/github/src/index.ts",
-      "bytes": 196,
-      "digest": "sha256:18a825bd2a5e24bdea3c611e3c911588834a3593f8a3f89ff3251af7b93e1c79"
+      "bytes": 233,
+      "digest": "sha256:f29fa5125e074976a39a71e720867f01875d31ce5758288efc2c14cfd419369c"
     },
     {
       "path": "packages/github/src/ingress.ts",
@@ -635,8 +667,8 @@
     },
     {
       "path": "packages/github/src/normalize.ts",
-      "bytes": 9280,
-      "digest": "sha256:0928d2552294b828c94bcbc67e2ee882c5381f2a714fa186f43221f1b8769318"
+      "bytes": 9595,
+      "digest": "sha256:11fea281bd231496add874b3f0708e93b56364614eb4f8e3dcc408f2500247c3"
     },
     {
       "path": "packages/github/src/pull-request.ts",
@@ -647,6 +679,11 @@
       "path": "packages/github/src/render.ts",
       "bytes": 4183,
       "digest": "sha256:3e3abb5de3ae3ba50cf8c25e5c475336083d5f12486123debbe72c2d048ffc7c"
+    },
+    {
+      "path": "packages/github/src/source-refetch.ts",
+      "bytes": 10852,
+      "digest": "sha256:78274fbe5e4f2dd7dae56d6924b3dab320b5b5d5dceb058b230840035e71db21"
     },
     {
       "path": "packages/gitlab/src/apply.ts",
@@ -690,8 +727,8 @@
     },
     {
       "path": "packages/governance/src/evaluate.ts",
-      "bytes": 30113,
-      "digest": "sha256:387fb75e7194ffb21e4a8ad3b66a7afee284815971a7909f1a15e63eabc78d53"
+      "bytes": 32452,
+      "digest": "sha256:1291c315ac2651b602ac51330ce72501beed5affc82df2517eb5ea05a22b7514"
     },
     {
       "path": "packages/governance/src/governance.ts",
@@ -805,13 +842,18 @@
     },
     {
       "path": "packages/local-runtime/src/config.ts",
-      "bytes": 21132,
-      "digest": "sha256:cb0014de79d7daaf0e46655005bf124e619e3ff42c41bf473842483e789dd04b"
+      "bytes": 66311,
+      "digest": "sha256:fc4b4da70f83ff91538e32e7079b364d0d61b1674bda2f036979282c05ad6c82"
+    },
+    {
+      "path": "packages/local-runtime/src/control-v1.ts",
+      "bytes": 82095,
+      "digest": "sha256:7c88289e5d9ad57faf77af604688ae50433147740ca451665d8fbbe241bdebf1"
     },
     {
       "path": "packages/local-runtime/src/daemon.ts",
-      "bytes": 28625,
-      "digest": "sha256:36de33ab1b8f780b585e7fc8a91277bd1a3f5793ee228da15209530b6ea5a91d"
+      "bytes": 36725,
+      "digest": "sha256:fd01a98c79908ff772cda9241a2c468ff0c09062ef614915c4124b1aba5bb44c"
     },
     {
       "path": "packages/local-runtime/src/dispatcher.ts",
@@ -820,23 +862,23 @@
     },
     {
       "path": "packages/local-runtime/src/doctor.ts",
-      "bytes": 21029,
-      "digest": "sha256:e9c41190ed963209f6ec0d368142dfe99aea669fd13a47f2510f109e4ae84fcb"
+      "bytes": 23414,
+      "digest": "sha256:206d66eacf414c8238b67bdcbb50d1a10f645606d45fee339f53ab1e867d6776"
     },
     {
       "path": "packages/local-runtime/src/index.ts",
-      "bytes": 293,
-      "digest": "sha256:ea004e487bcf0388ccb1694f5382bbd82c3cc3b354737c9f24650c3ac9a02792"
+      "bytes": 326,
+      "digest": "sha256:d277a7791459cbd78e828544113f6442a6cd046ee8b6fb4af86bc1c51eb69956"
     },
     {
       "path": "packages/local-runtime/src/pr.ts",
-      "bytes": 4684,
-      "digest": "sha256:9d258a29c6ad555f462e5dce64f8337981b65b1cb7ff3706d25a4c9caf580879"
+      "bytes": 5549,
+      "digest": "sha256:6380af4004c092c81daa00b5cb3d5cf6efc3e97ae84c692f983099c38a2e59e4"
     },
     {
       "path": "packages/local-runtime/src/runtime.ts",
-      "bytes": 6229,
-      "digest": "sha256:da20c1c640e0af89d7fb816059c96ec63ba990f573a366554dd78c62ea31f8d3"
+      "bytes": 8532,
+      "digest": "sha256:b6e24aa7cd89107ba7c8d54131e3d23b2d743cdf0589275aa13566ba89b85390"
     },
     {
       "path": "packages/runner/src/acp-agent.ts",
@@ -935,8 +977,8 @@
     },
     {
       "path": "packages/slack/src/render.ts",
-      "bytes": 32009,
-      "digest": "sha256:f11265a0b6eda24452a8545ee102d4f3f69d807302d8c9bf86a4bdbe586380a8"
+      "bytes": 33032,
+      "digest": "sha256:3e81c57642510d9085098a516f3bf632a42cde27eaa6f6d04187d6bf9e56d249"
     },
     {
       "path": "packages/slack/src/socket-mode.ts",
@@ -955,13 +997,13 @@
     },
     {
       "path": "packages/store/src/repository.ts",
-      "bytes": 379696,
-      "digest": "sha256:6742654d2f57059547aff4c74546149261171d208ce97d27bdfa20fdd5d7832f"
+      "bytes": 748833,
+      "digest": "sha256:0460637d21c4799314d05e62b9a6d4c69ddc82c37a75cc7a9fe55a9fa0271ffb"
     },
     {
       "path": "packages/store/src/schema.ts",
-      "bytes": 62549,
-      "digest": "sha256:64c14a2abce660a2bf88aee5e8938aaa47f5297e20d0546e76af88ef04631420"
+      "bytes": 141216,
+      "digest": "sha256:3061c4a90a08e758221c11dd1052b062abf3753d6128d758ad093fe335954d22"
     },
     {
       "path": "packages/teams/src/auth.ts",
@@ -1037,13 +1079,58 @@
     },
     {
       "path": "packages/cli/src/config.ts",
-      "line": 585,
+      "line": 658,
       "kind": "sdk"
     },
     {
+      "path": "packages/cli/src/config.ts",
+      "line": 948,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/cli/src/config.ts",
+      "line": 965,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/cli/src/config.ts",
+      "line": 991,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/cli/src/config.ts",
+      "line": 1033,
+      "kind": "readback"
+    },
+    {
       "path": "packages/cli/src/health.ts",
-      "line": 10,
+      "line": 14,
       "kind": "http"
+    },
+    {
+      "path": "packages/cli/src/pair.ts",
+      "line": 165,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/cli/src/pair.ts",
+      "line": 168,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/cli/src/pair.ts",
+      "line": 174,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/cli/src/pair.ts",
+      "line": 177,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/cli/src/pair.ts",
+      "line": 653,
+      "kind": "readback"
     },
     {
       "path": "packages/cli/src/service.ts",
@@ -1112,438 +1199,618 @@
     },
     {
       "path": "packages/cli/src/start.ts",
-      "line": 18,
+      "line": 23,
       "kind": "token"
     },
     {
       "path": "packages/cli/src/start.ts",
-      "line": 81,
+      "line": 92,
       "kind": "token"
     },
     {
       "path": "packages/cli/src/start.ts",
-      "line": 617,
+      "line": 628,
       "kind": "readback"
     },
     {
       "path": "packages/cli/src/start.ts",
-      "line": 618,
+      "line": 629,
       "kind": "readback"
     },
     {
       "path": "packages/cli/src/start.ts",
-      "line": 690,
+      "line": 701,
       "kind": "token"
     },
     {
       "path": "packages/cli/src/start.ts",
-      "line": 698,
+      "line": 709,
       "kind": "token"
     },
     {
       "path": "packages/cli/src/start.ts",
-      "line": 922,
+      "line": 933,
       "kind": "token"
     },
     {
       "path": "packages/cli/src/start.ts",
-      "line": 1027,
+      "line": 1064,
       "kind": "token"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 244,
+      "line": 47,
       "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 247,
+      "line": 50,
       "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 294,
+      "line": 51,
       "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 497,
+      "line": 118,
       "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 536,
+      "line": 151,
       "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 741,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 750,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 758,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 772,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 780,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 789,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 797,
+      "line": 326,
       "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 798,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 803,
+      "line": 329,
       "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 807,
-      "kind": "http"
+      "line": 388,
+      "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 818,
-      "kind": "http"
+      "line": 439,
+      "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 827,
-      "kind": "http"
+      "line": 685,
+      "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 835,
-      "kind": "http"
+      "line": 696,
+      "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 845,
-      "kind": "http"
+      "line": 735,
+      "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 853,
-      "kind": "http"
+      "line": 1187,
+      "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 863,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 871,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 881,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 891,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 903,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 914,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 938,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 949,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 958,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 967,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 983,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 994,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1005,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1016,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1026,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1037,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1046,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1055,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1065,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1106,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1115,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1129,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1147,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1156,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1170,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1181,
-      "kind": "http"
+      "line": 1191,
+      "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
       "line": 1192,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1202,
       "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 1203,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1203,
+      "line": 1194,
       "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 1213,
+      "line": 1837,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2033,
       "kind": "readback"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 1219,
+      "line": 2091,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2092,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2093,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2106,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2114,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2239,
       "kind": "http"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 1235,
+      "line": 2247,
       "kind": "http"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 1254,
+      "line": 2261,
       "kind": "http"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 1268,
+      "line": 2269,
       "kind": "http"
     },
     {
       "path": "packages/client/src/index.ts",
-      "line": 1282,
+      "line": 2278,
       "kind": "http"
     },
     {
       "path": "packages/client/src/index.ts",
+      "line": 2286,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2287,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2292,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2296,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2307,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2316,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2324,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2334,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2342,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2352,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2360,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2370,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2380,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2392,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2403,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2427,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2438,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2447,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2456,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2472,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2483,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2494,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2505,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2515,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2526,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2535,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2544,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2554,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2595,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2604,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2618,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2636,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2645,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2659,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2670,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2681,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2691,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2692,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2692,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2702,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2708,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2724,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2743,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2757,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2771,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2788,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2800,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2809,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2828,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2861,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2878,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2895,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2924,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2943,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2951,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2959,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2967,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2975,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2983,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 2992,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 3000,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 3008,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 3016,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 3035,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 3043,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 3059,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 3067,
+      "kind": "http"
+    },
+    {
+      "path": "packages/client/src/index.ts",
+      "line": 3084,
+      "kind": "http"
+    },
+    {
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 114,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 378,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 397,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 407,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 471,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 1285,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 1290,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 1294,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/core/src/control-protocol.ts",
       "line": 1299,
-      "kind": "http"
+      "kind": "readback"
     },
     {
-      "path": "packages/client/src/index.ts",
-      "line": 1311,
-      "kind": "http"
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 1303,
+      "kind": "readback"
     },
     {
-      "path": "packages/client/src/index.ts",
-      "line": 1320,
-      "kind": "http"
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 1304,
+      "kind": "readback"
     },
     {
-      "path": "packages/client/src/index.ts",
-      "line": 1339,
-      "kind": "http"
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 1305,
+      "kind": "readback"
     },
     {
-      "path": "packages/client/src/index.ts",
-      "line": 1372,
-      "kind": "http"
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 3213,
+      "kind": "readback"
     },
     {
-      "path": "packages/client/src/index.ts",
-      "line": 1389,
-      "kind": "http"
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 3390,
+      "kind": "readback"
     },
     {
-      "path": "packages/client/src/index.ts",
-      "line": 1406,
-      "kind": "http"
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 3391,
+      "kind": "readback"
     },
     {
-      "path": "packages/client/src/index.ts",
-      "line": 1435,
-      "kind": "http"
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 3393,
+      "kind": "readback"
     },
     {
-      "path": "packages/client/src/index.ts",
-      "line": 1454,
-      "kind": "http"
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 3394,
+      "kind": "readback"
     },
     {
-      "path": "packages/client/src/index.ts",
-      "line": 1462,
-      "kind": "http"
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 3403,
+      "kind": "readback"
     },
     {
-      "path": "packages/client/src/index.ts",
-      "line": 1470,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1478,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1486,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1494,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1503,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1511,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1519,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1527,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1546,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1554,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1570,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1578,
-      "kind": "http"
-    },
-    {
-      "path": "packages/client/src/index.ts",
-      "line": 1595,
-      "kind": "http"
+      "path": "packages/core/src/control-protocol.ts",
+      "line": 3404,
+      "kind": "readback"
     },
     {
       "path": "packages/core/src/schema.ts",
@@ -1557,22 +1824,22 @@
     },
     {
       "path": "packages/core/src/schema.ts",
-      "line": 911,
+      "line": 1257,
       "kind": "readback"
     },
     {
       "path": "packages/core/src/schema.ts",
-      "line": 1068,
+      "line": 1414,
       "kind": "readback"
     },
     {
       "path": "packages/core/src/schema.ts",
-      "line": 1118,
+      "line": 1464,
       "kind": "readback"
     },
     {
       "path": "packages/core/src/schema.ts",
-      "line": 1270,
+      "line": 1616,
       "kind": "readback"
     },
     {
@@ -1587,97 +1854,172 @@
     },
     {
       "path": "packages/dispatcher/src/callbacks.ts",
-      "line": 103,
+      "line": 53,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 72,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 79,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 84,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 137,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 373,
       "kind": "token"
     },
     {
       "path": "packages/dispatcher/src/callbacks.ts",
-      "line": 135,
+      "line": 405,
       "kind": "http"
     },
     {
       "path": "packages/dispatcher/src/callbacks.ts",
-      "line": 158,
+      "line": 492,
       "kind": "http"
     },
     {
       "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 569,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 827,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 926,
+      "kind": "token"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 929,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 1024,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 1179,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 1233,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 1238,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 1275,
+      "kind": "sdk"
+    },
+    {
+      "path": "packages/dispatcher/src/callbacks.ts",
+      "line": 1355,
+      "kind": "http"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "line": 27,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "line": 1044,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "line": 1045,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "line": 1096,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "line": 1103,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/completion-governance.ts",
+      "line": 1130,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/governed-callback-runtime.ts",
+      "line": 32,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/governed-callback-worker.ts",
+      "line": 37,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/governed-callback-worker.ts",
       "line": 208,
-      "kind": "http"
-    },
-    {
-      "path": "packages/dispatcher/src/callbacks.ts",
-      "line": 328,
-      "kind": "http"
-    },
-    {
-      "path": "packages/dispatcher/src/callbacks.ts",
-      "line": 386,
-      "kind": "token"
-    },
-    {
-      "path": "packages/dispatcher/src/callbacks.ts",
-      "line": 451,
-      "kind": "http"
-    },
-    {
-      "path": "packages/dispatcher/src/callbacks.ts",
-      "line": 577,
-      "kind": "sdk"
-    },
-    {
-      "path": "packages/dispatcher/src/callbacks.ts",
-      "line": 616,
-      "kind": "sdk"
-    },
-    {
-      "path": "packages/dispatcher/src/callbacks.ts",
-      "line": 621,
-      "kind": "sdk"
-    },
-    {
-      "path": "packages/dispatcher/src/callbacks.ts",
-      "line": 629,
-      "kind": "sdk"
-    },
-    {
-      "path": "packages/dispatcher/src/callbacks.ts",
-      "line": 665,
-      "kind": "http"
-    },
-    {
-      "path": "packages/dispatcher/src/completion-governance.ts",
-      "line": 23,
       "kind": "readback"
     },
     {
-      "path": "packages/dispatcher/src/completion-governance.ts",
-      "line": 755,
+      "path": "packages/dispatcher/src/governed-callback-worker.ts",
+      "line": 480,
       "kind": "readback"
     },
     {
-      "path": "packages/dispatcher/src/completion-governance.ts",
-      "line": 1009,
+      "path": "packages/dispatcher/src/governed-callback-worker.ts",
+      "line": 599,
       "kind": "readback"
     },
     {
-      "path": "packages/dispatcher/src/completion-governance.ts",
-      "line": 1010,
+      "path": "packages/dispatcher/src/governed-callback-worker.ts",
+      "line": 628,
       "kind": "readback"
     },
     {
-      "path": "packages/dispatcher/src/completion-governance.ts",
-      "line": 1058,
+      "path": "packages/dispatcher/src/governed-callback-worker.ts",
+      "line": 635,
       "kind": "readback"
     },
     {
-      "path": "packages/dispatcher/src/completion-governance.ts",
-      "line": 1065,
+      "path": "packages/dispatcher/src/governed-callback-worker.ts",
+      "line": 646,
       "kind": "readback"
     },
     {
-      "path": "packages/dispatcher/src/completion-governance.ts",
-      "line": 1092,
+      "path": "packages/dispatcher/src/reassessment-processor.ts",
+      "line": 98,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/dispatcher/src/reassessment-processor.ts",
+      "line": 188,
       "kind": "readback"
     },
     {
@@ -1702,132 +2044,122 @@
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 796,
+      "line": 805,
       "kind": "readback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 2484,
+      "line": 2513,
       "kind": "token"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 2942,
+      "line": 3029,
       "kind": "delivery_callback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 3031,
+      "line": 3126,
       "kind": "delivery_callback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 3136,
+      "line": 3382,
       "kind": "token"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 3199,
+      "line": 3445,
       "kind": "http"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 3450,
+      "line": 3745,
       "kind": "delivery_callback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 3678,
+      "line": 3973,
       "kind": "delivery_callback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 4181,
-      "kind": "readback"
-    },
-    {
-      "path": "packages/dispatcher/src/server.ts",
-      "line": 4252,
-      "kind": "readback"
-    },
-    {
-      "path": "packages/dispatcher/src/server.ts",
-      "line": 4366,
+      "line": 4516,
       "kind": "delivery_callback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 4825,
+      "line": 4975,
       "kind": "token"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 4837,
+      "line": 4987,
       "kind": "readback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 5009,
+      "line": 5159,
       "kind": "http"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 5029,
+      "line": 5179,
       "kind": "http"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 5148,
+      "line": 5298,
       "kind": "readback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 5169,
+      "line": 5319,
       "kind": "readback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 5170,
+      "line": 5320,
       "kind": "readback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 6649,
+      "line": 6799,
       "kind": "readback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 6650,
+      "line": 6800,
       "kind": "readback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 6651,
+      "line": 6801,
       "kind": "readback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 6661,
+      "line": 6811,
       "kind": "readback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 6662,
+      "line": 6812,
       "kind": "readback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 6667,
+      "line": 6817,
       "kind": "readback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 6679,
+      "line": 6829,
       "kind": "readback"
     },
     {
       "path": "packages/dispatcher/src/server.ts",
-      "line": 6739,
+      "line": 6889,
       "kind": "delivery_callback"
     },
     {
@@ -2116,6 +2448,11 @@
       "kind": "http"
     },
     {
+      "path": "packages/github/src/source-refetch.ts",
+      "line": 139,
+      "kind": "http"
+    },
+    {
       "path": "packages/gitlab/src/merge-request.ts",
       "line": 22,
       "kind": "http"
@@ -2127,22 +2464,22 @@
     },
     {
       "path": "packages/governance/src/evaluate.ts",
-      "line": 285,
+      "line": 340,
       "kind": "readback"
     },
     {
       "path": "packages/governance/src/evaluate.ts",
-      "line": 289,
+      "line": 344,
       "kind": "readback"
     },
     {
       "path": "packages/governance/src/evaluate.ts",
-      "line": 511,
+      "line": 597,
       "kind": "readback"
     },
     {
       "path": "packages/governance/src/evaluate.ts",
-      "line": 512,
+      "line": 598,
       "kind": "readback"
     },
     {
@@ -2262,17 +2599,122 @@
     },
     {
       "path": "packages/local-runtime/src/config.ts",
-      "line": 346,
+      "line": 215,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 217,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 234,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 253,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 803,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 867,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 1036,
       "kind": "sdk"
     },
     {
-      "path": "packages/local-runtime/src/daemon.ts",
-      "line": 492,
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 1250,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 1260,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 1287,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 1301,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 1308,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 1318,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 1323,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 1423,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 1499,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/config.ts",
+      "line": 1502,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/control-v1.ts",
+      "line": 1,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/local-runtime/src/control-v1.ts",
+      "line": 721,
+      "kind": "external_process"
+    },
+    {
+      "path": "packages/local-runtime/src/control-v1.ts",
+      "line": 1465,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/control-v1.ts",
+      "line": 1759,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/control-v1.ts",
+      "line": 1895,
       "kind": "readback"
     },
     {
       "path": "packages/local-runtime/src/daemon.ts",
-      "line": 496,
+      "line": 620,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/local-runtime/src/daemon.ts",
+      "line": 624,
       "kind": "readback"
     },
     {
@@ -2377,137 +2819,422 @@
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 1040,
+      "line": 196,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 1041,
+      "line": 425,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 1042,
+      "line": 739,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 5278,
+      "line": 2129,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 5407,
+      "line": 2130,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 6759,
+      "line": 2131,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 6762,
+      "line": 6123,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 6796,
+      "line": 11403,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 6938,
+      "line": 11532,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 6941,
+      "line": 13167,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 6966,
+      "line": 13170,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7006,
+      "line": 13204,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7196,
+      "line": 13346,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7202,
+      "line": 13349,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7211,
+      "line": 13374,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7227,
+      "line": 13414,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7228,
+      "line": 13604,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7232,
+      "line": 13610,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7241,
+      "line": 13619,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7251,
+      "line": 13635,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7252,
+      "line": 13636,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7253,
+      "line": 13640,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7275,
+      "line": 13649,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7279,
+      "line": 13659,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7283,
+      "line": 13660,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7294,
+      "line": 13661,
       "kind": "readback"
     },
     {
       "path": "packages/store/src/repository.ts",
-      "line": 7302,
+      "line": 13683,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 13687,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 13691,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 13702,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 13710,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15370,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15418,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15447,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15529,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15669,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15694,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15696,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15697,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15702,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15719,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15728,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15789,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15797,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15804,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15805,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15817,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15819,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15899,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15901,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15902,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15903,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15905,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15906,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/repository.ts",
+      "line": 15907,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 812,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 813,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 815,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 826,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 830,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 834,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2646,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2647,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2657,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2658,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2659,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2660,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2703,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2704,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2706,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2707,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2712,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2713,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2723,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2724,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2725,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2727,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2729,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2731,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2732,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2734,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2736,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2737,
+      "kind": "readback"
+    },
+    {
+      "path": "packages/store/src/schema.ts",
+      "line": 2740,
       "kind": "readback"
     },
     {
@@ -2577,9 +3304,9 @@
     }
   ],
   "counts": {
-    "candidateModules": 167,
-    "candidateBytes": 2610392,
-    "roots": 310
+    "candidateModules": 174,
+    "candidateBytes": 3547347,
+    "roots": 447
   },
   "exclusions": [
     {
@@ -2608,5 +3335,5 @@
     "Line matches are candidates for review; they do not prove that a Provider operation executes in production."
   ],
   "sourceRepository": "opentag",
-  "inventoryDigest": "sha256:05cd9d4854cb72eb0f1f18a90b53874d46857417e2f3a52d70f693ceef54779e"
+  "inventoryDigest": "sha256:7d8276991b2427f00b7f560fe13411251d9893637db914f51eb01945de83c0b8"
 }

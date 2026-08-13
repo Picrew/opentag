@@ -17,7 +17,7 @@ import { constants as fsConstants } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const TASK4_BASE_REVISION = '92c41240ea1d1173cbc4affc6c94f8136c3dddd3';
+export const TASK4_BASE_REVISION = 'e421fd2dbb18cbb5a5602227415a955a0e23eea5';
 export const TASK4_SEMANTIC_RECEIPT_PATH =
   '.superpowers/sdd/prd-unified-delivery-breaking-cutover/task-4-slack-kernel-semantic-receipt.json';
 export const TASK4_SEMANTIC_RUNNER_COMMAND =
@@ -69,6 +69,16 @@ const PRODUCTION_INPUTS = Object.freeze([
   [
     'legacy_callbacks_absent',
     'packages/dispatcher/src/callbacks.ts',
+    'absent',
+  ],
+  [
+    'governed_callback_runtime_absent',
+    'packages/dispatcher/src/governed-callback-runtime.ts',
+    'absent',
+  ],
+  [
+    'governed_callback_worker_absent',
+    'packages/dispatcher/src/governed-callback-worker.ts',
     'absent',
   ],
   ['lark_inbound', 'packages/lark/src/inbound.ts'],

@@ -119,15 +119,8 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import {
-  CallbackProviderOutcomeUnknownError,
-  type CallbackSinkWithPreflight
-} from "./callbacks.js";
-import {
-  createGovernedCallbackRuntime,
-  type GovernedCallbackRuntime
-} from "./governed-callback-runtime.js";
 import { createReassessmentObligationWorker } from "./reassessment-obligations.js";
+import { createReassessmentObligationProcessor } from "./reassessment-processor.js";
 import { UnifiedDeliveryProducer, type UnifiedDeliveryEnqueuer } from "./delivery/producer.js";
 
 /**
@@ -2757,14 +2750,6 @@ export function createDispatcherApp(input: {
     retryMaxMs?: number;
     maxAttempts?: number;
   };
-  governedCallbackRuntime?: {
-    create?: (
-      options: Parameters<typeof createGovernedCallbackRuntime>[0]
-    ) => GovernedCallbackRuntime;
-    retryDelayMs?: number;
-    setTimeout?: typeof globalThis.setTimeout;
-    clearTimeout?: typeof globalThis.clearTimeout;
-  };
 }) {
   const sqlite = input.sqlite ?? openDispatcherDatabase(input.databasePath);
   migrateSchema(sqlite);
@@ -2874,127 +2859,6 @@ export function createDispatcherApp(input: {
     });
   }
 
-  async function recordGovernedCallbackBlock(inputValue: {
-    runId: string;
-    workThreadId?: string;
-    assessmentId: string;
-    transitionKey: string;
-    reasonCode: string;
-    nextAction: string;
-  }): Promise<void> {
-    try {
-      await repo.appendControlPlaneEvent({
-        type: "callback.governed.enqueue_blocked",
-        severity: "error",
-        subject: inputValue.runId,
-        idempotencyKey: `governed-callback-blocked:${inputValue.transitionKey}:${inputValue.reasonCode}`,
-        payload: {
-          runId: inputValue.runId,
-          ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
-          assessmentId: inputValue.assessmentId,
-          reasonCode: inputValue.reasonCode,
-          nextAction: inputValue.nextAction
-        }
-      });
-    } catch {
-      // The durable reassessment obligation remains the retry authority.
-    }
-  }
-
-  async function deliverCallbackWithCompletionAuthority(inputValue: {
-    message: CallbackMessage;
-    assessmentId?: string;
-    transitionKey: string;
-    workThreadId?: string;
-    legacyFallback?: boolean;
-    deferOnGovernedFailure?: boolean;
-  }): Promise<"governed" | "legacy" | "deferred" | "skipped"> {
-    if (!inputValue.assessmentId) {
-      if (inputValue.legacyFallback === false) return "skipped";
-      await deliverAndAudit({
-        repo,
-        sink: callbackSink,
-        retry: callbackRetry,
-        message: inputValue.message
-      });
-      return "legacy";
-    }
-    let governedContext: Awaited<ReturnType<typeof repo.getGovernedCallbackEnqueueContext>>;
-    try {
-      governedContext = await repo.getGovernedCallbackEnqueueContext({
-        runId: inputValue.message.runId,
-        assessmentId: inputValue.assessmentId
-      });
-    } catch {
-      await recordGovernedCallbackBlock({
-        runId: inputValue.message.runId,
-        ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
-        assessmentId: inputValue.assessmentId,
-        transitionKey: inputValue.transitionKey,
-        reasonCode: "governed_callback_context_unavailable",
-        nextAction: "inspect-local-callback-ledger"
-      });
-      if (inputValue.deferOnGovernedFailure) return "deferred";
-      throw new Error("governed_callback_context_unavailable");
-    }
-    if (governedContext.outcome === "authority_conflict") {
-      await recordGovernedCallbackBlock({
-        runId: inputValue.message.runId,
-        ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
-        assessmentId: inputValue.assessmentId,
-        transitionKey: inputValue.transitionKey,
-        reasonCode: "governed_callback_authority_conflict",
-        nextAction: "retry-after-hosted-authority-is-acknowledged"
-      });
-      if (inputValue.deferOnGovernedFailure) return "deferred";
-      throw new Error("governed_callback_authority_conflict");
-    }
-    if (governedContext.outcome === "ready") {
-      if (inputValue.message.provider !== "github" || !governedCallbackRuntime) {
-        const reasonCode = inputValue.message.provider !== "github"
-          ? "governed_callback_provider_not_supported"
-          : "governed_callback_runtime_unavailable";
-        await recordGovernedCallbackBlock({
-          runId: inputValue.message.runId,
-          ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
-          assessmentId: inputValue.assessmentId,
-          transitionKey: inputValue.transitionKey,
-          reasonCode,
-          nextAction: "repair-local-callback"
-        });
-        if (inputValue.deferOnGovernedFailure) return "deferred";
-        throw new Error(reasonCode);
-      }
-      try {
-        await governedCallbackRuntime.enqueue({
-          context: governedContext,
-          message: inputValue.message,
-          transitionKey: inputValue.transitionKey
-        });
-      } catch {
-        await recordGovernedCallbackBlock({
-          runId: inputValue.message.runId,
-          ...(inputValue.workThreadId ? { workThreadId: inputValue.workThreadId } : {}),
-          assessmentId: inputValue.assessmentId,
-          transitionKey: inputValue.transitionKey,
-          reasonCode: "governed_callback_enqueue_failed",
-          nextAction: "inspect-local-callback-ledger"
-        });
-        if (inputValue.deferOnGovernedFailure) return "deferred";
-        throw new Error("governed_callback_enqueue_failed");
-      }
-      return "governed";
-    }
-    if (inputValue.legacyFallback === false) return "skipped";
-    await deliverAndAudit({
-      repo,
-      sink: callbackSink,
-      retry: callbackRetry,
-      message: inputValue.message
-    });
-    return "legacy";
-  }
-
   async function deliverCompletionTransition(
     workThreadId: string,
     options: {
@@ -3047,6 +2911,7 @@ export function createDispatcherApp(input: {
         idempotencyKey: transition.transitionKey
       }
     );
+    return transition.assessment.id;
   }
   const maxRequestBodyBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
   const runnerLeaseSeconds = input.runnerLeaseSeconds ?? 60;
@@ -7025,14 +6890,7 @@ export function createDispatcherApp(input: {
 
   return Object.assign(app, {
     async stopBackgroundWorkers() {
-      governedCallbackRuntimeStopping = true;
-      if (governedCallbackRuntimeRetryTimer) {
-        clearGovernedCallbackRuntimeTimeout(governedCallbackRuntimeRetryTimer);
-        governedCallbackRuntimeRetryTimer = undefined;
-      }
       await reassessmentWorker.stop();
-      await governedCallbackRuntimeStartTask;
-      await governedCallbackRuntime?.stop();
     }
   });
 }

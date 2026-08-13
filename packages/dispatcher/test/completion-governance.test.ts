@@ -1551,6 +1551,7 @@ describe("dispatcher completion governance", () => {
     const restarted = createDispatcherApp({
       databasePath,
       completionPolicies: [strictPolicy],
+      reassessmentObligations: { autoStart: false },
       deliveryProducer: captureDeliveries(
         restartedDeliveries,
         setup.queuedDeliveryKeys

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, extname, posix } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -238,6 +238,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
       })}\n`,
     );
   } else {
-    process.stdout.write(`${JSON.stringify(inventory, null, 2)}\n`);
+    const output = `${JSON.stringify(inventory, null, 2)}\n`;
+    const outputPath = args.get('--output');
+    if (outputPath) writeFileSync(outputPath, output, { mode: 0o600 });
+    else process.stdout.write(output);
   }
 }

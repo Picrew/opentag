@@ -84,8 +84,8 @@ describe("createReassessmentObligationProcessor", () => {
     expect(deps.reassessWorkThread).not.toHaveBeenCalled();
   });
 
-  it("keeps the obligation retryable when completion callback custody is not durable yet", async () => {
-    const callbackFailure = new Error("governed_callback_authority_conflict");
+  it("keeps the obligation retryable when completion delivery custody is not durable yet", async () => {
+    const callbackFailure = new Error("delivery_custody_unavailable");
     const deps = dependencies({
       deliverCompletionTransition: vi.fn(async () => {
         throw callbackFailure;

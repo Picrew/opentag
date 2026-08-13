@@ -412,17 +412,6 @@ export class HostedLifecycleOperationConflictError extends Error {
   }
 }
 
-export class GovernedCallbackConflictError extends Error {
-  constructor(readonly code:
-    | "GOVERNED_CALLBACK_INVALID"
-    | "GOVERNED_CALLBACK_CONFLICT"
-    | "GOVERNED_CALLBACK_AUTHORITY_CONFLICT"
-    | "GOVERNED_CALLBACK_STALE_LEASE"
-    | "GOVERNED_CALLBACK_RECONCILIATION_REQUIRED") {
-    super(code);
-  }
-}
-
 export type HostedImportAuthority = HostedClaimV1["authority"] & {
   admissionId: string;
   admissionOperationId: string;
@@ -2021,66 +2010,6 @@ type AttemptLease = {
 
 class StaleActionTransitionError extends Error {}
 
-class GovernedCallbackEnqueueValidationError extends Error {}
-
-function governedCallbackEnqueueConflict(): never {
-  throw new GovernedCallbackEnqueueValidationError();
-}
-
-function parseGovernedCallbackEnqueueJson(json: string): unknown {
-  try {
-    return JSON.parse(json);
-  } catch (error) {
-    if (error instanceof SyntaxError) governedCallbackEnqueueConflict();
-    throw error;
-  }
-}
-
-function parseGovernedCallbackEnqueueSchema<T>(
-  schema: {
-    safeParse(value: unknown):
-      | { success: true; data: T }
-      | { success: false };
-  },
-  json: string
-): T {
-  const parsed = schema.safeParse(parseGovernedCallbackEnqueueJson(json));
-  if (!parsed.success) governedCallbackEnqueueConflict();
-  return parsed.data;
-}
-
-function governedCallbackEnqueueAuthorityFromJson(
-  authorityJson: string
-): HostedClaimV1["authority"] {
-  try {
-    return hostedClaimAuthoritySnapshotFromJson(authorityJson);
-  } catch (error) {
-    if (
-      error instanceof SyntaxError
-      || (error instanceof Error
-        && error.message === "hosted claim authority snapshot invalid")
-    ) governedCallbackEnqueueConflict();
-    throw error;
-  }
-}
-
-function governedCallbackEnqueueProjectionFromRow(
-  row: typeof controlPlaneProjectionOutbox.$inferSelect
-): ControlPlaneProjectionOutboxEntry {
-  try {
-    return projectionOutboxEntryFromRow(row);
-  } catch (error) {
-    if (
-      error instanceof Error
-      && (
-        error.message === "control_plane_projection_outbox_state_invalid"
-        || error.message === "control_plane_projection_outbox_row_invalid"
-      )
-    ) governedCallbackEnqueueConflict();
-    throw error;
-  }
-}
-
 function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
   const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
   const result = row.resultJson ? OpenTagRunResultSchema.parse(JSON.parse(row.resultJson)) : undefined;
@@ -2156,6 +2085,46 @@ function sourceContainerMetadataMatches(input: {
 }): boolean {
   if (input.event.source !== input.source) return false;
   return Object.entries(input.metadata).every(([key, value]) => input.event.metadata[key] === value);
+}
+
+const HOSTED_CLAIM_AUTHORITY_KEYS = [
+  "organizationId", "runnerId", "runId", "credentialId",
+  "registrationGeneration", "credentialGeneration", "projectTargetId",
+  "bindingId", "targetBindingDigest", "admissionPolicyReceiptId",
+  "admissionPolicySnapshotId", "admissionPolicySnapshotDigest",
+  "runnerReadinessReceiptId", "runnerReadinessReceiptDigest",
+  "targetReadinessReceiptId", "targetReadinessReceiptDigest", "executorId",
+  "executorCapabilityDigest", "attemptId", "attemptNumber", "epoch",
+  "fencingTokenDigest"
+] as const;
+
+function hostedClaimAuthoritySnapshotFromJson(
+  authorityJson: string
+): HostedClaimV1["authority"] {
+  const value = JSON.parse(authorityJson) as Record<string, unknown>;
+  const keys = Object.keys(value).sort();
+  const expectedKeys = [...HOSTED_CLAIM_AUTHORITY_KEYS].sort();
+  const integerKeys = [
+    "registrationGeneration", "credentialGeneration", "attemptNumber", "epoch"
+  ] as const;
+  const digestKeys = [
+    "targetBindingDigest", "admissionPolicySnapshotDigest",
+    "runnerReadinessReceiptDigest", "targetReadinessReceiptDigest",
+    "executorCapabilityDigest", "fencingTokenDigest"
+  ] as const;
+  const stringKeys = HOSTED_CLAIM_AUTHORITY_KEYS.filter(
+    (key) => !(integerKeys as readonly string[]).includes(key)
+  );
+  if (
+    canonicalJsonStringify(keys) !== canonicalJsonStringify(expectedKeys)
+    || stringKeys.some((key) => typeof value[key] !== "string" || value[key] === "")
+    || digestKeys.some((key) => !/^sha256:[0-9a-f]{64}$/u.test(value[key] as string))
+    || integerKeys.some((key) => !Number.isInteger(value[key]) || (value[key] as number) <= 0)
+    || value.epoch !== value.attemptNumber
+    || value.runnerReadinessReceiptId !== value.targetReadinessReceiptId
+    || value.runnerReadinessReceiptDigest !== value.targetReadinessReceiptDigest
+  ) throw new Error("hosted claim authority snapshot invalid");
+  return value as HostedClaimV1["authority"];
 }
 
 function followUpRequestFromRow(row: typeof followUpRequests.$inferSelect): FollowUpRequest {
@@ -5470,334 +5439,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     }));
   }
 
-  function assertGovernedCallbackAuthorityTx(
-    tx: ProjectionTransaction,
-    intent: typeof governedCallbackIntents.$inferSelect,
-    options: { requireCurrentAssessment?: boolean } = {}
-  ): typeof callbackDeliveries.$inferSelect {
-    if (
-      intent.completionOperationId === null
-      || intent.assessmentReceiptId === null
-      || intent.assessmentReceiptDigest === null
-      || intent.localDeliveryId === null
-      || intent.targetIdentityDigest === null
-    ) throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
-    let intentEnvelope: typeof CallbackIntentObservationReceiptEnvelopeV1Schema._output;
-    try {
-      intentEnvelope = CallbackIntentObservationReceiptEnvelopeV1Schema.parse(
-        JSON.parse(intent.intentReceiptJson)
-      );
-    } catch {
-      throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
-    }
-    const assessmentRef = intentEnvelope.payload.assessmentRef;
-    const importedRun = tx.select().from(hostedRunImports).where(and(
-      eq(hostedRunImports.runId, intent.runId),
-      eq(hostedRunImports.admissionId, intent.admissionId),
-      eq(hostedRunImports.admissionOperationId, intent.admissionOperationId),
-      eq(hostedRunImports.claimOperationId, intent.claimOperationId),
-      eq(hostedRunImports.attemptId, intent.runAttemptId),
-      eq(hostedRunImports.fencingTokenDigest, intent.fencingTokenDigest),
-      eq(hostedRunImports.workThreadId, intent.workThreadId),
-      eq(hostedRunImports.sourceIdentityDigest,
-        intentEnvelope.payload.sourceThreadIdentityDigest)
-    )).limit(1).get();
-    const importedAttempt = tx.select().from(hostedAttemptImports).where(and(
-      eq(hostedAttemptImports.attemptId, intent.runAttemptId),
-      eq(hostedAttemptImports.runId, intent.runId),
-      eq(hostedAttemptImports.attemptNumber, intent.runAttemptNumber),
-      eq(hostedAttemptImports.claimOperationId, intent.claimOperationId),
-      eq(hostedAttemptImports.fencingTokenDigest, intent.fencingTokenDigest)
-    )).limit(1).get();
-    const claim = tx.select().from(hostedClaimOperations).where(and(
-      eq(hostedClaimOperations.operationId, intent.claimOperationId),
-      eq(hostedClaimOperations.destinationId, intent.destinationId),
-      eq(hostedClaimOperations.organizationId, intent.organizationId),
-      eq(hostedClaimOperations.runnerId, intent.runnerId),
-      eq(hostedClaimOperations.runId, intent.runId),
-      eq(hostedClaimOperations.credentialId, intent.credentialId),
-      eq(hostedClaimOperations.attemptId, intent.runAttemptId),
-      eq(hostedClaimOperations.attemptNumber, intent.runAttemptNumber),
-      eq(hostedClaimOperations.fencingTokenDigest, intent.fencingTokenDigest),
-      eq(hostedClaimOperations.state, "claimed"),
-      isNotNull(hostedClaimOperations.executionStartedAt),
-      isNull(hostedClaimOperations.terminalReasonCode)
-    )).limit(1).get();
-    const completion = tx.select().from(hostedLifecycleOperations).where(and(
-      eq(hostedLifecycleOperations.destinationId, intent.destinationId),
-      eq(hostedLifecycleOperations.organizationId, intent.organizationId),
-      eq(hostedLifecycleOperations.runnerId, intent.runnerId),
-      eq(hostedLifecycleOperations.credentialId, intent.credentialId),
-      eq(hostedLifecycleOperations.operationId, intent.completionOperationId),
-      eq(hostedLifecycleOperations.action, "complete"),
-      eq(hostedLifecycleOperations.runId, intent.runId),
-      eq(hostedLifecycleOperations.attemptId, intent.runAttemptId),
-      eq(hostedLifecycleOperations.attemptNumber, intent.runAttemptNumber),
-      eq(hostedLifecycleOperations.fencingTokenDigest, intent.fencingTokenDigest)
-    )).limit(1).get();
-    const delivery = tx.select().from(callbackDeliveries).where(and(
-      eq(callbackDeliveries.id, intent.localDeliveryId),
-      eq(callbackDeliveries.runId, intent.runId),
-      eq(callbackDeliveries.provider, "github"),
-      eq(callbackDeliveries.dispatchMode, "governed")
-    )).limit(1).get();
-    const run = tx.select().from(runs).where(eq(runs.id, intent.runId)).limit(1).get();
-    const thread = tx.select().from(workThreads)
-      .where(eq(workThreads.id, intent.workThreadId)).limit(1).get();
-    const assessmentRow = tx.select().from(completionAssessments).where(and(
-      eq(completionAssessments.id, assessmentRef),
-      eq(completionAssessments.workThreadId, intent.workThreadId)
-    )).limit(1).get();
-    const assessmentProjection = tx.select().from(controlPlaneProjectionOutbox).where(and(
-      eq(controlPlaneProjectionOutbox.destinationId, intent.destinationId),
-      eq(controlPlaneProjectionOutbox.organizationId, intent.organizationId),
-      eq(controlPlaneProjectionOutbox.receiptId, intent.assessmentReceiptId),
-      eq(controlPlaneProjectionOutbox.receiptDigest, intent.assessmentReceiptDigest),
-      eq(controlPlaneProjectionOutbox.receiptKind, "completion_assessment")
-    )).limit(1).get();
-    try {
-      if (!importedRun || !importedAttempt || !claim || !completion || !delivery || !run
-        || !thread || !assessmentRow || !assessmentProjection
-        || importedRun.authorityDigest !== importedAttempt.authorityDigest
-        || importedRun.authorityDigest !== claim.authorityDigest
-        || importedRun.authorityJson !== importedAttempt.authorityJson
-        || importedRun.authorityJson !== claim.authorityJson
-        || importedRun.claimDigest !== importedAttempt.claimDigest
-        || importedRun.claimDigest !== claim.claimDigest
-        || !validAcknowledgedLifecycleDependency(completion)
-        || (options.requireCurrentAssessment !== false
-          && thread.currentAssessmentId !== assessmentRef)
-        || delivery.governedState !== intent.state
-        || governedCallbackPayloadDigest(delivery) !== intent.payloadDigest
-        || assessmentProjection.requiresLifecycleOperationId
-          !== intent.completionOperationId
-      ) throw new Error("invalid frozen lineage");
-      governedCallbackEventTarget({
-        eventJson: run.eventJson,
-        eventDigest: importedRun.eventDigest,
-        deliveryTarget: delivery.uri,
-        targetIdentityDigest: intent.targetIdentityDigest
-      });
-      const authority = hostedClaimAuthoritySnapshotFromJson(importedAttempt.authorityJson);
-      if (
-        !authority || typeof authority !== "object"
-        || canonicalSha256Json(authority) !== importedAttempt.authorityDigest
-        || authority.organizationId !== intent.organizationId
-        || authority.runnerId !== intent.runnerId
-        || authority.runId !== intent.runId
-        || authority.credentialId !== intent.credentialId
-        || authority.registrationGeneration !== intent.registrationGeneration
-        || authority.attemptId !== intent.runAttemptId
-        || authority.attemptNumber !== intent.runAttemptNumber
-        || authority.epoch !== intent.runAttemptNumber
-        || authority.fencingTokenDigest !== intent.fencingTokenDigest
-      ) throw new Error("invalid frozen authority");
-      const assessment = CompletionAssessmentSchema.parse(JSON.parse(assessmentRow.assessmentJson));
-      const envelope = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
-        JSON.parse(assessmentProjection.envelopeJson)
-      );
-      const completionRequest = HostedCompleteRequestV1Schema.parse(
-        JSON.parse(completion.requestJson)
-      );
-      const executorResultRef = envelope.payload.executorResultReceiptRef;
-      assertProjectionCustodySafe(envelope);
-      assertProjectionDigests(envelope);
-      if (
-        assessment.id !== assessmentRef
-        || assessment.workThreadId !== intent.workThreadId
-        || assessment.triggeredByRunId !== intent.runId
-        || envelope.receiptId !== intent.assessmentReceiptId
-        || envelope.receiptDigest !== intent.assessmentReceiptDigest
-        || envelope.organizationId !== intent.organizationId
-        || envelope.runId !== intent.runId
-        || envelope.workThreadId !== intent.workThreadId
-        || envelope.attempt.attemptId !== intent.runAttemptId
-        || envelope.attempt.attemptNumber !== intent.runAttemptNumber
-        || envelope.attempt.epoch !== intent.runAttemptNumber
-        || envelope.attempt.fencingTokenDigest !== intent.fencingTokenDigest
-        || envelope.producer.id !== intent.producerId
-        || envelope.producer.credentialId !== intent.credentialId
-        || envelope.producer.registrationGeneration !== intent.registrationGeneration
-        || envelope.payload.assessmentId !== assessmentRef
-        || !intentEnvelope.predecessorReceiptDigests?.includes(
-          intent.assessmentReceiptDigest
-        )
-        || envelope.payload.workThreadId !== intent.workThreadId
-        || envelope.payload.runId !== intent.runId
-        || envelope.payload.attempt.attemptId !== intent.runAttemptId
-        || envelope.payload.attempt.attemptNumber !== intent.runAttemptNumber
-        || envelope.payload.attempt.epoch !== intent.runAttemptNumber
-        || envelope.payload.attempt.fencingTokenDigest !== intent.fencingTokenDigest
-        || executorResultRef.receiptId !== completion.receiptId
-        || executorResultRef.operationId !== completion.operationId
-        || executorResultRef.requestId !== completion.requestId
-        || executorResultRef.requestDigest !== completion.requestDigest
-        || executorResultRef.resultDigest !== completionRequest.resultDigest
-        || !envelope.predecessorReceiptDigests?.includes(completion.receiptDigest!)
-        || envelope.payload.admissionPolicySnapshot.snapshotId
-          !== authority.admissionPolicySnapshotId
-        || envelope.payload.admissionPolicySnapshot.digest
-          !== authority.admissionPolicySnapshotDigest
-        || envelope.payload.contract.contractId !== assessment.contractId
-        || envelope.payload.contract.version !== assessment.contractVersion
-        || envelope.payload.contract.cycle !== assessment.cycle
-        || envelope.payload.assessmentInputDigest !== assessment.inputDigest
-        || envelope.payload.conclusion !== assessment.state
-        || envelope.payload.assessedAt !== assessment.assessedAt
-        || envelope.payload.assessedBy !== (assessment.assessedBy === "opentag"
-          ? "local_opentag"
-          : "human")
-        || (envelope.payload.supersedesAssessmentId ?? null)
-          !== (assessment.supersedesAssessmentId ?? null)
-      ) throw new Error("invalid completion assessment");
-    } catch {
-      throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_AUTHORITY_CONFLICT");
-    }
-    return delivery;
-  }
-
-  function updateGovernedDeliveryStateTx(
-    tx: ProjectionTransaction,
-    input: { deliveryId: number; from: GovernedCallbackState | GovernedCallbackState[]; to: GovernedCallbackState; updatedAt: string }
-  ): void {
-    const from = Array.isArray(input.from) ? input.from : [input.from];
-    const updated = tx.update(callbackDeliveries).set({
-      governedState: input.to,
-      updatedAt: input.updatedAt
-    }).where(and(
-      eq(callbackDeliveries.id, input.deliveryId),
-      eq(callbackDeliveries.dispatchMode, "governed"),
-      inArray(callbackDeliveries.governedState, from)
-    )).run();
-    if (updated.changes !== 1) throw new Error("governed_callback_delivery_state_update_lost");
-  }
-
-  function validateCallbackProjectionEnvelope<T extends ControlPlaneProjectionEnvelope>(
-    schema: { parse(value: unknown): T },
-    value: unknown
-  ): T {
-    let envelope: T;
-    try {
-      envelope = schema.parse(value);
-      assertProjectionCustodySafe(envelope);
-      assertProjectionDigests(envelope);
-    } catch {
-      throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_INVALID");
-    }
-    return envelope;
-  }
-
   function assertProjectionCreatedOrReplayed(result: EnqueueControlPlaneProjectionResult): void {
     if (result.outcome === "conflict") {
-      throw new GovernedCallbackConflictError("GOVERNED_CALLBACK_CONFLICT");
+      throw new Error("control_plane_projection_conflict");
     }
-  }
-
-  function buildExpiredSendingAttemptObservation(
-    intent: typeof governedCallbackIntents.$inferSelect,
-    attempt: typeof governedCallbackAttempts.$inferSelect,
-    observedAt: string
-  ): typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output {
-    if (!attempt.attemptedAt) throw new Error("governed_callback_attempted_at_missing");
-    const payload = {
-      localIntentId: intent.localIntentId,
-      localAttemptId: attempt.localAttemptId,
-      attemptNumber: attempt.attemptNumber,
-      requestDigest: attempt.requestDigest,
-      outcome: "outcome_unknown" as const,
-      reasonCode: "provider_receipt_missing" as const,
-      nextAction: "reconcile-provider" as const,
-      owner: intent.producerId,
-      attemptedAt: attempt.attemptedAt,
-      observedAt
-    };
-    const base = {
-      schemaVersion: 1 as const,
-      protocolVersion: "1.0" as const,
-      receiptKind: "callback_attempt_observation" as const,
-      receiptId: `receipt_${attempt.localAttemptId}`,
-      organizationId: intent.organizationId,
-      operationId: `operation_${attempt.localAttemptId}`,
-      requiredCapabilities: ["relay.callback-observation.v1"] as const,
-      producer: {
-        kind: "local_opentag" as const,
-        id: intent.producerId,
-        credentialId: intent.credentialId,
-        registrationGeneration: intent.registrationGeneration
-      },
-      identity: {
-        namespace: "opentag.control.receipt/callback-attempt-observation/v1" as const,
-        parts: [
-          intent.organizationId,
-          intent.workThreadId,
-          intent.localIntentId,
-          attempt.localAttemptId
-        ]
-      },
-      observedAt,
-      runId: intent.runId,
-      workThreadId: intent.workThreadId,
-      predecessorReceiptDigests: [intent.intentReceiptDigest],
-      payload,
-      payloadDigest: canonicalSha256Json(payload)
-    };
-    return validateCallbackProjectionEnvelope(
-      CallbackAttemptObservationReceiptEnvelopeV1Schema,
-      { ...base, receiptDigest: canonicalSha256Json(base) }
-    );
-  }
-
-  function buildLocalAttentionAttemptObservation(
-    intent: typeof governedCallbackIntents.$inferSelect,
-    attempt: typeof governedCallbackAttempts.$inferSelect,
-    observedAt: string
-  ): typeof CallbackAttemptObservationReceiptEnvelopeV1Schema._output {
-    const payload = {
-      localIntentId: intent.localIntentId,
-      localAttemptId: attempt.localAttemptId,
-      attemptNumber: attempt.attemptNumber,
-      requestDigest: attempt.requestDigest,
-      outcome: "attention" as const,
-      reasonCode: "callback_local_error" as const,
-      nextAction: "repair-local-callback" as const,
-      owner: intent.producerId,
-      attemptedAt: attempt.attemptedAt ?? observedAt,
-      observedAt
-    };
-    const base = {
-      schemaVersion: 1 as const,
-      protocolVersion: "1.0" as const,
-      receiptKind: "callback_attempt_observation" as const,
-      receiptId: `receipt_${attempt.localAttemptId}`,
-      organizationId: intent.organizationId,
-      operationId: `operation_${attempt.localAttemptId}`,
-      requiredCapabilities: ["relay.callback-observation.v1"] as const,
-      producer: {
-        kind: "local_opentag" as const,
-        id: intent.producerId,
-        credentialId: intent.credentialId,
-        registrationGeneration: intent.registrationGeneration
-      },
-      identity: {
-        namespace: "opentag.control.receipt/callback-attempt-observation/v1" as const,
-        parts: [
-          intent.organizationId,
-          intent.workThreadId,
-          intent.localIntentId,
-          attempt.localAttemptId
-        ]
-      },
-      observedAt,
-      runId: intent.runId,
-      workThreadId: intent.workThreadId,
-      predecessorReceiptDigests: [intent.intentReceiptDigest],
-      payload,
-      payloadDigest: canonicalSha256Json(payload)
-    };
-    return validateCallbackProjectionEnvelope(
-      CallbackAttemptObservationReceiptEnvelopeV1Schema,
-      { ...base, receiptDigest: canonicalSha256Json(base) }
-    );
   }
 
   function validProjectionLimit(value: number | undefined): number {

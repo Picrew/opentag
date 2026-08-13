@@ -1,6 +1,6 @@
 {
   "schemaVersion": "ProviderIoRootInventoryConfigV1",
-  "revision": "92c41240ea1d1173cbc4affc6c94f8136c3dddd3",
+  "revision": "e421fd2dbb18cbb5a5602227415a955a0e23eea5",
   "entrypoints": [
     "apps/opentagd/src/index.ts",
     "apps/slack-events/src/index.ts",
