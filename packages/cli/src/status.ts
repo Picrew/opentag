@@ -801,117 +801,25 @@ function formatRunRouting(summary: RunStatusSummary): string[] {
   ];
 }
 
-function livenessGuidance(strategy: PlatformLivenessStrategy | "default_callback"): string {
-  if (strategy === "status_update") return "source thread can receive concise status/progress callbacks.";
+function livenessGuidance(strategy: PlatformLivenessStrategy | "default_delivery"): string {
+  if (strategy === "status_update") return "source thread can receive concise status/progress updates.";
   if (strategy === "source_receipt") return "source thread uses native receipts first; routine progress stays in audit/status.";
   if (strategy === "pull_status") return "source thread stays quiet by default; pull detail with /status or this command.";
   if (strategy === "thread_reply") return "source thread uses concise thread replies for liveness.";
-  return "callback delivery follows provider default behavior.";
+  return "source-thread delivery follows provider default behavior.";
 }
 
 function formatRunLiveness(summary: RunStatusSummary): string[] {
   const provider = summary.event.callback.provider;
   const capability = platformCapabilityForProvider(provider);
-  const strategy = capability?.livenessStrategy ?? "default_callback";
-  const suppressedProgressEvents = summary.events.filter((event) => event.type === "callback.progress.suppressed");
-  const sourceReceiptDeliveredEvents = summary.events.filter((event) => event.type === "source_receipt.delivered");
-  const sourceReceiptFailedEvents = summary.events.filter((event) => event.type === "source_receipt.failed");
-  const suppressedReasons = Array.from(
-    new Set(
-      suppressedProgressEvents
-        .map((event) => {
-          const payload = recordFromUnknown(event.payload);
-          const reason = payload?.["reason"];
-          return typeof reason === "string" && reason.length > 0 ? reason : undefined;
-        })
-        .filter((reason): reason is string => Boolean(reason))
-    )
-  );
-  const sourceReceiptStates = Array.from(
-    new Set(
-      [...sourceReceiptDeliveredEvents, ...sourceReceiptFailedEvents]
-        .map((event) => {
-          const payload = recordFromUnknown(event.payload);
-          const state = payload?.["state"];
-          return typeof state === "string" && state.length > 0 ? state : undefined;
-        })
-        .filter((state): state is string => Boolean(state))
-    )
-  );
-  return [
-    "Liveness:",
-    `  Provider: ${provider} (${strategy})`,
-    `  Human callbacks: ${summary.metrics.humanCallbackCount}; thread noise ratio: ${summary.metrics.threadNoiseRatio}`,
-    `  Progress delivery: ${livenessGuidance(strategy)}`,
-    ...(sourceReceiptDeliveredEvents.length || sourceReceiptFailedEvents.length
-      ? [
-          `  Source receipts: ${sourceReceiptDeliveredEvents.length} delivered, ${sourceReceiptFailedEvents.length} failed${
-            sourceReceiptStates.length ? ` (${sourceReceiptStates.join(", ")})` : ""
-          }`
-        ]
-      : []),
-    ...(suppressedProgressEvents.length
-      ? [
-          `  Suppressed progress callbacks: ${suppressedProgressEvents.length}${
-            suppressedReasons.length ? ` (${suppressedReasons.join(", ")})` : ""
-          }`
-        ]
-      : [])
-  ];
+  const strategy = capability?.livenessStrategy ?? "default_delivery";
+  return ["Liveness:", `  Provider: ${provider} (${strategy})`, `  Progress delivery: ${livenessGuidance(strategy)}`];
 }
 
-type CallbackDeliveryKind = "acknowledgement" | "progress" | "final";
-type CallbackDeliveryState = "queued" | "delivered" | "failed" | "duplicate" | "suppressed";
-
-const callbackKinds: CallbackDeliveryKind[] = ["acknowledgement", "progress", "final"];
-const callbackStates: CallbackDeliveryState[] = ["queued", "delivered", "failed", "duplicate", "suppressed"];
-
-function emptyCallbackDeliveryCounts(): Record<CallbackDeliveryKind, Record<CallbackDeliveryState, number>> {
-  return Object.fromEntries(
-    callbackKinds.map((kind) => [
-      kind,
-      Object.fromEntries(callbackStates.map((state) => [state, 0])) as Record<CallbackDeliveryState, number>
-    ])
-  ) as Record<CallbackDeliveryKind, Record<CallbackDeliveryState, number>>;
-}
-
-function callbackDeliveryEventType(type: unknown): { kind: CallbackDeliveryKind; state: CallbackDeliveryState } | null {
-  if (typeof type !== "string") return null;
-  const match = type.match(/^callback\.(acknowledgement|progress|final)\.(queued|delivered|failed|duplicate|suppressed)$/);
-  if (!match) return null;
-  return {
-    kind: match[1] as CallbackDeliveryKind,
-    state: match[2] as CallbackDeliveryState
-  };
-}
-
-function callbackDeliveryLine(kind: CallbackDeliveryKind, counts: Record<CallbackDeliveryState, number>): string | null {
-  const parts = callbackStates.filter((state) => counts[state] > 0).map((state) => `${state}=${counts[state]}`);
-  return parts.length ? `  ${kind}: ${parts.join(", ")}` : null;
-}
-
-function formatCallbackDelivery(summary: RunStatusSummary): string[] {
-  const counts = emptyCallbackDeliveryCounts();
-  for (const event of summary.events) {
-    const parsed = callbackDeliveryEventType(event.type);
-    if (!parsed) continue;
-    counts[parsed.kind][parsed.state] += 1;
-  }
-
-  const lines = callbackKinds
-    .map((kind) => callbackDeliveryLine(kind, counts[kind]))
-    .filter((line): line is string => Boolean(line));
-  if (lines.length === 0) return ["Callback Delivery:", "  none"];
-
-  const finalFailed = counts.final.failed;
-  const finalSuppressed = counts.final.suppressed;
-  return [
-    "Callback Delivery:",
-    ...lines,
-    ...(finalFailed || finalSuppressed
-      ? [`  Attention: final callback has failed=${finalFailed}, suppressed=${finalSuppressed}; inspect audit events before assuming the source thread saw the result.`]
-      : [])
-  ];
+function formatDelivery(summary: RunStatusSummary): string[] {
+  const count = (type: string) => summary.events.filter((event) => event.type === type).length;
+  const blocked = count("delivery.activation_blocked");
+  return ["Delivery:", `  intents queued: ${count("delivery.intent.queued")}`, `  activation blocked: ${blocked}`, "  Provider outcomes: unavailable in the run event read model.", ...(blocked ? ["  Attention: delivery activation was blocked; no provider I/O was attempted."] : [])];
 }
 
 function formatRunResult(run: OpenTagRun): string[] {
@@ -973,8 +881,7 @@ function ledgerCategoryForStatus(type: unknown): string {
   if (type.startsWith("context_packet.")) return "context_packet";
   if (type.startsWith("routing.")) return "routing";
   if (type.startsWith("executor.capability.")) return "executor_capability";
-  if (type === "callback.progress.suppressed") return "progress_visibility";
-  if (type.startsWith("callback.") || type.startsWith("source_receipt.")) return "callback_delivery";
+  if (type.startsWith("delivery.")) return "delivery";
   if (type.startsWith("approval.")) return "approval_decision";
   if (type.startsWith("apply_plan.")) return "apply_plan";
   if (type.startsWith("artifact.") || type.startsWith("proposal.snapshot.")) return "artifact";
@@ -1044,7 +951,7 @@ export function formatRunStatus(summary: RunStatusSummary): string {
     `Metrics: ${summary.metrics.totalEventCount} events, ${summary.metrics.suggestedChangesCount} suggested action(s), ${summary.metrics.applyPlanCount} apply plan(s), ${summary.metrics.staleIntentCount} stale intent(s)`,
     ...formatAgentWorkLedger(summary),
     ...formatRunLiveness(summary),
-    ...formatCallbackDelivery(summary),
+    ...formatDelivery(summary),
     "Recent Events:",
     ...(latestEvents.length ? latestEvents.map(formatRunEvent) : ["  none"])
   ].join("\n");

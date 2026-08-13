@@ -8,6 +8,7 @@ import {
   type OpenTagEvent,
   type OpenTagSourceThreadStatusPresentation
 } from "@opentag/core";
+import type { SlackSelfServiceDeliveryCommand, SlackSelfServiceDeliveryInput } from "@opentag/client";
 import { encodeSlackThreadKey, normalizeSlackAppMention, stripSlackAppMention, type SlackChannelBinding } from "./normalize.js";
 import {
   createSlackDoctorSummaryBlocks,
@@ -78,6 +79,7 @@ export type SlackIngressPayload = SlackEventEnvelope | SlackInteractivePayload;
 
 export type SlackIngressVerification = {
   signatureVerified?: boolean;
+  transportAssurance?: "authenticated_socket_mode";
 };
 
 export type SlackAppRuntimeConfig = {
@@ -121,7 +123,7 @@ export type SlackEventProcessorInput = {
   submitThreadAction?(action: SlackThreadActionInput): Promise<unknown>;
   bindChannel?(input: { teamId: string; channelId: string; repoProvider: string; owner: string; repo: string }): Promise<void>;
   unbindChannel?(input: { teamId: string; channelId: string }): Promise<void>;
-  reply?(input: { channelId: string; threadTs: string; text: string; textFormat?: "mrkdwn"; blocks?: SlackBlock[] }): Promise<void>;
+  reply?(input: SlackSelfServiceDeliveryInput): Promise<void>;
   status?(input: SlackSelfServiceContext): Promise<SlackSelfServiceReply | string>;
   doctor?(input: SlackSelfServiceContext): Promise<SlackSelfServiceReply | string>;
   linear?(input: SlackSelfServiceContext): Promise<SlackSelfServiceReply | string>;
@@ -463,24 +465,26 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
         payload.event.type === "app_mention"
           ? stripSlackAppMention(payload.event.text, payload.authorizations?.[0]?.user_id)
           : payload.event.text.trim();
+      const assurance = verification.signatureVerified === true ? "verified_http_signature" : verification.transportAssurance;
+      const deliverReply = input.reply && assurance && payload.event_time !== undefined ?
+        (command: SlackSelfServiceDeliveryCommand, presentation: SlackSelfServiceReply) => input.reply!({ cause: { assurance, eventId: payload.event_id,
+          eventTime: payload.event_time!, teamId: payload.team_id, channelId: payload.event.channel,
+          threadTs: payload.event.thread_ts ?? payload.event.ts, userId: payload.event.user, command,
+          ...(payload.api_app_id ? { appId: payload.api_app_id } : {}) }, presentation }) : undefined;
       const bindRequest = payload.event.type === "app_mention" ? parseBindCommand(rawThreadActionText) : null;
       if (bindRequest) {
         const threadTs = payload.event.thread_ts ?? payload.event.ts;
-        if (!input.reply) {
+        if (!deliverReply) {
           return json({ ok: true, ignored: "self_service_reply_unavailable", command: "bind" });
         }
         if (!input.bindChannel) {
-          await input.reply({
-            channelId: payload.event.channel,
-            threadTs,
+          await deliverReply("bind", {
             text: "Slack channel binding from source threads is not configured. Re-run `opentag setup` or update local OpenTag channel bindings."
           });
           return json({ ok: true, selfService: "bind", unavailable: true });
         }
         if (!bindRequest.ok) {
-          await input.reply({
-            channelId: payload.event.channel,
-            threadTs,
+          await deliverReply("bind", {
             text: BIND_USAGE
           });
           return json({ ok: true, selfService: "bind", usage: true });
@@ -495,9 +499,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
           ...(payload.api_app_id ? { appId: payload.api_app_id } : {})
         });
         if (!authorized) {
-          await input.reply({
-            channelId: payload.event.channel,
-            threadTs,
+          await deliverReply("bind", {
             text: BINDING_AUTH_DENIED_TEXT
           });
           return json({ ok: true, selfService: "bind", unauthorized: true });
@@ -509,9 +511,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
           owner: bindRequest.owner,
           repo: bindRequest.repo
         });
-        await input.reply({
-          channelId: payload.event.channel,
-          threadTs,
+        await deliverReply("bind", {
           text: `Connected this Slack channel to Project Target ${bindRequest.repoProvider}:${bindRequest.owner}/${bindRequest.repo}. @mention the app with a task to start a run.`
         });
         return json({ ok: true, selfService: "bind" });
@@ -519,21 +519,17 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
       const unbindRequest = payload.event.type === "app_mention" ? parseUnbindCommand(rawThreadActionText) : null;
       if (unbindRequest) {
         const threadTs = payload.event.thread_ts ?? payload.event.ts;
-        if (!input.reply) {
+        if (!deliverReply) {
           return json({ ok: true, ignored: "self_service_reply_unavailable", command: "unbind" });
         }
         if (!input.unbindChannel) {
-          await input.reply({
-            channelId: payload.event.channel,
-            threadTs,
+          await deliverReply("unbind", {
             text: "Slack channel unbinding is not enabled in this build. Re-run `opentag setup` or update local OpenTag channel bindings."
           });
           return json({ ok: true, selfService: "unbind", unavailable: true });
         }
         if (!unbindRequest.ok) {
-          await input.reply({
-            channelId: payload.event.channel,
-            threadTs,
+          await deliverReply("unbind", {
             text: UNBIND_USAGE
           });
           return json({ ok: true, selfService: "unbind", usage: true });
@@ -548,9 +544,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
           ...(payload.api_app_id ? { appId: payload.api_app_id } : {})
         });
         if (!authorized) {
-          await input.reply({
-            channelId: payload.event.channel,
-            threadTs,
+          await deliverReply("unbind", {
             text: BINDING_AUTH_DENIED_TEXT
           });
           return json({ ok: true, selfService: "unbind", unauthorized: true });
@@ -560,9 +554,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
           channelId: payload.event.channel
         });
         if (!binding) {
-          await input.reply({
-            channelId: payload.event.channel,
-            threadTs,
+          await deliverReply("unbind", {
             text: UNBOUND_HINT
           });
           return json({ ok: true, selfService: "unbind", ignored: "unbound_channel" });
@@ -571,9 +563,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
           teamId: payload.team_id,
           channelId: payload.event.channel
         });
-        await input.reply({
-          channelId: payload.event.channel,
-          threadTs,
+        await deliverReply("unbind", {
           text: `Disconnected this Slack channel from Project Target ${formatProjectTarget(binding)}. Re-run \`opentag setup\` or update local OpenTag channel bindings to connect a new target.`
         });
         return json({ ok: true, selfService: "unbind" });
@@ -582,10 +572,8 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
       if (stopRequest) {
         const threadTs = payload.event.thread_ts ?? payload.event.ts;
         if (!input.stopRun) {
-          if (input.reply) {
-            await input.reply({
-              channelId: payload.event.channel,
-              threadTs,
+          if (deliverReply) {
+            await deliverReply("stop", {
               text: STOP_UNAVAILABLE_TEXT
             });
           }
@@ -597,10 +585,8 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
           ...(stopRequest.runId ? { runId: stopRequest.runId } : {}),
           requestedBy: `slack:${payload.event.user}`
         });
-        if (input.reply) {
-          await input.reply({
-            channelId: payload.event.channel,
-            threadTs,
+        if (deliverReply) {
+          await deliverReply("stop", {
             text: formatStopResultText(result)
           });
         }
@@ -609,15 +595,15 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
       const linearRequest = payload.event.type === "app_mention" ? parseLinearCommand(rawThreadActionText) : null;
       if (linearRequest) {
         const threadTs = payload.event.thread_ts ?? payload.event.ts;
-        if (!input.reply) {
+        if (!deliverReply) {
           return json({ ok: true, ignored: "self_service_reply_unavailable", command: "linear" });
         }
         if (!linearRequest.ok) {
-          await input.reply({ channelId: payload.event.channel, threadTs, text: LINEAR_USAGE });
+          await deliverReply("linear", { text: LINEAR_USAGE });
           return json({ ok: true, selfService: "linear", usage: true });
         }
         if (!input.linear) {
-          await input.reply({ channelId: payload.event.channel, threadTs, text: LINEAR_UNAVAILABLE_TEXT });
+          await deliverReply("linear", { text: LINEAR_UNAVAILABLE_TEXT });
           return json({ ok: true, selfService: "linear", unavailable: true });
         }
         // /linear authorization and project routing are enforced by the injected handler before credentials or APIs are used; repository binding is intentionally not its authorization source.
@@ -630,13 +616,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
             binding: null
           })
         );
-        await input.reply({
-          channelId: payload.event.channel,
-          threadTs,
-          text: reply.text,
-          ...(reply.textFormat ? { textFormat: reply.textFormat } : {}),
-          ...(reply.blocks?.length ? { blocks: reply.blocks } : {})
-        });
+        await deliverReply("linear", reply);
         return json({ ok: true, selfService: "linear" });
       }
       const selfServiceCommand = payload.event.type === "app_mention" ? parseSelfServiceCommand(rawThreadActionText) : null;
@@ -649,7 +629,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
                 channelId: payload.event.channel
               });
         const threadTs = payload.event.thread_ts ?? payload.event.ts;
-        if (!input.reply) {
+        if (!deliverReply) {
           return json({ ok: true, ignored: "self_service_reply_unavailable", command: selfServiceCommand });
         }
         const context: SlackSelfServiceContext = {
@@ -671,12 +651,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
                     ? await input.doctor(context)
                     : doctorReply(context)
               );
-        await input.reply({
-          channelId: payload.event.channel,
-          threadTs,
-          text: reply.text,
-          ...(reply.blocks?.length ? { blocks: reply.blocks } : {})
-        });
+        await deliverReply(selfServiceCommand, reply);
         return json({ ok: true, selfService: selfServiceCommand });
       }
       if (payload.event.type === "message" && (!rawThreadActionText || !parseThreadActionCommand(rawThreadActionText))) {

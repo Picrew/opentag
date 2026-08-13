@@ -121,7 +121,7 @@
   },
   "expected": {
     "artifactTypes": ["diagnosis_report", "pr_intent"],
-    "ledgerCategories": ["source_event", "admission", "context_packet", "executor_capability", "artifact", "final_outcome", "callback_delivery"],
+    "ledgerCategories": ["source_event", "admission", "context_packet", "executor_capability", "artifact", "final_outcome", "delivery"],
     "finalBodyContains": ["Prepared a GitLab merge request path", "Artifacts:", "Needs setup", "Audit:"]
   }
 }

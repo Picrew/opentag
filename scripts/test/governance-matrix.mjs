@@ -13,7 +13,8 @@ const cases = [
     command: [
       "corepack pnpm vitest run",
       "packages/dispatcher/test/admission.test.ts",
-      "packages/dispatcher/test/callbacks.test.ts",
+      "packages/dispatcher/test/delivery/activation-state.test.ts",
+      "packages/dispatcher/test/delivery/provider-registry.test.ts",
       "packages/local-runtime/test/dispatcher.test.ts",
       "packages/local-runtime/test/daemon-security.test.ts",
       "packages/slack/test/socket-mode.test.ts",
@@ -22,8 +23,8 @@ const cases = [
     covers: [
       "public repository default denial without write access",
       "allowedActors allow and deny behavior",
-      "GitHub apply token disabled while callbacks remain configured",
-      "GitLab callback/apply token configuration",
+      "GitHub apply token disabled without enabling outbound delivery",
+      "GitLab ingress and apply token configuration",
       "Slack terminal auth and bot permission failures",
       "Lark credential and bot permission failures",
       "daemon Project Target allowlist enforcement"
@@ -56,11 +57,14 @@ const cases = [
   },
   {
     id: "recovery-idempotency",
-    label: "Daemon, dispatcher, replay, and callback recovery matrix",
+    label: "Daemon, dispatcher, replay, and delivery-kernel recovery matrix",
     command: [
       "corepack pnpm vitest run",
       "packages/store/test/repository.test.ts",
+      "packages/store/test/delivery-journal.test.ts",
       "packages/dispatcher/test/admission.test.ts",
+      "packages/dispatcher/test/delivery/side-effect-kernel.test.ts",
+      "packages/dispatcher/test/delivery/slack-restart-faults.test.ts",
       "packages/dispatcher/test/server.test.ts",
       "apps/opentagd/test/daemon.test.ts",
       "apps/opentagd/test/integration.test.ts",
@@ -70,7 +74,7 @@ const cases = [
       "leases expire and runs are claimable after runner loss",
       "runner running/progress/complete retries dedupe by idempotency key",
       "duplicate source events and source deliveries replay without duplicate runs",
-      "callback delivery dedupe, retry, stale reclaim, and suppression",
+      "delivery-intent dedupe, fenced retry, restart recovery, and suppression",
       "daemon heartbeats while executors run",
       "daemon cancellation when control plane no longer owns the run",
       "hard timeout cancellation and failure completion",
@@ -91,7 +95,7 @@ const cases = [
       "packages/lark/test/render.test.ts"
     ].join(" "),
     covers: [
-      "status output includes Context Packet-adjacent provenance, Agent Work Ledger, artifacts, callback delivery, liveness, and apply outcome metrics",
+      "status output includes Context Packet-adjacent provenance, Agent Work Ledger, artifacts, queued delivery intents, activation blocks, and apply outcome metrics",
       "final source-thread receipts stay concise and point to local audit/status instead of raw executor logs",
       "artifact snapshots keep sourceRunId and machine-addressable artifact types",
       "GitHub, GitLab, Slack, and Lark render action receipts without leaking internal proposal or intent identifiers"
@@ -113,7 +117,7 @@ const cases = [
       "missing source or target branches keep apply disabled before external writes",
       "GitHub PR and GitLab MR create failures fall back to child runs with quiet source-thread receipts",
       "repeated apply replies do not create duplicate PRs or MRs",
-      "failed direct apply records apply outcomes while keeping provider tokens and raw headers out of callbacks"
+      "failed direct apply records apply outcomes while keeping provider tokens and raw headers out of presentations"
     ],
     requiredCommands: ["corepack"]
   },
@@ -123,7 +127,7 @@ const cases = [
     command: "corepack pnpm vitest run packages/dispatcher/test/replay-harness.test.ts",
     covers: [
       "GitHub, Slack, GitLab, and Lark live-shaped source events replay fully in memory",
-      "replay preserves receipt, artifact, ledger, callback, and executor-capability strategy",
+      "replay preserves receipt, artifact, ledger, delivery-intent, and executor-capability strategy",
       "live-derived fixtures are sanitized before entering the regression harness"
     ],
     requiredCommands: ["corepack"]
@@ -172,7 +176,7 @@ const cases = [
   },
   {
     id: "privacy-redaction",
-    label: "Callback, report, status, and artifact privacy scan",
+    label: "Delivery, report, status, and artifact privacy scan",
     command: [
       "node scripts/test/privacy-redaction-scan.mjs",
       "--allow-missing",

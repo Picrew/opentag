@@ -13,6 +13,8 @@
     { "path": "../gitlab" },
     { "path": "../github" },
     { "path": "../linear" },
+    { "path": "../slack" },
+    { "path": "../store" },
     { "path": "../teams" },
     { "path": "../telegram" },
     { "path": "../runner" }

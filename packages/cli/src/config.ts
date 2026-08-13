@@ -47,6 +47,7 @@ const CliLanguageSchema = z.enum(["en", "zh-CN"]);
 const PlatformSchema = z.enum(["lark", "slack", "github", "gitlab", "linear", "telegram", "discord", "teams"]);
 const LarkSetupMethodSchema = z.enum(["saved", "scan", "manual"]);
 const SlackModeSchema = z.enum(["socket_mode", "events_api"]);
+const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const TelegramModeSchema = z.enum(["polling", "webhook"]);
 const DiscordModeSchema = z.enum(["gateway", "webhook"]);
 const BindingMethodSchema = z.enum(["default_project", "bind_later"]);
@@ -302,6 +303,11 @@ const SlackPlatformSchema = z
     teamId: z.string().min(1),
     channelId: z.string().min(1),
     appId: z.string().min(1).optional(),
+    installations: z.array(z.object({ recordVersion: z.literal(1), installationId: z.string().min(1), teamId: z.string().min(1), appId: z.string().min(1),
+      providerInstanceId: z.string().min(1), bindingDigest: DigestSchema, principalDigest: DigestSchema, configGeneration: PositiveIntegerSchema,
+      principalAssurance: z.enum(["provider_verified", "configured_declared"]), lifecycle: z.literal("active"),
+      configGenerationDigest: DigestSchema, credentialReference: z.object({ custody: z.literal("local"), id: z.string().min(1) }).strict(),
+      channelIds: z.array(z.string().min(1)).min(1) }).strict()).optional(),
     defaultProjectBinding: z.boolean().optional(),
     port: OptionalPortSchema
   })

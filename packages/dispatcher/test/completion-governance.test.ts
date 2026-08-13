@@ -9,7 +9,7 @@ import {
   createDispatcherApp,
   createDispatcherCompletionGovernance,
   currentWorkThreadRun,
-  type CallbackMessage,
+  type DispatcherDeliveryPresentation,
   type GitHubCompletionPolicy
 } from "../src/index.js";
 
@@ -94,6 +94,27 @@ function jsonRequest(body: unknown) {
   };
 }
 
+function captureDeliveries(
+  deliveries: DispatcherDeliveryPresentation[],
+  queuedKeys = new Set<string>()
+) {
+  return {
+    async enqueue(delivery: DispatcherDeliveryPresentation) {
+      const key = delivery.kind === "source_thread_control"
+        ? undefined
+        : delivery.idempotencyKey;
+      if (!key || !queuedKeys.has(key)) {
+        deliveries.push(delivery);
+        if (key) queuedKeys.add(key);
+      }
+      return {
+        outcome: "queued" as const,
+        sideEffectIntentId: key ?? `test-intent-${deliveries.length}`
+      };
+    }
+  };
+}
+
 async function startRun(input: {
   runId: string;
   completionPolicies?: GitHubCompletionPolicy[];
@@ -107,19 +128,15 @@ async function startRun(input: {
     pollIntervalMs?: number;
   };
 }) {
-  const delivered: CallbackMessage[] = [];
+  const delivered: DispatcherDeliveryPresentation[] = [];
+  const queuedDeliveryKeys = new Set<string>();
   const app = createDispatcherApp({
     databasePath: input.databasePath ?? ":memory:",
     ...(input.completionPolicies ? { completionPolicies: input.completionPolicies } : {}),
     ...(input.defaultGitHubCompletion ? { defaultGitHubCompletion: input.defaultGitHubCompletion } : {}),
     ...(input.completionNow ? { completionNow: input.completionNow } : {}),
     reassessmentObligations: input.reassessmentObligations ?? { autoStart: false },
-    callbackSink: {
-      async deliver(message) {
-        delivered.push(message);
-        return { handled: true, outcome: "accepted" } as const;
-      }
-    }
+    deliveryProducer: captureDeliveries(delivered, queuedDeliveryKeys)
   });
   expect((await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Local Runner" }))).status).toBe(201);
   expect((await app.request("/v1/repo-bindings", jsonRequest({
@@ -137,7 +154,7 @@ async function startRun(input: {
   const claimResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
   expect(claimResponse.status).toBe(200);
   const claim = await claimResponse.json() as { attemptId: string; fencingToken: string };
-  return { app, claim, delivered };
+  return { app, claim, delivered, queuedDeliveryKeys };
 }
 
 function temporaryDatabasePath(): string {
@@ -400,7 +417,7 @@ describe("dispatcher completion governance", () => {
         }
       }
     });
-    expect(setup.delivered.at(-1)).toMatchObject({ kind: "final" });
+    expect(setup.delivered.at(-1)).toMatchObject({ phase: "final" });
     expect(setup.delivered.at(-1)?.body).toContain("Execution succeeded");
     expect(setup.delivered.at(-1)?.body).toContain("verified repository evidence");
   });
@@ -974,18 +991,18 @@ describe("dispatcher completion governance", () => {
     expect(sqlite.prepare("SELECT state FROM completion_assessments ORDER BY sequence DESC LIMIT 1").get())
       .toEqual({ state: "pending" });
     sqlite.close();
-    const recoveredCallbacks: CallbackMessage[] = [];
+    const recoveredDeliveries: DispatcherDeliveryPresentation[] = [];
     createDispatcherApp({
       databasePath,
       completionPolicies: [strictPolicy],
-      callbackSink: { async deliver(message) { recoveredCallbacks.push(message); return { handled: true, outcome: "accepted" } as const; } }
+      deliveryProducer: captureDeliveries(recoveredDeliveries)
     });
 
-    for (let attempt = 0; attempt < 50 && recoveredCallbacks.length === 0; attempt += 1) {
+    for (let attempt = 0; attempt < 50 && recoveredDeliveries.length === 0; attempt += 1) {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
     }
 
-    expect(recoveredCallbacks).toEqual(expect.arrayContaining([
+    expect(recoveredDeliveries).toEqual(expect.arrayContaining([
       expect.objectContaining({ body: expect.stringContaining("provider-verified completion requirements are satisfied") })
     ]));
   });
@@ -1530,11 +1547,14 @@ describe("dispatcher completion governance", () => {
     });
     expect(setup.delivered.at(-1)?.runId).toBe(currentRunId);
 
-    const restartedDeliveries: CallbackMessage[] = [];
+    const restartedDeliveries: DispatcherDeliveryPresentation[] = [];
     const restarted = createDispatcherApp({
       databasePath,
       completionPolicies: [strictPolicy],
-      callbackSink: { async deliver(message) { restartedDeliveries.push(message); return { handled: true, outcome: "accepted" } as const; } }
+      deliveryProducer: captureDeliveries(
+        restartedDeliveries,
+        setup.queuedDeliveryKeys
+      )
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
     await expect((await restarted.request(`/v1/runs/${currentRunId}/completion`)).json()).resolves.toMatchObject({
@@ -1914,11 +1934,11 @@ describe("dispatcher completion governance", () => {
   });
 
   it("persists uncorrelated evidence but requires a current-epoch observation after later correlation", async () => {
-    const delivered: CallbackMessage[] = [];
+    const delivered: DispatcherDeliveryPresentation[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
       completionPolicies: [strictPolicy],
-      callbackSink: { async deliver(message) { delivered.push(message); return { handled: true, outcome: "accepted" } as const; } }
+      deliveryProducer: captureDeliveries(delivered)
     });
     const early = await app.request("/v1/completion-evidence/github", jsonRequest(githubSnapshot({ deliveryId: "delivery-early" })));
     expect(early.status).toBe(200);

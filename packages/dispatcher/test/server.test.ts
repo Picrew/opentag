@@ -19,9 +19,43 @@ import { computeLinearSignature } from "@opentag/linear";
 import { parseSlackSuggestedActionButtonValue, type SlackBlock } from "@opentag/slack";
 import { createOpenTagRepository } from "@opentag/store";
 import { z } from "zod";
-import { canonicalSha256Json } from "../../store/src/canonical-json.js";
-import { createDefaultCallbackPresentation } from "../src/presentation.js";
-import { createDispatcherApp as createRawDispatcherApp, type CallbackMessage } from "../src/server.js";
+import { createDefaultProviderPresentation } from "../src/presentation.js";
+import {
+  createDispatcherApp as createRawDispatcherApp,
+  type DispatcherDeliveryPresentation
+} from "../src/server.js";
+
+type CapturedBusinessDelivery = Omit<
+  Extract<DispatcherDeliveryPresentation, { kind: "business" }>,
+  "kind" | "phase"
+> & { kind: "acknowledgement" | "progress" | "final" };
+
+function captureBusinessDeliveries(
+  capture: (delivery: CapturedBusinessDelivery) => unknown | Promise<unknown>
+): NonNullable<Parameters<typeof createRawDispatcherApp>[0]["deliveryProducer"]> {
+  return {
+    async enqueue(presentation) {
+      if (presentation.kind === "business") {
+        const { phase: kind, ...delivery } = presentation;
+        await capture({ ...delivery, kind });
+      } else if (presentation.kind === "source_thread_control") {
+        await capture({
+          kind: "final",
+          runId: presentation.auditRunId ?? presentation.request.id ?? "control_unknown",
+          provider: presentation.request.callback.provider,
+          uri: presentation.request.callback.uri,
+          body: presentation.body,
+          ...(presentation.request.callback.threadKey
+            ? { threadKey: presentation.request.callback.threadKey }
+            : {}),
+          ...(presentation.blocks?.length ? { blocks: presentation.blocks } : {}),
+          ...(presentation.rich ? { rich: presentation.rich } : {})
+        });
+      }
+      return { outcome: "queued", sideEffectIntentId: "intent_server_test" };
+    }
+  };
+}
 
 function createDispatcherApp(input: Parameters<typeof createRawDispatcherApp>[0]): ReturnType<typeof createRawDispatcherApp> {
   const app = createRawDispatcherApp({
@@ -531,7 +565,137 @@ async function seedCompletedProposal(input: {
   expect(completeResponse.status).toBe(200);
 }
 
+function signedLinearWebhookRequest(payload: unknown, webhookSecret: string): RequestInit {
+  const rawBody = JSON.stringify(payload);
+  return {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "linear-signature": computeLinearSignature({ webhookSecret, rawBody })
+    },
+    body: rawBody
+  };
+}
+
+function linearAgentSessionFixture(id: string) {
+  return {
+    id,
+    creator: { id: "user_1", name: "Ada" },
+    issue: {
+      id: "issue_1",
+      identifier: "ENG-1",
+      title: "Demo",
+      url: "https://linear.app/acme/issue/ENG-1/demo",
+      team: { id: "team_1", key: "ENG", name: "Engineering" }
+    }
+  };
+}
+
+async function seedLinearPriorityProposal(input: {
+  app: ReturnType<typeof createDispatcherApp>;
+  runId: string;
+  threadKey: string;
+  installationId: string;
+}) {
+  const event = linearIssueEvent({
+    id: `evt_${input.runId}`,
+    sourceEventId: `comment_${input.runId}`,
+    threadKey: input.threadKey
+  });
+  await seedCompletedProposal({
+    app: input.app,
+    runId: input.runId,
+    event: {
+      ...event,
+      metadata: {
+        ...event.metadata,
+        linearRelayInstallationId: input.installationId
+      }
+    },
+    suggestedChanges: [
+      {
+        proposalId: `proposal_${input.runId}`,
+        createdAt: "2026-07-07T00:00:00.000Z",
+        summary: "Update Linear issue priority.",
+        intents: [
+          {
+            intentId: `intent_${input.runId}`,
+            domain: "priority",
+            action: "set_priority",
+            summary: "Set Linear issue priority to high.",
+            params: { priority: "high" }
+          }
+        ]
+      }
+    ]
+  });
+  return event;
+}
+
 describe("dispatcher API", () => {
+  it("records activation blocked without claiming delivery by default", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+
+    const response = await app.request("/v1/runs", jsonRequest({
+      runId: "run_delivery_blocked",
+      event: { ...validEvent, id: "evt_delivery_blocked", sourceEventId: "comment_delivery_blocked" }
+    }));
+    expect(response.status).toBe(201);
+
+    const body = await (await app.request("/v1/runs/run_delivery_blocked/events")).json() as {
+      events: Array<{ type: string }>;
+    };
+    expect(body.events.map((event) => event.type)).toContain("delivery.activation_blocked");
+    expect(body.events.some((event) => event.type.includes("delivered"))).toBe(false);
+  });
+
+  it("enqueues source receipt before business acknowledgement and records queued truthfully", async () => {
+    const presentations: DispatcherDeliveryPresentation[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      deliveryProducer: {
+        async enqueue(presentation) {
+          presentations.push(presentation);
+          return {
+            outcome: "queued",
+            sideEffectIntentId: `intent_${presentations.length}`
+          };
+        }
+      }
+    });
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+
+    const response = await app.request("/v1/runs", jsonRequest({
+      runId: "run_delivery_queued",
+      event: { ...validEvent, id: "evt_delivery_queued", sourceEventId: "comment_delivery_queued" }
+    }));
+    expect(response.status).toBe(201);
+    expect(presentations.map((presentation) => presentation.kind)).toEqual([
+      "source_receipt",
+      "business"
+    ]);
+
+    const body = await (await app.request("/v1/runs/run_delivery_queued/events")).json() as {
+      events: Array<{ type: string }>;
+    };
+    expect(body.events.map((event) => event.type)).toContain("delivery.intent.queued");
+  });
+
   it("requires a bearer token when pairing token auth is configured", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:", pairingToken: "pair_test" });
 
@@ -1475,16 +1639,13 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string; statusMessageKey?: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({
             kind: message.kind,
             body: message.body,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request("/v1/repo-bindings", {
@@ -1580,16 +1741,13 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string; statusMessageKey?: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({
             kind: message.kind,
             body: message.body,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request(
@@ -1701,77 +1859,7 @@ describe("dispatcher API", () => {
         body: `OpenTag picked this up. Run: \`${promotedRunId}\``
       }
     ]);
-  });
-
-  it("uses the Slack run card for queued follow-ups instead of a text acknowledgement", async () => {
-    const delivered: Array<{ kind: string; body: string }> = [];
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
-          delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
-      sourceReceiptSink: {
-        async deliver() {
-          return { delivered: true };
-        }
-      }
-    });
-
-    await app.request(
-      "/v1/repo-bindings",
-      jsonRequest({
-        provider: "github",
-        owner: "acme",
-        repo: "demo",
-        runnerId: "runner_1",
-        workspacePath: "/Users/test/demo",
-        defaultExecutor: "echo"
-      })
-    );
-    await bindSourceChannel(app, slackRepoEvent({
-      id: "evt_slack_active_binding",
-      sourceEventId: "slack_active_binding",
-      threadKey: "T123|C123|1710000000.000100"
-    }));
-
-    const first = await app.request(
-      "/v1/runs",
-      jsonRequest({
-        runId: "run_slack_active_1",
-        event: slackRepoEvent({ id: "evt_slack_active_1", sourceEventId: "slack_active_1", threadKey: "T123|C123|1710000000.000100" })
-      })
-    );
-    expect(first.status).toBe(201);
-
-    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
-
-    const second = await app.request(
-      "/v1/runs",
-      jsonRequest({
-        runId: "follow_up_slack_1",
-        event: slackRepoEvent({ id: "evt_slack_follow_up_1", sourceEventId: "slack_follow_up_1", threadKey: "T123|C123|1710000000.000100" })
-      })
-    );
-    expect(second.status).toBe(202);
-    await expect(second.json()).resolves.toMatchObject({
-      followUpRequest: {
-        id: "follow_up_slack_1",
-        status: "queued",
-        activeRunId: "run_slack_active_1"
-      }
-    });
-    expect(delivered.filter((message) => message.kind === "progress")).toEqual([
-      {
-        kind: "progress",
-        body: expect.stringContaining("*OpenTag: Queued*")
-      }
-    ]);
-  });
-
-  it("stores and returns repo policy rules", async () => {
+  });  it("stores and returns repo policy rules", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
     const response = await app.request("/v1/repo-bindings/github/acme/demo/policy-rules", {
       method: "POST",
@@ -1911,272 +1999,7 @@ describe("dispatcher API", () => {
     expect(authorizationUrl.searchParams.get("scope")).toBe("read,comments:create,app:assignable");
     expect(authorizationUrl.searchParams.get("state")).toMatch(/^linear_[0-9a-f]{48}$/);
     expect(JSON.stringify(body)).not.toContain("linear_whsec_");
-  });
-
-  it("completes hosted Linear OAuth installs and refreshes relay tokens for callbacks", async () => {
-    let now = new Date("2026-07-07T00:00:00.000Z");
-    const tokenRequests: Array<Record<string, string>> = [];
-    const graphqlRequests: Array<{ authorization: string | null; body: { query?: string; variables?: unknown } }> = [];
-    const linearFetch = (async (url, init) => {
-      const requestUrl = String(url);
-      if (requestUrl === "https://linear.example/oauth/token") {
-        const body = new URLSearchParams(String(init?.body ?? ""));
-        tokenRequests.push(Object.fromEntries(body.entries()));
-        if (body.get("grant_type") === "authorization_code") {
-          return Response.json({
-            access_token: "linear_access_token",
-            refresh_token: "linear_refresh_token",
-            expires_in: 1,
-            scope: "read,write,comments:create,app:assignable,app:mentionable"
-          });
-        }
-        return Response.json({
-          access_token: "linear_refreshed_token",
-          refresh_token: "linear_refresh_token_2",
-          expires_in: 3600,
-          scope: "read,write,comments:create,app:assignable,app:mentionable"
-        });
-      }
-      if (requestUrl === "https://linear.example/graphql") {
-        const body = JSON.parse(String(init?.body)) as { query?: string; variables?: unknown };
-        graphqlRequests.push({ authorization: new Headers(init?.headers).get("authorization"), body });
-        if (body.query?.includes("OpenTagLinearWorkspaceIdentity")) {
-          return Response.json({
-            data: {
-              viewer: { id: "app_user_1", name: "OpenTag", app: true },
-              organization: { id: "org_linear_1", name: "Acme", urlKey: "acme" }
-            }
-          });
-        }
-        if (body.query?.includes("OpenTagLinearMetadata")) {
-          return Response.json({
-            data: {
-              teams: {
-                nodes: [{ id: "team_eng", key: "ENG", name: "Engineering" }]
-              },
-              users: {
-                nodes: [{ id: "user_ada", name: "Ada Lovelace", displayName: "Ada", email: "ada@example.com", active: true, app: false }]
-              },
-              workflowStates: {
-                nodes: [{ id: "state_progress", name: "In Progress", type: "started", team: { id: "team_eng", key: "ENG" } }]
-              },
-              issueLabels: {
-                nodes: [{ id: "label_bug", name: "Bug", color: "#ff0000", isGroup: false, team: { id: "team_eng", key: "ENG" } }]
-              }
-            }
-          });
-        }
-        return Response.json({
-          data: {
-            commentCreate: {
-              success: true,
-              comment: {
-                id: "linear_comment_1",
-                url: "https://linear.app/acme/issue/ENG-1/demo#comment"
-              }
-            }
-          }
-        });
-      }
-      throw new Error(`Unexpected Linear test request: ${requestUrl}`);
-    }) as typeof fetch;
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = linearFetch;
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      pairingToken: "pairing_token",
-      linearOAuthInstall: {
-        clientId: "linear_client",
-        clientSecret: "linear_secret",
-        redirectUri: "https://relay.example/linear/oauth/callback",
-        webhookSecret: "linear_app_webhook_secret",
-        authorizationUrl: "https://linear.example/oauth/authorize",
-        tokenUrl: "https://linear.example/oauth/token",
-        fetchImpl: linearFetch,
-        now: () => now,
-        refreshSkewMs: 0,
-        commentRunDeferMs: 0
-      }
-    });
-
-    try {
-      await app.request("/v1/runners", authorizedJsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
-      await app.request(
-        "/v1/repo-bindings",
-        authorizedJsonRequest({
-          provider: "github",
-          owner: "acme",
-          repo: "demo",
-          runnerId: "runner_1"
-        })
-      );
-
-      const start = await app.request(
-        "/v1/linear-oauth-installations",
-        authorizedJsonRequest({
-          owner: "acme",
-          repo: "demo",
-          graphqlUrl: "https://linear.example/graphql"
-        })
-      );
-      expect(start.status).toBe(201);
-      const started = await start.json();
-      const state = new URL(String(started.authorizationUrl)).searchParams.get("state");
-      expect(state).toBeTruthy();
-
-      const callback = await app.request(`/linear/oauth/callback?state=${encodeURIComponent(state!)}&code=code_123`);
-      expect(callback.status).toBe(200);
-      const completed = await callback.json();
-      expect(completed).toMatchObject({
-        ok: true,
-        installation: {
-          id: started.installation.id,
-          webhookPath: started.installation.webhookPath,
-          projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
-          graphqlUrl: "https://linear.example/graphql",
-          organizationId: "org_linear_1",
-          teamId: "team_eng",
-          teamKey: "ENG"
-        }
-      });
-      expect(JSON.stringify(completed)).not.toContain("linear_access_token");
-      expect(JSON.stringify(completed)).not.toContain("linear_refresh_token");
-      expect(tokenRequests).toEqual([
-        {
-          client_id: "linear_client",
-          code: "code_123",
-          redirect_uri: "https://relay.example/linear/oauth/callback",
-          grant_type: "authorization_code",
-          client_secret: "linear_secret"
-        }
-      ]);
-      expect(graphqlRequests).toHaveLength(5);
-      expect(graphqlRequests).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            authorization: "Bearer linear_access_token",
-            body: expect.objectContaining({ query: expect.stringContaining("OpenTagLinearWorkspaceIdentity") })
-          }),
-          expect.objectContaining({
-            authorization: "Bearer linear_access_token",
-            body: expect.objectContaining({ query: expect.stringContaining("OpenTagLinearMetadataTeams") })
-          }),
-          expect.objectContaining({
-            authorization: "Bearer linear_access_token",
-            body: expect.objectContaining({ query: expect.stringContaining("OpenTagLinearMetadataUsers") })
-          }),
-          expect.objectContaining({
-            authorization: "Bearer linear_access_token",
-            body: expect.objectContaining({ query: expect.stringContaining("OpenTagLinearMetadataWorkflowStates") })
-          }),
-          expect.objectContaining({
-            authorization: "Bearer linear_access_token",
-            body: expect.objectContaining({ query: expect.stringContaining("OpenTagLinearMetadataIssueLabels") })
-          })
-        ])
-      );
-      const mappingsResponse = await app.request("/v1/repo-bindings/github/acme/demo/mutation-mappings", {
-        headers: { authorization: "Bearer pairing_token" }
-      });
-      expect(mappingsResponse.status).toBe(200);
-      await expect(mappingsResponse.json()).resolves.toMatchObject({
-        mappings: expect.arrayContaining([
-          expect.objectContaining({
-            id: "linear_status_state_id",
-            values: expect.objectContaining({ in_progress: "state_progress" })
-          }),
-          expect.objectContaining({
-            id: "linear_assignee_user_id",
-            values: expect.objectContaining({ "ada@example.com": "user_ada" })
-          }),
-          expect.objectContaining({
-            id: "linear_label_label_id",
-            values: expect.objectContaining({ bug: "label_bug" })
-          })
-        ])
-      });
-
-      graphqlRequests.length = 0;
-      const payload = {
-        type: "Comment",
-        action: "create",
-        webhookId: "linear_oauth_webhook_delivery_1",
-        organizationId: "org_linear_1",
-        createdAt: "2026-07-07T00:00:00.000Z",
-        webhookTimestamp: Date.now(),
-        data: {
-          id: "comment_oauth_1",
-          body: "@opentag run from hosted OAuth webhook",
-          url: "https://linear.app/acme/issue/ENG-1/demo#comment",
-          issue: {
-            id: "issue_123",
-            identifier: "ENG-1",
-            title: "Demo",
-            url: "https://linear.app/acme/issue/ENG-1/demo",
-            team: { id: "team_eng", key: "ENG" }
-          },
-          user: { id: "user_ada", name: "Ada Lovelace" }
-        }
-      };
-      const rawBody = JSON.stringify(payload);
-      const hostedWebhook = await app.request("/linear/oauth/webhooks", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "linear-signature": computeLinearSignature({ webhookSecret: "linear_app_webhook_secret", rawBody })
-        },
-        body: rawBody
-      });
-
-      expect(hostedWebhook.status).toBe(200);
-      await expect(hostedWebhook.json()).resolves.toMatchObject({ ok: true, runId: expect.any(String) });
-      expect(graphqlRequests).toHaveLength(1);
-      expect(graphqlRequests[0]).toMatchObject({
-        authorization: "Bearer linear_access_token"
-      });
-      expect(graphqlRequests[0]!.body.query).toContain("commentCreate");
-
-      graphqlRequests.length = 0;
-      now = new Date("2026-07-07T00:00:10.000Z");
-      const event = linearIssueEvent({ id: "evt_linear_oauth", sourceEventId: "linear_oauth_comment" });
-      const createRun = await app.request(
-        "/v1/runs",
-        authorizedJsonRequest({
-          runId: "run_linear_oauth",
-          event: {
-            ...event,
-            metadata: {
-              ...event.metadata,
-              linearRelayInstallationId: started.installation.id
-            }
-          }
-        })
-      );
-
-      expect(createRun.status).toBe(201);
-      expect(tokenRequests.map((request) => request["grant_type"])).toEqual(["authorization_code", "refresh_token"]);
-      expect(tokenRequests[1]).toMatchObject({
-        client_id: "linear_client",
-        refresh_token: "linear_refresh_token",
-        grant_type: "refresh_token",
-        client_secret: "linear_secret"
-      });
-      expect(graphqlRequests).toHaveLength(1);
-      expect(graphqlRequests[0]).toMatchObject({
-        authorization: "Bearer linear_refreshed_token"
-      });
-      expect(graphqlRequests[0]!.body.query).toContain("commentCreate");
-      expect(graphqlRequests[0]!.body.variables).toMatchObject({
-        input: {
-          issueId: "issue_123"
-        }
-      });
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it("removes hosted Linear OAuth installations when Linear sends OAuthApp revoked", async () => {
+  });  it("removes hosted Linear OAuth installations when Linear sends OAuthApp revoked", async () => {
     const graphqlRequests: Array<{ authorization: string | null; body: { query?: string; variables?: unknown } }> = [];
     const linearFetch = (async (url, init) => {
       const requestUrl = String(url);
@@ -2315,580 +2138,6 @@ describe("dispatcher API", () => {
     expect(graphqlRequests).toHaveLength(graphQlRequestCountAfterRevoke);
   });
 
-  it("routes dynamic Linear relay webhooks through stored installation credentials", async () => {
-    const app = createDispatcherApp({ databasePath: ":memory:" });
-    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
-    await app.request(
-      "/v1/repo-bindings",
-      jsonRequest({
-        provider: "github",
-        owner: "acme",
-        repo: "demo",
-        runnerId: "runner_1"
-      })
-    );
-    await app.request(
-      "/v1/linear-relay-installations",
-      jsonRequest({
-        id: "install_123",
-        webhookPath: "/linear/webhooks/install_123",
-        webhookSecret: "linear_webhook_secret",
-        token: "lin_api_token",
-        graphqlUrl: "https://linear.example/graphql",
-        repoProvider: "github",
-        owner: "acme",
-        repo: "demo"
-      })
-    );
-
-    const originalFetch = globalThis.fetch;
-    const requests: Array<{ url: string; authorization?: string | null; body?: unknown }> = [];
-    globalThis.fetch = (async (url, init) => {
-      requests.push({
-        url: String(url),
-        authorization: init?.headers instanceof Headers ? init.headers.get("authorization") : (init?.headers as Record<string, string> | undefined)?.authorization,
-        ...(init?.body ? { body: JSON.parse(String(init.body)) } : {})
-      });
-      return Response.json({
-        data: {
-          commentCreate: {
-            success: true,
-            comment: { id: "linear_comment_1", url: "https://linear.app/acme/issue/ENG-1#comment" }
-          }
-        }
-      });
-    }) as typeof fetch;
-
-    try {
-      const payload = {
-        type: "Comment",
-        action: "create",
-        webhookId: "linear_delivery_1",
-        organizationId: "org_1",
-        createdAt: "2026-07-07T00:00:00.000Z",
-        webhookTimestamp: Date.now(),
-        data: {
-          id: "comment_1",
-          body: "@opentag run dynamic relay smoke",
-          url: "https://linear.app/acme/issue/ENG-1/demo#comment",
-          issue: {
-            id: "issue_1",
-            identifier: "ENG-1",
-            title: "Demo",
-            url: "https://linear.app/acme/issue/ENG-1/demo",
-            team: { id: "team_1", key: "ENG" }
-          },
-          user: { id: "user_1", name: "Ada" }
-        }
-      };
-      const rawBody = JSON.stringify(payload);
-      const response = await app.request("/linear/webhooks/install_123", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody })
-        },
-        body: rawBody
-      });
-
-      expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toMatchObject({ ok: true, runId: expect.any(String) });
-      expect(requests).toHaveLength(1);
-      expect(requests[0]).toMatchObject({
-        url: "https://linear.example/graphql",
-        authorization: "lin_api_token"
-      });
-      expect(String((requests[0]!.body as { query: string }).query)).toContain("commentCreate");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it("queues prompted Linear Agent Session events behind an active Agent Session run", async () => {
-    const app = createDispatcherApp({ databasePath: ":memory:" });
-    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
-    await app.request(
-      "/v1/repo-bindings",
-      jsonRequest({
-        provider: "github",
-        owner: "acme",
-        repo: "demo",
-        runnerId: "runner_1"
-      })
-    );
-    await app.request(
-      "/v1/linear-relay-installations",
-      jsonRequest({
-        id: "install_agent_prompted",
-        webhookPath: "/linear/webhooks/install_agent_prompted",
-        webhookSecret: "linear_webhook_secret",
-        token: "lin_api_token",
-        graphqlUrl: "https://linear.example/graphql",
-        repoProvider: "github",
-        owner: "acme",
-        repo: "demo"
-      })
-    );
-
-    const originalFetch = globalThis.fetch;
-    const graphqlRequests: Array<{ authorization?: string | null; body?: { query?: string; variables?: unknown } }> = [];
-    globalThis.fetch = (async (url, init) => {
-      if (String(url) !== "https://linear.example/graphql") {
-        throw new Error(`Unexpected Linear test request: ${String(url)}`);
-      }
-      const body = JSON.parse(String(init?.body)) as { query?: string; variables?: unknown };
-      graphqlRequests.push({
-        authorization: init?.headers instanceof Headers ? init.headers.get("authorization") : (init?.headers as Record<string, string> | undefined)?.authorization,
-        body
-      });
-      if (body.query?.includes("agentActivityCreate")) {
-        return Response.json({ data: { agentActivityCreate: { success: true, agentActivity: { id: `activity_${graphqlRequests.length}` } } } });
-      }
-      return Response.json({ data: { agentSessionUpdate: { success: true } } });
-    }) as typeof fetch;
-
-    try {
-      const agentSession = {
-        id: "agent_session_prompted_1",
-        creator: { id: "user_1", name: "Ada" },
-        issue: {
-          id: "issue_1",
-          identifier: "ENG-1",
-          title: "Demo",
-          url: "https://linear.app/acme/issue/ENG-1/demo",
-          team: { id: "team_1", key: "ENG", name: "Engineering" }
-        }
-      };
-      const createdPayload = {
-        type: "AgentSessionEvent",
-        action: "created",
-        webhookId: "linear_agent_prompted_created_1",
-        organizationId: "org_1",
-        createdAt: "2026-07-07T00:00:00.000Z",
-        webhookTimestamp: Date.now(),
-        promptContext: "<issue identifier=\"ENG-1\">Initial prompt</issue>",
-        agentSession
-      };
-      const createdRawBody = JSON.stringify(createdPayload);
-      const created = await app.request("/linear/webhooks/install_agent_prompted", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: createdRawBody })
-        },
-        body: createdRawBody
-      });
-
-      expect(created.status).toBe(200);
-      const createdBody = await created.json();
-      const activeRunId = String(createdBody.runId);
-      expect(activeRunId).toMatch(/^run_/);
-      await app.request("/v1/runners/runner_1/claim", { method: "POST" });
-      await app.request(`/v1/runners/runner_1/runs/${activeRunId}/running`, jsonRequest({ executor: "echo" }));
-      for (let attempt = 0; attempt < 20 && graphqlRequests.length < 2; attempt += 1) {
-        await wait(10);
-      }
-      graphqlRequests.length = 0;
-
-      const promptText = "Please also update the regression coverage.";
-      const promptedPayload = {
-        type: "AgentSessionEvent",
-        action: "prompted",
-        webhookId: "linear_agent_prompted_1",
-        organizationId: "org_1",
-        createdAt: "2026-07-07T00:00:01.000Z",
-        webhookTimestamp: Date.now(),
-        promptContext: "This context should not override the prompted activity body.",
-        agentActivity: {
-          id: "activity_prompted_1",
-          body: promptText
-        },
-        agentSession
-      };
-      const promptedRawBody = JSON.stringify(promptedPayload);
-      const prompted = await app.request("/linear/webhooks/install_agent_prompted", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: promptedRawBody })
-        },
-        body: promptedRawBody
-      });
-
-      expect(prompted.status).toBe(200);
-      await expect(prompted.json()).resolves.toEqual({ ok: true });
-      const status = await app.request(
-        "/v1/thread-actions",
-        jsonRequest({
-          rawText: "/status",
-          actor: { provider: "linear", providerUserId: "user_1", handle: "Ada", organizationId: "org_1" },
-          callback: {
-            provider: "linear",
-            uri: "linear://agent-session/agent_session_prompted_1/activities",
-            threadKey: "ENG|issue|ENG-1"
-          },
-          metadata: {
-            repoProvider: "github",
-            owner: "acme",
-            repo: "demo",
-            agentSessionId: "agent_session_prompted_1",
-            linearRelayInstallationId: "install_agent_prompted",
-            graphqlUrl: "https://linear.example/graphql"
-          }
-        })
-      );
-      expect(status.status).toBe(200);
-      await expect(status.json()).resolves.toMatchObject({
-        outcome: "status",
-        activeRun: { id: activeRunId, status: "running" },
-        queuedFollowUps: [
-          {
-            status: "queued",
-            activeRunId,
-            event: {
-              command: {
-                rawText: promptText
-              },
-              metadata: {
-                action: "prompted",
-                agentSessionId: "agent_session_prompted_1"
-              }
-            }
-          }
-        ]
-      });
-      expect(graphqlRequests).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            authorization: "lin_api_token",
-            body: expect.objectContaining({
-              query: expect.stringContaining("agentActivityCreate"),
-              variables: expect.objectContaining({
-                input: expect.objectContaining({
-                  agentSessionId: "agent_session_prompted_1",
-                  content: expect.objectContaining({
-                    type: "thought",
-                    body: expect.stringContaining("Queued follow-up")
-                  })
-                })
-              })
-            })
-          })
-        ])
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it("cancels an active Linear Agent Session run when Linear sends a stop signal", async () => {
-    const app = createDispatcherApp({ databasePath: ":memory:" });
-    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
-    await app.request(
-      "/v1/repo-bindings",
-      jsonRequest({
-        provider: "github",
-        owner: "acme",
-        repo: "demo",
-        runnerId: "runner_1"
-      })
-    );
-    await app.request(
-      "/v1/linear-relay-installations",
-      jsonRequest({
-        id: "install_agent_stop",
-        webhookPath: "/linear/webhooks/install_agent_stop",
-        webhookSecret: "linear_webhook_secret",
-        token: "lin_api_token",
-        graphqlUrl: "https://linear.example/graphql",
-        repoProvider: "github",
-        owner: "acme",
-        repo: "demo"
-      })
-    );
-
-    const originalFetch = globalThis.fetch;
-    const graphqlRequests: Array<{ authorization?: string | null; body?: { query?: string; variables?: unknown } }> = [];
-    globalThis.fetch = (async (url, init) => {
-      if (String(url) !== "https://linear.example/graphql") {
-        throw new Error(`Unexpected Linear test request: ${String(url)}`);
-      }
-      const body = JSON.parse(String(init?.body)) as { query?: string; variables?: unknown };
-      graphqlRequests.push({
-        authorization: init?.headers instanceof Headers ? init.headers.get("authorization") : (init?.headers as Record<string, string> | undefined)?.authorization,
-        body
-      });
-      if (body.query?.includes("agentActivityCreate")) {
-        return Response.json({ data: { agentActivityCreate: { success: true, agentActivity: { id: `activity_${graphqlRequests.length}` } } } });
-      }
-      return Response.json({ data: { agentSessionUpdate: { success: true } } });
-    }) as typeof fetch;
-
-    try {
-      const createdPayload = {
-        type: "AgentSessionEvent",
-        action: "created",
-        webhookId: "linear_agent_created_1",
-        organizationId: "org_1",
-        createdAt: "2026-07-07T00:00:00.000Z",
-        webhookTimestamp: Date.now(),
-        promptContext: "<issue identifier=\"ENG-1\">Demo</issue>",
-        agentSession: {
-          id: "agent_session_stop_1",
-          creator: { id: "user_1", name: "Ada" },
-          issue: {
-            id: "issue_1",
-            identifier: "ENG-1",
-            title: "Demo",
-            url: "https://linear.app/acme/issue/ENG-1/demo",
-            team: { id: "team_1", key: "ENG", name: "Engineering" }
-          }
-        }
-      };
-      const createdRawBody = JSON.stringify(createdPayload);
-      const created = await app.request("/linear/webhooks/install_agent_stop", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: createdRawBody })
-        },
-        body: createdRawBody
-      });
-
-      expect(created.status).toBe(200);
-      const createdBody = await created.json();
-      const runId = String(createdBody.runId);
-      expect(runId).toMatch(/^run_/);
-
-      await app.request("/v1/runners/runner_1/claim", { method: "POST" });
-      await app.request(`/v1/runners/runner_1/runs/${runId}/running`, jsonRequest({ executor: "echo" }));
-      const followUp = await app.request(
-        "/v1/runs",
-        jsonRequest({
-          runId: "follow_up_linear_agent_stop",
-          event: {
-            ...linearIssueEvent({ id: "evt_linear_agent_stop_follow_up", sourceEventId: "linear_agent_stop_follow_up" }),
-            callback: {
-              provider: "linear",
-              uri: "linear://agent-session/agent_session_stop_1/activities",
-              threadKey: "ENG|issue|ENG-1"
-            },
-            metadata: {
-              repoProvider: "github",
-              owner: "acme",
-              repo: "demo",
-              agentSessionId: "agent_session_stop_1",
-              linearRelayInstallationId: "install_agent_stop",
-              graphqlUrl: "https://linear.example/graphql"
-            }
-          }
-        })
-      );
-      expect(followUp.status).toBe(202);
-      graphqlRequests.length = 0;
-
-      const stopPayload = {
-        type: "AgentSessionEvent",
-        action: "prompted",
-        webhookId: "linear_agent_stop_1",
-        organizationId: "org_1",
-        createdAt: "2026-07-07T00:00:01.000Z",
-        webhookTimestamp: Date.now(),
-        agentActivity: {
-          id: "activity_stop_1",
-          body: "Stop",
-          signal: "stop"
-        },
-        agentSession: createdPayload.agentSession
-      };
-      const stopRawBody = JSON.stringify(stopPayload);
-      const stopped = await app.request("/linear/webhooks/install_agent_stop", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: stopRawBody })
-        },
-        body: stopRawBody
-      });
-
-      expect(stopped.status).toBe(200);
-      await expect(stopped.json()).resolves.toEqual({ ok: true, action: "stop" });
-      const stored = await app.request(`/v1/runs/${runId}`);
-      await expect(stored.json()).resolves.toMatchObject({
-        run: {
-          id: runId,
-          status: "cancelled",
-          result: { conclusion: "cancelled" }
-        }
-      });
-      const queuedFollowUp = await app.request("/v1/follow-up-requests/follow_up_linear_agent_stop");
-      await expect(queuedFollowUp.json()).resolves.toMatchObject({
-        followUpRequest: {
-          id: "follow_up_linear_agent_stop",
-          status: "queued"
-        }
-      });
-      expect(graphqlRequests).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            authorization: "lin_api_token",
-            body: expect.objectContaining({ query: expect.stringContaining("agentSessionUpdate") })
-          }),
-          expect.objectContaining({
-            authorization: "lin_api_token",
-            body: expect.objectContaining({
-              query: expect.stringContaining("agentActivityCreate"),
-              variables: expect.objectContaining({
-                input: expect.objectContaining({
-                  agentSessionId: "agent_session_stop_1",
-                  content: expect.objectContaining({
-                    type: "response",
-                    body: expect.stringContaining("Cancellation requested for run")
-                  })
-                })
-              })
-            })
-          })
-        ])
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it("refreshes OAuth relay installations uploaded through the static relay endpoint", async () => {
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      linearOAuthInstall: {
-        clientId: "linear_client",
-        clientSecret: "linear_secret",
-        redirectUri: "https://relay.example/linear/oauth/callback",
-        tokenUrl: "https://linear.example/oauth/token",
-        now: () => new Date("2026-07-07T00:10:00.000Z"),
-        refreshSkewMs: 0,
-        commentRunDeferMs: 0
-      }
-    });
-    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
-    await app.request(
-      "/v1/repo-bindings",
-      jsonRequest({
-        provider: "github",
-        owner: "acme",
-        repo: "demo",
-        runnerId: "runner_1"
-      })
-    );
-    const stored = await app.request(
-      "/v1/linear-relay-installations",
-      jsonRequest({
-        id: "install_oauth",
-        webhookPath: "/linear/webhooks/install_oauth",
-        webhookSecret: "linear_webhook_secret",
-        token: "linear_access_old",
-        auth: {
-          method: "oauth_app",
-          actor: "app",
-          clientId: "linear_client",
-          refreshToken: "linear_refresh_old",
-          accessTokenExpiresAt: "2026-07-07T00:00:00.000Z",
-          scopes: ["read", "comments:create"]
-        },
-        graphqlUrl: "https://linear.example/graphql",
-        repoProvider: "github",
-        owner: "acme",
-        repo: "demo"
-      })
-    );
-    expect(stored.status).toBe(201);
-    const storedBody = await stored.json();
-    expect(JSON.stringify(storedBody)).not.toContain("linear_access_old");
-    expect(JSON.stringify(storedBody)).not.toContain("linear_refresh_old");
-
-    const originalFetch = globalThis.fetch;
-    const tokenRequests: Array<Record<string, string>> = [];
-    const graphqlRequests: Array<{ authorization?: string | null; body?: unknown }> = [];
-    globalThis.fetch = (async (url, init) => {
-      const requestUrl = String(url);
-      if (requestUrl === "https://linear.example/oauth/token") {
-        const body = new URLSearchParams(String(init?.body ?? ""));
-        tokenRequests.push(Object.fromEntries(body.entries()));
-        return Response.json({
-          access_token: "linear_access_refreshed",
-          refresh_token: "linear_refresh_new",
-          expires_in: 3600,
-          scope: "read,comments:create"
-        });
-      }
-      if (requestUrl === "https://linear.example/graphql") {
-        graphqlRequests.push({
-          authorization: init?.headers instanceof Headers ? init.headers.get("authorization") : (init?.headers as Record<string, string> | undefined)?.authorization,
-          ...(init?.body ? { body: JSON.parse(String(init.body)) } : {})
-        });
-        return Response.json({
-          data: {
-            commentCreate: {
-              success: true,
-              comment: { id: "linear_comment_1", url: "https://linear.app/acme/issue/ENG-1#comment" }
-            }
-          }
-        });
-      }
-      throw new Error(`Unexpected Linear test request: ${requestUrl}`);
-    }) as typeof fetch;
-
-    try {
-      const payload = {
-        type: "Comment",
-        action: "create",
-        webhookId: "linear_delivery_oauth",
-        organizationId: "org_1",
-        createdAt: "2026-07-07T00:00:00.000Z",
-        webhookTimestamp: Date.now(),
-        data: {
-          id: "comment_1",
-          body: "@opentag run dynamic oauth relay smoke",
-          url: "https://linear.app/acme/issue/ENG-1/demo#comment",
-          issue: {
-            id: "issue_1",
-            identifier: "ENG-1",
-            title: "Demo",
-            url: "https://linear.app/acme/issue/ENG-1/demo",
-            team: { id: "team_1", key: "ENG" }
-          },
-          user: { id: "user_1", name: "Ada" }
-        }
-      };
-      const rawBody = JSON.stringify(payload);
-      const response = await app.request("/linear/webhooks/install_oauth", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody })
-        },
-        body: rawBody
-      });
-
-      expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toMatchObject({ ok: true, runId: expect.any(String) });
-      expect(tokenRequests).toEqual([
-        {
-          client_id: "linear_client",
-          refresh_token: "linear_refresh_old",
-          grant_type: "refresh_token",
-          client_secret: "linear_secret"
-        }
-      ]);
-      expect(graphqlRequests).toHaveLength(1);
-      expect(graphqlRequests[0]).toMatchObject({
-        authorization: "Bearer linear_access_refreshed"
-      });
-      expect(String((graphqlRequests[0]!.body as { query: string }).query)).toContain("commentCreate");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
   it("shares claim state across relay deliveries so a mention's comment and session events yield one run", async () => {
     const app = createDispatcherApp({
       databasePath: ":memory:",
@@ -3014,142 +2263,7 @@ describe("dispatcher API", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
-  });
-
-  it("deduplicates concurrent OAuth relay installation refreshes into a single token request", async () => {
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      linearOAuthInstall: {
-        clientId: "linear_client",
-        clientSecret: "linear_secret",
-        redirectUri: "https://relay.example/linear/oauth/callback",
-        tokenUrl: "https://linear.example/oauth/token",
-        now: () => new Date("2026-07-07T00:10:00.000Z"),
-        refreshSkewMs: 0,
-        commentRunDeferMs: 0
-      }
-    });
-    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
-    await app.request(
-      "/v1/repo-bindings",
-      jsonRequest({
-        provider: "github",
-        owner: "acme",
-        repo: "demo",
-        runnerId: "runner_1"
-      })
-    );
-    const stored = await app.request(
-      "/v1/linear-relay-installations",
-      jsonRequest({
-        id: "install_oauth",
-        webhookPath: "/linear/webhooks/install_oauth",
-        webhookSecret: "linear_webhook_secret",
-        token: "linear_access_old",
-        auth: {
-          method: "oauth_app",
-          actor: "app",
-          clientId: "linear_client",
-          refreshToken: "linear_refresh_old",
-          accessTokenExpiresAt: "2026-07-07T00:00:00.000Z",
-          scopes: ["read", "comments:create"]
-        },
-        graphqlUrl: "https://linear.example/graphql",
-        repoProvider: "github",
-        owner: "acme",
-        repo: "demo"
-      })
-    );
-    expect(stored.status).toBe(201);
-
-    const originalFetch = globalThis.fetch;
-    const tokenRequests: Array<Record<string, string>> = [];
-    const graphqlAuthorizations: Array<string | null | undefined> = [];
-    globalThis.fetch = (async (url, init) => {
-      const requestUrl = String(url);
-      if (requestUrl === "https://linear.example/oauth/token") {
-        const body = new URLSearchParams(String(init?.body ?? ""));
-        tokenRequests.push(Object.fromEntries(body.entries()));
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        return Response.json({
-          access_token: "linear_access_refreshed",
-          refresh_token: "linear_refresh_new",
-          expires_in: 3600,
-          scope: "read,comments:create"
-        });
-      }
-      if (requestUrl === "https://linear.example/graphql") {
-        graphqlAuthorizations.push(
-          init?.headers instanceof Headers ? init.headers.get("authorization") : (init?.headers as Record<string, string> | undefined)?.authorization
-        );
-        return Response.json({
-          data: {
-            commentCreate: {
-              success: true,
-              comment: { id: "linear_comment_1", url: "https://linear.app/acme/issue/ENG-1#comment" }
-            }
-          }
-        });
-      }
-      throw new Error(`Unexpected Linear test request: ${requestUrl}`);
-    }) as typeof fetch;
-
-    try {
-      const webhookRequest = (input: { webhookId: string; commentId: string }) => {
-        const rawBody = JSON.stringify({
-          type: "Comment",
-          action: "create",
-          webhookId: input.webhookId,
-          organizationId: "org_1",
-          createdAt: "2026-07-07T00:00:00.000Z",
-          webhookTimestamp: Date.now(),
-          data: {
-            id: input.commentId,
-            body: "@opentag run concurrent oauth refresh smoke",
-            url: `https://linear.app/acme/issue/ENG-1/demo#${input.commentId}`,
-            issue: {
-              id: "issue_1",
-              identifier: "ENG-1",
-              title: "Demo",
-              url: "https://linear.app/acme/issue/ENG-1/demo",
-              team: { id: "team_1", key: "ENG" }
-            },
-            user: { id: "user_1", name: "Ada" }
-          }
-        });
-        return app.request("/linear/webhooks/install_oauth", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody })
-          },
-          body: rawBody
-        });
-      };
-
-      const [first, second] = await Promise.all([
-        webhookRequest({ webhookId: "linear_delivery_concurrent_1", commentId: "comment_concurrent_1" }),
-        webhookRequest({ webhookId: "linear_delivery_concurrent_2", commentId: "comment_concurrent_2" })
-      ]);
-
-      expect(first.status).toBe(200);
-      expect(second.status).toBe(200);
-      expect(tokenRequests).toEqual([
-        {
-          client_id: "linear_client",
-          refresh_token: "linear_refresh_old",
-          grant_type: "refresh_token",
-          client_secret: "linear_secret"
-        }
-      ]);
-      expect(graphqlAuthorizations).toHaveLength(2);
-      expect(graphqlAuthorizations).toEqual(["Bearer linear_access_refreshed", "Bearer linear_access_refreshed"]);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it("records management audit events for repo policy and mutation mapping changes without rule details", async () => {
+  });  it("records management audit events for repo policy and mutation mapping changes without rule details", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
 
     await app.request(
@@ -3223,12 +2337,9 @@ describe("dispatcher API", () => {
     const delivered: { kind: string; body: string; blocks?: unknown[] }[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body, ...(message.blocks?.length ? { blocks: message.blocks } : {}) });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request("/v1/repo-bindings", {
@@ -3280,16 +2391,14 @@ describe("dispatcher API", () => {
       "run.created",
       "context_packet.generated",
       "agent_access_profile.captured",
-      "callback.acknowledgement.queued",
-      "callback.acknowledgement.delivered",
+      "delivery.intent.queued",
+      "delivery.intent.queued",
       "routing.decided",
       "run.claimed",
       "run.progress",
-      "callback.progress.queued",
-      "callback.progress.delivered",
+      "delivery.intent.queued",
       "run.completed",
-      "callback.final.queued",
-      "callback.final.delivered"
+      "delivery.intent.queued"
     ]);
     expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
       visibility: "human",
@@ -3304,22 +2413,16 @@ describe("dispatcher API", () => {
       visibility: "audit",
       importance: "normal"
     });
-    expect(events.find((event: { type: string }) => event.type === "callback.final.delivered")).toMatchObject({
-      visibility: "human",
-      importance: "high"
-    });
+    expect(events.filter((event: { type: string }) => event.type === "delivery.intent.queued")).toHaveLength(4);
   });
 
   it("keeps default audit progress out of source-thread callbacks", async () => {
     const delivered: { kind: string; body: string }[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request("/v1/repo-bindings", {
@@ -3359,8 +2462,8 @@ describe("dispatcher API", () => {
       "run.created",
       "context_packet.generated",
       "agent_access_profile.captured",
-      "callback.acknowledgement.queued",
-      "callback.acknowledgement.delivered",
+      "delivery.intent.queued",
+      "delivery.intent.queued",
       "routing.decided",
       "run.claimed",
       "run.progress"
@@ -3376,12 +2479,9 @@ describe("dispatcher API", () => {
     const delivered: { kind: string; body: string }[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request("/v1/repo-bindings", jsonRequest({
@@ -3654,651 +2754,13 @@ describe("dispatcher API", () => {
     await expect(second.json()).resolves.toEqual({ error: "follow_up_request_not_queued" });
   });
 
-  it("renders Slack callbacks with Slack mrkdwn and keeps progress audit-only", async () => {
-    const delivered: { kind: string; body: string; blocks?: unknown[]; statusMessageKey?: string }[] = [];
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
-          delivered.push({
-            kind: message.kind,
-            body: message.body,
-            ...(message.blocks?.length ? { blocks: message.blocks } : {}),
-            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
-          });
-          return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId ?? "slack_status_1" } as const;
-        }
-      },
-      sourceReceiptSink: {
-        async deliver() {
-          return { delivered: true };
-        }
-      }
-    });
-
-    await app.request("/v1/repo-bindings", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        provider: "github",
-        owner: "acme",
-        repo: "demo",
-        runnerId: "runner_1",
-        workspacePath: "/Users/test/demo",
-        defaultExecutor: "echo"
-      })
-    });
-
-    const slackEvent = {
-      ...validEvent,
-      id: "evt_slack_1",
-      source: "slack",
-      sourceEventId: "Ev123",
-      actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
-      permissions: [{ scope: "chat:postMessage", reason: "reply in thread" }],
-      metadata: { ...validEvent.metadata, teamId: "T123", channelId: "C123", channelApplicationId: "A123", channelBotId: "U_APP" },
-      callback: {
-        provider: "slack",
-        uri: "https://slack.com/api/chat.postMessage",
-        threadKey: "T123|C123|1710000000.000100"
-      }
-    };
-    await bindSourceChannel(app, slackEvent);
-
-    const createResponse = await app.request("/v1/runs", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ runId: "run_slack_1", event: slackEvent })
-    });
-    expect(createResponse.status).toBe(201);
-
-    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
-    const runningResponse = await app.request("/v1/runners/runner_1/runs/run_slack_1/running", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ executor: "hermes" })
-    });
-    expect(runningResponse.status).toBe(200);
-    const progressResponse = await app.request("/v1/runners/runner_1/runs/run_slack_1/progress", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        type: "executor.progress",
-        message: "Hermes tool call started",
-        at: "2026-06-24T00:00:01.000Z",
-        visibility: "human"
-      })
-    });
-    expect(progressResponse.status).toBe(200);
-    const completeResponse = await app.request("/v1/runners/runner_1/runs/run_slack_1/complete", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        result: {
-          conclusion: "success",
-          summary: "Echoed OpenTag command: introduce yourself",
-          verification: [{ command: "echo", outcome: "passed" }]
-        }
-      })
-    });
-    expect(completeResponse.status).toBe(200);
-
-    expect(delivered.map(({ kind, statusMessageKey }) => ({ kind, statusMessageKey }))).toEqual([
-      { kind: "progress", statusMessageKey: "run_slack_1:status" },
-      { kind: "final", statusMessageKey: "run_slack_1:status" }
-    ]);
-    expect(delivered[0]?.body).toContain("*OpenTag: Running*");
-    expect(delivered[0]?.body).toContain("Running with hermes.");
-    expect(delivered[1]?.body).toBe(
-      "*Finished: success.*\nEchoed OpenTag command: introduce yourself\nVerified: `echo` passed\n\nAudit: `opentag status --run run_slack_1`"
-    );
-    expect(delivered.some((message) => message.body.includes("Hermes tool call started"))).toBe(false);
-    expect(delivered.every((message) => (message as { agentId?: string }).agentId === undefined)).toBe(true);
-    expect(delivered.at(-1)?.body).not.toContain("**success**");
-
-    const eventsResponse = await app.request("/v1/runs/run_slack_1/events");
-    const { events } = await eventsResponse.json();
-    expect(events.map((event: { type: string }) => event.type)).not.toContain("callback.progress.suppressed");
-    expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
-      visibility: "audit",
-      importance: "normal",
-      message: "Hermes tool call started"
-    });
-  });
-
-  it("sanitizes every runner-controlled sibling field before persistence or presentation", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "opentag-safe-runner-ingress-"));
-    onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
-    const databasePath = join(directory, "dispatcher.sqlite");
-    const delivered: unknown[] = [];
-    const app = createDispatcherApp({
-      databasePath,
-      runnerLeaseSeconds: 60,
-      callbackSink: {
-        async deliver(message) {
-          delivered.push(message);
-          return { handled: true, outcome: "accepted", externalMessageId: "safe-status" } as const;
-        }
-      },
-      sourceReceiptSink: { async deliver() { return { delivered: true }; } }
-    });
-    await app.request("/v1/repo-bindings", jsonRequest({
-      provider: "github",
-      owner: "acme",
-      repo: "demo",
-      runnerId: "runner_safe_ingress",
-      workspacePath: "/Users/test/demo",
-      defaultExecutor: "echo"
-    }));
-    const event = slackRepoEvent({
-      id: "evt_safe_runner_ingress",
-      sourceEventId: "EvSafeRunnerIngress",
-      threadKey: "T123|C123|1710000000.000100"
-    });
-    await bindSourceChannel(app, event);
-    expect((await app.request("/v1/runs", jsonRequest({ runId: "run_safe_runner_ingress", event }))).status).toBe(201);
-    const firstClaim = await app.request("/v1/runners/runner_safe_ingress/claim", { method: "POST" });
-    const firstLease = await firstClaim.json() as { attemptId: string; fencingToken: string };
-    expireRunnerLease(databasePath, "run_safe_runner_ingress", firstLease.attemptId);
-    const secondClaim = await app.request("/v1/runners/runner_safe_ingress/claim", { method: "POST" });
-    const lease = await secondClaim.json() as { attemptId: string; fencingToken: string };
-
-    expect((await app.request("/v1/runners/runner_safe_ingress/runs/run_safe_runner_ingress/running", jsonRequest({
-      ...lease,
-      executor: firstLease.fencingToken,
-      executorCapability: { nested: { historicalFence: firstLease.fencingToken, accessToken: "opaque-ingress-token" } },
-      idempotencyKey: firstLease.fencingToken
-    }))).status).toBe(200);
-    expect((await app.request("/v1/runners/runner_safe_ingress/runs/run_safe_runner_ingress/progress", jsonRequest({
-      ...lease,
-      message: `safe progress ${firstLease.fencingToken}`,
-      type: firstLease.fencingToken,
-      visibility: "human",
-      idempotencyKey: firstLease.fencingToken
-    }))).status).toBe(200);
-    expect((await app.request("/v1/runners/runner_safe_ingress/runs/run_safe_runner_ingress/complete", jsonRequest({
-      ...lease,
-      result: {
-        conclusion: "success",
-        summary: `safe completion ${firstLease.fencingToken}`,
-        artifacts: [{ title: "result", uri: "workspace/result.md", metadata: { historicalFence: firstLease.fencingToken } }],
-        verification: [{ command: "verify", outcome: "passed", excerpt: firstLease.fencingToken }]
-      },
-      idempotencyKey: firstLease.fencingToken
-    }))).status).toBe(200);
-
-    const run = await (await app.request("/v1/runs/run_safe_runner_ingress")).json();
-    const events = await (await app.request("/v1/runs/run_safe_runner_ingress/events")).json();
-    const durableAndPresented = JSON.stringify({ run, events, delivered });
-    expect(durableAndPresented).not.toContain(firstLease.fencingToken);
-    expect(durableAndPresented).not.toContain(lease.fencingToken);
-    expect(durableAndPresented).not.toContain("opaque-ingress-token");
-    expect(durableAndPresented).toContain("[redacted]");
-  });
-
-  it("delivers Slack source receipts and one running run-card update", async () => {
-    const callbacks: { kind: string }[] = [];
-    const receipts: Array<{ runId: string; provider: string; state: string; agentId?: string; channelId: unknown; messageTs: unknown }> = [];
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
-          callbacks.push({ kind: message.kind });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
-      sourceReceiptSink: {
-        async deliver(receipt) {
-          receipts.push({
-            runId: receipt.runId,
-            provider: receipt.provider,
-            state: receipt.state,
-            ...(receipt.agentId ? { agentId: receipt.agentId } : {}),
-            channelId: receipt.event.metadata["channelId"],
-            messageTs: receipt.event.metadata["messageTs"]
-          });
-          return { delivered: true };
-        }
-      }
-    });
-
-    await app.request("/v1/repo-bindings", jsonRequest({
-      provider: "github",
-      owner: "acme",
-      repo: "demo",
-      runnerId: "runner_1",
-      workspacePath: "/Users/test/demo",
-      defaultExecutor: "echo"
-    }));
-
-    const event = slackRepoEvent({ id: "evt_slack_receipt", sourceEventId: "EvSlackReceipt", threadKey: "T123|C123|1710000000.000100" });
-    await bindSourceChannel(app, event);
-    const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_slack_receipt", event }));
-    expect(createResponse.status).toBe(201);
-
-    const claimResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
-    expect(claimResponse.status).toBe(200);
-    const runningResponse = await app.request("/v1/runners/runner_1/runs/run_slack_receipt/running", jsonRequest({ executor: "echo" }));
-    expect(runningResponse.status).toBe(200);
-
-    const replayResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_slack_receipt_replay", event }));
-    expect(replayResponse.status).toBe(200);
-
-    expect(callbacks).toEqual([{ kind: "progress" }]);
-    expect(receipts).toEqual([
-      {
-        runId: "run_slack_receipt",
-        provider: "slack",
-        state: "received",
-        agentId: "opentag",
-        channelId: "C123",
-        messageTs: "1710000000.000100"
-      },
-      {
-        runId: "run_slack_receipt",
-        provider: "slack",
-        state: "running",
-        agentId: "opentag",
-        channelId: "C123",
-        messageTs: "1710000000.000100"
-      }
-    ]);
-
-    const eventsResponse = await app.request("/v1/runs/run_slack_receipt/events");
-    const { events } = await eventsResponse.json();
-    expect(events.map((event: { type: string }) => event.type)).toEqual([
-      "admission.decided",
-      "run.created",
-      "context_packet.generated",
-      "agent_access_profile.captured",
-      "source_receipt.delivered",
-      "routing.decided",
-      "run.claimed",
-      "run.running",
-      "source_receipt.delivered",
-      "callback.progress.queued",
-      "callback.progress.delivered",
-      "admission.decided",
-      "run.create_idempotent_replay"
-    ]);
-    expect(
-      events
-        .filter((event: { type: string }) => event.type === "source_receipt.delivered")
-        .map((event: { visibility: string; importance: string; payload: { provider: string; state: string } }) => ({
-          visibility: event.visibility,
-          importance: event.importance,
-          payload: event.payload
-        }))
-    ).toEqual([
-      {
-        visibility: "audit",
-        importance: "low",
-        payload: {
-          provider: "slack",
-          state: "received"
-        }
-      },
-      {
-        visibility: "audit",
-        importance: "low",
-        payload: {
-          provider: "slack",
-          state: "running"
-        }
-      }
-    ]);
-  });
-
-  it("falls back to a Slack text acknowledgement when the source receipt is not delivered", async () => {
-    const callbacks: Array<{ kind: string; body: string }> = [];
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
-          callbacks.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
-    });
-
-    await app.request("/v1/repo-bindings", jsonRequest({
-      provider: "github",
-      owner: "acme",
-      repo: "demo",
-      runnerId: "runner_1",
-      workspacePath: "/Users/test/demo",
-      defaultExecutor: "echo"
-    }));
-
-    const event = slackRepoEvent({ id: "evt_slack_receipt_fallback", sourceEventId: "EvSlackReceiptFallback", threadKey: "T123|C123|1710000000.000100" });
-    await bindSourceChannel(app, event);
-    const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_slack_receipt_fallback", event }));
-    expect(createResponse.status).toBe(201);
-    expect(callbacks).toEqual([
-      {
-        kind: "acknowledgement",
-        body: "*OpenTag: Received*\nRun: `run_slack_receipt_fallback`"
-      }
-    ]);
-
-    const eventsResponse = await app.request("/v1/runs/run_slack_receipt_fallback/events");
-    const { events } = await eventsResponse.json();
-    expect(events.map((event: { type: string }) => event.type)).toEqual([
-      "admission.decided",
-      "run.created",
-      "context_packet.generated",
-      "agent_access_profile.captured",
-      "callback.acknowledgement.queued",
-      "callback.acknowledgement.delivered"
-    ]);
-  });
-
-  it("delivers Lark received source receipts without posting received cards", async () => {
-    const callbacks: { kind: string }[] = [];
-    const receipts: Array<{ runId: string; provider: string; state: string; chatId: unknown; messageId: unknown }> = [];
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
-          callbacks.push({ kind: message.kind });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
-      sourceReceiptSink: {
-        async deliver(receipt) {
-          receipts.push({
-            runId: receipt.runId,
-            provider: receipt.provider,
-            state: receipt.state,
-            chatId: receipt.event.metadata["chatId"],
-            messageId: receipt.event.metadata["messageId"]
-          });
-          return { delivered: true };
-        }
-      }
-    });
-
-    await app.request("/v1/repo-bindings", jsonRequest({
-      provider: "github",
-      owner: "acme",
-      repo: "demo",
-      runnerId: "runner_1",
-      workspacePath: "/Users/test/demo",
-      defaultExecutor: "echo"
-    }));
-
-    const event = larkRepoEvent({ id: "evt_lark_receipt", sourceEventId: "EvLarkReceipt" });
-    await bindSourceChannel(app, event);
-    const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_lark_receipt", event }));
-    expect(createResponse.status).toBe(201);
-
-    expect(callbacks).toEqual([]);
-    expect(receipts).toEqual([
-      {
-        runId: "run_lark_receipt",
-        provider: "lark",
-        state: "received",
-        chatId: "oc_chat",
-        messageId: "om_msg"
-      }
-    ]);
-
-    const eventsResponse = await app.request("/v1/runs/run_lark_receipt/events");
-    const { events } = await eventsResponse.json();
-    expect(events.map((event: { type: string }) => event.type)).toEqual([
-      "admission.decided",
-      "run.created",
-      "context_packet.generated",
-      "agent_access_profile.captured",
-      "source_receipt.delivered"
-    ]);
-  });
-
-  it("falls back to a Lark received card when the source receipt is not delivered", async () => {
-    const callbacks: Array<{ kind: string; hasRich?: boolean }> = [];
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
-          callbacks.push({ kind: message.kind, ...(message.rich ? { hasRich: true } : {}) });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
-    });
-
-    await app.request("/v1/repo-bindings", jsonRequest({
-      provider: "github",
-      owner: "acme",
-      repo: "demo",
-      runnerId: "runner_1",
-      workspacePath: "/Users/test/demo",
-      defaultExecutor: "echo"
-    }));
-
-    const event = larkRepoEvent({ id: "evt_lark_receipt_fallback", sourceEventId: "EvLarkReceiptFallback" });
-    await bindSourceChannel(app, event);
-    const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_lark_receipt_fallback", event }));
-    expect(createResponse.status).toBe(201);
-    expect(callbacks).toEqual([{ kind: "acknowledgement", hasRich: true }]);
-  });
-
-  it("updates the native Lark run card even when the run finishes before the legacy delay", async () => {
-    const delivered: Array<{ kind: string; statusMessageKey?: string; externalMessageId?: string; hasRich?: boolean }> = [];
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      larkStatusCards: { delayMs: 20 },
-      sourceReceiptSink: {
-        async deliver() {
-          return { delivered: true };
-        }
-      },
-      callbackSink: {
-        async deliver(message) {
-          delivered.push({
-            kind: message.kind,
-            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {}),
-            ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
-            ...(message.rich ? { hasRich: true } : {})
-          });
-          return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId ?? "om_final" } as const;
-        }
-      }
-    });
-
-    await app.request("/v1/repo-bindings", jsonRequest({
-      provider: "github",
-      owner: "acme",
-      repo: "demo",
-      runnerId: "runner_1",
-      workspacePath: "/Users/test/demo",
-      defaultExecutor: "echo"
-    }));
-
-    const event = larkRepoEvent({ id: "evt_lark_short_status_card", sourceEventId: "EvLarkShortStatusCard" });
-    await bindSourceChannel(app, event);
-    expect((await app.request("/v1/runs", jsonRequest({ runId: "run_lark_short_status_card", event }))).status).toBe(201);
-    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
-    expect(
-      (await app.request("/v1/runners/runner_1/runs/run_lark_short_status_card/running", jsonRequest({ executor: "codex" }))).status
-    ).toBe(200);
-    expect(
-      (await app.request("/v1/runners/runner_1/runs/run_lark_short_status_card/complete", jsonRequest({
-        result: {
-          conclusion: "success",
-          summary: "Done quickly.",
-          verification: [{ command: "echo", outcome: "passed" }]
-        }
-      }))).status
-    ).toBe(200);
-
-    await wait(40);
-
-    expect(delivered).toEqual([
-      {
-        kind: "progress",
-        statusMessageKey: "run_lark_short_status_card:status",
-        hasRich: true
-      },
-      {
-        kind: "final",
-        statusMessageKey: "run_lark_short_status_card:status",
-        externalMessageId: "om_final",
-        hasRich: true
-      }
-    ]);
-  });
-
-  it("creates a delayed Lark status card for long runs and patches final into the same message", async () => {
-    const delivered: Array<{ kind: string; body: string; statusMessageKey?: string; externalMessageId?: string; hasRich?: boolean }> = [];
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      larkStatusCards: { delayMs: 10, minUpdateIntervalMs: 50 },
-      sourceReceiptSink: {
-        async deliver() {
-          return { delivered: true };
-        }
-      },
-      callbackSink: {
-        async deliver(message) {
-          delivered.push({
-            kind: message.kind,
-            body: message.body,
-            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {}),
-            ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
-            ...(message.rich ? { hasRich: true } : {})
-          });
-          return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId ?? "om_status" } as const;
-        }
-      }
-    });
-
-    await app.request("/v1/repo-bindings", jsonRequest({
-      provider: "github",
-      owner: "acme",
-      repo: "demo",
-      runnerId: "runner_1",
-      workspacePath: "/Users/test/demo",
-      defaultExecutor: "echo"
-    }));
-
-    const event = larkRepoEvent({ id: "evt_lark_delayed_status_card", sourceEventId: "EvLarkDelayedStatusCard" });
-    await bindSourceChannel(app, event);
-    expect((await app.request("/v1/runs", jsonRequest({ runId: "run_lark_delayed_status_card", event }))).status).toBe(201);
-    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
-    expect(
-      (await app.request("/v1/runners/runner_1/runs/run_lark_delayed_status_card/running", jsonRequest({ executor: "codex" }))).status
-    ).toBe(200);
-
-    await wait(30);
-
-    expect(delivered).toEqual([
-      {
-        kind: "progress",
-        body: ["Running with codex.", "Run: run_lark_delayed_status_card", "Use /status here for details."].join("\n"),
-        statusMessageKey: "run_lark_delayed_status_card:status",
-        hasRich: true
-      }
-    ]);
-
-    expect(
-      (await app.request("/v1/runners/runner_1/runs/run_lark_delayed_status_card/complete", jsonRequest({
-        result: {
-          conclusion: "success",
-          summary: "Done after status.",
-          verification: [{ command: "echo", outcome: "passed" }]
-        }
-      }))).status
-    ).toBe(200);
-
-    expect(delivered).toEqual([
-      {
-        kind: "progress",
-        body: ["Running with codex.", "Run: run_lark_delayed_status_card", "Use /status here for details."].join("\n"),
-        statusMessageKey: "run_lark_delayed_status_card:status",
-        hasRich: true
-      },
-      {
-        kind: "final",
-        body: expect.stringContaining("Finished with success."),
-        statusMessageKey: "run_lark_delayed_status_card:status",
-        externalMessageId: "om_status",
-        hasRich: true
-      }
-    ]);
-  });
-
-  it("keeps routine executor progress audit-only after the Lark run card is visible", async () => {
-    const delivered: Array<{ kind: string; body: string; statusMessageKey?: string; externalMessageId?: string; hasRich?: boolean }> = [];
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      larkStatusCards: { delayMs: 10, minUpdateIntervalMs: 1_000 },
-      sourceReceiptSink: {
-        async deliver() {
-          return { delivered: true };
-        }
-      },
-      callbackSink: {
-        async deliver(message) {
-          delivered.push({
-            kind: message.kind,
-            body: message.body,
-            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {}),
-            ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
-            ...(message.rich ? { hasRich: true } : {})
-          });
-          return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId ?? "om_status" } as const;
-        }
-      }
-    });
-
-    await app.request("/v1/repo-bindings", jsonRequest({
-      provider: "github",
-      owner: "acme",
-      repo: "demo",
-      runnerId: "runner_1",
-      workspacePath: "/Users/test/demo",
-      defaultExecutor: "echo"
-    }));
-
-    const event = larkRepoEvent({ id: "evt_lark_progress_status_card", sourceEventId: "EvLarkProgressStatusCard" });
-    await bindSourceChannel(app, event);
-    expect((await app.request("/v1/runs", jsonRequest({ runId: "run_lark_progress_status_card", event }))).status).toBe(201);
-    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
-    await app.request("/v1/runners/runner_1/runs/run_lark_progress_status_card/running", jsonRequest({ executor: "codex" }));
-    await wait(30);
-    expect(delivered).toHaveLength(1);
-    await wait(10);
-
-    expect((await app.request("/v1/runners/runner_1/runs/run_lark_progress_status_card/progress", jsonRequest({
-      type: "executor.progress",
-      message: "Starting ACP agent codex in scratch workspace"
-    }))).status).toBe(200);
-    expect((await app.request("/v1/runners/runner_1/runs/run_lark_progress_status_card/progress", jsonRequest({
-      type: "executor.progress",
-      message: "Still working with internal details"
-    }))).status).toBe(200);
-
-    expect(delivered).toEqual([
-      {
-        kind: "progress",
-        body: ["Running with codex.", "Run: run_lark_progress_status_card", "Use /status here for details."].join("\n"),
-        statusMessageKey: "run_lark_progress_status_card:status",
-        hasRich: true
-      }
-    ]);
-    expect(delivered.map((delivery) => delivery.body).join("\n")).not.toContain("Still working with internal details");
-  });
-
   it("renders Lark callbacks with lightweight acknowledgement while keeping process progress audit-only", async () => {
     const delivered: { kind: string; body: string }[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request("/v1/repo-bindings", {
@@ -4377,12 +2839,6 @@ describe("dispatcher API", () => {
 
     expect(delivered).toEqual([
       {
-        kind: "acknowledgement",
-        body: ["Received. OpenTag is working.", "Run: run_lark_1", "Use /status here for queue state; audit locally with opentag status --run run_lark_1."].join(
-          "\n"
-        )
-      },
-      {
         kind: "progress",
         body: ["Running with echo.", "Run: run_lark_1", "Use /status here for details."].join("\n")
       },
@@ -4399,17 +2855,15 @@ describe("dispatcher API", () => {
       "run.created",
       "context_packet.generated",
       "agent_access_profile.captured",
-      "callback.acknowledgement.queued",
-      "callback.acknowledgement.delivered",
+      "delivery.intent.queued",
       "routing.decided",
       "run.claimed",
       "run.running",
-      "callback.progress.queued",
-      "callback.progress.delivered",
+      "delivery.intent.queued",
+      "delivery.intent.queued",
       "run.progress",
       "run.completed",
-      "callback.final.queued",
-      "callback.final.delivered"
+      "delivery.intent.queued"
     ]);
     expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
       visibility: "audit",
@@ -4417,99 +2871,6 @@ describe("dispatcher API", () => {
       message: "Echo executor started"
     });
     expect(events.map((event: { type: string }) => event.type)).not.toContain("callback.progress.suppressed");
-  });
-
-  it("reuses the first Lark status message id when delivering the final card", async () => {
-    const delivered: Array<{
-      kind: string;
-      statusMessageKey?: string;
-      externalMessageId?: string;
-      hasRich?: boolean;
-    }> = [];
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
-          delivered.push({
-            kind: message.kind,
-            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {}),
-            ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
-            ...(message.rich ? { hasRich: true } : {})
-          });
-          return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId ?? "om_status" } as const;
-        }
-      }
-    });
-
-    await app.request("/v1/repo-bindings", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        provider: "github",
-        owner: "acme",
-        repo: "demo",
-        runnerId: "runner_1",
-        workspacePath: "/Users/test/demo",
-        defaultExecutor: "echo"
-      })
-    });
-
-    const larkEvent = {
-      ...validEvent,
-      id: "evt_lark_status_card",
-      source: "lark",
-      sourceEventId: "EvLarkStatusCard",
-      actor: { provider: "lark", providerUserId: "ou_123", handle: "Felix", organizationId: "tenant_123" },
-      permissions: [{ scope: "chat:postMessage", reason: "reply in thread" }],
-      callback: {
-        provider: "lark",
-        uri: "lark://im/v1/messages",
-        threadKey: "tk_123|oc_chat|om_msg"
-      },
-      metadata: {
-        ...validEvent.metadata,
-        tenantKey: "tenant_123",
-        chatId: "oc_chat",
-        channelApplicationId: "cli_app_123",
-        channelBotId: "ou_bot"
-      }
-    };
-    await bindSourceChannel(app, larkEvent);
-
-    const createResponse = await app.request("/v1/runs", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ runId: "run_lark_status_card", event: larkEvent })
-    });
-    expect(createResponse.status).toBe(201);
-
-    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
-    const completeResponse = await app.request("/v1/runners/runner_1/runs/run_lark_status_card/complete", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        result: {
-          conclusion: "success",
-          summary: "Done.",
-          verification: [{ command: "echo", outcome: "passed" }]
-        }
-      })
-    });
-    expect(completeResponse.status).toBe(200);
-
-    expect(delivered).toEqual([
-      {
-        kind: "acknowledgement",
-        statusMessageKey: "run_lark_status_card:status",
-        hasRich: true
-      },
-      {
-        kind: "final",
-        statusMessageKey: "run_lark_status_card:status",
-        externalMessageId: "om_status",
-        hasRich: true
-      }
-    ]);
   });
 
   it("records proposal approval decisions and creates apply plans", async () => {
@@ -5084,7 +3445,7 @@ describe("dispatcher API", () => {
 
   it("adds a stable statusMessageKey when progress callbacks are delivered", async () => {
     const delivered: Array<{ kind: string; statusMessageKey?: string }> = [];
-    const defaultPresentation = createDefaultCallbackPresentation();
+    const defaultPresentation = createDefaultProviderPresentation();
     const app = createDispatcherApp({
       databasePath: ":memory:",
       presentation: {
@@ -5120,15 +3481,12 @@ describe("dispatcher API", () => {
           return defaultPresentation.render(input);
         }
       },
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({
             kind: message.kind,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request("/v1/repo-bindings", {
@@ -5190,121 +3548,17 @@ describe("dispatcher API", () => {
       { kind: "acknowledgement", statusMessageKey: "run_status_key:status" },
       { kind: "progress", statusMessageKey: "run_status_key:status" }
     ]);
-  });
-
-  it("uses one editable Telegram status card from acknowledgement through final", async () => {
-    const delivered: Array<{ kind: string; body: string; statusMessageKey?: string; externalMessageId?: string; richProvider?: string }> = [];
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
-          delivered.push({
-            kind: message.kind,
-            body: message.body,
-            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {}),
-            ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
-            ...(message.rich?.provider ? { richProvider: message.rich.provider } : {})
-          });
-          return { handled: true, outcome: "accepted", externalMessageId: message.externalMessageId ?? "100" } as const;
-        }
-      }
-    });
-
-    await app.request(
-      "/v1/repo-bindings",
-      jsonRequest({
-        provider: "github",
-        owner: "acme",
-        repo: "demo",
-        runnerId: "runner_1",
-        workspacePath: "/Users/test/demo",
-        defaultExecutor: "echo"
-      })
-    );
-
-    const response = await app.request(
-      "/v1/runs",
-      jsonRequest({
-        runId: "run_telegram_status_card",
-        event: {
-          ...validEvent,
-          id: "evt_telegram_status_card",
-          source: "telegram",
-          sourceEventId: "EvTelegramStatusCard",
-          actor: { provider: "telegram", providerUserId: "789", handle: "alice" },
-          permissions: [
-            { scope: "chat:postMessage", reason: "reply in Telegram" },
-            { scope: "runner:local", reason: "execute locally" }
-          ],
-          callback: {
-            provider: "telegram",
-            uri: "https://api.telegram.org/sendMessage",
-            threadKey: "bot_123|-1001|789|42"
-          },
-          metadata: { repoProvider: "github", owner: "acme", repo: "demo", botId: "bot_123", chatId: "-1001" }
-        }
-      })
-    );
-    expect(response.status).toBe(201);
-
-    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
-    expect(
-      (await app.request(
-        "/v1/runners/runner_1/runs/run_telegram_status_card/running",
-        jsonRequest({ executor: "echo" })
-      )).status
-    ).toBe(200);
-    expect(
-      (await app.request(
-        "/v1/runners/runner_1/runs/run_telegram_status_card/complete",
-        jsonRequest({
-          result: {
-            conclusion: "success",
-            summary: "Echoed OpenTag command: hi",
-            verification: [{ command: "echo", outcome: "passed" }]
-          }
-        })
-      )).status
-    ).toBe(200);
-
-    expect(delivered).toEqual([
-      {
-        kind: "acknowledgement",
-        body: expect.stringContaining("<b>OpenTag picked this up</b>"),
-        statusMessageKey: "run_telegram_status_card:status",
-        richProvider: "telegram"
-      },
-      {
-        kind: "progress",
-        body: expect.stringContaining("<b>OpenTag is working</b>"),
-        statusMessageKey: "run_telegram_status_card:status",
-        externalMessageId: "100",
-        richProvider: "telegram"
-      },
-      {
-        kind: "final",
-        body: expect.stringContaining("<b>OpenTag finished</b>"),
-        statusMessageKey: "run_telegram_status_card:status",
-        externalMessageId: "100",
-        richProvider: "telegram"
-      }
-    ]);
-  });
-
-  it("delivers a running liveness status when a status-update provider starts executing", async () => {
+  });  it("delivers a running liveness status when a status-update provider starts executing", async () => {
     const delivered: Array<{ kind: string; body: string; statusMessageKey?: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({
             kind: message.kind,
             body: message.body,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request(
@@ -5352,16 +3606,13 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string; statusMessageKey?: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({
             kind: message.kind,
             body: message.body,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request(
@@ -5407,7 +3658,7 @@ describe("dispatcher API", () => {
     const eventsResponse = await app.request("/v1/runs/run_running_replay/events");
     const { events } = await eventsResponse.json();
     expect(events.filter((event: { type: string }) => event.type === "run.running")).toHaveLength(1);
-    expect(events.filter((event: { type: string }) => event.type === "callback.progress.delivered")).toHaveLength(1);
+    expect(events.filter((event: { type: string }) => event.type === "delivery.intent.queued")).toHaveLength(3);
     expect(events.find((event: { type: string }) => event.type === "run.running")).toMatchObject({
       payload: expect.objectContaining({
         executor: "echo",
@@ -5422,16 +3673,13 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string; statusMessageKey?: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({
             kind: message.kind,
             body: message.body,
             ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
           });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request(
@@ -5536,7 +3784,8 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: { async deliver(message) { delivered.push({ kind: message.kind, body: message.body }); return { handled: true, outcome: "accepted" } as const; } }
+      deliveryProducer: captureBusinessDeliveries(async (message) => { delivered.push({ kind: message.kind, body: message.body });
+      })
     });
     await app.request("/v1/repo-bindings", jsonRequest({
       provider: "github",
@@ -5604,9 +3853,9 @@ describe("dispatcher API", () => {
     expect(delivered.some((message) => message.body.includes("Send a new task"))).toBe(false);
   });
 
-  it("deduplicates runner progress retries by idempotency key before callback delivery", async () => {
+  it("deduplicates runner progress retries by idempotency key before delivery enqueue", async () => {
     const delivered: Array<{ kind: string; body: string }> = [];
-    const defaultPresentation = createDefaultCallbackPresentation();
+    const defaultPresentation = createDefaultProviderPresentation();
     const app = createDispatcherApp({
       databasePath: ":memory:",
       presentation: {
@@ -5618,12 +3867,9 @@ describe("dispatcher API", () => {
           return provider === "github";
         }
       },
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request("/v1/repo-bindings", jsonRequest({
@@ -5678,7 +3924,7 @@ describe("dispatcher API", () => {
     const eventsResponse = await app.request("/v1/runs/run_progress_replay/events");
     const { events } = await eventsResponse.json();
     expect(events.filter((event: { type: string }) => event.type === "run.progress")).toHaveLength(3);
-    expect(events.filter((event: { type: string }) => event.type === "callback.progress.delivered")).toHaveLength(3);
+    expect(events.filter((event: { type: string }) => event.type === "delivery.intent.queued")).toHaveLength(5);
     expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
       payload: expect.not.objectContaining({ idempotencyKey: expect.anything() })
     });
@@ -5690,16 +3936,13 @@ describe("dispatcher API", () => {
     expect(serializedEvents).not.toContain("[redacted]");
   });
 
-  it("deduplicates runner completion retries by idempotency key before final callback delivery", async () => {
+  it("deduplicates runner completion retries by idempotency key before final delivery enqueue", async () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request("/v1/repo-bindings", jsonRequest({
@@ -5754,7 +3997,7 @@ describe("dispatcher API", () => {
     const eventsResponse = await app.request("/v1/runs/run_complete_replay/events");
     const { events } = await eventsResponse.json();
     expect(events.filter((event: { type: string }) => event.type === "run.completed")).toHaveLength(1);
-    expect(events.filter((event: { type: string }) => event.type === "callback.final.delivered")).toHaveLength(1);
+    expect(events.filter((event: { type: string }) => event.type === "delivery.intent.queued")).toHaveLength(3);
     expect(events.find((event: { type: string }) => event.type === "run.completed")).toMatchObject({
       payload: expect.objectContaining({ idempotencyKey: "runner_1:run_complete_replay:complete:1" })
     });
@@ -6786,12 +5029,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string; runId: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request("/v1/repo-bindings", jsonRequest({
@@ -6866,12 +5106,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string; runId: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
     await app.request("/v1/repo-bindings", jsonRequest({
       provider: "github",
@@ -6914,12 +5151,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string; runId: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await app.request("/v1/repo-bindings", jsonRequest({
@@ -7197,92 +5431,14 @@ describe("dispatcher API", () => {
     });
 
     expect(response.status).toBe(201);
-  });
-
-  it("passes the target agent id through Slack callbacks", async () => {
-    const delivered: Array<{ kind: string; agentId?: string }> = [];
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
-          delivered.push({
-            kind: message.kind,
-            ...(message.agentId ? { agentId: message.agentId } : {})
-          });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
-      sourceReceiptSink: {
-        async deliver() {
-          return { delivered: true };
-        }
-      }
-    });
-
-    await app.request("/v1/repo-bindings", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        provider: "github",
-        owner: "acme",
-        repo: "demo",
-        runnerId: "runner_1"
-      })
-    });
-
-    const slackEvent = {
-      ...validEvent,
-      id: "evt_slack_agent",
-      source: "slack",
-      sourceEventId: "EvAgent",
-      actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
-      target: { mention: "<@U_DEEP>", agentId: "deepseek" },
-      callback: {
-        provider: "slack",
-        uri: "https://slack.com/api/chat.postMessage",
-        threadKey: "T123|C123|1710000000.000100"
-      },
-      metadata: {
-        ...validEvent.metadata,
-        teamId: "T123",
-        channelId: "C123",
-        channelApplicationId: "A123",
-        channelBotId: "U_APP"
-      }
-    };
-    await bindSourceChannel(app, slackEvent);
-
-    const createResponse = await app.request("/v1/runs", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ runId: "run_slack_agent", event: slackEvent })
-    });
-    expect(createResponse.status).toBe(201);
-
-    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
-    const completeResponse = await app.request("/v1/runners/runner_1/runs/run_slack_agent/complete", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ result: { conclusion: "success", summary: "done" } })
-    });
-    expect(completeResponse.status).toBe(200);
-
-    expect(delivered).toEqual([
-      { kind: "final", agentId: "deepseek" }
-    ]);
-  });
-
-  it("applies a model-suggested GitHub label action from a source-thread reply", async () => {
+  });  it("applies a model-suggested GitHub label action from a source-thread reply", async () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const githubRequests: Array<{ url: string; method?: string; body?: unknown; authorization?: string | null }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       githubApply: {
         token: "gh_test",
         fetchImpl: async (url, init) => {
@@ -7382,12 +5538,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
 
     await seedCompletedProposal({
@@ -7425,12 +5578,9 @@ describe("dispatcher API", () => {
     const event = githubIssueEvent({ id: "evt_thread_pr_missing_condition", sourceEventId: "comment_thread_pr_missing_condition", threadKey: "acme/demo" });
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       githubApply: {
         token: "gh_test",
         fetchImpl: async () => {
@@ -7479,12 +5629,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       githubApply: {
         token: "gh_test",
         fetchImpl: async () => {
@@ -7531,12 +5678,9 @@ describe("dispatcher API", () => {
     const githubRequests: Array<{ url: string; method?: string; authorization?: string | null; hasSignal: boolean }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       githubApply: {
         token: "gh_test",
         fetchImpl: async (url, init) => {
@@ -7593,12 +5737,9 @@ describe("dispatcher API", () => {
     const githubRequests: string[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       githubApply: {
         token: "gh_test",
         fetchImpl: async (url) => {
@@ -7649,12 +5790,9 @@ describe("dispatcher API", () => {
     const githubRequests: string[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       githubApply: {
         token: "gh_test",
         fetchImpl: async (url) => {
@@ -7729,12 +5867,9 @@ describe("dispatcher API", () => {
     const githubRequests: unknown[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       githubApply: {
         token: "gh_test",
         fetchImpl: async (url) => {
@@ -7902,12 +6037,9 @@ describe("dispatcher API", () => {
     const githubRequests: unknown[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       githubApply: {
         token: "gh_test",
         fetchImpl: async (url) => {
@@ -8723,12 +6855,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
     await seedCompletedProposal({
       app,
@@ -8788,12 +6917,9 @@ describe("dispatcher API", () => {
     const githubRequests: Array<{ url: string; method?: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       githubApply: {
         token: "gh_test",
         fetchImpl: async (url, init) => {
@@ -8971,12 +7097,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       githubApply: {
         token: "gh_test",
         fetchImpl: async (url, init) => {
@@ -9085,12 +7208,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       githubApply: {
         token: "gh_test",
         fetchImpl: async (url, init) => {
@@ -9204,10 +7324,11 @@ describe("dispatcher API", () => {
     const directory = mkdtempSync(join(tmpdir(), "opentag-reconciliation-fences-"));
     onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
     const databasePath = join(directory, "dispatcher.sqlite");
-    const delivered: CallbackMessage[] = [];
+    const delivered: CapturedBusinessDelivery[] = [];
     const app = createDispatcherApp({
       databasePath,
-      callbackSink: { async deliver(message) { delivered.push(message); return { handled: true, outcome: "accepted" } as const; } }
+      deliveryProducer: captureBusinessDeliveries(async (message) => { delivered.push(message);
+      })
     });
     await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Local Runner" }));
     await app.request("/v1/channel-bindings", jsonRequest({
@@ -9403,13 +7524,13 @@ describe("dispatcher API", () => {
       publicActionPayload,
       runEventsPayload,
       controlPlanePayload,
-      callbackDeliveryAndProviderPayload: delivered.at(-1)
+      unifiedDeliveryAndProviderPayload: delivered.at(-1)
     };
     const exposedJson = JSON.stringify(exposedSurfaces);
     for (const secret of [lease.fencingToken, secondClaim.fencingToken, "callback-secret", privateKeyBody]) {
       expect(exposedJson).not.toContain(secret);
     }
-    expect(exposedSurfaces.callbackDeliveryAndProviderPayload).toMatchObject({
+    expect(exposedSurfaces.unifiedDeliveryAndProviderPayload).toMatchObject({
       kind: "progress",
       provider: "slack",
       uri: "https://example.com/slack/callback",
@@ -9430,12 +7551,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       gitlabApply: {
         token: "glpat_test",
         baseUrl: "https://gitlab.example.com",
@@ -9547,12 +7665,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       linearApply: {
         async getToken() {
           return "Bearer refreshed_app_token";
@@ -9659,12 +7774,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       gitlabApply: {
         token: "glpat_test",
         baseUrl: "https://gitlab.example.com",
@@ -9778,12 +7890,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       githubApply: {
         token: "gh_test",
         fetchImpl: async (url, init) => {
@@ -9885,12 +7994,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       linearApply: {
         token: "Bearer linear_app_token",
         graphqlUrl: "https://linear.example/graphql",
@@ -10116,12 +8222,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      }
+      })
     });
     await seedCompletedProposal({
       app,
@@ -10204,12 +8307,9 @@ describe("dispatcher API", () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: {
-        async deliver(message) {
+      deliveryProducer: captureBusinessDeliveries(async (message) => {
           delivered.push({ kind: message.kind, body: message.body });
-          return { handled: true, outcome: "accepted" } as const;
-        }
-      },
+      }),
       githubApply: {
         token: "gh_test",
         fetchImpl: async () => {
@@ -10424,765 +8524,910 @@ describe("dispatcher API", () => {
     expect(text).not.toContain("invalid_json_body");
   });
 
-  it("schedules exactly one fresh governed callback runtime start after startup failure", async () => {
-    const timeouts = createControlledTimeouts();
-    const firstStart = deferred();
-    const secondStart = deferred();
-    let startCalls = 0;
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      governedCallbackRuntime: {
-        retryDelayMs: 1,
-        setTimeout: timeouts.setTimeout,
-        clearTimeout: timeouts.clearTimeout,
-        create: () => ({
-          start() {
-            startCalls += 1;
-            return startCalls === 1 ? firstStart.promise : secondStart.promise;
-          },
-          async enqueue() {
-            throw new Error("unexpected governed callback enqueue");
-          },
-          async stop() {}
-        })
-      }
-    });
-
-    firstStart.reject(new Error("startup failed"));
-    await waitForCondition(() => timeouts.pendingCount === 1);
-    expect(startCalls).toBe(1);
-
-    timeouts.runNext();
-    expect(startCalls).toBe(2);
-    expect(timeouts.pendingCount).toBe(0);
-    secondStart.resolve();
-    await app.stopBackgroundWorkers();
-  });
-
-  it("cancels a pending governed callback runtime retry when background workers stop", async () => {
-    const timeouts = createControlledTimeouts();
-    let startCalls = 0;
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      governedCallbackRuntime: {
-        retryDelayMs: 1,
-        setTimeout: timeouts.setTimeout,
-        clearTimeout: timeouts.clearTimeout,
-        create: () => ({
-          async start() {
-            startCalls += 1;
-            throw new Error("startup failed");
-          },
-          async enqueue() {
-            throw new Error("unexpected governed callback enqueue");
-          },
-          async stop() {}
-        })
-      }
-    });
-    await waitForCondition(() => timeouts.pendingCount === 1);
-
-    await app.stopBackgroundWorkers();
-
-    expect(timeouts.pendingCount).toBe(0);
-    timeouts.runAll();
-    expect(startCalls).toBe(1);
-  });
-
-  it("waits for an in-flight governed callback runtime start before stopping without restarting", async () => {
-    const timeouts = createControlledTimeouts();
-    const inFlightStart = deferred();
-    let startCalls = 0;
-    let stopCalls = 0;
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      governedCallbackRuntime: {
-        retryDelayMs: 1,
-        setTimeout: timeouts.setTimeout,
-        clearTimeout: timeouts.clearTimeout,
-        create: () => ({
-          start() {
-            startCalls += 1;
-            return inFlightStart.promise;
-          },
-          async enqueue() {
-            throw new Error("unexpected governed callback enqueue");
-          },
-          async stop() {
-            stopCalls += 1;
-          }
-        })
-      }
-    });
-
-    let stopped = false;
-    const stopTask = app.stopBackgroundWorkers().then(() => {
-      stopped = true;
-    });
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(stopped).toBe(false);
-    expect(stopCalls).toBe(0);
-
-    inFlightStart.reject(new Error("startup failed during stop"));
-    await stopTask;
-
-    expect(stopCalls).toBe(1);
-    expect(timeouts.pendingCount).toBe(0);
-    timeouts.runAll();
-    expect(startCalls).toBe(1);
-  });
-
-  it("keeps governed callback runtime retries serial across repeated startup failures", async () => {
-    const timeouts = createControlledTimeouts();
-    const starts: Array<ReturnType<typeof deferred>> = [];
-    let concurrentStarts = 0;
-    let maxConcurrentStarts = 0;
-    const app = createDispatcherApp({
-      databasePath: ":memory:",
-      governedCallbackRuntime: {
-        retryDelayMs: 1,
-        setTimeout: timeouts.setTimeout,
-        clearTimeout: timeouts.clearTimeout,
-        create: () => ({
-          start() {
-            concurrentStarts += 1;
-            maxConcurrentStarts = Math.max(
-              maxConcurrentStarts,
-              concurrentStarts
-            );
-            const start = deferred();
-            starts.push(start);
-            return start.promise.finally(() => {
-              concurrentStarts -= 1;
+  it("completes hosted Linear OAuth installs and refreshes relay tokens for unified delivery", async () => {
+    let now = new Date("2026-07-07T00:00:00.000Z");
+    const tokenRequests: Array<Record<string, string>> = [];
+    const graphqlRequests: Array<{
+      authorization: string | null;
+      body: { query?: string; variables?: unknown };
+    }> = [];
+    const deliveries: CapturedBusinessDelivery[] = [];
+    const linearFetch = (async (url, init) => {
+      const requestUrl = String(url);
+      if (requestUrl === "https://linear.example/oauth/token") {
+        const body = new URLSearchParams(String(init?.body ?? ""));
+        tokenRequests.push(Object.fromEntries(body.entries()));
+        return Response.json(body.get("grant_type") === "authorization_code"
+          ? {
+              access_token: "linear_access_token",
+              refresh_token: "linear_refresh_token",
+              expires_in: 1,
+              scope: "read,write,comments:create,app:assignable,app:mentionable"
+            }
+          : {
+              access_token: "linear_refreshed_token",
+              refresh_token: "linear_refresh_token_2",
+              expires_in: 3600,
+              scope: "read,write,comments:create,app:assignable,app:mentionable"
             });
-          },
-          async enqueue() {
-            throw new Error("unexpected governed callback enqueue");
-          },
-          async stop() {}
-        })
+      }
+      if (requestUrl !== "https://linear.example/graphql") {
+        throw new Error(`Unexpected Linear test request: ${requestUrl}`);
+      }
+      const body = JSON.parse(String(init?.body)) as { query?: string; variables?: unknown };
+      graphqlRequests.push({
+        authorization: new Headers(init?.headers).get("authorization"),
+        body
+      });
+      if (body.query?.includes("OpenTagLinearWorkspaceIdentity")) {
+        return Response.json({
+          data: {
+            viewer: { id: "app_user_1", name: "OpenTag", app: true },
+            organization: { id: "org_linear_1", name: "Acme", urlKey: "acme" }
+          }
+        });
+      }
+      if (body.query?.includes("OpenTagLinearMetadata")) {
+        return Response.json({
+          data: {
+            teams: { nodes: [{ id: "team_eng", key: "ENG", name: "Engineering" }] },
+            users: {
+              nodes: [
+                {
+                  id: "user_ada",
+                  name: "Ada Lovelace",
+                  displayName: "Ada",
+                  email: "ada@example.com",
+                  active: true,
+                  app: false
+                }
+              ]
+            },
+            workflowStates: {
+              nodes: [
+                {
+                  id: "state_progress",
+                  name: "In Progress",
+                  type: "started",
+                  team: { id: "team_eng", key: "ENG" }
+                }
+              ]
+            },
+            issueLabels: {
+              nodes: [
+                {
+                  id: "label_bug",
+                  name: "Bug",
+                  color: "#ff0000",
+                  isGroup: false,
+                  team: { id: "team_eng", key: "ENG" }
+                }
+              ]
+            }
+          }
+        });
+      }
+      return Response.json({
+        data: {
+          issueUpdate: {
+            success: true,
+            issue: {
+              id: "issue_123",
+              url: "https://linear.app/acme/issue/ENG-1/demo"
+            }
+          }
+        }
+      });
+    }) as typeof fetch;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = linearFetch;
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      deliveryProducer: captureBusinessDeliveries((delivery) => {
+        deliveries.push(delivery);
+      }),
+      linearOAuthInstall: {
+        clientId: "linear_client",
+        clientSecret: "linear_secret",
+        redirectUri: "https://relay.example/linear/oauth/callback",
+        webhookSecret: "linear_app_webhook_secret",
+        authorizationUrl: "https://linear.example/oauth/authorize",
+        tokenUrl: "https://linear.example/oauth/token",
+        fetchImpl: linearFetch,
+        now: () => now,
+        refreshSkewMs: 0,
+        commentRunDeferMs: 0
       }
     });
 
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      expect(starts).toHaveLength(attempt + 1);
-      starts[attempt]!.reject(new Error(`startup failed ${attempt + 1}`));
-      await waitForCondition(() => timeouts.pendingCount === 1);
-      expect(concurrentStarts).toBe(0);
-      if (attempt < 2) timeouts.runNext();
-    }
+    try {
+      const start = await app.request(
+        "/v1/linear-oauth-installations",
+        jsonRequest({
+          owner: "acme",
+          repo: "demo",
+          graphqlUrl: "https://linear.example/graphql"
+        })
+      );
+      expect(start.status).toBe(201);
+      const started = await start.json();
+      const state = new URL(String(started.authorizationUrl)).searchParams.get("state");
+      const callback = await app.request(
+        `/linear/oauth/callback?state=${encodeURIComponent(state!)}&code=code_123`
+      );
 
-    expect(maxConcurrentStarts).toBe(1);
-    expect(timeouts.pendingCount).toBe(1);
-    await app.stopBackgroundWorkers();
+      expect(callback.status).toBe(200);
+      const completed = await callback.json();
+      expect(completed).toMatchObject({
+        ok: true,
+        installation: {
+          id: started.installation.id,
+          projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+          organizationId: "org_linear_1",
+          teamId: "team_eng",
+          teamKey: "ENG"
+        }
+      });
+      expect(JSON.stringify(completed)).not.toContain("linear_access_token");
+      expect(JSON.stringify(completed)).not.toContain("linear_refresh_token");
+      expect(tokenRequests.map((request) => request["grant_type"])).toEqual(["authorization_code"]);
+      expect(graphqlRequests).toHaveLength(5);
+
+      const event = await seedLinearPriorityProposal({
+        app,
+        runId: "run_linear_oauth_refresh",
+        threadKey: "ENG|issue|ENG-1-oauth-refresh",
+        installationId: started.installation.id
+      });
+      expect(tokenRequests).toHaveLength(1);
+
+      now = new Date("2026-07-07T00:00:10.000Z");
+      graphqlRequests.length = 0;
+      deliveries.length = 0;
+      const apply = await app.request("/v1/thread-actions", jsonRequest({
+        rawText: "apply 1",
+        actor: { provider: "linear", providerUserId: "user_ada", handle: "Ada" },
+        callback: event.callback
+      }));
+
+      expect(apply.status).toBe(201);
+      await expect(apply.json()).resolves.toMatchObject({ outcome: "applied" });
+      expect(tokenRequests.map((request) => request["grant_type"])).toEqual([
+        "authorization_code",
+        "refresh_token"
+      ]);
+      expect(tokenRequests[1]).toMatchObject({
+        client_id: "linear_client",
+        refresh_token: "linear_refresh_token",
+        grant_type: "refresh_token",
+        client_secret: "linear_secret"
+      });
+      expect(graphqlRequests).toHaveLength(1);
+      expect(graphqlRequests[0]).toMatchObject({
+        authorization: "Bearer linear_refreshed_token",
+        body: {
+          variables: {
+            id: "issue_123",
+            input: { priority: 2 }
+          }
+        }
+      });
+      expect(graphqlRequests[0]!.body.query).toContain("issueUpdate");
+      expect(graphqlRequests[0]!.body.query).not.toContain("commentCreate");
+      expect(deliveries.some((delivery) =>
+        delivery.kind === "final" && delivery.body.includes("Applied")
+      )).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
-  it("keeps hosted terminal callbacks out of the legacy sink until lifecycle authority is acknowledged", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "opentag-hosted-callback-server-"));
-    onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
-    const databasePath = join(directory, "dispatcher.sqlite");
-    const sqlite = new Database(databasePath);
-    const providerDeliveries: CallbackMessage[] = [];
-    const callbackSink = {
-      async preflight(message: CallbackMessage) {
-        return message.provider === "github"
-          ? { handled: true } as const
-          : { handled: false, reasonCode: "provider_not_supported" } as const;
-      },
-      async deliver(message: CallbackMessage) {
-        providerDeliveries.push(message);
-        return {
-          handled: true,
-          outcome: "accepted",
-          externalMessageId: "comment_101",
-          providerReceiptId: "comment_101",
-          providerResourceUri:
-            "https://api.github.com/repos/acme/demo/issues/comments/101"
-        } as const;
-      }
-    };
+  it("routes dynamic Linear relay webhooks through stored installation ingress and unified delivery", async () => {
+    const presentations: DispatcherDeliveryPresentation[] = [];
+    const providerRequests: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url) => {
+      providerRequests.push(String(url));
+      throw new Error(`Unexpected provider request: ${String(url)}`);
+    }) as typeof fetch;
     const app = createDispatcherApp({
-      databasePath,
-      sqlite,
-      callbackSink,
-      reassessmentObligations: {
-        autoStart: true,
-        pollIntervalMs: 10,
-        retryBaseMs: 500,
-        retryMaxMs: 500,
-        leaseSeconds: 2,
-        maxAttempts: 5
+      databasePath: ":memory:",
+      deliveryProducer: {
+        async enqueue(presentation) {
+          presentations.push(presentation);
+          return { outcome: "queued", sideEffectIntentId: `intent_${presentations.length}` };
+        }
       }
     });
+
     try {
-      const runnerId = "runner_hosted_callback";
-      const runId = "run_hosted_callback";
-      const destinationId = "cloud_hosted_callback";
-      const organizationId = "org_hosted_callback";
-      const credentialId = "credential_hosted_callback";
-      expect((await app.request("/v1/runners", jsonRequest({
-        runnerId,
-        name: "Hosted callback runner",
-        locality: "local",
-        executors: [echoExecutorRegistration]
-      }))).status).toBe(201);
-      expect((await app.request("/v1/repo-bindings", jsonRequest({
-        provider: "github",
-        owner: "acme",
-        repo: "demo",
-        runnerId,
-        workspacePath: "/Users/test/demo",
-        defaultExecutor: "echo"
-      }))).status).toBe(201);
-      expect((await app.request("/v1/runs", jsonRequest({
-        runId,
-        event: {
-          ...validEvent,
-          id: "evt_hosted_callback",
-          metadata: { ...validEvent.metadata, issueNumber: 1 }
-        }
-      }))).status).toBe(201);
-      const claimResponse = await app.request(`/v1/runners/${runnerId}/claim`, {
-        method: "POST"
-      });
-      expect(claimResponse.status).toBe(200);
-      const claim = await claimResponse.json() as {
-        attemptId: string;
-        fencingToken: string;
-      };
-      const runRow = sqlite.prepare(`SELECT event_json AS eventJson,
-        work_thread_id AS workThreadId FROM runs WHERE id = ?`).get(runId) as {
-          eventJson: string;
-          workThreadId: string;
-        };
-      const attemptRow = sqlite.prepare(`SELECT number, runner_locality AS runnerLocality
-        FROM attempts WHERE id = ?`).get(claim.attemptId) as {
-          number: number;
-          runnerLocality: string;
-        };
-      expect(attemptRow.runnerLocality).toBe("local");
-      sqlite.prepare("UPDATE attempts SET runner_locality = 'hosted' WHERE id = ?")
-        .run(claim.attemptId);
-      expect(sqlite.prepare(`SELECT runner_locality AS runnerLocality
-        FROM attempts WHERE id = ?`).get(claim.attemptId)).toEqual({
-          runnerLocality: "hosted"
-        });
-
-      const fencingTokenDigest = `sha256:${createHash("sha256")
-        .update(claim.fencingToken)
-        .digest("hex")}`;
-      const claimOperationId = "claim_operation_hosted_callback";
-      const claimDigest = `sha256:${"d".repeat(64)}`;
-      const evidenceDigest = `sha256:${"e".repeat(64)}`;
-      const authority = {
-        organizationId,
-        runnerId,
-        runId,
-        credentialId,
-        registrationGeneration: 1,
-        credentialGeneration: 1,
-        projectTargetId: "project_target_hosted_callback",
-        bindingId: "binding_hosted_callback",
-        targetBindingDigest: `sha256:${"6".repeat(64)}`,
-        admissionPolicyReceiptId: "policy_receipt_hosted_callback",
-        admissionPolicySnapshotId: "policy_snapshot_hosted_callback",
-        admissionPolicySnapshotDigest: evidenceDigest,
-        runnerReadinessReceiptId: "readiness_receipt_hosted_callback",
-        runnerReadinessReceiptDigest: `sha256:${"8".repeat(64)}`,
-        targetReadinessReceiptId: "readiness_receipt_hosted_callback",
-        targetReadinessReceiptDigest: `sha256:${"8".repeat(64)}`,
-        executorId: "echo",
-        executorCapabilityDigest: `sha256:${"9".repeat(64)}`,
-        attemptId: claim.attemptId,
-        attemptNumber: attemptRow.number,
-        epoch: attemptRow.number,
-        fencingTokenDigest
-      };
-      const authorityJson = canonicalJsonStringify(authority);
-      const authorityDigest = canonicalSha256Json(authority);
-      const importedAt = new Date().toISOString();
-      sqlite.prepare(`INSERT INTO hosted_claim_operations (
-        operation_id, request_id, organization_id, runner_id, destination_id,
-        request_digest, request_json, state, run_id, claim_digest,
-        authority_digest, authority_json, attempt_id, attempt_number,
-        fencing_token_digest, credential_id, execution_started_at,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, '{}', 'claimed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(
-          claimOperationId,
-          "claim_request_hosted_callback",
-          organizationId,
-          runnerId,
-          destinationId,
-          `sha256:${"1".repeat(64)}`,
-          runId,
-          claimDigest,
-          authorityDigest,
-          authorityJson,
-          claim.attemptId,
-          attemptRow.number,
-          fencingTokenDigest,
-          credentialId,
-          importedAt,
-          importedAt,
-          importedAt
-        );
-      sqlite.prepare(`INSERT INTO hosted_run_imports (
-        run_id, admission_id, admission_operation_id, claim_operation_id,
-        attempt_id, fencing_token_digest, source_identity_digest,
-        delivery_payload_digest, admission_envelope_digest, policy_receipt_id,
-        policy_payload_digest, policy_receipt_digest, event_digest,
-        context_packet_digest, work_thread_id, claim_digest, authority_digest,
-        authority_json, imported_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(
-          runId,
-          "admission_hosted_callback",
-          "admission_operation_hosted_callback",
-          claimOperationId,
-          claim.attemptId,
-          fencingTokenDigest,
-          `sha256:${"2".repeat(64)}`,
-          `sha256:${"3".repeat(64)}`,
-          `sha256:${"4".repeat(64)}`,
-          authority.admissionPolicyReceiptId,
-          `sha256:${"5".repeat(64)}`,
-          evidenceDigest,
-          canonicalSha256Json(JSON.parse(runRow.eventJson)),
-          `sha256:${"7".repeat(64)}`,
-          runRow.workThreadId,
-          claimDigest,
-          authorityDigest,
-          authorityJson,
-          importedAt
-        );
-      sqlite.prepare(`INSERT INTO hosted_attempt_imports (
-        attempt_id, run_id, attempt_number, claim_operation_id,
-        fencing_token_digest, claim_digest, authority_digest, authority_json,
-        imported_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(
-          claim.attemptId,
-          runId,
-          attemptRow.number,
-          claimOperationId,
-          fencingTokenDigest,
-          claimDigest,
-          authorityDigest,
-          authorityJson,
-          importedAt
-        );
-
-      const legacyDeliveriesBeforeHostedCompletion = sqlite.prepare(`SELECT
-        count(*) AS count FROM callback_deliveries
-        WHERE run_id = ? AND dispatch_mode = 'legacy'`).get(runId) as {
-          count: number;
-        };
-      expect(legacyDeliveriesBeforeHostedCompletion).toEqual({ count: 1 });
-      providerDeliveries.length = 0;
-      const result = { conclusion: "success" as const, summary: "completed locally" };
-      const request = await buildHostedLifecycleRequestV1({
-        action: "complete",
-        organizationId,
-        runnerId,
-        runId,
-        attempt: {
-          attemptId: claim.attemptId,
-          attemptNumber: attemptRow.number,
-          epoch: attemptRow.number,
-          fencingToken: claim.fencingToken,
-          fencingTokenDigest
-        },
-        occurredAt: new Date().toISOString(),
-        conclusion: "success",
-        reasonCode: "executor_success",
-        resultDigest: await computeControlPayloadDigestV1(result),
-        artifactDigests: [],
-        evidenceDigests: []
-      });
-      const repo = createOpenTagRepository(drizzle(sqlite));
-      await expect(repo.completeHostedRunLocally({
-        runId,
-        result,
-        runnerId,
-        attemptId: claim.attemptId,
-        fencingToken: claim.fencingToken,
-        destinationId,
-        organizationId,
-        credentialId,
-        request
-      })).resolves.toBe("completed");
-
-      await waitForDatabase(
-        sqlite,
-        `SELECT state, attempt_count AS attemptCount, last_reason_code AS lastReasonCode
-          FROM reassessment_obligations WHERE source_kind = 'run_result_recorded'
-          AND source_id = '${runId}'`,
-        (row) => row?.["state"] === "pending"
-          && Number(row["attemptCount"]) >= 1
-          && row["lastReasonCode"] === "reassessment_failed"
+      await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
+      await app.request(
+        "/v1/repo-bindings",
+        jsonRequest({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
       );
-      expect(sqlite.prepare("SELECT count(*) AS count FROM governed_callback_intents").get())
-        .toEqual({ count: 0 });
-      expect(sqlite.prepare(`SELECT count(*) AS count
-        FROM control_plane_projection_outbox
-        WHERE receipt_kind = 'completion_assessment'`).get()).toEqual({ count: 0 });
-      expect(providerDeliveries).toEqual([]);
-      const preAcknowledgementAssessment = sqlite.prepare(`SELECT
-        work_threads.current_assessment_id AS assessmentId,
-        completion_assessments.assessment_json AS assessmentJson,
-        (SELECT count(*) FROM completion_assessments
-          WHERE work_thread_id = work_threads.id) AS assessmentCount
-        FROM work_threads
-        JOIN completion_assessments
-          ON completion_assessments.id = work_threads.current_assessment_id
-        WHERE work_threads.id = ?`).get(runRow.workThreadId) as {
-          assessmentId: string;
-          assessmentJson: string;
-          assessmentCount: number;
-        };
-      expect(preAcknowledgementAssessment.assessmentCount).toBe(1);
-      expect(JSON.parse(preAcknowledgementAssessment.assessmentJson)).toMatchObject({
-        id: preAcknowledgementAssessment.assessmentId,
-        workThreadId: runRow.workThreadId,
-        triggeredByRunId: runId
-      });
+      expect((await app.request(
+        "/v1/linear-relay-installations",
+        jsonRequest({
+          id: "install_dynamic_ingress",
+          webhookPath: "/linear/webhooks/install_dynamic_ingress",
+          webhookSecret: "linear_webhook_secret",
+          token: "lin_api_token",
+          graphqlUrl: "https://linear.example/graphql",
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo"
+        })
+      )).status).toBe(201);
 
-      const [lifecycle] = await repo.claimDueHostedLifecycleOperations({
-        destinationId,
-        organizationId,
-        leaseOwner: "server-test-lifecycle-pump",
-        leaseSeconds: 30,
-        now: new Date()
+      const payload = {
+        type: "Comment",
+        action: "create",
+        webhookId: "linear_dynamic_ingress_1",
+        organizationId: "org_1",
+        createdAt: "2026-07-07T00:00:00.000Z",
+        webhookTimestamp: Date.now(),
+        data: {
+          id: "comment_dynamic_ingress_1",
+          body: "@opentag run dynamic relay smoke",
+          url: "https://linear.app/acme/issue/ENG-1/demo#comment",
+          issue: linearAgentSessionFixture("unused").issue,
+          user: { id: "user_1", name: "Ada" }
+        }
+      };
+      const response = await app.request(
+        "/linear/webhooks/install_dynamic_ingress",
+        signedLinearWebhookRequest(payload, "linear_webhook_secret")
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ ok: true, runId: expect.any(String) });
+      expect(presentations.map((presentation) => presentation.kind)).toEqual([
+        "source_receipt",
+        "business"
+      ]);
+      expect(providerRequests).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("queues prompted Linear Agent Session events behind an active run through unified delivery", async () => {
+    const presentations: DispatcherDeliveryPresentation[] = [];
+    const graphqlRequests: Array<{ query?: string; variables?: unknown }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url, init) => {
+      if (String(url) !== "https://linear.example/graphql") {
+        throw new Error(`Unexpected Linear test request: ${String(url)}`);
+      }
+      const body = JSON.parse(String(init?.body)) as { query?: string; variables?: unknown };
+      graphqlRequests.push(body);
+      return Response.json({
+        data: {
+          agentSessionUpdate: { success: true },
+          agentActivityCreate: {
+            success: true,
+            agentActivity: { id: `activity_${graphqlRequests.length}` }
+          }
+        }
       });
-      expect(lifecycle?.operationId).toBe(request.operationId);
-      const receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(receiptWithDigests({
-        schemaVersion: 1,
-        protocolVersion: "1.0",
-        receiptKind: "attempt_lifecycle",
-        receiptId: `lifecycle_${canonicalSha256Json({
-          organizationId,
-          operationId: request.operationId
-        }).slice("sha256:".length)}`,
-        organizationId,
-        requestId: request.requestId,
-        operationId: request.operationId,
-        requestDigest: request.requestDigest,
-        requiredCapabilities: ["relay.lifecycle.v1"],
-        producer: { kind: "runner", id: runnerId, credentialId },
-        identity: {
-          namespace: "opentag.control.receipt/attempt-lifecycle/v1",
-          parts: [organizationId, runId, claim.attemptId, "executor_result", request.operationId]
+    }) as typeof fetch;
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      deliveryProducer: {
+        async enqueue(presentation) {
+          presentations.push(presentation);
+          return { outcome: "queued", sideEffectIntentId: `intent_${presentations.length}` };
+        }
+      }
+    });
+
+    try {
+      await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
+      await app.request(
+        "/v1/repo-bindings",
+        jsonRequest({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
+      );
+      await app.request(
+        "/v1/linear-relay-installations",
+        jsonRequest({
+          id: "install_agent_prompted",
+          webhookPath: "/linear/webhooks/install_agent_prompted",
+          webhookSecret: "linear_webhook_secret",
+          token: "lin_api_token",
+          graphqlUrl: "https://linear.example/graphql",
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo"
+        })
+      );
+
+      const agentSession = linearAgentSessionFixture("agent_session_prompted_1");
+      const created = await app.request(
+        "/linear/webhooks/install_agent_prompted",
+        signedLinearWebhookRequest({
+          type: "AgentSessionEvent",
+          action: "created",
+          webhookId: "linear_agent_prompted_created_1",
+          organizationId: "org_1",
+          createdAt: "2026-07-07T00:00:00.000Z",
+          webhookTimestamp: Date.now(),
+          promptContext: "<issue identifier=\"ENG-1\">Initial prompt</issue>",
+          agentSession
+        }, "linear_webhook_secret")
+      );
+      expect(created.status).toBe(200);
+      const activeRunId = String((await created.json()).runId);
+      expect(activeRunId).toMatch(/^run_/);
+      await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+      await app.request(
+        `/v1/runners/runner_1/runs/${activeRunId}/running`,
+        jsonRequest({ executor: "echo" })
+      );
+      await wait(30);
+      expect(graphqlRequests).toEqual([]);
+      presentations.length = 0;
+
+      const promptText = "Please also update the regression coverage.";
+      const prompted = await app.request(
+        "/linear/webhooks/install_agent_prompted",
+        signedLinearWebhookRequest({
+          type: "AgentSessionEvent",
+          action: "prompted",
+          webhookId: "linear_agent_prompted_1",
+          organizationId: "org_1",
+          createdAt: "2026-07-07T00:00:01.000Z",
+          webhookTimestamp: Date.now(),
+          promptContext: "This context must not override the activity body.",
+          agentActivity: { id: "activity_prompted_1", body: promptText },
+          agentSession
+        }, "linear_webhook_secret")
+      );
+
+      expect(prompted.status).toBe(200);
+      await expect(prompted.json()).resolves.toEqual({ ok: true });
+      await wait(30);
+      expect(graphqlRequests).toEqual([]);
+      expect(presentations).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          kind: "business",
+          phase: "progress",
+          runId: activeRunId,
+          body: expect.stringContaining("Queued follow-up")
+        })
+      ]));
+
+      const status = await app.request("/v1/thread-actions", jsonRequest({
+        rawText: "/status",
+        actor: { provider: "linear", providerUserId: "user_1", handle: "Ada", organizationId: "org_1" },
+        callback: {
+          provider: "linear",
+          uri: "linear://agent-session/agent_session_prompted_1/activities",
+          threadKey: "ENG|issue|ENG-1"
         },
-        observedAt: new Date().toISOString(),
-        runId,
-        attempt: {
-          attemptId: claim.attemptId,
-          attemptNumber: attemptRow.number,
-          epoch: attemptRow.number,
-          fencingTokenDigest
-        },
-        payload: {
-          operation: "executor_result",
-          occurredAt: request.occurredAt,
-          conclusion: "success",
-          reasonCode: "executor_success",
-          resultDigest: request.resultDigest,
-          artifactDigests: [],
-          evidenceDigests: []
+        metadata: {
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo",
+          agentSessionId: "agent_session_prompted_1",
+          linearRelayInstallationId: "install_agent_prompted",
+          graphqlUrl: "https://linear.example/graphql"
         }
       }));
-      await expect(repo.acknowledgeHostedLifecycleOperation({
-        destinationId,
-        organizationId,
-        operationId: request.operationId,
-        leaseToken: lifecycle!.leaseToken!,
-        receipt,
-        now: new Date()
-      })).resolves.toBe("acknowledged");
-
-      const assessmentProjectionRow = sqlite.prepare(`SELECT
-        destination_id AS destinationId,
-        organization_id AS organizationId,
-        run_id AS runId,
-        work_thread_id AS workThreadId,
-        payload_digest AS payloadDigest,
-        receipt_digest AS receiptDigest,
-        envelope_json AS envelopeJson,
-        requires_lifecycle_operation_id AS requiresLifecycleOperationId
-        FROM control_plane_projection_outbox
-        WHERE receipt_kind = 'completion_assessment'`).get() as {
-          destinationId: string;
-          organizationId: string;
-          runId: string;
-          workThreadId: string;
-          payloadDigest: string;
-          receiptDigest: string;
-          envelopeJson: string;
-          requiresLifecycleOperationId: string;
-        };
-      const assessmentProjection = CompletionAssessmentReceiptEnvelopeV1Schema.parse(
-        JSON.parse(assessmentProjectionRow.envelopeJson)
-      );
-      const currentAssessment = sqlite.prepare(`SELECT current_assessment_id AS assessmentId
-        FROM work_threads WHERE id = ?`).get(runRow.workThreadId) as {
-          assessmentId: string;
-      };
-      expect(assessmentProjectionRow).toMatchObject({
-        destinationId,
-        organizationId,
-        runId,
-        workThreadId: runRow.workThreadId,
-        payloadDigest: assessmentProjection.payloadDigest,
-        receiptDigest: assessmentProjection.receiptDigest,
-        requiresLifecycleOperationId: request.operationId
-      });
-      expect(assessmentProjection.payloadDigest).toBe(
-        canonicalSha256Json(assessmentProjection.payload)
-      );
-      const { receiptDigest: _receiptDigest, ...assessmentWithoutReceiptDigest } =
-        assessmentProjection;
-      expect(assessmentProjection.receiptDigest).toBe(
-        canonicalSha256Json(assessmentWithoutReceiptDigest)
-      );
-      expect(assessmentProjectionRow.requiresLifecycleOperationId).toBe(request.operationId);
-      expect(assessmentProjection.identity).toEqual({
-        namespace: "opentag.control.receipt/completion-assessment/v1",
-        parts: [
-          organizationId,
-          runRow.workThreadId,
-          preAcknowledgementAssessment.assessmentId
+      expect(status.status).toBe(200);
+      await expect(status.json()).resolves.toMatchObject({
+        outcome: "status",
+        activeRun: { id: activeRunId, status: "running" },
+        queuedFollowUps: [
+          {
+            status: "queued",
+            activeRunId,
+            event: {
+              command: { rawText: promptText },
+              metadata: {
+                action: "prompted",
+                agentSessionId: "agent_session_prompted_1"
+              }
+            }
+          }
         ]
       });
-      expect(assessmentProjection.producer).toEqual({
-        kind: "local_opentag",
-        id: runnerId,
-        credentialId,
-        registrationGeneration: 1
-      });
-      expect(assessmentProjection.attempt).toEqual({
-        attemptId: claim.attemptId,
-        attemptNumber: attemptRow.number,
-        epoch: attemptRow.number,
-        fencingTokenDigest
-      });
-      expect(assessmentProjection.predecessorReceiptDigests).toContain(
-        receipt.receiptDigest
-      );
-      expect(currentAssessment.assessmentId).toBe(
-        preAcknowledgementAssessment.assessmentId
-      );
-      expect(assessmentProjection.payload.assessmentId).toBe(
-        preAcknowledgementAssessment.assessmentId
-      );
-      expect(assessmentProjection.payload.executorResultReceiptRef).toEqual({
-        receiptId: receipt.receiptId,
-        operationId: request.operationId,
-        requestId: request.requestId,
-        requestDigest: request.requestDigest,
-        resultDigest: request.resultDigest
-      });
-
-      await waitForDatabase(
-        sqlite,
-        `SELECT state, attempt_count AS attemptCount,
-          last_reason_code AS lastReasonCode, last_error AS lastError,
-          satisfied_assessment_id AS satisfiedAssessmentId,
-          (SELECT count(*) FROM governed_callback_intents) AS intentCount,
-          (SELECT count(*) FROM control_plane_projection_outbox
-            WHERE receipt_kind = 'completion_assessment') AS assessmentReceiptCount
-          FROM reassessment_obligations WHERE source_kind = 'run_result_recorded'
-          AND source_id = '${runId}'`,
-        (row) => row?.["state"] === "satisfied"
-          && row["lastReasonCode"] === "assessment_satisfied"
-          && row["lastError"] === null
-          && row["satisfiedAssessmentId"]
-            === preAcknowledgementAssessment.assessmentId
-          && Number(row["attemptCount"]) >= 2
-          && Number(row["attemptCount"]) < 5
-          && row["intentCount"] === 1
-          && row["assessmentReceiptCount"] === 1
-      );
-      await waitForDatabase(
-        sqlite,
-        `SELECT state,
-          (SELECT count(*) FROM governed_callback_attempts
-            WHERE state = 'accepted') AS acceptedAttemptCount,
-          (SELECT count(*) FROM governed_callback_attempts
-            WHERE provider_receipt_id IS NOT NULL
-              AND provider_receipt_digest IS NOT NULL
-              AND provider_receipt_json IS NOT NULL) AS providerReceiptCount
-          FROM governed_callback_intents`,
-        (row) => row?.["state"] === "accepted"
-          && row["acceptedAttemptCount"] === 1
-          && row["providerReceiptCount"] === 1
-      );
-      const intentRow = sqlite.prepare(`SELECT
-        local_intent_id AS localIntentId,
-        destination_id AS destinationId,
-        organization_id AS organizationId,
-        runner_id AS runnerId,
-        credential_id AS credentialId,
-        registration_generation AS registrationGeneration,
-        run_id AS runId,
-        work_thread_id AS workThreadId,
-        run_attempt_id AS runAttemptId,
-        run_attempt_number AS runAttemptNumber,
-        fencing_token_digest AS fencingTokenDigest,
-        admission_id AS admissionId,
-        admission_operation_id AS admissionOperationId,
-        claim_operation_id AS claimOperationId,
-        completion_operation_id AS completionOperationId,
-        assessment_receipt_id AS assessmentReceiptId,
-        assessment_receipt_digest AS assessmentReceiptDigest,
-        state, current_attempt_number AS currentAttemptNumber,
-        last_reason_code AS lastReasonCode, terminal_at AS terminalAt
-        FROM governed_callback_intents`).get() as {
-          localIntentId: string;
-          destinationId: string;
-          organizationId: string;
-          runnerId: string;
-          credentialId: string;
-          registrationGeneration: number;
-          runId: string;
-          workThreadId: string;
-          runAttemptId: string;
-          runAttemptNumber: number;
-          fencingTokenDigest: string;
-          admissionId: string;
-          admissionOperationId: string;
-          claimOperationId: string;
-          completionOperationId: string;
-          assessmentReceiptId: string;
-          assessmentReceiptDigest: string;
-          state: string;
-          currentAttemptNumber: number;
-          lastReasonCode: string;
-          terminalAt: string;
-        };
-      expect(intentRow).toMatchObject({
-        destinationId,
-        organizationId,
-        runnerId,
-        credentialId,
-        registrationGeneration: authority.registrationGeneration,
-        runId,
-        workThreadId: runRow.workThreadId,
-        runAttemptId: claim.attemptId,
-        runAttemptNumber: attemptRow.number,
-        fencingTokenDigest,
-        admissionId: "admission_hosted_callback",
-        admissionOperationId: "admission_operation_hosted_callback",
-        claimOperationId,
-        completionOperationId: request.operationId,
-        assessmentReceiptId: assessmentProjection.receiptId,
-        assessmentReceiptDigest: assessmentProjection.receiptDigest,
-        state: "accepted",
-        currentAttemptNumber: 1,
-        lastReasonCode: "provider_accepted"
-      });
-      expect(intentRow.terminalAt).toEqual(expect.any(String));
-
-      const projectionRows = sqlite.prepare(`SELECT receipt_kind AS receiptKind,
-        receipt_id AS receiptId, operation_id AS operationId,
-        depends_on_receipt_id AS dependsOnReceiptId,
-        envelope_json AS envelopeJson
-        FROM control_plane_projection_outbox WHERE run_id = ?
-        AND receipt_kind IN (
-          'completion_assessment', 'callback_intent_observation',
-          'callback_attempt_observation', 'callback_provider_observation'
-        )`).all(runId) as Array<{
-          receiptKind: string;
-          receiptId: string;
-          operationId: string;
-          dependsOnReceiptId: string | null;
-          envelopeJson: string;
-        }>;
-      expect(projectionRows).toHaveLength(4);
-      expect(new Set(projectionRows.map((row) => row.operationId)).size).toBe(4);
-      const projectionByKind = new Map(
-        projectionRows.map((row) => [row.receiptKind, row])
-      );
-      const intentProjectionRow = projectionByKind.get(
-        "callback_intent_observation"
-      )!;
-      const attemptProjectionRow = projectionByKind.get(
-        "callback_attempt_observation"
-      )!;
-      const providerProjectionRow = projectionByKind.get(
-        "callback_provider_observation"
-      )!;
-      const intentProjection = CallbackIntentObservationReceiptEnvelopeV1Schema
-        .parse(JSON.parse(intentProjectionRow.envelopeJson));
-      const attemptProjection = CallbackAttemptObservationReceiptEnvelopeV1Schema
-        .parse(JSON.parse(attemptProjectionRow.envelopeJson));
-      const providerProjection = CallbackProviderObservationReceiptEnvelopeV1Schema
-        .parse(JSON.parse(providerProjectionRow.envelopeJson));
-      expect(intentProjection.predecessorReceiptDigests).toEqual([
-        assessmentProjection.receiptDigest
-      ]);
-      expect(intentProjection.payload).toMatchObject({
-        localIntentId: intentRow.localIntentId,
-        assessmentRef: assessmentProjection.payload.assessmentId,
-        assessmentDigest: assessmentProjection.receiptDigest,
-        provider: "github"
-      });
-      expect(intentProjectionRow.dependsOnReceiptId).toBe(
-        assessmentProjection.receiptId
-      );
-      expect(attemptProjection.predecessorReceiptDigests).toEqual([
-        intentProjection.receiptDigest
-      ]);
-      expect(attemptProjection.payload).toMatchObject({
-        localIntentId: intentRow.localIntentId,
-        attemptNumber: 1,
-        outcome: "accepted",
-        reasonCode: "provider_accepted"
-      });
-      expect(attemptProjectionRow.dependsOnReceiptId).toBe(
-        intentProjection.receiptId
-      );
-      expect(providerProjection.predecessorReceiptDigests).toEqual([
-        attemptProjection.receiptDigest
-      ]);
-      expect(providerProjection.payload).toMatchObject({
-        localIntentId: intentRow.localIntentId,
-        providerReceiptId: "comment_101",
-        resourceIdentity: "github:comment:101",
-        outcome: "succeeded",
-        reasonCode: "provider_accepted"
-      });
-      expect(providerProjectionRow.dependsOnReceiptId).toBe(
-        attemptProjection.receiptId
-      );
-      await wait(100);
-      expect(sqlite.prepare(`SELECT count(*) AS count
-        FROM callback_deliveries WHERE run_id = ?
-        AND dispatch_mode = 'legacy'`).get(runId)).toEqual(
-        legacyDeliveriesBeforeHostedCompletion
-      );
-      expect(sqlite.prepare(`SELECT kind, status, count(*) AS count
-        FROM callback_deliveries WHERE run_id = ?
-        AND dispatch_mode = 'legacy'
-        GROUP BY kind, status`).all(runId)).toEqual([
-        { kind: "acknowledgement", status: "delivered", count: 1 }
-      ]);
-      expect(sqlite.prepare(`SELECT dispatch_mode AS dispatchMode,
-        governed_state AS governedState, count(*) AS count
-        FROM callback_deliveries WHERE run_id = ?
-        AND dispatch_mode = 'governed'
-        GROUP BY dispatch_mode, governed_state`).all(runId)).toEqual([
-        { dispatchMode: "governed", governedState: "accepted", count: 1 }
-      ]);
-      expect(sqlite.prepare(`SELECT count(*) AS count
-        FROM control_plane_projection_outbox
-        WHERE receipt_kind = 'completion_assessment'`).get()).toEqual({ count: 1 });
-      expect(sqlite.prepare(`SELECT count(*) AS count FROM completion_assessments
-        WHERE work_thread_id = ?`).get(runRow.workThreadId)).toEqual({ count: 1 });
-      expect(providerDeliveries).toHaveLength(1);
+      expect(graphqlRequests).toEqual([]);
     } finally {
-      await app.stopBackgroundWorkers();
-      sqlite.close();
+      globalThis.fetch = originalFetch;
     }
-  }, 15_000);
+  });
+
+  it("cancels an active Linear Agent Session run when Linear sends a stop signal", async () => {
+    const presentations: DispatcherDeliveryPresentation[] = [];
+    const graphqlRequests: Array<{ query?: string }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url, init) => {
+      if (String(url) !== "https://linear.example/graphql") {
+        throw new Error(`Unexpected Linear test request: ${String(url)}`);
+      }
+      const body = JSON.parse(String(init?.body)) as { query?: string };
+      graphqlRequests.push(body);
+      return Response.json({
+        data: {
+          agentSessionUpdate: { success: true },
+          agentActivityCreate: {
+            success: true,
+            agentActivity: { id: `activity_${graphqlRequests.length}` }
+          }
+        }
+      });
+    }) as typeof fetch;
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      deliveryProducer: {
+        async enqueue(presentation) {
+          presentations.push(presentation);
+          return { outcome: "queued", sideEffectIntentId: `intent_${presentations.length}` };
+        }
+      }
+    });
+
+    try {
+      await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
+      await app.request(
+        "/v1/repo-bindings",
+        jsonRequest({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
+      );
+      await app.request(
+        "/v1/linear-relay-installations",
+        jsonRequest({
+          id: "install_agent_stop",
+          webhookPath: "/linear/webhooks/install_agent_stop",
+          webhookSecret: "linear_webhook_secret",
+          token: "lin_api_token",
+          graphqlUrl: "https://linear.example/graphql",
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo"
+        })
+      );
+
+      const agentSession = linearAgentSessionFixture("agent_session_stop_1");
+      const created = await app.request(
+        "/linear/webhooks/install_agent_stop",
+        signedLinearWebhookRequest({
+          type: "AgentSessionEvent",
+          action: "created",
+          webhookId: "linear_agent_created_1",
+          organizationId: "org_1",
+          createdAt: "2026-07-07T00:00:00.000Z",
+          webhookTimestamp: Date.now(),
+          promptContext: "<issue identifier=\"ENG-1\">Demo</issue>",
+          agentSession
+        }, "linear_webhook_secret")
+      );
+      const runId = String((await created.json()).runId);
+      expect(runId).toMatch(/^run_/);
+      await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+      await app.request(
+        `/v1/runners/runner_1/runs/${runId}/running`,
+        jsonRequest({ executor: "echo" })
+      );
+      await wait(30);
+      expect(graphqlRequests).toEqual([]);
+
+      const followUp = await app.request("/v1/runs", jsonRequest({
+        runId: "follow_up_linear_agent_stop",
+        event: {
+          ...linearIssueEvent({
+            id: "evt_linear_agent_stop_follow_up",
+            sourceEventId: "linear_agent_stop_follow_up"
+          }),
+          callback: {
+            provider: "linear",
+            uri: "linear://agent-session/agent_session_stop_1/activities",
+            threadKey: "ENG|issue|ENG-1"
+          },
+          metadata: {
+            repoProvider: "github",
+            owner: "acme",
+            repo: "demo",
+            agentSessionId: "agent_session_stop_1",
+            linearRelayInstallationId: "install_agent_stop",
+            graphqlUrl: "https://linear.example/graphql"
+          }
+        }
+      }));
+      expect(followUp.status).toBe(202);
+      graphqlRequests.length = 0;
+      presentations.length = 0;
+
+      const stopped = await app.request(
+        "/linear/webhooks/install_agent_stop",
+        signedLinearWebhookRequest({
+          type: "AgentSessionEvent",
+          action: "prompted",
+          webhookId: "linear_agent_stop_1",
+          organizationId: "org_1",
+          createdAt: "2026-07-07T00:00:01.000Z",
+          webhookTimestamp: Date.now(),
+          agentActivity: { id: "activity_stop_1", body: "Stop", signal: "stop" },
+          agentSession
+        }, "linear_webhook_secret")
+      );
+
+      expect(stopped.status).toBe(200);
+      await expect(stopped.json()).resolves.toEqual({ ok: true, action: "stop" });
+      await expect((await app.request(`/v1/runs/${runId}`)).json()).resolves.toMatchObject({
+        run: { id: runId, status: "cancelled", result: { conclusion: "cancelled" } }
+      });
+      await expect((await app.request(
+        "/v1/follow-up-requests/follow_up_linear_agent_stop"
+      )).json()).resolves.toMatchObject({
+        followUpRequest: { id: "follow_up_linear_agent_stop", status: "queued" }
+      });
+      expect(graphqlRequests).toEqual([]);
+      expect(presentations).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          kind: "source_thread_control",
+          auditRunId: runId,
+          body: expect.stringContaining(`Cancellation requested for run ${runId}`)
+        })
+      ]));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("refreshes OAuth relay installations uploaded through the static relay endpoint", async () => {
+    let now = new Date("2026-07-07T00:00:00.000Z");
+    const tokenRequests: Array<Record<string, string>> = [];
+    const graphqlRequests: Array<{ authorization: string | null; body: { query?: string } }> = [];
+    const deliveries: CapturedBusinessDelivery[] = [];
+    const linearFetch = (async (url, init) => {
+      const requestUrl = String(url);
+      if (requestUrl === "https://linear.example/oauth/token") {
+        const body = new URLSearchParams(String(init?.body ?? ""));
+        tokenRequests.push(Object.fromEntries(body.entries()));
+        return Response.json({
+          access_token: "linear_access_refreshed",
+          refresh_token: "linear_refresh_new",
+          expires_in: 3600,
+          scope: "read,comments:create"
+        });
+      }
+      if (requestUrl !== "https://linear.example/graphql") {
+        throw new Error(`Unexpected Linear test request: ${requestUrl}`);
+      }
+      const body = JSON.parse(String(init?.body)) as { query?: string };
+      graphqlRequests.push({
+        authorization: new Headers(init?.headers).get("authorization"),
+        body
+      });
+      return Response.json({
+        data: {
+          issueUpdate: {
+            success: true,
+            issue: { id: "issue_123", url: "https://linear.app/acme/issue/ENG-1/demo" }
+          }
+        }
+      });
+    }) as typeof fetch;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = linearFetch;
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      deliveryProducer: captureBusinessDeliveries((delivery) => {
+        deliveries.push(delivery);
+      }),
+      linearOAuthInstall: {
+        clientId: "linear_client",
+        clientSecret: "linear_secret",
+        redirectUri: "https://relay.example/linear/oauth/callback",
+        tokenUrl: "https://linear.example/oauth/token",
+        fetchImpl: linearFetch,
+        now: () => now,
+        refreshSkewMs: 0
+      }
+    });
+
+    try {
+      await app.request(
+        "/v1/repo-bindings",
+        jsonRequest({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
+      );
+      const stored = await app.request(
+        "/v1/linear-relay-installations",
+        jsonRequest({
+          id: "install_static_oauth",
+          webhookPath: "/linear/webhooks/install_static_oauth",
+          webhookSecret: "linear_webhook_secret",
+          token: "linear_access_old",
+          auth: {
+            method: "oauth_app",
+            actor: "app",
+            clientId: "linear_client",
+            refreshToken: "linear_refresh_old",
+            accessTokenExpiresAt: "2026-07-07T00:01:00.000Z",
+            scopes: ["read", "comments:create"]
+          },
+          graphqlUrl: "https://linear.example/graphql",
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo"
+        })
+      );
+      expect(stored.status).toBe(201);
+      const storedBody = await stored.json();
+      expect(JSON.stringify(storedBody)).not.toContain("linear_access_old");
+      expect(JSON.stringify(storedBody)).not.toContain("linear_refresh_old");
+      expect((await app.request(
+        "/v1/repo-bindings/github/acme/demo/mutation-mappings",
+        jsonRequest({
+          mapping: {
+            id: "linear_priority_priority",
+            adapter: "linear",
+            domain: "priority",
+            strategy: "priority",
+            values: { high: "2" }
+          }
+        })
+      )).status).toBe(201);
+
+      const event = await seedLinearPriorityProposal({
+        app,
+        runId: "run_static_oauth_refresh",
+        threadKey: "ENG|issue|ENG-1-static-refresh",
+        installationId: "install_static_oauth"
+      });
+      expect(tokenRequests).toEqual([]);
+
+      now = new Date("2026-07-07T00:10:00.000Z");
+      deliveries.length = 0;
+      const apply = await app.request("/v1/thread-actions", jsonRequest({
+        rawText: "apply 1",
+        actor: { provider: "linear", providerUserId: "user_1", handle: "Ada" },
+        callback: event.callback
+      }));
+
+      expect(apply.status).toBe(201);
+      expect(tokenRequests).toEqual([
+        {
+          client_id: "linear_client",
+          refresh_token: "linear_refresh_old",
+          grant_type: "refresh_token",
+          client_secret: "linear_secret"
+        }
+      ]);
+      expect(graphqlRequests).toHaveLength(1);
+      expect(graphqlRequests[0]).toMatchObject({
+        authorization: "Bearer linear_access_refreshed"
+      });
+      expect(graphqlRequests[0]!.body.query).toContain("issueUpdate");
+      expect(deliveries.some((delivery) => delivery.kind === "final")).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("deduplicates concurrent OAuth relay installation refreshes into a single token request", async () => {
+    let now = new Date("2026-07-07T00:00:00.000Z");
+    const tokenRequests: Array<Record<string, string>> = [];
+    const graphqlAuthorizations: Array<string | null> = [];
+    const linearFetch = (async (url, init) => {
+      const requestUrl = String(url);
+      if (requestUrl === "https://linear.example/oauth/token") {
+        const body = new URLSearchParams(String(init?.body ?? ""));
+        tokenRequests.push(Object.fromEntries(body.entries()));
+        await wait(50);
+        return Response.json({
+          access_token: "linear_access_refreshed",
+          refresh_token: "linear_refresh_new",
+          expires_in: 3600,
+          scope: "read,comments:create"
+        });
+      }
+      if (requestUrl !== "https://linear.example/graphql") {
+        throw new Error(`Unexpected Linear test request: ${requestUrl}`);
+      }
+      graphqlAuthorizations.push(new Headers(init?.headers).get("authorization"));
+      return Response.json({
+        data: {
+          issueUpdate: {
+            success: true,
+            issue: { id: "issue_123", url: "https://linear.app/acme/issue/ENG-1/demo" }
+          }
+        }
+      });
+    }) as typeof fetch;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = linearFetch;
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      deliveryProducer: captureBusinessDeliveries(() => undefined),
+      linearOAuthInstall: {
+        clientId: "linear_client",
+        clientSecret: "linear_secret",
+        redirectUri: "https://relay.example/linear/oauth/callback",
+        tokenUrl: "https://linear.example/oauth/token",
+        fetchImpl: linearFetch,
+        now: () => now,
+        refreshSkewMs: 0
+      }
+    });
+
+    try {
+      await app.request(
+        "/v1/repo-bindings",
+        jsonRequest({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
+      );
+      await app.request(
+        "/v1/linear-relay-installations",
+        jsonRequest({
+          id: "install_concurrent_oauth",
+          webhookPath: "/linear/webhooks/install_concurrent_oauth",
+          webhookSecret: "linear_webhook_secret",
+          token: "linear_access_old",
+          auth: {
+            method: "oauth_app",
+            actor: "app",
+            clientId: "linear_client",
+            refreshToken: "linear_refresh_old",
+            accessTokenExpiresAt: "2026-07-07T00:01:00.000Z",
+            scopes: ["read", "comments:create"]
+          },
+          graphqlUrl: "https://linear.example/graphql",
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo"
+        })
+      );
+      await app.request(
+        "/v1/repo-bindings/github/acme/demo/mutation-mappings",
+        jsonRequest({
+          mapping: {
+            id: "linear_priority_priority",
+            adapter: "linear",
+            domain: "priority",
+            strategy: "priority",
+            values: { high: "2" }
+          }
+        })
+      );
+      const firstEvent = await seedLinearPriorityProposal({
+        app,
+        runId: "run_concurrent_oauth_1",
+        threadKey: "ENG|issue|ENG-1-concurrent-1",
+        installationId: "install_concurrent_oauth"
+      });
+      const secondEvent = await seedLinearPriorityProposal({
+        app,
+        runId: "run_concurrent_oauth_2",
+        threadKey: "ENG|issue|ENG-1-concurrent-2",
+        installationId: "install_concurrent_oauth"
+      });
+      expect(tokenRequests).toEqual([]);
+      now = new Date("2026-07-07T00:10:00.000Z");
+
+      const apply = (callback: typeof firstEvent.callback) => app.request(
+        "/v1/thread-actions",
+        jsonRequest({
+          rawText: "apply 1",
+          actor: { provider: "linear", providerUserId: "user_1", handle: "Ada" },
+          callback
+        })
+      );
+      const [first, second] = await Promise.all([
+        apply(firstEvent.callback),
+        apply(secondEvent.callback)
+      ]);
+
+      expect(first.status).toBe(201);
+      expect(second.status).toBe(201);
+      expect(tokenRequests).toEqual([
+        {
+          client_id: "linear_client",
+          refresh_token: "linear_refresh_old",
+          grant_type: "refresh_token",
+          client_secret: "linear_secret"
+        }
+      ]);
+      expect(graphqlAuthorizations).toEqual([
+        "Bearer linear_access_refreshed",
+        "Bearer linear_access_refreshed"
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("sanitizes every runner-controlled sibling field before persistence or presentation", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "opentag-safe-runner-ingress-"));
+    onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
+    const databasePath = join(directory, "dispatcher.sqlite");
+    const presentations: DispatcherDeliveryPresentation[] = [];
+    const app = createDispatcherApp({
+      databasePath,
+      runnerLeaseSeconds: 60,
+      deliveryProducer: {
+        async enqueue(presentation) {
+          presentations.push(presentation);
+          return { outcome: "queued", sideEffectIntentId: `intent_${presentations.length}` };
+        }
+      }
+    });
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_safe_ingress",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+    const event = slackRepoEvent({
+      id: "evt_safe_runner_ingress",
+      sourceEventId: "EvSafeRunnerIngress",
+      threadKey: "T123|C123|1710000000.000100"
+    });
+    await bindSourceChannel(app, event);
+    expect((await app.request(
+      "/v1/runs",
+      jsonRequest({ runId: "run_safe_runner_ingress", event })
+    )).status).toBe(201);
+    const firstClaim = await app.request("/v1/runners/runner_safe_ingress/claim", { method: "POST" });
+    const firstLease = await firstClaim.json() as { attemptId: string; fencingToken: string };
+    expireRunnerLease(databasePath, "run_safe_runner_ingress", firstLease.attemptId);
+    const secondClaim = await app.request("/v1/runners/runner_safe_ingress/claim", { method: "POST" });
+    const lease = await secondClaim.json() as { attemptId: string; fencingToken: string };
+
+    expect((await app.request(
+      "/v1/runners/runner_safe_ingress/runs/run_safe_runner_ingress/running",
+      jsonRequest({
+        ...lease,
+        executor: firstLease.fencingToken,
+        executorCapability: {
+          nested: {
+            historicalFence: firstLease.fencingToken,
+            accessToken: "opaque-ingress-token"
+          }
+        },
+        idempotencyKey: firstLease.fencingToken
+      })
+    )).status).toBe(200);
+    expect((await app.request(
+      "/v1/runners/runner_safe_ingress/runs/run_safe_runner_ingress/progress",
+      jsonRequest({
+        ...lease,
+        message: `safe progress ${firstLease.fencingToken}`,
+        type: firstLease.fencingToken,
+        visibility: "human",
+        idempotencyKey: firstLease.fencingToken
+      })
+    )).status).toBe(200);
+    expect((await app.request(
+      "/v1/runners/runner_safe_ingress/runs/run_safe_runner_ingress/complete",
+      jsonRequest({
+        ...lease,
+        result: {
+          conclusion: "success",
+          summary: `safe completion ${firstLease.fencingToken}`,
+          artifacts: [
+            {
+              title: "result",
+              uri: "workspace/result.md",
+              metadata: { historicalFence: firstLease.fencingToken }
+            }
+          ],
+          verification: [
+            { command: "verify", outcome: "passed", excerpt: firstLease.fencingToken }
+          ]
+        },
+        idempotencyKey: firstLease.fencingToken
+      })
+    )).status).toBe(200);
+
+    const run = await (await app.request("/v1/runs/run_safe_runner_ingress")).json();
+    const events = await (await app.request("/v1/runs/run_safe_runner_ingress/events")).json();
+    const durableAndPresented = JSON.stringify({ run, events, presentations });
+    expect(durableAndPresented).not.toContain(firstLease.fencingToken);
+    expect(durableAndPresented).not.toContain(lease.fencingToken);
+    expect(durableAndPresented).not.toContain("opaque-ingress-token");
+    expect(durableAndPresented).toContain("[redacted]");
+  });
 });

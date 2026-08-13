@@ -132,6 +132,16 @@ function filesystemFailingAt(
 }
 
 describe("OpenTag CLI config", () => {
+  it("preserves an explicit secret-free Slack installation registry without resolving credentials", () => {
+    const source = config(); const digest = `sha256:${"a".repeat(64)}`;
+    const parsed = parseCliConfig({ ...source, platforms: { ...source.platforms, slack: { mode: "events_api", botToken: "unused",
+      signingSecret: "unused", teamId: "T1", channelId: "C1", appId: "A1", installations: [{ recordVersion: 1,
+        installationId: "install_1", teamId: "T1", appId: "A1", providerInstanceId: "slack_install_1", bindingDigest: digest,
+        principalDigest: digest, principalAssurance: "provider_verified", lifecycle: "active", configGeneration: 4, configGenerationDigest: digest,
+        credentialReference: { custody: "local", id: "slack.bot.install_1" }, channelIds: ["C1", "C2"] }] } } });
+    expect(parsed.platforms.slack?.installations).toHaveLength(1);
+  });
+
   it("resolves config and state paths from XDG-style environment", () => {
     const home = tempDir();
     expect(defaultConfigPath({ XDG_CONFIG_HOME: join(home, "xdg-config") }, home)).toBe(

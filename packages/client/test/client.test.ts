@@ -1637,6 +1637,43 @@ describe("@opentag/client", () => {
     ]);
   });
 
+  it('submits credential-safe Slack self-service delivery presentations', async () => {
+    const requests: Array<{ url: string; body?: unknown }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: 'http://dispatcher.test',
+      fetchImpl: async (url, init) => {
+        requests.push({
+          url: String(url),
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        });
+        return jsonResponse({ outcome: 'activation_blocked' }, 202);
+      },
+    });
+    const input = {
+      cause: {
+        assurance: 'authenticated_socket_mode' as const,
+        eventId: 'Ev-client',
+        eventTime: 1_775_692_800,
+        teamId: 'T1',
+        channelId: 'C1',
+        threadTs: '170.001',
+        userId: 'U1',
+        command: 'help' as const,
+      },
+      presentation: { text: 'Help', textFormat: 'mrkdwn' as const },
+    };
+
+    await expect(client.submitSlackSelfServiceDelivery(input)).resolves.toEqual({
+      outcome: 'activation_blocked',
+    });
+    expect(requests).toEqual([
+      {
+        url: 'http://dispatcher.test/v1/delivery-presentations/slack-self-service',
+        body: input,
+      },
+    ]);
+  });
+
   it("calls repo policy rule endpoints", async () => {
     const requests: Array<{ url: string; method: string; body?: unknown }> = [];
     const client = createOpenTagClient({
@@ -1902,8 +1939,6 @@ describe("@opentag/client", () => {
       humanEventCount: 2,
       auditEventCount: 8,
       debugEventCount: 0,
-      humanCallbackCount: 2,
-      threadNoiseRatio: 0.25,
       suggestedChangesCount: 2,
       approvalDecisionCount: 1,
       applyPlanCount: 1,

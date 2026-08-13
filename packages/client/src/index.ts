@@ -73,6 +73,8 @@ import {
   WorkstreamSchema,
   WorkLoopViewSchema,
   WorkThreadSchema,
+  type SlackSelfServiceDeliveryInput,
+  type SlackSelfServiceDeliveryResult,
   type ActorIdentity,
   type Action,
   type ActionPermissionRequest,
@@ -535,6 +537,8 @@ export type ThreadActionResult = {
   run?: OpenTagRun;
 };
 
+export type { SlackSelfServiceDeliveryCommand, SlackSelfServiceDeliveryInput, SlackSelfServiceDeliveryResult } from "@opentag/core";
+
 export type CancelRunResult = {
   outcome: "cancelled";
   run: OpenTagRun;
@@ -554,8 +558,6 @@ export type RunMetrics = {
   humanEventCount: number;
   auditEventCount: number;
   debugEventCount: number;
-  humanCallbackCount: number;
-  threadNoiseRatio: number;
   suggestedChangesCount: number;
   approvalDecisionCount: number;
   applyPlanCount: number;
@@ -790,6 +792,7 @@ export type OpenTagClient = {
   getApplyPlan(input: { applyPlanId: string }): Promise<{ plan: ApplyPlan }>;
   createChildRun(input: { parentRunId: string } & ChildRunInput): Promise<{ run: OpenTagRun }>;
   submitThreadAction(input: ThreadActionInput): Promise<ThreadActionResult>;
+  submitSlackSelfServiceDelivery(input: SlackSelfServiceDeliveryInput): Promise<SlackSelfServiceDeliveryResult>;
 };
 
 export type DispatcherRunnerClient = {
@@ -3098,6 +3101,14 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       });
       await assertOk(response, "submitThreadAction");
       return (await response.json()) as ThreadActionResult;
+    },
+
+    async submitSlackSelfServiceDelivery(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/delivery-presentations/slack-self-service`, {
+        method: "POST", headers: jsonHeaders(options.pairingToken), body: JSON.stringify(input)
+      });
+      await assertOk(response, "submitSlackSelfServiceDelivery");
+      return (await response.json()) as SlackSelfServiceDeliveryResult;
     }
   };
 }

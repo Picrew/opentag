@@ -416,7 +416,6 @@ export const AdapterMutationMappingSchema = z.object({
 
 export const SuccessMetricNameSchema = z.enum([
   "time_to_first_useful_artifact",
-  "thread_noise_ratio",
   "artifact_acceptance_rate",
   "context_reuse_rate",
   "external_write_approval_rate",

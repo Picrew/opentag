@@ -2,39 +2,18 @@ import { randomUUID } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { createOpenTagClient, type ChannelRuntimeStatus } from "@opentag/client";
 import {
-  createCompositeCallbackSink,
-  createCompositeSourceReceiptSink,
-  createDiscordCallbackSink,
-  createDispatcherApp,
-  createGitHubCallbackSink,
-  createGitLabCallbackSink,
-  createLarkCallbackSink,
-  createLinearCallbackSink,
-  createLarkSourceReceiptSink,
-  createSlackCallbackSink,
-  createSlackSourceReceiptSink,
-  createTeamsCallbackSink,
-  createTelegramCallbackSink,
-  type ChannelPrincipalCredential,
-  type GitHubCompletionPolicy,
-  type GitHubDefaultCompletionMode,
-  type LinearTokenProvider
+  createDispatcherApp, getUnifiedDeliveryActivationState, openDispatcherDatabase, type ChannelPrincipalCredential, type GitHubCompletionPolicy, type GitHubDefaultCompletionMode
 } from "@opentag/dispatcher";
 import type { DispatcherRateLimitOptions, LinearOAuthInstallOptions, RelayPlatformCapability } from "@opentag/dispatcher";
 import { createDiscordInteractionsApp, startDiscordGateway } from "@opentag/discord";
 import { createGitLabWebhookApp } from "@opentag/gitlab";
 import { createLinearWebhookApp, type LinearProjectTarget } from "@opentag/linear";
-import {
-  createTeamsAuthenticator,
-  createTeamsConnector,
-  createTeamsTokenProvider,
-  createTeamsWebhookApp
-} from "@opentag/teams";
+import { createSlackInstallationRegistry, type SlackInstallationRecordV1 } from "@opentag/store";
+import { createTeamsAuthenticator, createTeamsWebhookApp } from "@opentag/teams";
 import {
   TELEGRAM_DOCTOR_TITLE,
   TELEGRAM_STATUS_TITLE,
   createTelegramEventsApp,
-  createTelegramSendMessagePayload,
   type TelegramChannelBinding,
   type TelegramStopRunResult
 } from "@opentag/telegram";
@@ -45,6 +24,7 @@ import {
   type AdapterMutationMapping,
   type OpenTagSourceThreadQueuedFollowUp
 } from "@opentag/core";
+export { getUnifiedDeliveryActivationState } from "@opentag/dispatcher";
 
 export type LocalDispatcherRuntimeInput = {
   port: number;
@@ -54,12 +34,8 @@ export type LocalDispatcherRuntimeInput = {
   runnerTokens?: string[];
   revokedRunnerTokenFingerprints?: string[];
   channelPrincipals?: ChannelPrincipalCredential[];
-  /**
-   * Backward-compatible GitHub token. When specific callback/apply tokens are
-   * omitted, this token is used for both callback delivery and direct apply.
-   */
+  slackInstallations?: readonly SlackInstallationRecordV1[];
   githubToken?: string;
-  githubCallbackToken?: string;
   githubApplyToken?: string | null;
   completionPolicies?: GitHubCompletionPolicy[];
   defaultGitHubCompletion?: GitHubDefaultCompletionMode;
@@ -69,7 +45,7 @@ export type LocalDispatcherRuntimeInput = {
   gitlabWebhookSecret?: string;
   gitlabWebhookPath?: string;
   linearToken?: string;
-  linearTokenProvider?: LinearTokenProvider;
+  linearTokenProvider?: () => Promise<string | undefined> | string | undefined;
   linearGraphqlUrl?: string;
   linearMappings?: AdapterMutationMapping[];
   linearOAuthInstall?: LinearOAuthInstallOptions;
@@ -81,12 +57,7 @@ export type LocalDispatcherRuntimeInput = {
     appSecret: string;
     domain: "lark" | "feishu";
   };
-  slackBotToken?: string;
-  slackBotTokensByAgentId?: Record<string, string>;
-  telegramBotToken?: string;
-  telegramBotTokensByAgentId?: Record<string, string>;
   telegramBots?: LocalTelegramBotConfig[];
-  telegramSendTimeoutMs?: number;
   discordMode?: "gateway" | "webhook";
   discordPublicKey?: string;
   discordBotToken?: string;
@@ -135,7 +106,16 @@ type ClosableServer = ReturnType<typeof serve> & {
   closeIdleConnections?: () => void;
 };
 
-function relayCapabilitiesFromInput(input: LocalDispatcherRuntimeInput): RelayPlatformCapability[] {
+function onceAsync(action: () => Promise<void>): () => Promise<void> {
+  let promise: Promise<void> | undefined;
+  return () => (promise ??= action());
+}
+
+function blockedDeliveryReason(): string { const activation = getUnifiedDeliveryActivationState(); return ["provider_adapter_not_registered", `unified_delivery_${activation.status}`, activation.releaseStatus, ...activation.reasons].join(":"); }
+
+async function rejectUnregisteredProviderDelivery(): Promise<never> { throw new Error("provider_adapter_not_registered"); }
+
+export function relayCapabilitiesFromInput(input: LocalDispatcherRuntimeInput): RelayPlatformCapability[] {
   const linearTokenConfigured = Boolean(input.linearToken || input.linearTokenProvider);
   const linearHostedOAuthConfigured = Boolean(input.linearOAuthInstall);
   const linearHostedOAuthWebhookConfigured = Boolean(input.linearOAuthInstall?.webhookSecret);
@@ -150,12 +130,7 @@ function relayCapabilitiesFromInput(input: LocalDispatcherRuntimeInput): RelayPl
                   path: input.linearWebhookSecret ? (input.linearWebhookPath ?? "/linear/webhooks") : (input.linearOAuthInstall?.webhookPath ?? "/linear/oauth/webhooks"),
                   signatureVerification: "configured" as const
                 },
-                callback: {
-                  enabled: linearTokenConfigured || linearHostedOAuthConfigured,
-                  ...(!linearTokenConfigured && !linearHostedOAuthConfigured
-                    ? { reason: "OPENTAG_LINEAR_API_KEY, OPENTAG_LINEAR_TOKEN, or hosted Linear OAuth install is not configured." }
-                    : {})
-                },
+                callback: { enabled: false, reason: blockedDeliveryReason() },
                 apply: {
                   enabled: linearTokenConfigured || linearHostedOAuthConfigured,
                   ...(!linearTokenConfigured && !linearHostedOAuthConfigured
@@ -184,10 +159,7 @@ function relayCapabilitiesFromInput(input: LocalDispatcherRuntimeInput): RelayPl
               path: input.gitlabWebhookPath ?? "/gitlab/webhooks",
               signatureVerification: "configured" as const
             },
-            callback: {
-              enabled: Boolean(input.gitlabToken),
-              ...(!input.gitlabToken ? { reason: "OPENTAG_GITLAB_TOKEN is not configured." } : {})
-            },
+            callback: { enabled: false, reason: blockedDeliveryReason() },
             apply: {
               enabled: Boolean(input.gitlabToken),
               ...(!input.gitlabToken ? { reason: "OPENTAG_GITLAB_TOKEN is not configured." } : {})
@@ -198,30 +170,6 @@ function relayCapabilitiesFromInput(input: LocalDispatcherRuntimeInput): RelayPl
     ...(linearCapability ? [linearCapability] : [])
   ];
 }
-
-function parseAgentTokenMap(name: string, raw: string | undefined): Record<string, string> | undefined {
-  if (!raw) return undefined;
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("Value is not a JSON object");
-    }
-    const entries = Object.entries(parsed);
-    if (entries.length === 0) return undefined;
-    for (const [agentId, token] of entries) {
-      if (!agentId.trim()) {
-        throw new Error("Agent id must be a non-empty string");
-      }
-      if (typeof token !== "string" || !token.trim()) {
-        throw new Error(`Token for agent ${agentId} must be a non-empty string`);
-      }
-    }
-    return Object.fromEntries(entries) as Record<string, string>;
-  } catch (error) {
-    throw new Error(`Failed to parse ${name}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
-
 
 function isNotFoundError(error: unknown): boolean {
   if (error && typeof error === "object") {
@@ -581,19 +529,13 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
         }]
       : [])
   ];
-  const slackBotTokensByAgentId = parseAgentTokenMap("OPENTAG_SLACK_BOT_TOKENS_JSON", env.OPENTAG_SLACK_BOT_TOKENS_JSON);
   const runnerTokens = parseStringList("OPENTAG_RUNNER_TOKENS_JSON", env.OPENTAG_RUNNER_TOKENS_JSON);
   const revokedRunnerTokenFingerprints = parseStringList(
     "OPENTAG_REVOKED_RUNNER_TOKEN_FINGERPRINTS_JSON",
     env.OPENTAG_REVOKED_RUNNER_TOKEN_FINGERPRINTS_JSON
   );
-  const telegramBotTokensByAgentId = parseAgentTokenMap(
-    "OPENTAG_TELEGRAM_BOT_TOKENS_JSON",
-    env.OPENTAG_TELEGRAM_BOT_TOKENS_JSON
-  );
   const telegramBots = telegramBotsFromEnv(env);
   assertUniqueTelegramBotIds(telegramBots);
-  const telegramSendTimeoutMs = parsePositiveIntegerEnv("OPENTAG_TELEGRAM_SEND_TIMEOUT_MS", env.OPENTAG_TELEGRAM_SEND_TIMEOUT_MS);
   const discordMode = parseDiscordMode("OPENTAG_DISCORD_MODE", env.OPENTAG_DISCORD_MODE);
   const hardening = dispatcherRuntimeHardeningInputFromEnv(env);
   const linearToken = env.OPENTAG_LINEAR_API_KEY ?? env.OPENTAG_LINEAR_TOKEN;
@@ -633,7 +575,6 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(revokedRunnerTokenFingerprints ? { revokedRunnerTokenFingerprints } : {}),
     ...(channelPrincipals.length ? { channelPrincipals } : {}),
     ...(env.OPENTAG_GITHUB_TOKEN ? { githubToken: env.OPENTAG_GITHUB_TOKEN } : {}),
-    ...(env.OPENTAG_GITHUB_CALLBACK_TOKEN ? { githubCallbackToken: env.OPENTAG_GITHUB_CALLBACK_TOKEN } : {}),
     ...(githubApplyToken !== undefined ? { githubApplyToken } : {}),
     ...(completionPolicies ? { completionPolicies } : {}),
     ...(defaultGitHubCompletion ? { defaultGitHubCompletion } : {}),
@@ -657,12 +598,7 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
           }
         }
       : {}),
-    ...(env.OPENTAG_SLACK_BOT_TOKEN ? { slackBotToken: env.OPENTAG_SLACK_BOT_TOKEN } : {}),
-    ...(slackBotTokensByAgentId ? { slackBotTokensByAgentId } : {}),
-    ...(env.OPENTAG_TELEGRAM_BOT_TOKEN ? { telegramBotToken: env.OPENTAG_TELEGRAM_BOT_TOKEN } : {}),
-    ...(telegramBotTokensByAgentId ? { telegramBotTokensByAgentId } : {}),
     ...(telegramBots ? { telegramBots } : {}),
-    ...(telegramSendTimeoutMs ? { telegramSendTimeoutMs } : {}),
     ...(discordMode ? { discordMode } : {}),
     ...(env.OPENTAG_DISCORD_PUBLIC_KEY ? { discordPublicKey: env.OPENTAG_DISCORD_PUBLIC_KEY } : {}),
     ...(env.OPENTAG_DISCORD_BOT_TOKEN ? { discordBotToken: env.OPENTAG_DISCORD_BOT_TOKEN } : {}),
@@ -792,14 +728,17 @@ function startTelegramPolling(input: {
 }
 
 export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispatcherHandle {
-  const githubCallbackToken = input.githubCallbackToken ?? input.githubToken;
   const githubApplyToken = input.githubApplyToken === null ? undefined : (input.githubApplyToken ?? input.githubToken);
   const reassessmentObligations = input.reassessmentObligations
     ?? reassessmentObligationTestRuntimeInputFromEnv(process.env);
   const backgroundHandles: BackgroundHandle[] = [];
+  createSlackInstallationRegistry(input.slackInstallations ?? []);
+  if (getUnifiedDeliveryActivationState().active) throw new Error("Active Slack delivery requires a supervised exact-installation composition.");
+  const sqlite = openDispatcherDatabase(input.databasePath);
 
   const app = createDispatcherApp({
     databasePath: input.databasePath,
+    sqlite,
     ...(input.completionPolicies ? { completionPolicies: input.completionPolicies } : {}),
     ...(input.defaultGitHubCompletion ? { defaultGitHubCompletion: input.defaultGitHubCompletion } : {}),
     ...(reassessmentObligations ? { reassessmentObligations } : {}),
@@ -832,60 +771,7 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
           }
         }
       : {}),
-    ...(input.linearOAuthInstall ? { linearOAuthInstall: input.linearOAuthInstall } : {}),
-    sourceReceiptSink: createCompositeSourceReceiptSink([
-      createSlackSourceReceiptSink({
-        ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),
-        ...(input.slackBotTokensByAgentId ? { botTokensByAgentId: input.slackBotTokensByAgentId } : {})
-      }),
-      createLarkSourceReceiptSink({
-        ...(input.lark
-          ? {
-              appId: input.lark.appId,
-              appSecret: input.lark.appSecret,
-              domain: input.lark.domain
-            }
-          : {})
-      })
-    ]),
-    callbackSink: createCompositeCallbackSink([
-      createGitHubCallbackSink({
-        ...(githubCallbackToken ? { token: githubCallbackToken } : {})
-      }),
-      createGitLabCallbackSink({
-        ...(input.gitlabToken ? { token: input.gitlabToken } : {})
-      }),
-      createLinearCallbackSink({
-        ...(input.linearToken ? { token: input.linearToken } : {}),
-        ...(input.linearTokenProvider ? { getToken: input.linearTokenProvider } : {}),
-        ...(input.linearGraphqlUrl ? { graphqlUrl: input.linearGraphqlUrl } : {})
-      }),
-      createSlackCallbackSink({
-        ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),
-        ...(input.slackBotTokensByAgentId ? { botTokensByAgentId: input.slackBotTokensByAgentId } : {})
-      }),
-      createLarkCallbackSink({
-        ...(input.lark
-          ? {
-              appId: input.lark.appId,
-              appSecret: input.lark.appSecret,
-              domain: input.lark.domain
-            }
-          : {})
-      }),
-      createTelegramCallbackSink({
-        ...(input.telegramBotToken ? { botToken: input.telegramBotToken } : {}),
-        ...(input.telegramBotTokensByAgentId ? { botTokensByAgentId: input.telegramBotTokensByAgentId } : {})
-      }),
-      createDiscordCallbackSink({
-        ...(input.discordBotToken ? { token: input.discordBotToken } : {})
-      }),
-      createTeamsCallbackSink({
-        ...(input.teamsAppId ? { appId: input.teamsAppId } : {}),
-        ...(input.teamsAppPassword ? { appPassword: input.teamsAppPassword } : {}),
-        ...(input.teamsTenantId ? { tenantId: input.teamsTenantId } : {})
-      })
-    ])
+    ...(input.linearOAuthInstall ? { linearOAuthInstall: input.linearOAuthInstall } : {})
   });
 
   if (input.gitlabWebhookSecret) {
@@ -954,10 +840,7 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
       dispatcherUrl: `http://127.0.0.1:${input.port}`,
       ...(input.pairingToken ? { pairingToken: input.pairingToken } : {})
     });
-    const telegramSendTimeoutMs = input.telegramSendTimeoutMs ?? 10_000;
-
     const telegramEventsAppInput = (telegramBots: LocalTelegramBotConfig[]): Parameters<typeof createTelegramEventsApp>[0] => {
-      const telegramBotTokenById = new Map(telegramBots.flatMap((bot) => (bot.botToken ? [[bot.botId, bot.botToken] as const] : [])));
       return {
         telegramBots,
         ...(input.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: input.maxRequestBodyBytes } : {}),
@@ -1048,26 +931,7 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
         async recordControlPlaneEvent(event) {
           await dispatcherClient.recordControlPlaneEvent(event);
         },
-        async reply(replyInput) {
-          const botToken = telegramBotTokenById.get(replyInput.botId);
-          if (!botToken) return;
-          const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(
-              createTelegramSendMessagePayload({
-                chatId: replyInput.chatId,
-                text: replyInput.text,
-                replyToMessageId: replyInput.messageId,
-                ...(replyInput.messageThreadId ? { messageThreadId: replyInput.messageThreadId } : {})
-              })
-            ),
-            signal: AbortSignal.timeout(telegramSendTimeoutMs)
-          });
-          if (!response.ok) {
-            throw new Error(`Telegram self-service reply failed with HTTP ${response.status}`);
-          }
-        },
+        reply: rejectUnregisteredProviderDelivery,
         now: () => new Date().toISOString()
       };
     };
@@ -1104,27 +968,12 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
       dispatcherUrl: `http://127.0.0.1:${input.port}`,
       ...(input.pairingToken ? { pairingToken: input.pairingToken } : {})
     });
-    const discordBotToken = input.discordBotToken;
     app.route(
       "/",
       createDiscordInteractionsApp({
         publicKey: input.discordPublicKey,
         ...(input.discordWebhookPath ? { webhookPath: input.discordWebhookPath } : {}),
-        ...(discordBotToken
-          ? {
-              async notifyChannel(target: { channelId: string; content: string }) {
-                const response = await fetch(`https://discord.com/api/v10/channels/${target.channelId}/messages`, {
-                  method: "POST",
-                  headers: { authorization: `Bot ${discordBotToken}`, "content-type": "application/json" },
-                  body: JSON.stringify({ content: target.content, allowed_mentions: { parse: [] } }),
-                  signal: AbortSignal.timeout(10_000)
-                });
-                if (!response.ok) {
-                  throw new Error(`Discord channel notice failed: ${response.status} ${await response.text()}`);
-                }
-              }
-            }
-          : {}),
+        notifyChannel: rejectUnregisteredProviderDelivery,
         async resolveChannelBinding({ applicationId, channelId }) {
           try {
             const { binding } = await dispatcherClient.getChannelBinding({
@@ -1170,6 +1019,7 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
     const discordBotToken = input.discordBotToken;
     const gatewayHandle = startDiscordGateway({
       botToken: discordBotToken,
+      notifyChannel: rejectUnregisteredProviderDelivery,
       async resolveChannelBinding({ applicationId, channelId }) {
         try {
           const { binding } = await dispatcherClient.getChannelBinding({
@@ -1211,16 +1061,6 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
       ...(input.pairingToken ? { pairingToken: input.pairingToken } : {})
     });
     const teamsAppId = input.teamsAppId;
-    const teamsAppPassword = input.teamsAppPassword;
-    // Built once and reused for every notifyConversation call — the token
-    // provider is a caching closure, and the connector is stateless, so there
-    // is no reason to rebuild either per call.
-    const teamsTokenProvider = createTeamsTokenProvider({
-      appId: teamsAppId,
-      appPassword: teamsAppPassword,
-      ...(input.teamsTenantId ? { tenantId: input.teamsTenantId } : {})
-    });
-    const teamsConnector = createTeamsConnector({ getToken: () => teamsTokenProvider.getToken() });
     app.route(
       "/",
       createTeamsWebhookApp({
@@ -1279,9 +1119,7 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
         async submitThreadAction(action) {
           await dispatcherClient.submitThreadAction(action);
         },
-        async notifyConversation({ serviceUrl, conversationId, text }) {
-          await teamsConnector.postMessage({ serviceUrl, conversationId, text });
-        },
+        notifyConversation: rejectUnregisteredProviderDelivery,
         now: () => new Date().toISOString()
       })
     );
@@ -1291,11 +1129,10 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
     fetch: app.fetch,
     port: input.port
   });
-
   return {
     url: `http://localhost:${input.port}`,
     server,
-    async close() {
+    close: onceAsync(async () => {
       await app.stopBackgroundWorkers();
       await new Promise<void>((resolve, reject) => {
         server.closeIdleConnections?.();
@@ -1309,6 +1146,7 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
         server.closeAllConnections?.();
       });
       await Promise.allSettled([...backgroundHandles].reverse().map((handle) => handle.close()));
-    }
+      sqlite.close();
+    })
   };
 }

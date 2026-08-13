@@ -455,8 +455,6 @@ function completionStatusFetch(input: {
           humanEventCount: 0,
           auditEventCount: 0,
           debugEventCount: 0,
-          humanCallbackCount: 0,
-          threadNoiseRatio: 0,
           suggestedChangesCount: 0,
           approvalDecisionCount: 0,
           applyPlanCount: 0,
@@ -1033,11 +1031,20 @@ describe("OpenTag CLI status", () => {
               createdAt: "2026-06-24T00:00:00.000Z"
             },
             {
-              type: "callback.final.delivered",
-              visibility: "human",
+              type: "delivery.intent.queued",
+              visibility: "audit",
               importance: "normal",
-              message: "Delivered final receipt.",
+              message: "Delivery intent queued for the provider side-effect kernel.",
+              payload: { presentationKind: "final", deliveryOutcome: "queued", sideEffectIntentId: "intent_status_1" },
               createdAt: "2026-06-24T00:01:00.000Z"
+            },
+            {
+              type: "delivery.activation_blocked",
+              visibility: "audit",
+              importance: "blocking",
+              message: "Delivery activation is blocked; no provider I/O was attempted.",
+              payload: { presentationKind: "final", deliveryOutcome: "activation_blocked" },
+              createdAt: "2026-06-24T00:01:01.000Z"
             }
           ]
         });
@@ -1046,12 +1053,10 @@ describe("OpenTag CLI status", () => {
         return Response.json({
           metrics: {
             runId: "run_status_1",
-            totalEventCount: 2,
-            humanEventCount: 1,
-            auditEventCount: 1,
+            totalEventCount: 3,
+            humanEventCount: 0,
+            auditEventCount: 3,
             debugEventCount: 0,
-            humanCallbackCount: 1,
-            threadNoiseRatio: 0.5,
             suggestedChangesCount: 1,
             approvalDecisionCount: 0,
             applyPlanCount: 0,
@@ -1099,18 +1104,19 @@ describe("OpenTag CLI status", () => {
                 createdAt: "2026-06-24T00:00:50.000Z"
               },
               {
-                type: "callback.final.delivered",
-                category: "callback_delivery",
-                visibility: "human",
+                type: "delivery.intent.queued",
+                category: "delivery",
+                visibility: "audit",
                 importance: "normal",
-                message: "Delivered final receipt.",
+                message: "Delivery intent queued for the provider side-effect kernel.",
                 createdAt: "2026-06-24T00:01:00.000Z"
               },
               {
-                type: "callback.progress.suppressed",
+                type: "delivery.activation_blocked",
+                category: "delivery",
                 visibility: "audit",
-                importance: "low",
-                message: "Suppressed progress callback.",
+                importance: "blocking",
+                message: "Delivery activation is blocked; no provider I/O was attempted.",
                 createdAt: "2026-06-24T00:01:01.000Z"
               }
             ]
@@ -1148,31 +1154,33 @@ describe("OpenTag CLI status", () => {
     expect(formatRunStatus(summary)).toContain("- report: Run report: opentag://run/run_status_1/report");
     expect(formatRunStatus(summary)).toContain("- log_summary: Log summary: opentag://run/run_status_1/log-summary");
     expect(formatRunStatus(summary)).toContain("- corepack pnpm test: passed");
-    expect(formatRunStatus(summary)).toContain("Metrics: 2 events, 1 suggested action(s), 0 apply plan(s), 0 stale intent(s)");
+    expect(formatRunStatus(summary)).toContain("Metrics: 3 events, 1 suggested action(s), 0 apply plan(s), 0 stale intent(s)");
     expect(formatRunStatus(summary)).toContain("Agent Work Ledger:");
     expect(formatRunStatus(summary)).toContain(
-      "entries: 6 (source_event=1, context_packet=1, executor_capability=1, artifact=1, callback_delivery=1, progress_visibility=1)"
+      "entries: 6 (source_event=1, context_packet=1, executor_capability=1, artifact=1, delivery=2)"
     );
     expect(formatRunStatus(summary)).toContain("source_event: source_event.received - github source event comment_status_run received.");
     expect(formatRunStatus(summary)).toContain("executor_capability: executor.capability.snapshot - Captured executor capability.");
     expect(formatRunStatus(summary)).toContain("artifact: artifact.created - Stored run artifacts.");
-    expect(formatRunStatus(summary)).toContain("progress_visibility: callback.progress.suppressed - Suppressed progress callback.");
+    expect(formatRunStatus(summary)).toContain("delivery: delivery.intent.queued - Delivery intent queued for the provider side-effect kernel.");
+    expect(formatRunStatus(summary)).toContain("delivery: delivery.activation_blocked - Delivery activation is blocked; no provider I/O was attempted.");
     expect(formatRunStatus(summary)).toContain("Liveness:");
     expect(formatRunStatus(summary)).toContain("Provider: github (status_update)");
-    expect(formatRunStatus(summary)).toContain("Human callbacks: 1; thread noise ratio: 0.5");
-    expect(formatRunStatus(summary)).toContain("Progress delivery: source thread can receive concise status/progress callbacks.");
-    expect(formatRunStatus(summary)).toContain("Callback Delivery:");
-    expect(formatRunStatus(summary)).toContain("final: delivered=1");
-    expect(formatRunStatus(summary)).toContain("callback.final.delivered - Delivered final receipt.");
+    expect(formatRunStatus(summary)).toContain("Progress delivery: source thread can receive concise status/progress updates.");
+    expect(formatRunStatus(summary)).toContain("Delivery:");
+    expect(formatRunStatus(summary)).toContain("intents queued: 1");
+    expect(formatRunStatus(summary)).toContain("activation blocked: 1");
+    expect(formatRunStatus(summary)).toContain("Provider outcomes: unavailable in the run event read model.");
+    expect(formatRunStatus(summary)).not.toMatch(/\bdelivered\b/i);
   });
 
-  it("formats callback delivery failures and duplicate-storm suppression in run status", async () => {
+  it("reports queued and activation-blocked unified delivery without claiming provider success", async () => {
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const href = String(url);
-      if (href.endsWith("/v1/runs/run_callback_failed")) {
+      if (href.endsWith("/v1/runs/run_delivery_blocked")) {
         return Response.json({
           run: {
-            id: "run_callback_failed",
+            id: "run_delivery_blocked",
             eventId: "evt_status_run",
             status: "succeeded",
             createdAt: "2026-06-24T00:00:00.000Z",
@@ -1182,61 +1190,42 @@ describe("OpenTag CLI status", () => {
           event: runEvent
         });
       }
-      if (href.endsWith("/v1/runs/run_callback_failed/events")) {
+      if (href.endsWith("/v1/runs/run_delivery_blocked/events")) {
         return Response.json({
           events: [
             {
-              type: "callback.acknowledgement.queued",
+              type: "delivery.intent.queued",
               visibility: "audit",
               importance: "normal",
-              createdAt: "2026-06-24T00:00:01.000Z"
-            },
-            {
-              type: "callback.acknowledgement.delivered",
-              visibility: "human",
-              importance: "normal",
-              message: "OpenTag picked this up.",
-              createdAt: "2026-06-24T00:00:02.000Z"
-            },
-            {
-              type: "callback.progress.duplicate",
-              visibility: "audit",
-              importance: "normal",
-              message: "Duplicate callback delivery suppressed.",
-              createdAt: "2026-06-24T00:00:10.000Z"
-            },
-            {
-              type: "callback.final.queued",
-              visibility: "audit",
-              importance: "normal",
+              message: "Final delivery intent queued.",
+              payload: {
+                presentationKind: "final",
+                deliveryOutcome: "queued"
+              },
               createdAt: "2026-06-24T00:01:00.000Z"
             },
             {
-              type: "callback.final.failed",
+              type: "delivery.activation_blocked",
               visibility: "audit",
-              importance: "normal",
-              createdAt: "2026-06-24T00:01:05.000Z"
-            },
-            {
-              type: "callback.final.suppressed",
-              visibility: "audit",
-              importance: "high",
-              message: "Callback delivery retry budget exhausted; further delivery attempts are suppressed to avoid duplicate storms.",
-              createdAt: "2026-06-24T00:01:06.000Z"
+              importance: "blocking",
+              message: "Delivery activation is blocked.",
+              payload: {
+                presentationKind: "final",
+                deliveryOutcome: "activation_blocked"
+              },
+              createdAt: "2026-06-24T00:01:01.000Z"
             }
           ]
         });
       }
-      if (href.endsWith("/v1/runs/run_callback_failed/metrics")) {
+      if (href.endsWith("/v1/runs/run_delivery_blocked/metrics")) {
         return Response.json({
           metrics: {
-            runId: "run_callback_failed",
-            totalEventCount: 6,
-            humanEventCount: 1,
-            auditEventCount: 5,
+            runId: "run_delivery_blocked",
+            totalEventCount: 2,
+            humanEventCount: 0,
+            auditEventCount: 2,
             debugEventCount: 0,
-            humanCallbackCount: 1,
-            threadNoiseRatio: 0.17,
             suggestedChangesCount: 0,
             approvalDecisionCount: 0,
             applyPlanCount: 0,
@@ -1246,7 +1235,7 @@ describe("OpenTag CLI status", () => {
           }
         });
       }
-      if (href.endsWith("/v1/runs/run_callback_failed/completion")) {
+      if (href.endsWith("/v1/runs/run_delivery_blocked/completion")) {
         return Response.json({ error: "completion_not_available" }, { status: 404 });
       }
       return Response.json({ error: "unexpected_url" }, { status: 500 });
@@ -1255,19 +1244,17 @@ describe("OpenTag CLI status", () => {
     const summary = await runStatusFromConfig({
       config: config(),
       configPath: "/tmp/opentag/config.json",
-      runId: "run_callback_failed",
+      runId: "run_delivery_blocked",
       fetchImpl
     });
 
     const formatted = formatRunStatus(summary);
-    expect(formatted).toContain("Callback Delivery:");
-    expect(formatted).toContain("acknowledgement: queued=1, delivered=1");
-    expect(formatted).toContain("progress: duplicate=1");
-    expect(formatted).toContain("final: queued=1, failed=1, suppressed=1");
-    expect(formatted).toContain(
-      "Attention: final callback has failed=1, suppressed=1; inspect audit events before assuming the source thread saw the result."
-    );
-    expect(formatted).toContain("callback.final.suppressed - Callback delivery retry budget exhausted");
+    expect(formatted).toContain("Delivery:");
+    expect(formatted).toContain("intents queued: 1");
+    expect(formatted).toContain("activation blocked: 1");
+    expect(formatted).toContain("Provider outcomes: unavailable in the run event read model.");
+    expect(formatted).toContain("Attention: delivery activation was blocked; no provider I/O was attempted.");
+    expect(formatted).not.toMatch(/\bdelivered\b/i);
   });
 
   it("formats human stop semantics for cancelled runs", () => {
@@ -1289,8 +1276,6 @@ describe("OpenTag CLI status", () => {
         humanEventCount: 0,
         auditEventCount: 1,
         debugEventCount: 0,
-        humanCallbackCount: 0,
-        threadNoiseRatio: 0,
         suggestedChangesCount: 0,
         approvalDecisionCount: 0,
         applyPlanCount: 0,
@@ -1338,8 +1323,6 @@ describe("OpenTag CLI status", () => {
         humanEventCount: 0,
         auditEventCount: 1,
         debugEventCount: 0,
-        humanCallbackCount: 0,
-        threadNoiseRatio: 0,
         suggestedChangesCount: 0,
         approvalDecisionCount: 0,
         applyPlanCount: 0,
@@ -1392,8 +1375,6 @@ describe("OpenTag CLI status", () => {
         humanEventCount: 0,
         auditEventCount: 3,
         debugEventCount: 0,
-        humanCallbackCount: 0,
-        threadNoiseRatio: 0,
         suggestedChangesCount: 0,
         approvalDecisionCount: 0,
         applyPlanCount: 0,
@@ -1486,7 +1467,7 @@ describe("OpenTag CLI status", () => {
     expect(formatted).not.toContain("localPath");
   });
 
-  it("formats liveness suppression detail for quiet source-thread platforms", async () => {
+  it("formats configured liveness strategy without legacy callback counters", async () => {
     const larkEvent: OpenTagEvent = {
       ...runEvent,
       id: "evt_lark_status_run",
@@ -1524,19 +1505,6 @@ describe("OpenTag CLI status", () => {
               importance: "normal",
               message: "External runtime requested a human-visible progress update.",
               createdAt: "2026-06-24T00:00:30.000Z"
-            },
-            {
-              type: "callback.progress.suppressed",
-              visibility: "audit",
-              importance: "low",
-              message: "Progress callback suppressed by platform liveness strategy; use status or audit for details.",
-              payload: {
-                provider: "lark",
-                requestedVisibility: "human",
-                reason: "platform_liveness_strategy",
-                livenessStrategy: "source_receipt"
-              },
-              createdAt: "2026-06-24T00:00:31.000Z"
             }
           ]
         });
@@ -1545,12 +1513,10 @@ describe("OpenTag CLI status", () => {
         return Response.json({
           metrics: {
             runId: "run_lark_quiet",
-            totalEventCount: 2,
+            totalEventCount: 1,
             humanEventCount: 1,
-            auditEventCount: 1,
+            auditEventCount: 0,
             debugEventCount: 0,
-            humanCallbackCount: 0,
-            threadNoiseRatio: 0,
             suggestedChangesCount: 0,
             approvalDecisionCount: 0,
             applyPlanCount: 0,
@@ -1575,108 +1541,9 @@ describe("OpenTag CLI status", () => {
 
     const formatted = formatRunStatus(summary);
     expect(formatted).toContain("Provider: lark (source_receipt)");
-    expect(formatted).toContain("Human callbacks: 0; thread noise ratio: 0");
     expect(formatted).toContain("Progress delivery: source thread uses native receipts first; routine progress stays in audit/status.");
-    expect(formatted).toContain("Suppressed progress callbacks: 1 (platform_liveness_strategy)");
-    expect(formatted).toContain("callback.progress.suppressed - Progress callback suppressed by platform liveness strategy");
-  });
-
-  it("formats source receipt liveness detail for receipt-based platforms", async () => {
-    const slackEvent: OpenTagEvent = {
-      ...runEvent,
-      id: "evt_slack_status_run",
-      source: "slack",
-      sourceEventId: "EvSlackStatus",
-      actor: { provider: "slack", providerUserId: "U123", handle: "alice", organizationId: "T123" },
-      context: [{ provider: "slack", kind: "message", uri: "slack://team/T123/channel/C123/message/1710000000.000100", visibility: "organization" }],
-      callback: {
-        provider: "slack",
-        uri: "https://slack.com/api/chat.postMessage",
-        threadKey: "T123|C123|1710000000.000100"
-      },
-      metadata: { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" }
-    };
-    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
-      const href = String(url);
-      if (href.endsWith("/v1/runs/run_slack_receipt")) {
-        return Response.json({
-          run: {
-            id: "run_slack_receipt",
-            eventId: "evt_slack_status_run",
-            status: "running",
-            createdAt: "2026-06-24T00:00:00.000Z",
-            updatedAt: "2026-06-24T00:01:00.000Z"
-          },
-          event: slackEvent
-        });
-      }
-      if (href.endsWith("/v1/runs/run_slack_receipt/events")) {
-        return Response.json({
-          events: [
-            {
-              type: "source_receipt.delivered",
-              visibility: "audit",
-              importance: "low",
-              message: "Source received receipt delivered.",
-              payload: { provider: "slack", state: "received" },
-              createdAt: "2026-06-24T00:00:01.000Z"
-            },
-            {
-              type: "source_receipt.delivered",
-              visibility: "audit",
-              importance: "low",
-              message: "Source running receipt delivered.",
-              payload: { provider: "slack", state: "running" },
-              createdAt: "2026-06-24T00:00:30.000Z"
-            },
-            {
-              type: "run.progress",
-              visibility: "audit",
-              importance: "normal",
-              message: "Internal progress stays in audit.",
-              createdAt: "2026-06-24T00:00:31.000Z"
-            }
-          ]
-        });
-      }
-      if (href.endsWith("/v1/runs/run_slack_receipt/metrics")) {
-        return Response.json({
-          metrics: {
-            runId: "run_slack_receipt",
-            totalEventCount: 3,
-            humanEventCount: 0,
-            auditEventCount: 3,
-            debugEventCount: 0,
-            humanCallbackCount: 0,
-            threadNoiseRatio: 0,
-            suggestedChangesCount: 0,
-            approvalDecisionCount: 0,
-            applyPlanCount: 0,
-            childRunCount: 0,
-            applyOutcomeCounts: { applied: 0, skipped: 0, failed: 0, stale: 0, unsupported: 0 },
-            staleIntentCount: 0
-          }
-        });
-      }
-      if (href.endsWith("/v1/runs/run_slack_receipt/completion")) {
-        return Response.json({ error: "completion_not_available" }, { status: 404 });
-      }
-      return Response.json({ error: "unexpected_url" }, { status: 500 });
-    }) as unknown as typeof fetch;
-
-    const summary = await runStatusFromConfig({
-      config: config(),
-      configPath: "/tmp/opentag/config.json",
-      runId: "run_slack_receipt",
-      fetchImpl
-    });
-
-    const formatted = formatRunStatus(summary);
-    expect(formatted).toContain("Provider: slack (source_receipt)");
-    expect(formatted).toContain("Progress delivery: source thread uses native receipts first; routine progress stays in audit/status.");
-    expect(formatted).toContain("Source receipts: 2 delivered, 0 failed (received, running)");
-    expect(formatted).toContain("Human callbacks: 0; thread noise ratio: 0");
-    expect(formatted).toContain("source_receipt.delivered - Source running receipt delivered.");
+    expect(formatted).not.toContain("Human callbacks:");
+    expect(formatted).not.toContain("thread noise ratio:");
   });
 
   it("formats one source container runtime summary from dispatcher status endpoints", async () => {

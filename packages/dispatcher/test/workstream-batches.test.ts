@@ -6,7 +6,10 @@ import Database from "better-sqlite3";
 import type { OpenTagEvent } from "@opentag/core";
 import { createOpenTagRepository, migrateSchema } from "@opentag/store";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { createDispatcherApp, type CallbackMessage, type SourceReceipt } from "../src/server.js";
+import {
+  createDispatcherApp,
+  type DispatcherDeliveryPresentation
+} from "../src/server.js";
 
 const event = {
   id: "evt_seed",
@@ -42,8 +45,7 @@ async function waitFor(predicate: () => boolean, message: string, attempts = 100
 }
 
 async function factorySetup(input: {
-  callbackMessages?: CallbackMessage[];
-  sourceReceipts?: SourceReceipt[];
+  deliveries?: DispatcherDeliveryPresentation[];
   agentAccessProfileCheck?: Parameters<typeof createDispatcherApp>[0]["agentAccessProfileCheck"];
   completionNow?: Parameters<typeof createDispatcherApp>[0]["completionNow"];
   completionPolicies?: Parameters<typeof createDispatcherApp>[0]["completionPolicies"];
@@ -74,8 +76,15 @@ async function factorySetup(input: {
   const app = createDispatcherApp({
     databasePath: input.databasePath ?? ":memory:",
     reassessmentObligations: input.reassessmentObligations ?? { autoStart: false },
-    callbackSink: { async deliver(message) { input.callbackMessages?.push(message); return { handled: true, outcome: "accepted" } as const; } },
-    sourceReceiptSink: { async deliver(receipt) { input.sourceReceipts?.push(receipt); return { delivered: true }; } },
+    deliveryProducer: {
+      async enqueue(delivery) {
+        input.deliveries?.push(delivery);
+        return {
+          outcome: "queued" as const,
+          sideEffectIntentId: `test-intent-${input.deliveries?.length ?? 0}`
+        };
+      }
+    },
     ...(input.agentAccessProfileCheck ? { agentAccessProfileCheck: input.agentAccessProfileCheck } : {}),
     ...(input.completionNow ? { completionNow: input.completionNow } : {}),
     ...(input.completionPolicies ? { completionPolicies: input.completionPolicies } : {}),
@@ -141,11 +150,9 @@ async function factorySetup(input: {
 
 describe("workstream batch admission", () => {
   it("turns a retryable terminal failure into one governed child Run without source-side acknowledgement", async () => {
-    const callbackMessages: CallbackMessage[] = [];
-    const sourceReceipts: SourceReceipt[] = [];
+    const deliveries: DispatcherDeliveryPresentation[] = [];
     const { app, workThreadId } = await factorySetup({
-      callbackMessages,
-      sourceReceipts,
+      deliveries,
       continuation: {
         mode: "evidence_driven",
         triggers: ["retryable_run_failure"],
@@ -154,8 +161,7 @@ describe("workstream batch admission", () => {
         backoff: { initialSeconds: 3_600, maxSeconds: 3_600 }
       }
     });
-    callbackMessages.length = 0;
-    sourceReceipts.length = 0;
+    deliveries.length = 0;
     const batch = {
       id: "batch_retryable_continuation",
       workstreamId: "workstream_default",
@@ -212,8 +218,9 @@ describe("workstream batch admission", () => {
       run: { id: childRunId, parentRunId: "run_retryable_continuation_parent", status: "queued" },
       event: { metadata: { workstreamContinuation: true, workstreamId: "workstream_default" } }
     });
-    expect(callbackMessages.some((message) => message.runId === childRunId)).toBe(false);
-    expect(sourceReceipts.some((receipt) => receipt.runId === childRunId)).toBe(false);
+    expect(deliveries.some((delivery) =>
+      delivery.kind !== "source_thread_control" && delivery.runId === childRunId
+    )).toBe(false);
 
     const collidingChild = await app.request(
       "/v1/runs/run_retryable_continuation_parent/child-runs",
@@ -1530,11 +1537,9 @@ describe("workstream batch admission", () => {
   });
 
   it("keeps single-run behavior and admits an ordered quiet replay-safe batch", async () => {
-    const callbackMessages: CallbackMessage[] = [];
-    const sourceReceipts: SourceReceipt[] = [];
-    const { app, workThreadId } = await factorySetup({ callbackMessages, sourceReceipts });
-    callbackMessages.length = 0;
-    sourceReceipts.length = 0;
+    const deliveries: DispatcherDeliveryPresentation[] = [];
+    const { app, workThreadId } = await factorySetup({ deliveries });
+    deliveries.length = 0;
 
     const batch = {
       id: "batch_1",
@@ -1560,8 +1565,7 @@ describe("workstream batch admission", () => {
         summary: { totalItems: 1, createdCount: 1, exceptionCount: 0, exceptions: [], omittedExceptionCount: 0 }
       }
     });
-    expect(callbackMessages).toEqual([]);
-    expect(sourceReceipts).toEqual([]);
+    expect(deliveries).toEqual([]);
 
     const replay = await app.request("/v1/workstream-batches", post(batch));
     expect(replay.status).toBe(200);
@@ -1665,17 +1669,14 @@ describe("workstream batch admission", () => {
 
   it("keeps needs-human decisions durable and bounds the quiet exception summary", async () => {
     let deny = false;
-    const callbackMessages: CallbackMessage[] = [];
-    const sourceReceipts: SourceReceipt[] = [];
+    const deliveries: DispatcherDeliveryPresentation[] = [];
     const { app, workThreadId } = await factorySetup({
-      callbackMessages,
-      sourceReceipts,
+      deliveries,
       agentAccessProfileCheck: async () => deny
         ? { allowed: false, reason: "access denied", reasonCode: "agent_access_profile_denied" }
         : { allowed: true }
     });
-    callbackMessages.length = 0;
-    sourceReceipts.length = 0;
+    deliveries.length = 0;
     deny = true;
 
     const items = Array.from({ length: 12 }, (_, index) => ({
@@ -1708,8 +1709,7 @@ describe("workstream batch admission", () => {
     expect((body.receipt.result.summary["exceptions"] as unknown[])).toHaveLength(10);
     expect(body.receipt.result.results).toHaveLength(12);
     expect(body.receipt.result.results.every((item) => item.status === "needs_human_decision" && item.humanEscalationId)).toBe(true);
-    expect(callbackMessages).toEqual([]);
-    expect(sourceReceipts).toEqual([]);
+    expect(deliveries).toEqual([]);
   });
 
   it("renews the batch and current item leases during a slow admission", async () => {

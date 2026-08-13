@@ -144,15 +144,21 @@ describe("Slack events app", () => {
     await expect(response.json()).resolves.toEqual({ ok: true, selfService: "status" });
     expect(createRun).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
-      channelId: "C123",
-      threadTs: `${currentTimestamp}.000100`,
-      text: expect.stringContaining("OpenTag status:"),
-      blocks: expect.arrayContaining([
-        expect.objectContaining({
-          type: "section",
-          text: expect.objectContaining({ text: "*OpenTag status:*" })
-        })
-      ])
+      cause: expect.objectContaining({
+        assurance: "verified_http_signature",
+        channelId: "C123",
+        command: "status",
+        threadTs: `${currentTimestamp}.000100`
+      }),
+      presentation: {
+        text: expect.stringContaining("OpenTag status:"),
+        blocks: expect.arrayContaining([
+          expect.objectContaining({
+            type: "section",
+            text: expect.objectContaining({ text: "*OpenTag status:*" })
+          })
+        ])
+      }
     });
   });
 
@@ -224,9 +230,8 @@ describe("Slack events app", () => {
       repo: "demo"
     });
     expect(reply).toHaveBeenCalledWith({
-      channelId: "C123",
-      threadTs: `${currentTimestamp}.000100`,
-      text: expect.stringContaining("Connected this Slack channel to Project Target github:acme/demo.")
+      cause: expect.objectContaining({ channelId: "C123", command: "bind", threadTs: `${currentTimestamp}.000100` }),
+      presentation: { text: expect.stringContaining("Connected this Slack channel to Project Target github:acme/demo.") }
     });
   });
 
@@ -281,9 +286,8 @@ describe("Slack events app", () => {
     expect(createRun).not.toHaveBeenCalled();
     expect(bindChannel).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
-      channelId: "C123",
-      threadTs: `${currentTimestamp}.000100`,
-      text: expect.stringContaining("Only an authorized Slack binding manager")
+      cause: expect.objectContaining({ channelId: "C123", command: "bind", threadTs: `${currentTimestamp}.000100` }),
+      presentation: { text: expect.stringContaining("Only an authorized Slack binding manager") }
     });
   });
 
@@ -338,9 +342,8 @@ describe("Slack events app", () => {
     expect(createRun).not.toHaveBeenCalled();
     expect(bindChannel).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
-      channelId: "C123",
-      threadTs: `${currentTimestamp}.000100`,
-      text: expect.stringContaining("Project Targets never use absolute local paths.")
+      cause: expect.objectContaining({ channelId: "C123", command: "bind", threadTs: `${currentTimestamp}.000100` }),
+      presentation: { text: expect.stringContaining("Project Targets never use absolute local paths.") }
     });
   });
 
@@ -392,9 +395,8 @@ describe("Slack events app", () => {
     await expect(response.json()).resolves.toEqual({ ok: true, selfService: "bind", unavailable: true });
     expect(createRun).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
-      channelId: "C123",
-      threadTs: `${currentTimestamp}.000100`,
-      text: expect.stringContaining("Slack channel binding from source threads is not configured.")
+      cause: expect.objectContaining({ channelId: "C123", command: "bind", threadTs: `${currentTimestamp}.000100` }),
+      presentation: { text: expect.stringContaining("Slack channel binding from source threads is not configured.") }
     });
   });
 
@@ -459,9 +461,8 @@ describe("Slack events app", () => {
       requestedBy: "slack:U456"
     });
     expect(reply).toHaveBeenCalledWith({
-      channelId: "C123",
-      threadTs: `${currentTimestamp}.000100`,
-      text: expect.stringContaining("Cancellation requested for run run_active.")
+      cause: expect.objectContaining({ channelId: "C123", command: "stop", threadTs: `${currentTimestamp}.000100` }),
+      presentation: { text: expect.stringContaining("Cancellation requested for run run_active.") }
     });
   });
 

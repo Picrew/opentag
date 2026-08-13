@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 : "${OPENTAG_CONFIG_PATH:?Set OPENTAG_CONFIG_PATH to your local runner config JSON}"
-: "${OPENTAG_GITHUB_TOKEN:?Set OPENTAG_GITHUB_TOKEN for GitHub callback delivery}"
+: "${OPENTAG_GITHUB_TOKEN:?Set OPENTAG_GITHUB_TOKEN for GitHub direct apply}"
 : "${OPENTAG_PAIRING_TOKEN:=dev_pairing_token}"
 : "${OPENTAG_DISPATCHER_PORT:=3031}"
 : "${OPENTAG_GITHUB_PORT:=3000}"
@@ -49,7 +49,6 @@ echo "Starting Probot ingress on :$OPENTAG_GITHUB_PORT"
   export WEBHOOK_PATH="${WEBHOOK_PATH:-/github/webhooks}"
   export OPENTAG_DISPATCHER_URL="http://localhost:$OPENTAG_DISPATCHER_PORT"
   export OPENTAG_DISPATCHER_TOKEN="$OPENTAG_PAIRING_TOKEN"
-  export OPENTAG_DISPATCHER_OWNS_CALLBACKS=true
   pnpm --filter @opentag/github-probot exec probot run ./dist/index.js
 ) &
 PROBOT_PID=$!

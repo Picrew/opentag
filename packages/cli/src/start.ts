@@ -29,6 +29,7 @@ import {
 import {
   createDaemonRuntimeInput,
   dispatcherRuntimeHardeningInputFromEnv,
+  getUnifiedDeliveryActivationState,
   hermesProfileConfigurationWarning,
   normalizeChannelBindings,
   reassessmentObligationTestRuntimeInputFromEnv,
@@ -393,8 +394,7 @@ export function dispatcherRuntimeInputFromCliConfig(
     throw new Error("Discord webhook mode requires platforms.discord.publicKey or OPENTAG_DISCORD_PUBLIC_KEY.");
   }
   if ((discordMode === "gateway" || discordMode === "webhook") && !discordBotToken) {
-    // Without the bot token the interactions app still mounts and ACKs slash commands,
-    // but every progress/final callback would silently fail — fail fast instead.
+    // Gateway and interactions authentication both require the bot credential.
     throw new Error("Discord platform requires platforms.discord.botToken or OPENTAG_DISCORD_BOT_TOKEN.");
   }
   const teamsAppId = teams?.appId ?? env.OPENTAG_TEAMS_APP_ID;
@@ -407,9 +407,6 @@ export function dispatcherRuntimeInputFromCliConfig(
     throw new Error(
       "Microsoft Teams platform requires both platforms.teams.appId/appPassword or OPENTAG_TEAMS_APP_ID/OPENTAG_TEAMS_APP_PASSWORD together."
     );
-  }
-  if (github && !config.daemon.githubToken) {
-    throw new Error("GitHub platform requires daemon.githubToken for callbacks.");
   }
   if (github && !config.daemon.preparePullRequestBranch && !config.daemon.allowAutoCreatePullRequest) {
     throw new Error(
@@ -429,8 +426,8 @@ export function dispatcherRuntimeInputFromCliConfig(
       ? { revokedRunnerTokenFingerprints: config.daemon.revokedRunnerTokenFingerprints }
       : {}),
     ...(channelPrincipals.length > 0 ? { channelPrincipals } : {}),
+    slackInstallations: config.platforms.slack?.installations ?? [],
     ...(config.daemon.githubToken ? { githubToken: config.daemon.githubToken } : {}),
-    ...(config.daemon.githubToken ? { githubCallbackToken: config.daemon.githubToken } : {}),
     ...(config.daemon.completionPolicies !== undefined
       ? { completionPolicies: config.daemon.completionPolicies }
       : {}),
@@ -460,8 +457,6 @@ export function dispatcherRuntimeInputFromCliConfig(
           }
         }
       : {}),
-    ...(slack ? { slackBotToken: slack.botToken } : {}),
-    ...(telegram ? { telegramBotToken: telegram.botToken } : {}),
     ...(telegram
       ? {
           telegramBots: [
@@ -584,7 +579,6 @@ export function slackSocketModeIngressConfigFromCliConfig(
     appToken: slack.appToken,
     dispatcherUrl: config.daemon.dispatcherUrl,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
-    botToken: slack.botToken,
     ...(slack.appId
       ? {
           channelPrincipalCredential: channelPrincipalCredential({
@@ -1123,6 +1117,9 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     logger.log("OpenTag is running.");
     logger.log(`Config: ${input.configPath}`);
     logger.log(`Dispatcher: ${config.daemon.dispatcherUrl}`);
+    const deliveryActivation = getUnifiedDeliveryActivationState();
+    logger.log(`Unified delivery: ${deliveryActivation.status} (${deliveryActivation.releaseStatus})`);
+    logger.log(`Unified delivery blockers: ${deliveryActivation.reasons.join(", ")}`);
     const hermesWarning = hermesProfileConfigurationWarning(config.daemon);
     if (hermesWarning) logger.log(hermesWarning);
     for (const diagnostic of linearBacklogConfigDiagnostics(config)) logger.log(`Warning: ${diagnostic.message}`);

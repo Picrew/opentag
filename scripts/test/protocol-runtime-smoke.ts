@@ -2,7 +2,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createOpenTagClient } from "../../packages/client/src/index.js";
-import { createDispatcherApp } from "../../packages/dispatcher/src/server.js";
+import {
+  createDispatcherApp,
+  type DispatcherDeliveryPresentation
+} from "../../packages/dispatcher/src/server.js";
 import type { OpenTagEvent } from "../../packages/core/src/schema.js";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -17,13 +20,18 @@ function assertIncludes<T>(values: T[], expected: T, message: string): void {
 
 const tempDir = await mkdtemp(join(tmpdir(), "opentag-protocol-smoke-"));
 const databasePath = join(tempDir, "opentag-smoke.db");
+const deliveries: DispatcherDeliveryPresentation[] = [];
 
 try {
   const app = createDispatcherApp({
     databasePath,
-    callbackSink: {
-      async deliver() {
-        return { handled: true, outcome: 'accepted' } as const;
+    deliveryProducer: {
+      async enqueue(presentation) {
+        deliveries.push(presentation);
+        return {
+          outcome: "queued",
+          sideEffectIntentId: `intent_protocol_smoke_${deliveries.length}`
+        };
       }
     }
   });
@@ -184,22 +192,29 @@ try {
   for (const expected of [
     "run.created",
     "context_packet.generated",
-    "callback.acknowledgement.delivered",
+    "delivery.intent.queued",
     "proposal.snapshot.created",
     "run.completed",
-    "callback.progress.delivered",
-    "callback.final.delivered",
     "approval.decision.recorded",
     "apply_plan.created",
     "run.child_created"
   ]) {
     assertIncludes(eventTypes, expected, "parent run audit trail is incomplete");
   }
+  assert(
+    deliveries.some((delivery) => delivery.kind === "business" && delivery.phase === "acknowledgement"),
+    "protocol smoke should enqueue an acknowledgement presentation"
+  );
+  assert(
+    deliveries.some((delivery) => delivery.kind === "business" && delivery.phase === "final"),
+    "protocol smoke should enqueue a final presentation"
+  );
+  assert(
+    !eventTypes.some((type) => type.includes("delivered")),
+    "run events must not infer provider delivery from a durable enqueue"
+  );
 
   const metrics = await client.getRunMetrics({ runId: "run_smoke_1" });
-  assert(metrics.metrics.humanCallbackCount === 4, "GitHub-shaped smoke should deliver ack, progress, final, and thread-action fallback callbacks");
-  assert(metrics.metrics.auditEventCount > metrics.metrics.humanCallbackCount, "audit events should exceed human callbacks");
-  assert(metrics.metrics.threadNoiseRatio < 1, "thread noise ratio should stay below 1");
   assert(metrics.metrics.suggestedChangesCount === 1, "metrics should count suggested changes");
   assert(metrics.metrics.approvalDecisionCount === 1, "metrics should count approvals");
   assert(metrics.metrics.applyPlanCount === 1, "metrics should count apply plans");

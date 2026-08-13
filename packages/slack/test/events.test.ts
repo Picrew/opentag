@@ -3,6 +3,7 @@ import {
   createSlackEventProcessor,
   isSlackLinearBacklogQuery,
   type SlackEventEnvelope,
+  type SlackEventProcessorInput,
   type SlackThreadActionInput
 } from "../src/events.js";
 
@@ -81,7 +82,7 @@ describe("Slack thread action metadata", () => {
 });
 
 describe("Slack /linear self-service command", () => {
-  type Reply = { channelId: string; threadTs: string; text: string; textFormat?: "mrkdwn" };
+  type Reply = Parameters<NonNullable<SlackEventProcessorInput["reply"]>>[0];
 
   function linearProcessor(input: {
     replies: Reply[];
@@ -99,12 +100,7 @@ describe("Slack /linear self-service command", () => {
         return { runId: "run_1" };
       },
       async reply(reply) {
-        input.replies.push({
-          channelId: reply.channelId,
-          threadTs: reply.threadTs,
-          text: reply.text,
-          ...(reply.textFormat ? { textFormat: reply.textFormat } : {})
-        });
+        input.replies.push(reply);
       },
       ...(input.withLinearHandler === false
         ? {}
@@ -122,7 +118,9 @@ describe("Slack /linear self-service command", () => {
     return {
       type: "event_callback" as const,
       team_id: "T123",
+      api_app_id: "A123",
       event_id: "EvLinear1",
+      event_time: 1719187200,
       authorizations: [{ user_id: "UBOT" }],
       event: {
         type: "app_mention" as const,
@@ -132,6 +130,10 @@ describe("Slack /linear self-service command", () => {
         ts: "1719187200.000100"
       }
     };
+  }
+
+  function processVerified(processor: ReturnType<typeof createSlackEventProcessor>, payload: SlackEventEnvelope) {
+    return processor.process(payload, { agentId: "opentag", appId: "A123" }, { signatureVerified: true });
   }
 
   it.each([
@@ -150,7 +152,7 @@ describe("Slack /linear self-service command", () => {
 
     expect(isSlackLinearBacklogQuery(payload)).toBe(false);
     await expect(
-      linearProcessor({ replies, runs, linearCalls }).process(payload, { agentId: "opentag" })
+      processVerified(linearProcessor({ replies, runs, linearCalls }), payload)
     ).resolves.toMatchObject({ status: 400, body: { error: "invalid_event_payload" } });
     expect(linearCalls).toHaveLength(0);
     expect(replies).toHaveLength(0);
@@ -164,14 +166,16 @@ describe("Slack /linear self-service command", () => {
       const runs: string[] = [];
       const linearCalls: number[] = [];
 
-      const result = await linearProcessor({ replies, runs, linearCalls }).process(mentionEvent(text), { agentId: "opentag" });
+      const result = await processVerified(linearProcessor({ replies, runs, linearCalls }), mentionEvent(text));
 
       expect(result.body).toMatchObject({ ok: true, selfService: "linear" });
       expect(linearCalls).toHaveLength(1);
       expect(runs).toHaveLength(0);
       expect(replies).toHaveLength(1);
-      expect(replies[0]).toMatchObject({ channelId: "C123", threadTs: "1719187200.000100" });
-      expect(replies[0]!.text).toContain("OpenTag project backlog");
+      expect(replies[0]).toMatchObject({
+        cause: { assurance: "verified_http_signature", command: "linear", channelId: "C123", threadTs: "1719187200.000100" }
+      });
+      expect(replies[0]!.presentation.text).toContain("OpenTag project backlog");
     }
   );
 
@@ -201,7 +205,7 @@ describe("Slack /linear self-service command", () => {
     const payload = mentionEvent("<@UBOT> /linear");
     payload.event.thread_ts = "1719187000.000050";
 
-    await processor.process(payload, { agentId: "opentag" });
+    await processVerified(processor, payload);
 
     expect(bindingCalls).toBe(0);
     expect(runs).toHaveLength(0);
@@ -213,10 +217,8 @@ describe("Slack /linear self-service command", () => {
       binding: null
     }]);
     expect(replies[0]).toMatchObject({
-      channelId: "C123",
-      threadTs: "1719187000.000050",
-      text: "• <https://x|AMP-1>",
-      textFormat: "mrkdwn"
+      cause: { command: "linear", channelId: "C123", threadTs: "1719187000.000050" },
+      presentation: { text: "• <https://x|AMP-1>", textFormat: "mrkdwn" }
     });
   });
 
@@ -225,15 +227,15 @@ describe("Slack /linear self-service command", () => {
     const runs: string[] = [];
     const linearCalls: number[] = [];
 
-    const result = await linearProcessor({ replies, runs, linearCalls }).process(
-      mentionEvent("<@UBOT> /linear something else"),
-      { agentId: "opentag" }
+    const result = await processVerified(
+      linearProcessor({ replies, runs, linearCalls }),
+      mentionEvent("<@UBOT> /linear something else")
     );
 
     expect(result.body).toMatchObject({ ok: true, selfService: "linear", usage: true });
     expect(linearCalls).toHaveLength(0);
     expect(runs).toHaveLength(0);
-    expect(replies[0]!.text).toContain("Usage");
+    expect(replies[0]!.presentation.text).toContain("Usage");
   });
 
   it("does NOT intercept a bare linear mention with extra words (normal run flow)", async () => {
@@ -241,9 +243,9 @@ describe("Slack /linear self-service command", () => {
     const runs: string[] = [];
     const linearCalls: number[] = [];
 
-    await linearProcessor({ replies, runs, linearCalls }).process(
-      mentionEvent("<@UBOT> linear regression in the parser, please fix"),
-      { agentId: "opentag" }
+    await processVerified(
+      linearProcessor({ replies, runs, linearCalls }),
+      mentionEvent("<@UBOT> linear regression in the parser, please fix")
     );
 
     expect(linearCalls).toHaveLength(0);
@@ -254,35 +256,38 @@ describe("Slack /linear self-service command", () => {
     const replies: Reply[] = [];
     const runs: string[] = [];
 
-    const result = await linearProcessor({ replies, runs, withLinearHandler: false }).process(
-      mentionEvent("<@UBOT> /linear"),
-      { agentId: "opentag" }
+    const result = await processVerified(
+      linearProcessor({ replies, runs, withLinearHandler: false }),
+      mentionEvent("<@UBOT> /linear")
     );
 
     expect(result.body).toMatchObject({ ok: true, selfService: "linear", unavailable: true });
     expect(runs).toHaveLength(0);
-    expect(replies[0]!.text).toContain("not available");
+    expect(replies[0]!.presentation.text).toContain("not available");
   });
 
   it("lists /linear in help output", async () => {
     const replies: Reply[] = [];
 
-    await linearProcessor({ replies, runs: [] }).process(mentionEvent("<@UBOT> /help"), { agentId: "opentag" });
+    await processVerified(linearProcessor({ replies, runs: [] }), mentionEvent("<@UBOT> /help"));
 
-    expect(replies[0]!.text).toContain("/linear");
+    expect(replies[0]!.presentation.text).toContain("/linear");
   });
 
   it("forwards textFormat: mrkdwn from a linear handler reply so links are not re-escaped", async () => {
     const replies: Reply[] = [];
     const runs: string[] = [];
 
-    await linearProcessor({
-      replies,
-      runs,
-      linearReply: { text: "• <https://x|AMP-1> — t", textFormat: "mrkdwn" }
-    }).process(mentionEvent("<@UBOT> /linear"), { agentId: "opentag" });
+    await processVerified(
+      linearProcessor({
+        replies,
+        runs,
+        linearReply: { text: "• <https://x|AMP-1> — t", textFormat: "mrkdwn" }
+      }),
+      mentionEvent("<@UBOT> /linear")
+    );
 
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toMatchObject({ text: "• <https://x|AMP-1> — t", textFormat: "mrkdwn" });
+    expect(replies[0]).toMatchObject({ presentation: { text: "• <https://x|AMP-1> — t", textFormat: "mrkdwn" } });
   });
 });

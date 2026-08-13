@@ -4,7 +4,7 @@ Microsoft Teams adapter primitives for OpenTag.
 
 This package receives Microsoft Teams Bot Framework `message` activities,
 normalizes supported messages into `OpenTagEvent`s, verifies Bot Framework JWTs,
-renders OpenTag callback updates, and posts replies back to the source Teams
+renders OpenTag delivery presentations, and posts replies back to the source Teams
 conversation through the Bot Connector REST API. It is mounted by the
 `local-runtime` dispatcher; this package does not run a standalone service by
 itself, and Teams relay ingress is not currently supported.
@@ -25,8 +25,8 @@ itself, and Teams relay ingress is not currently supported.
 - `auth.ts` validates Bot Framework bearer tokens.
 - `token.ts` obtains Connector API access tokens.
 - `connector.ts` posts replies through the Bot Connector REST API.
-- `render.ts` converts OpenTag callback payloads into Teams-friendly text.
-- `webhook-app.ts` wires auth, normalization, dispatcher calls, and callback
+- `render.ts` converts OpenTag presentations into Teams-friendly text.
+- `webhook-app.ts` wires auth, normalization, dispatcher calls, and source-thread
   replies for the `/teams/messages` endpoint.
 - `thread-key.ts` builds stable OpenTag thread keys for Teams source threads.
 
@@ -73,7 +73,7 @@ reply-specific suffix:
 `local-runtime` also has a fallback that strips `;messageid=...` so an incoming
 full conversation id can still match a binding created with the base id.
 Dispatcher source-thread lookup keeps both the full reply identity and a
-canonical base-conversation alias, while callback delivery retains the full
+canonical base-conversation alias, while the delivery presentation retains the full
 conversation id needed to reply to the correct Teams thread.
 
 The binding identity is effectively:
@@ -97,9 +97,9 @@ requires the current Teams channel binding to retain the same identity and, for
 repository actions, the same repository target. Removed, rebound, or
 identity-incomplete bindings fail closed.
 
-### Callback replies
+### Source-thread delivery
 
-The Teams callback sink posts status updates back into the same channel thread.
+The Teams delivery adapter posts status updates back into the same channel thread.
 For proposal receipts, the rendered message should clearly indicate the target
 system of record, impact, preconditions, and exact Teams command to approve or
 reject the action.
@@ -148,4 +148,4 @@ User-facing setup is documented in:
 - `docs/platforms/teams.zh-CN.md`
 
 Keep those guides in sync with package behavior whenever auth, binding,
-callback, or action-routing semantics change.
+delivery, or action-routing semantics change.

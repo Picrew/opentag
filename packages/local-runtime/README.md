@@ -12,7 +12,8 @@ pnpm add @opentag/local-runtime
 
 ## Exports
 
-- `startDispatcher`: starts the local dispatcher with callback sinks.
+- `startDispatcher`: starts the local dispatcher with the unified delivery
+  producer and provider registry.
 - `serveDaemon`: starts the local daemon loop.
 - `createDaemonRuntimeInput`: derives daemon runtime input from config.
 - `runDoctor`: checks dispatcher, bindings, checkouts, and executors.

@@ -7,8 +7,8 @@ import { describe, expect, it } from "vitest";
 import { formatCompletionExplanation } from "../../cli/src/status.js";
 import {
   createDispatcherApp,
-  type CallbackMessage,
   type CompletionExplanation,
+  type DispatcherDeliveryPresentation,
   type GitHubCompletionPolicy
 } from "../src/index.js";
 
@@ -88,6 +88,25 @@ function jsonRequest(body: unknown) {
   };
 }
 
+function captureDeliveries(deliveries: DispatcherDeliveryPresentation[]) {
+  const queuedKeys = new Set<string>();
+  return {
+    async enqueue(delivery: DispatcherDeliveryPresentation) {
+      const key = delivery.kind === "source_thread_control"
+        ? undefined
+        : delivery.idempotencyKey;
+      if (!key || !queuedKeys.has(key)) {
+        deliveries.push(delivery);
+        if (key) queuedKeys.add(key);
+      }
+      return {
+        outcome: "queued" as const,
+        sideEffectIntentId: key ?? `test-intent-${deliveries.length}`
+      };
+    }
+  };
+}
+
 function expectCredentialSafe(value: unknown): void {
   const serialized = JSON.stringify(value);
   expect(serialized).not.toMatch(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b/u);
@@ -102,18 +121,13 @@ describe("GitHub completion governance replay", () => {
     const fixture = loadFixture();
     const tempRoot = mkdtempSync(join(tmpdir(), "opentag-completion-replay-"));
     const databasePath = join(tempRoot, "opentag.db");
-    const delivered: CallbackMessage[] = [];
+    const delivered: DispatcherDeliveryPresentation[] = [];
 
     try {
       const app = createDispatcherApp({
         databasePath,
         completionPolicies: [fixture.completionPolicy],
-        callbackSink: {
-          async deliver(message) {
-            delivered.push(message);
-            return { handled: true, outcome: "accepted" } as const;
-          }
-        }
+        deliveryProducer: captureDeliveries(delivered)
       });
 
       expect((await app.request("/v1/runners", jsonRequest({

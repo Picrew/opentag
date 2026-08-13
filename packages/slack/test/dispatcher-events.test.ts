@@ -32,7 +32,7 @@ describe("Slack dispatcher-backed self-service", () => {
     });
   });
 
-  it("renders dispatcher channel status and posts it back to the Slack thread", async () => {
+  it("renders dispatcher channel status without performing provider delivery", async () => {
     const requests: Array<{ url: string; authorization?: string; body?: unknown }> = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const href = String(url);
@@ -115,16 +115,12 @@ describe("Slack dispatcher-backed self-service", () => {
           ]
         });
       }
-      if (href === "https://slack.com/api/chat.postMessage") {
-        return Response.json({ ok: true, ts: "1719187201.000100" });
-      }
       return Response.json({ error: "unexpected_url" }, { status: 500 });
     }) as unknown as typeof fetch;
 
     const processorInput = createSlackDispatcherEventProcessorInput({
       dispatcherUrl: "http://dispatcher.test",
       dispatcherToken: "dispatcher_token",
-      botToken: "xoxb-test",
       runTimeoutMs: 30_000,
       fetchImpl
     });
@@ -136,73 +132,16 @@ describe("Slack dispatcher-backed self-service", () => {
       userId: "U456",
       binding: { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" }
     });
-    await processorInput.reply!({
-      channelId: "C123",
-      threadTs: "1719187200.000100",
-      text: typeof reply === "string" ? reply : reply.text,
-      blocks: typeof reply === "string" ? undefined : reply.blocks
-    });
-
     expect(requests).toEqual([
       expect.objectContaining({
         url: "http://dispatcher.test/v1/channel-bindings/slack/T123/C123/status",
         authorization: "Bearer dispatcher_token"
-      }),
-      expect.objectContaining({
-        url: "https://slack.com/api/chat.postMessage",
-        authorization: "Bearer xoxb-test",
-        body: expect.objectContaining({
-          channel: "C123",
-          thread_ts: "1719187200.000100",
-          text: expect.stringContaining("OpenTag status:")
-        })
       })
     ]);
-    expect(JSON.stringify(requests[1]?.body)).toContain("*Active run:* run_active (running)");
-    expect(JSON.stringify(requests[1]?.body)).toContain("follow_up_1 (queued): update the docs too");
-    expect(JSON.stringify(requests[1]?.body)).toContain("timeout policy: hard timeout after 45 second(s).");
-  });
-
-  it("posts a reply with textFormat: mrkdwn without re-escaping a hand-built Slack link", async () => {
-    const requests: Array<{ url: string; authorization?: string; body?: unknown }> = [];
-    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      const href = String(url);
-      const headers = init?.headers as Record<string, string> | undefined;
-      requests.push({
-        url: href,
-        ...(headers?.authorization ? { authorization: headers.authorization } : {}),
-        ...(typeof init?.body === "string" ? { body: JSON.parse(init.body) as unknown } : {})
-      });
-      if (href === "https://slack.com/api/chat.postMessage") {
-        return Response.json({ ok: true, ts: "1719187201.000100" });
-      }
-      return Response.json({ error: "unexpected_url" }, { status: 500 });
-    }) as unknown as typeof fetch;
-
-    const processorInput = createSlackDispatcherEventProcessorInput({
-      dispatcherUrl: "http://dispatcher.test",
-      botToken: "xoxb-test",
-      fetchImpl
-    });
-
-    await processorInput.reply!({
-      channelId: "C123",
-      threadTs: "1719187200.000100",
-      text: "<https://x|A>",
-      textFormat: "mrkdwn"
-    });
-
-    expect(requests).toEqual([
-      expect.objectContaining({
-        url: "https://slack.com/api/chat.postMessage",
-        authorization: "Bearer xoxb-test",
-        body: expect.objectContaining({
-          channel: "C123",
-          thread_ts: "1719187200.000100",
-          text: "<https://x|A>"
-        })
-      })
-    ]);
+    expect(typeof reply === "string" ? reply : reply.text).toContain("OpenTag status:");
+    expect(JSON.stringify(typeof reply === "string" ? {} : reply.blocks)).toContain("*Active run:* run_active (running)");
+    expect(JSON.stringify(typeof reply === "string" ? {} : reply.blocks)).toContain("follow_up_1 (queued): update the docs too");
+    expect(JSON.stringify(typeof reply === "string" ? {} : reply.blocks)).toContain("timeout policy: hard timeout after 45 second(s).");
   });
 
   it("cancels a specific run through the dispatcher", async () => {

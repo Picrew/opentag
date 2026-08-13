@@ -2,7 +2,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createOpenTagClient } from "../../packages/client/src/index.js";
-import { createDispatcherApp, type CallbackMessage } from "../../packages/dispatcher/src/server.js";
+import {
+  createDispatcherApp,
+  type DispatcherDeliveryPresentation
+} from "../../packages/dispatcher/src/server.js";
 import { normalizeSlackAppMention } from "../../packages/slack/src/normalize.js";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -17,15 +20,18 @@ function assertIncludes<T>(values: T[], expected: T, message: string): void {
 
 const tempDir = await mkdtemp(join(tmpdir(), "opentag-slack-protocol-smoke-"));
 const databasePath = join(tempDir, "opentag-slack-smoke.db");
-const delivered: CallbackMessage[] = [];
+const deliveries: DispatcherDeliveryPresentation[] = [];
 
 try {
   const app = createDispatcherApp({
     databasePath,
-    callbackSink: {
-      async deliver(message) {
-        delivered.push(message);
-        return { handled: true, outcome: 'accepted' } as const;
+    deliveryProducer: {
+      async enqueue(presentation) {
+        deliveries.push(presentation);
+        return {
+          outcome: "queued",
+          sideEffectIntentId: `intent_slack_smoke_${deliveries.length}`
+        };
       }
     }
   });
@@ -79,11 +85,16 @@ try {
   assert(created.run.contextPacket?.summary === "investigate the flaky smoke test", "Slack run should include context packet");
   assert(
     created.run.thread?.workItemReference.externalId === event.workItem?.externalId,
-    "Bound Slack threads should preserve their canonical work item on the work thread"
+    "Slack bound thread should preserve its canonical work item"
   );
-  assert(delivered.length === 1, "Slack acknowledgement should be delivered");
-  assert(delivered[0]?.provider === "slack", "acknowledgement should target Slack");
-  assert(delivered[0]?.kind === "acknowledgement", "first Slack callback should be acknowledgement");
+  assert(
+    deliveries.some((delivery) => delivery.kind === "source_receipt" && delivery.phase === "received"),
+    "Slack source receipt should be queued"
+  );
+  assert(
+    !deliveries.some((delivery) => delivery.kind === "business" && delivery.phase === "acknowledgement"),
+    "Slack source receipt should replace a duplicate acknowledgement"
+  );
 
   const claimed = await client.claim({ runnerId: "runner_slack_smoke" });
   assert(claimed?.run.id === "run_slack_smoke_1", "runner should claim the Slack smoke run");
@@ -99,7 +110,10 @@ try {
     at: "2026-06-24T00:00:01.000Z"
   });
   assert(progressResponse === undefined, "progress call should complete");
-  assert(delivered.length === 1, "Slack progress should remain audit-only by default");
+  assert(
+    !deliveries.some((delivery) => delivery.kind === "business" && delivery.phase === "progress"),
+    "Slack progress should remain audit-only by default"
+  );
 
   await client.complete({
     runnerId: "runner_slack_smoke",
@@ -136,19 +150,21 @@ try {
     }
   });
 
-  const finalCallbacks = delivered.filter((message) => message.kind === "final");
-  assert(finalCallbacks.length === 1, "Slack should deliver exactly one final callback");
-  const finalCallback = finalCallbacks[0];
-  assert(finalCallback?.provider === "slack", "final callback should target Slack");
-  assert(finalCallback.body.includes("Prepared a Slack-originated follow-up task."), "final Slack body should include summary");
-  assert(finalCallback.blocks && finalCallback.blocks.length > 0, "final Slack callback should include Block Kit blocks");
+  const finalPresentations = deliveries.filter(
+    (delivery) => delivery.kind === "business" && delivery.phase === "final"
+  );
+  assert(finalPresentations.length === 1, "Slack should enqueue exactly one final presentation");
+  const finalPresentation = finalPresentations[0];
+  assert(finalPresentation?.provider === "slack", "final presentation should target Slack");
+  assert(finalPresentation.body?.includes("Prepared a Slack-originated follow-up task."), "final Slack body should include summary");
+  assert(finalPresentation.blocks && finalPresentation.blocks.length > 0, "final Slack presentation should include Block Kit blocks");
 
   const proposal = await client.getProposal({ proposalId: "proposal_slack_smoke_1" });
   assert(proposal.runId === "run_slack_smoke_1", "Slack proposal should point to source run");
   assert(proposal.snapshot.sourceRunId === "run_slack_smoke_1", "Slack proposal should carry sourceRunId");
   assert(
-    proposal.snapshot.workThread?.workItemReference.externalId === event.workItem?.externalId,
-    "Slack proposal should preserve the bound thread work item"
+    proposal.snapshot.workThread?.id === created.run.thread.id,
+    "Slack proposal should retain the run work thread"
   );
 
   const lineage = await client.getProposalLineage({ proposalId: "proposal_slack_smoke_1" });
@@ -174,23 +190,22 @@ try {
   for (const expected of [
     "run.created",
     "context_packet.generated",
-    "callback.acknowledgement.delivered",
+    "delivery.intent.queued",
     "run.progress",
     "proposal.snapshot.created",
     "run.completed",
-    "callback.final.delivered",
     "approval.decision.recorded",
     "apply_plan.created",
     "run.child_created"
   ]) {
     assertIncludes(eventTypes, expected, "Slack parent run audit trail is incomplete");
   }
+  assert(
+    !eventTypes.some((type) => type.includes("delivered")),
+    "run events must not infer provider delivery from a durable enqueue"
+  );
 
   const metrics = await client.getRunMetrics({ runId: "run_slack_smoke_1" });
-  assert(metrics.metrics.humanCallbackCount === delivered.length, "Slack callback metrics should match the delivered sink messages");
-  assert(metrics.metrics.humanCallbackCount >= 3 && metrics.metrics.humanCallbackCount <= 4, "Slack smoke should stay within its compact callback budget");
-  assert(metrics.metrics.auditEventCount > metrics.metrics.humanCallbackCount, "Slack audit events should exceed human callbacks");
-  assert(metrics.metrics.threadNoiseRatio < 1, "Slack thread noise ratio should stay below 1");
   assert(metrics.metrics.suggestedChangesCount === 1, "Slack metrics should count suggested changes");
   assert(metrics.metrics.approvalDecisionCount === 1, "Slack metrics should count approvals");
   assert(metrics.metrics.applyPlanCount === 1, "Slack metrics should count apply plans");

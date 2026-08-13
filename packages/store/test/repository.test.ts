@@ -214,32 +214,6 @@ describe("OpenTag repository", () => {
     await expect(repo.listCompletionAssessments({ workThreadId: thread.id })).resolves.toEqual([original]);
   });
 
-  it("migrates legacy callback deliveries before creating the idempotency index", () => {
-    const sqlite = new Database(":memory:");
-    sqlite.exec(`
-      CREATE TABLE callback_deliveries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        provider TEXT NOT NULL,
-        uri TEXT NOT NULL,
-        body TEXT NOT NULL,
-        thread_key TEXT,
-        status TEXT NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-    `);
-
-    expect(() => migrateSchema(sqlite)).not.toThrow();
-    const columns = sqlite.prepare("PRAGMA table_info(callback_deliveries)").all() as { name: string }[];
-    expect(columns.map((column) => column.name)).toContain("idempotency_key");
-    const indexes = sqlite.prepare("PRAGMA index_list(callback_deliveries)").all() as { name: string }[];
-    expect(indexes.map((index) => index.name)).toContain("callback_deliveries_idempotency_key_idx");
-  });
-
   it("migrates legacy run events before creating the progress idempotency index", () => {
     const sqlite = new Database(":memory:");
     sqlite.exec(`
@@ -1118,7 +1092,7 @@ describe("OpenTag repository", () => {
     expect(durable).not.toContain(second!.fencingToken);
   });
 
-  it("sanitizes runner output and callback payloads before any durable write", async () => {
+  it("sanitizes runner output and delivery audit payloads before any durable write", async () => {
     const sqlite = new Database(":memory:");
     const repo = createOpenTagRepository(drizzle(sqlite));
     migrateSchema(sqlite);
@@ -1154,14 +1128,8 @@ describe("OpenTag repository", () => {
     const providerFailure = `provider failed ${claimed.fencingToken} Bearer ${providerToken} -----BEGIN PRIVATE KEY----- secret`;
     await repo.appendRunEvent({
       runId: "run_safe_output",
-      type: "source_receipt.failed",
-      payload: { provider: "lark", error: providerFailure },
-      message: providerFailure
-    });
-    await repo.appendRunEvent({
-      runId: "run_safe_output",
-      type: "callback.progress.failed",
-      payload: { provider: "lark", reason: "delayed_status_card", error: providerFailure },
+      type: "delivery.activation_blocked",
+      payload: { provider: "lark", deliveryOutcome: "activation_blocked", diagnostic: providerFailure },
       message: providerFailure
     });
     await expect(
@@ -1182,27 +1150,15 @@ describe("OpenTag repository", () => {
         idempotencyKey: claimed.fencingToken
       })
     ).resolves.toBe("completed");
-    await repo.enqueueCallbackDelivery({
-      runId: "run_safe_output",
-      kind: "final",
-      provider: "slack",
-      uri: "https://example.test/callback",
-      body: `callback ${providerToken}`,
-      blocks: [{ type: "section", text: { type: "mrkdwn", text: `Bearer ${providerToken}` } }],
-      rich: { accessToken: "opaque-callback-secret" }
-    });
-
     const durable = {
       stored: await repo.getRun({ runId: "run_safe_output" }),
-      events: await repo.listRunEvents({ runId: "run_safe_output" }),
-      callbacks: await repo.claimPendingCallbackDeliveries({ limit: 10 })
+      events: await repo.listRunEvents({ runId: "run_safe_output" })
     };
     const serialized = JSON.stringify(durable);
     expect(serialized).not.toContain(providerToken);
     expect(serialized).not.toContain(claimed.fencingToken);
     expect(serialized).not.toContain("opaque-secret");
     expect(serialized).not.toContain("opaque-executor-secret");
-    expect(serialized).not.toContain("opaque-callback-secret");
     expect(serialized).not.toContain("-----BEGIN PRIVATE KEY-----");
     expect(serialized).toContain("[redacted]");
   });
@@ -1513,205 +1469,6 @@ describe("OpenTag repository", () => {
       repo: "demo",
       metadata: { source: "seed", labels: ["triage"] }
     });
-  });
-
-  it("claims pending callback deliveries only once", async () => {
-    const sqlite = new Database(":memory:");
-    const db = drizzle(sqlite);
-    migrateSchema(sqlite);
-    const repo = createOpenTagRepository(db);
-
-    await repo.enqueueCallbackDelivery({
-      runId: "run_delivery",
-      kind: "acknowledgement",
-      provider: "github",
-      uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
-      body: "hello"
-    });
-
-    const first = await repo.claimPendingCallbackDeliveries({ limit: 10 });
-    const second = await repo.claimPendingCallbackDeliveries({ limit: 10 });
-
-    expect(first).toHaveLength(1);
-    expect(first[0]?.status).toBe("delivering");
-    expect(second).toEqual([]);
-  });
-
-  it("deduplicates equivalent callback deliveries before sending", async () => {
-    const sqlite = new Database(":memory:");
-    const db = drizzle(sqlite);
-    migrateSchema(sqlite);
-    const repo = createOpenTagRepository(db);
-
-    const first = await repo.enqueueCallbackDelivery({
-      runId: "run_callback_dedupe",
-      kind: "final",
-      provider: "lark",
-      uri: "lark://im/v1/messages",
-      threadKey: "tenant|chat|message",
-      statusMessageKey: "run_callback_dedupe:final",
-      body: "Done.",
-      rich: { provider: "lark", payload: { header: { title: "Done" } } }
-    });
-    const second = await repo.enqueueCallbackDelivery({
-      runId: "run_callback_dedupe",
-      kind: "final",
-      provider: "lark",
-      uri: "lark://im/v1/messages",
-      threadKey: "tenant|chat|message",
-      statusMessageKey: "run_callback_dedupe:final",
-      body: "Done.",
-      rich: { provider: "lark", payload: { header: { title: "Done" } } }
-    });
-
-    expect(second.id).toBe(first.id);
-    expect(first.enqueueOutcome).toBe("queued");
-    expect(second.enqueueOutcome).toBe("duplicate");
-    expect(first.idempotencyKey).toBe(second.idempotencyKey);
-    const pending = await repo.claimPendingCallbackDeliveries({ limit: 10 });
-    expect(pending).toHaveLength(1);
-    expect(pending[0]?.rich).toEqual({ provider: "lark", payload: { header: { title: "Done" } } });
-    const events = await repo.listRunEvents({ runId: "run_callback_dedupe" });
-    expect(events.map((event) => event.type)).toEqual(["callback.final.queued", "callback.final.duplicate"]);
-    expect(events.at(-1)?.message).toBe("Duplicate callback delivery suppressed.");
-  });
-
-  it("records external callback message ids for status updates", async () => {
-    const sqlite = new Database(":memory:");
-    const db = drizzle(sqlite);
-    migrateSchema(sqlite);
-    const repo = createOpenTagRepository(db);
-
-    const delivery = await repo.enqueueCallbackDelivery({
-      runId: "run_callback_external_id",
-      kind: "acknowledgement",
-      provider: "lark",
-      uri: "lark://im/v1/messages",
-      threadKey: "tenant|chat|message",
-      statusMessageKey: "run_callback_external_id:status",
-      body: "Received."
-    });
-    await repo.markCallbackDelivered({ deliveryId: delivery.id, externalMessageId: "om_status" });
-
-    await expect(
-      repo.findCallbackExternalMessageId({
-        runId: "run_callback_external_id",
-        provider: "lark",
-        threadKey: "tenant|chat|message",
-        statusMessageKey: "run_callback_external_id:status"
-      })
-    ).resolves.toBe("om_status");
-
-    const events = await repo.listRunEvents({ runId: "run_callback_external_id" });
-    expect(events.at(-1)).toMatchObject({
-      type: "callback.acknowledgement.delivered",
-      payload: expect.objectContaining({
-        externalMessageId: "om_status"
-      })
-    });
-  });
-
-  it("reclaims stale delivering rows and respects retry backoff for failed deliveries", async () => {
-    const sqlite = new Database(":memory:");
-    const db = drizzle(sqlite);
-    migrateSchema(sqlite);
-    const repo = createOpenTagRepository(db);
-
-    await repo.enqueueCallbackDelivery({
-      runId: "run_retry",
-      kind: "acknowledgement",
-      provider: "github",
-      uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
-      body: "hello"
-    });
-
-    // Claim the delivery so it moves to "delivering".
-    const t0 = new Date("2026-01-01T00:00:00.000Z");
-    const claimed = await repo.claimPendingCallbackDeliveries({ limit: 10, now: t0 });
-    expect(claimed).toHaveLength(1);
-    expect(claimed[0]?.status).toBe("delivering");
-
-    // Mark it failed with a future nextAttemptAt.
-    const deliveryId = claimed[0]!.id;
-    const retryAt = "2026-01-01T00:01:00.000Z";
-    await repo.markCallbackFailed({ deliveryId, error: "timeout", nextAttemptAt: retryAt });
-
-    // Before retry window: should not be claimed.
-    const beforeRetry = new Date("2026-01-01T00:00:30.000Z");
-    const tooEarly = await repo.claimPendingCallbackDeliveries({ limit: 10, now: beforeRetry });
-    expect(tooEarly).toHaveLength(0);
-
-    // After retry window: should be claimable again.
-    const afterRetry = new Date("2026-01-01T00:02:00.000Z");
-    const reclaimed = await repo.claimPendingCallbackDeliveries({ limit: 10, now: afterRetry });
-    expect(reclaimed).toHaveLength(1);
-    expect(reclaimed[0]?.attempts).toBe(1);
-
-    // A still-fresh delivering row should not be reclaimed.
-    const freshNow = new Date("2026-01-01T00:02:05.000Z");
-    const notStale = await repo.claimPendingCallbackDeliveries({ limit: 10, now: freshNow, staleDeliveryThresholdMs: 60_000 });
-    expect(notStale).toHaveLength(0);
-
-    // Once the stale threshold passes, the delivering row should be reclaimed.
-    const staleNow = new Date("2026-01-01T00:03:10.000Z");
-    const staleReclaimed = await repo.claimPendingCallbackDeliveries({ limit: 10, now: staleNow, staleDeliveryThresholdMs: 60_000 });
-    expect(staleReclaimed).toHaveLength(1);
-    expect(staleReclaimed[0]?.attempts).toBe(1);
-  });
-
-  it("records a callback suppression audit event when the retry budget is exhausted", async () => {
-    const sqlite = new Database(":memory:");
-    const db = drizzle(sqlite);
-    migrateSchema(sqlite);
-    const repo = createOpenTagRepository(db);
-
-    await repo.registerRunner({ runnerId: "runner_callback_guard", name: "Callback Guard" });
-    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_callback_guard" });
-    await repo.createRun({
-      id: "run_callback_storm_guard",
-      event: larkEvent({ id: "evt_callback_storm_guard", sourceEventId: "msg_callback_storm_guard" })
-    });
-    const runClaim = await repo.claimNextRun({ runnerId: "runner_callback_guard", leaseSeconds: 60 });
-    if (!runClaim) throw new Error("expected callback guard run claim");
-
-    await repo.enqueueCallbackDelivery({
-      runId: "run_callback_storm_guard",
-      kind: "final",
-      provider: "lark",
-      uri: "lark://im/v1/messages",
-      threadKey: "tenant|chat|message",
-      statusMessageKey: "run_callback_storm_guard:final",
-      body: "Done."
-    });
-
-    const claimed = await repo.claimPendingCallbackDeliveries({ limit: 10, maxAttempts: 1 });
-    expect(claimed).toHaveLength(1);
-    await repo.markCallbackFailed({
-      deliveryId: claimed[0]!.id,
-      error: `rate_limited ${runClaim.fencingToken} xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz Bearer ghp\x5fabcdefghijklmnopqrstuvwxyz123456 -----BEGIN PRIVATE KEY----- secret`,
-      maxAttempts: 1
-    });
-
-    await expect(repo.claimPendingCallbackDeliveries({ limit: 10, maxAttempts: 1 })).resolves.toEqual([]);
-
-    const events = await repo.listRunEvents({ runId: "run_callback_storm_guard" });
-    expect(events.filter((event) => event.type.startsWith("callback.")).map((event) => event.type)).toEqual([
-      "callback.final.queued",
-      "callback.final.failed",
-      "callback.final.suppressed"
-    ]);
-    expect(events.at(-1)).toMatchObject({
-      visibility: "audit",
-      importance: "high",
-      message: "Callback delivery retry budget exhausted; further delivery attempts are suppressed to avoid duplicate storms."
-    });
-    const failedRow = sqlite.prepare("SELECT last_error FROM callback_deliveries WHERE id = ?").get(claimed[0]!.id);
-    const failurePersistence = JSON.stringify({ failedRow, events });
-    expect(failurePersistence).not.toContain(runClaim.fencingToken);
-    expect(failurePersistence).not.toContain("xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz");
-    expect(failurePersistence).not.toContain("ghp\x5fabcdefghijklmnopqrstuvwxyz123456");
-    expect(failurePersistence).not.toContain("-----BEGIN PRIVATE KEY-----");
-    expect(failurePersistence).toContain("[redacted]");
   });
 
   it("records control-plane events that are not tied to a run", async () => {
@@ -2769,7 +2526,6 @@ describe("OpenTag repository", () => {
     const metrics = await repo.getRunMetrics({ runId: "run_protocol" });
     expect(metrics).toMatchObject({
       runId: "run_protocol",
-      humanCallbackCount: 0,
       suggestedChangesCount: 2,
       approvalDecisionCount: 2,
       applyPlanCount: 1,
@@ -2802,6 +2558,70 @@ describe("OpenTag repository", () => {
       approvalDecisionCount: 2,
       applyPlanCount: 1
     });
+  });
+
+  it("projects unified delivery intent events without inferring provider outcomes", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+
+    await repo.createRun({
+      id: "run_delivery_read_model",
+      event: larkEvent({
+        id: "evt_delivery_read_model",
+        sourceEventId: "msg_delivery_read_model"
+      })
+    });
+    await repo.appendRunEvent({
+      runId: "run_delivery_read_model",
+      type: "delivery.intent.queued",
+      visibility: "audit",
+      importance: "normal",
+      payload: {
+        presentationKind: "final",
+        deliveryOutcome: "queued"
+      },
+      message: "Final delivery intent queued."
+    });
+    await repo.appendRunEvent({
+      runId: "run_delivery_read_model",
+      type: "delivery.activation_blocked",
+      visibility: "audit",
+      importance: "blocking",
+      payload: {
+        presentationKind: "final",
+        deliveryOutcome: "activation_blocked"
+      },
+      message: "Delivery activation is blocked."
+    });
+
+    const ledger = await repo.getRunLedger({ runId: "run_delivery_read_model" });
+    expect(
+      ledger?.entries
+        .filter((entry) => entry.type.startsWith("delivery."))
+        .map((entry) => ({ type: entry.type, category: entry.category }))
+    ).toEqual([
+      { type: "delivery.intent.queued", category: "delivery" },
+      { type: "delivery.activation_blocked", category: "delivery" }
+    ]);
+
+    const metrics = await repo.getRunMetrics({ runId: "run_delivery_read_model" });
+    expect(Object.keys(metrics).sort()).toEqual([
+      "applyOutcomeCounts",
+      "applyPlanCount",
+      "approvalDecisionCount",
+      "auditEventCount",
+      "childRunCount",
+      "debugEventCount",
+      "humanEventCount",
+      "runId",
+      "staleIntentCount",
+      "suggestedChangesCount",
+      "totalEventCount"
+    ]);
+    expect((await repo.listRunEvents({ runId: "run_delivery_read_model" })).map((event) => event.type)).not.toContain(
+      "delivery.delivered"
+    );
   });
 
   it("uses repo policy rules during apply preflight", async () => {

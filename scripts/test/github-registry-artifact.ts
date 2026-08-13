@@ -2,7 +2,6 @@ import { execFile } from "node:child_process";
 import { chmod, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { GitHubFactoryRegistryRuntimeArtifact } from "./github-factory-acceptance.js";
 
 type JsonObject = Record<string, unknown>;
 const TRUSTED_NPM_REGISTRY_ORIGIN = "https://registry.npmjs.org";
@@ -23,8 +22,29 @@ type PackageLock = {
   }>;
 };
 
+export type GitHubRegistryRuntimeArtifact = {
+  expectedVersion: string;
+  package: "@opentag/cli";
+  version: string;
+  registry: string;
+  resolved: string;
+  integrity: string;
+  sourceNormalizer: {
+    package: "@opentag/github";
+    version: string;
+    resolved: string;
+    integrity: string;
+  };
+  eventSchema: {
+    package: "@opentag/core";
+    version: string;
+    resolved: string;
+    integrity: string;
+  };
+};
+
 export type RegistryCliArtifactInspection = {
-  runtimeArtifact: GitHubFactoryRegistryRuntimeArtifact;
+  runtimeArtifact: GitHubRegistryRuntimeArtifact;
   installation: {
     cliPackageRoot: string;
     githubEntrypoint: string;

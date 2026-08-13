@@ -3,7 +3,10 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createOpenTagClient, type OpenTagClient } from "@opentag/client";
-import { createDispatcherApp, type CallbackMessage } from "@opentag/dispatcher";
+import {
+  createDispatcherApp,
+  type DispatcherDeliveryPresentation
+} from "@opentag/dispatcher";
 import { computeGitHubSignature, createGitHubWebhookApp } from "@opentag/github";
 import { runOneDaemonIteration } from "@opentag/local-runtime";
 import { createExecutorRunResult, type ExecutorAdapter } from "@opentag/runner";
@@ -115,7 +118,7 @@ async function createGitHubConfiguredDispatcher() {
     }
   });
   const githubRequests: Array<{ url: string; method?: string; authorization?: string | null; body?: unknown }> = [];
-  const delivered: CallbackMessage[] = [];
+  const delivered: DispatcherDeliveryPresentation[] = [];
   const dispatcherApp = createDispatcherApp({
     databasePath: ":memory:",
     ...(config.daemon.pairingToken ? { pairingToken: config.daemon.pairingToken } : {}),
@@ -131,10 +134,10 @@ async function createGitHubConfiguredDispatcher() {
         return Response.json({ html_url: "https://github.com/acme/demo/pull/123" }, { status: 201 });
       }
     },
-    callbackSink: {
-      async deliver(message) {
-        delivered.push(message);
-        return { handled: true, outcome: "accepted" } as const;
+    deliveryProducer: {
+      async enqueue(presentation) {
+        delivered.push(presentation);
+        return { outcome: "queued", sideEffectIntentId: "intent_github_contract" };
       }
     }
   });
@@ -226,7 +229,11 @@ describe("CLI platform contract smoke", () => {
       "git commit -m OpenTag run run_github_contract",
       "git push -u origin opentag/run_github_contract"
     ]);
-    expect(delivered.some((message) => message.kind === "final" && message.body.includes("Create a pull request"))).toBe(true);
+    expect(delivered.some((message) =>
+      message.kind === "business"
+      && message.phase === "final"
+      && message.body?.includes("Create a pull request")
+    )).toBe(true);
 
     const applyBody = JSON.stringify({
       action: "created",
@@ -291,8 +298,6 @@ describe("CLI platform contract smoke", () => {
         }
       }
     ]);
-    expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://github.com/acme/demo/pull/123"))).toBe(true);
-
     await expect(client.getRun({ runId: "run_github_contract" })).resolves.toMatchObject({
       run: { id: "run_github_contract", status: "succeeded" },
       event: { source: "github" }
@@ -317,14 +322,14 @@ describe("CLI platform contract smoke", () => {
         bindingMethod: "default_project"
       }
     });
-    const delivered: CallbackMessage[] = [];
+    const delivered: DispatcherDeliveryPresentation[] = [];
     const dispatcherApp = createDispatcherApp({
       databasePath: ":memory:",
       ...(config.daemon.pairingToken ? { pairingToken: config.daemon.pairingToken } : {}),
-      callbackSink: {
-        async deliver(message) {
-          delivered.push(message);
-          return { handled: true, outcome: "accepted" } as const;
+      deliveryProducer: {
+        async enqueue(presentation) {
+          delivered.push(presentation);
+          return { outcome: "queued", sideEffectIntentId: "intent_slack_contract" };
         }
       }
     });
@@ -430,7 +435,12 @@ describe("CLI platform contract smoke", () => {
 
     expect(socket.sent).toContain(JSON.stringify({ envelope_id: "envelope_mention" }));
     await eventually(() =>
-      expect(delivered.some((message) => message.kind === "final" && message.provider === "slack" && message.body.includes("Create a pull request"))).toBe(true)
+      expect(delivered.some((message) =>
+        message.kind === "business"
+        && message.phase === "final"
+        && message.provider === "slack"
+        && message.body?.includes("Create a pull request")
+      )).toBe(true)
     );
 
     socket.emit(
@@ -467,10 +477,6 @@ describe("CLI platform contract smoke", () => {
       plan: { adapter: "slack" },
       run: { id: expect.any(String) }
     });
-    await eventually(() =>
-      expect(delivered.some((message) => message.kind === "final" && message.body.includes("Adapter slack is not directly executable yet"))).toBe(true)
-    );
-
     await handle.close();
   });
 });

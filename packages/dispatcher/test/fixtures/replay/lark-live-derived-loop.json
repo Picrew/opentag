@@ -80,7 +80,7 @@
   },
   "expected": {
     "artifactTypes": ["patch", "report"],
-    "ledgerCategories": ["source_event", "admission", "context_packet", "executor_capability", "artifact", "final_outcome", "callback_delivery"],
+    "ledgerCategories": ["source_event", "admission", "context_packet", "executor_capability", "artifact", "final_outcome", "delivery"],
     "finalBodyContains": ["Validated the Lark patch path", "Artifacts", "Audit:"]
   }
 }

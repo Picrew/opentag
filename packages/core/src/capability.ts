@@ -104,13 +104,13 @@ export function platformCapabilityForProvider(provider: string): PlatformCapabil
   return isOpenTagPlatformId(provider) ? OPEN_TAG_PLATFORM_CAPABILITIES[provider] : undefined;
 }
 
-export function shouldDeliverCallbackRunStatus(provider: string): boolean {
+export function shouldDeliverRunStatusPresentation(provider: string): boolean {
   const strategy = platformCapabilityForProvider(provider)?.livenessStrategy;
   if (!strategy) return true;
   return strategy === "status_update" || strategy === "thread_reply";
 }
 
-export function shouldDeliverCallbackProgress(provider: string): boolean {
+export function shouldDeliverProgressPresentation(provider: string): boolean {
   const strategy = platformCapabilityForProvider(provider)?.livenessStrategy;
   if (!strategy) return true;
   return strategy === "status_update";

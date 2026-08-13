@@ -13,31 +13,18 @@ pnpm add @opentag/dispatcher
 ## Exports
 
 - `createDispatcherApp`: creates the Hono app that exposes the OpenTag dispatcher API.
-- `createGitHubCallbackSink`: posts callback messages to GitHub issue or PR comments.
-- `createSlackCallbackSink`: posts callback messages to Slack threads through `chat.postMessage`.
-- `createTelegramCallbackSink`: posts callback messages to Telegram chats through the Bot API `sendMessage` method.
-- `createCompositeCallbackSink`: fans callback delivery out to multiple sinks.
-- `CallbackMessage`, `CallbackSink`: callback delivery contracts.
+- `UnifiedDeliveryProducer`: validates and enqueues configured delivery intents.
+- `DispatcherDeliveryPresentation`: provider-neutral rendering input for the
+  configured delivery-intent resolver.
 
 ## Example
 
 ```ts
-import {
-  createCompositeCallbackSink,
-  createDispatcherApp,
-  createGitHubCallbackSink,
-  createSlackCallbackSink,
-  createTelegramCallbackSink
-} from "@opentag/dispatcher";
+import { createDispatcherApp } from "@opentag/dispatcher";
 
 export const dispatcher = createDispatcherApp({
   databasePath: "opentag.db",
-  pairingToken: process.env.OPENTAG_PAIRING_TOKEN,
-  callbackSink: createCompositeCallbackSink([
-    createGitHubCallbackSink({ token: process.env.OPENTAG_GITHUB_TOKEN }),
-    createSlackCallbackSink({ botToken: process.env.OPENTAG_SLACK_BOT_TOKEN }),
-    createTelegramCallbackSink({ botToken: process.env.OPENTAG_TELEGRAM_BOT_TOKEN })
-  ])
+  pairingToken: process.env.OPENTAG_PAIRING_TOKEN
 });
 ```
 
@@ -93,4 +80,5 @@ Authorization: Bearer <pairingToken>
 
 ## Stability
 
-The Hono app factory and callback sink interfaces are public API. Individual HTTP endpoint semantics should remain backward compatible within a major version.
+The Hono app factory and delivery-intent boundary are public API. Delivery is
+activation-blocked until a resolver and durable submitter are configured.

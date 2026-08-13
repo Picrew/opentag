@@ -278,11 +278,11 @@ export function defaultRunEventMetadata(type: string): {
   visibility: "human" | "audit" | "debug";
   importance: "low" | "normal" | "high" | "blocking";
 } {
-  const visibility = type.startsWith("callback.") ? "human" : type.startsWith("executor.log") ? "debug" : "audit";
+  const visibility = type === "delivery.activation_blocked" ? "human" : type.startsWith("executor.log") ? "debug" : "audit";
   const importance =
-    type === "run.waiting_for_permission"
+    type === "run.waiting_for_permission" || type === "delivery.activation_blocked"
       ? "blocking"
-      : type === "run.completed" || type.startsWith("callback.final")
+      : type === "run.completed"
         ? "high"
         : type === "run.created"
           ? "low"
