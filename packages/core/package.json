@@ -35,6 +35,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@opentag/control-protocol": "workspace:*",
     "zod": "^4.4.3"
   },
   "devDependencies": {

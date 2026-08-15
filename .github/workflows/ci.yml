@@ -18,6 +18,23 @@ jobs:
     name: Build, lint, typecheck, test, and release checks
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: opentag_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d opentag_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      OPENTAG_REQUIRE_TEST_DATABASE: "1"
+      OPENTAG_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/opentag_test
 
     steps:
       - name: Check out repository
@@ -60,3 +77,46 @@ jobs:
 
       - name: Check release packages
         run: pnpm release:check
+
+  control-plane-e2e:
+    name: Control Plane browser E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 9.15.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium
+        run: pnpm --dir apps/control-plane exec playwright install --with-deps chromium
+
+      - name: Run isolated Compose and browser E2E
+        run: pnpm e2e:control-plane
+
+      - name: Upload Playwright failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.2
+        with:
+          name: control-plane-playwright
+          path: |
+            playwright-report/control-plane
+            test-results/control-plane
+          if-no-files-found: ignore
+          retention-days: 7

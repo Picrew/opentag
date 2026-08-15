@@ -14,11 +14,13 @@
     "release:publish": "node scripts/release/publish-local.mjs",
     "opentag-dev": "node scripts/dev/install-opentag-dev.mjs",
     "smoke:governance": "node scripts/test/governance-matrix.mjs",
+    "e2e:control-plane": "node scripts/test/control-plane-browser-e2e.mjs",
     "smoke:factory-conformance": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/factory-conformance.ts",
     "smoke:acp-conformance": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/builtin-acp-conformance.ts",
     "smoke:live": "node scripts/test/live-e2e-smoke.mjs",
     "smoke:openclaw-acp-conformance": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/openclaw-acp-conformance.ts",
     "smoke:privacy": "node scripts/test/privacy-redaction-scan.mjs",
+    "smoke:control-plane-compose:typecheck": "tsc -p scripts/test/tsconfig.control-plane-compose-smoke.json",
     "smoke:protocol": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/protocol-runtime-smoke.ts",
     "smoke:slack-protocol": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/slack-protocol-runtime-smoke.ts",
     "verify:delivery-fixtures": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/verify-delivery-fixture-corpus.ts ../../packages/delivery-contract/fixtures/relay.delivery-observation.v2"
@@ -31,7 +33,7 @@
   },
   "pnpm": {
     "overrides": {
-      "vite": "^6.4.3",
+      "vite": "^8.2.1",
       "axios": "^1.16.0",
       "esbuild": "0.28.1",
       "postcss": "8.5.18"

@@ -1,4 +1,4 @@
-import { RelayCapabilitiesResponseV1Schema } from "@opentag/core";
+import { RelayCapabilitiesResponseV1Schema } from "@opentag/control-protocol";
 
 type RelayCapabilitiesResponseV1 = ReturnType<typeof RelayCapabilitiesResponseV1Schema.parse>;
 

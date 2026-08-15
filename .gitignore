@@ -12,6 +12,8 @@ dist/
 *.real.json
 .DS_Store
 coverage/
+playwright-report/
+test-results/
 .worktrees/
 *.tsbuildinfo
 .agents/

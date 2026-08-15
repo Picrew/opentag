@@ -1,0 +1,53 @@
+{
+  "name": "@opentag/control-protocol",
+  "version": "0.10.0-next.0",
+  "description": "Canonical OpenTag Control V1 schemas, types, and digest helpers.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./canonical-json": {
+      "development": "./src/canonical-json.ts",
+      "types": "./dist/canonical-json.d.ts",
+      "import": "./dist/canonical-json.js"
+    },
+    "./credential-safety": {
+      "development": "./src/credential-safety.ts",
+      "types": "./dist/credential-safety.d.ts",
+      "import": "./dist/credential-safety.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "opentag",
+    "control-plane",
+    "protocol",
+    "schemas"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build": "tsup && tsc -b tsconfig.json --emitDeclarationOnly --force",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  }
+}

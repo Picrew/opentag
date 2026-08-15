@@ -12,6 +12,13 @@ For the proposed next product and architecture direction—OpenTag as the open
 control plane for governed software factories—see the repository-level
 [Product Design](../DESIGN.md) and [Software Factory Control Plane](./software-factory-control-plane.md).
 
+For the optional shared service—identity, runner pairing, public
+ingress, tenant-scoped coordination, and retained audit while execution stays
+local—see the [Node/PostgreSQL Control Plane architecture](./control-plane-runtime-architecture.md)
+and [ADR 0003](./adr/0003-node-postgresql-control-plane.md). The clean-room
+Node/PostgreSQL implementation exists locally; managed deployment, publication,
+and production activation are not implied.
+
 ## One-Liner
 
 OpenTag turns an existing work thread into a governed agent work loop: tag any approved agent from a workspace surface, route the request through bounded context, scoped permissions, executor capability checks, an append-only work ledger, and artifact-first delivery presentations, then let a local or user-controlled runner execute the work and report back without creating a new AI workspace.

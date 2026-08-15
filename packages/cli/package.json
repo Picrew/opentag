@@ -38,6 +38,7 @@
   },
   "dependencies": {
     "@opentag/client": "workspace:*",
+    "@opentag/control-protocol": "workspace:*",
     "@opentag/core": "workspace:*",
     "@opentag/github": "workspace:*",
     "@opentag/gitlab": "workspace:*",

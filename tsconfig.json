@@ -1,6 +1,7 @@
 {
   "files": [],
   "references": [
+    { "path": "packages/control-protocol" },
     { "path": "packages/core" },
     { "path": "packages/delivery-contract" },
     { "path": "packages/governance" },
@@ -16,6 +17,7 @@
     { "path": "packages/store" },
     { "path": "packages/cli" },
     { "path": "apps/dispatcher" },
+    { "path": "apps/control-plane" },
     { "path": "apps/github-probot" },
     { "path": "apps/lark-events" },
     { "path": "apps/slack-events" },

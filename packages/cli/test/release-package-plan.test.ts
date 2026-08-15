@@ -165,7 +165,7 @@ describe("public release package plan", () => {
     expect(() => buildPublicPackagePlan(packagesDirectory)).toThrow(/malformed.*package\.json/i);
   });
 
-  it("discovers the repository's complete 17-package public release set", () => {
+  it("discovers the repository's complete 18-package public release set", () => {
     const repositoryPackagesDirectory = resolve(
       dirname(fileURLToPath(import.meta.url)),
       "../../../packages"
@@ -176,6 +176,7 @@ describe("public release package plan", () => {
     expect(plan.map((entry) => entry.packageJson.name).sort()).toEqual([
       "@opentag/cli",
       "@opentag/client",
+      "@opentag/control-protocol",
       "@opentag/core",
       "@opentag/delivery-contract",
       "@opentag/discord",
