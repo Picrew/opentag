@@ -1,6 +1,8 @@
 import {
   check,
   foreignKey,
+  index,
+  integer,
   pgTable,
   primaryKey,
   text,
@@ -77,6 +79,25 @@ export const sessions = pgTable(
       name: "cp_session_membership_fk",
     }),
     unique("cp_session_token_hash_key").on(table.tokenHash),
+  ],
+);
+
+export const loginThrottles = pgTable(
+  "cp_login_throttle",
+  {
+    throttleKey: text("throttle_key").primaryKey(),
+    failureCount: integer("failure_count").notNull(),
+    windowStartedAt: timestamp("window_started_at", { withTimezone: true })
+      .notNull(),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    check("cp_login_throttle_failure_count_check", sql`${table.failureCount} > 0`),
+    index("cp_login_throttle_locked_until_idx")
+      .on(table.lockedUntil)
+      .where(sql`${table.lockedUntil} IS NOT NULL`),
+    index("cp_login_throttle_updated_at_idx").on(table.updatedAt),
   ],
 );
 

@@ -35,7 +35,8 @@ export const githubBindings = pgTable(
   (table) => [
     primaryKey({ columns: [table.organizationId, table.bindingId] }),
     unique("cp_github_binding_binding_id_key").on(table.bindingId),
-    unique("cp_github_binding_provider_repository_id_key").on(
+    unique("cp_github_binding_organization_id_provider_repository_id_key").on(
+      table.organizationId,
       table.providerRepositoryId,
     ),
     foreignKey({

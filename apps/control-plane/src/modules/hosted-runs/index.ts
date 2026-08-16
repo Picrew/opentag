@@ -25,12 +25,42 @@ import {
   type HostedLifecycleRequestV1,
 } from "@opentag/control-protocol";
 import type { Pool } from "pg";
+import { z } from "zod";
 import { withPostgresTransaction } from "../../database/postgres.js";
 import type { RuntimePrincipal } from "../runners/index.js";
 
 type Clock = { now(): Date };
 type IdFactory = (kind: "attempt") => string;
-type TokenFactory = () => string;
+export type HostedFencingTokenContext = {
+  organizationId: string;
+  operationId: string;
+  runId: string;
+  attemptId: string;
+  attemptNumber: number;
+};
+type TokenFactory = (context: HostedFencingTokenContext) => string;
+
+const StoredHostedClaimAttemptV1Schema = z
+  .object({
+    id: HostedClaimV1Schema.shape.attempt.shape.id,
+    number: HostedClaimV1Schema.shape.attempt.shape.number,
+    epoch: HostedClaimV1Schema.shape.attempt.shape.epoch,
+    fencingTokenDigest:
+      HostedClaimV1Schema.shape.attempt.shape.fencingTokenDigest,
+    leaseExpiresAt: HostedClaimV1Schema.shape.attempt.shape.leaseExpiresAt,
+  })
+  .strict();
+const StoredHostedClaimV1Schema = z
+  .object({
+    ...HostedClaimV1Schema.shape,
+    attempt: StoredHostedClaimAttemptV1Schema,
+  })
+  .strict();
+
+function claimForStorage(claim: HostedClaimV1) {
+  const { fencingToken: _fencingToken, ...attempt } = claim.attempt;
+  return StoredHostedClaimV1Schema.parse({ ...claim, attempt });
+}
 
 type TerminalKind = "cancelled" | "completed" | "rejected";
 
@@ -140,6 +170,25 @@ export function createHostedRunCoordinator(input: {
   idFactory: IdFactory;
   tokenFactory: TokenFactory;
 }): HostedRunCoordinator {
+  async function hydrateStoredClaim(value: unknown): Promise<HostedClaimV1 | null> {
+    const stored = StoredHostedClaimV1Schema.parse(value);
+    const fencingToken = input.tokenFactory({
+      organizationId: stored.organizationId,
+      operationId: stored.operationId,
+      runId: stored.runId,
+      attemptId: stored.attempt.id,
+      attemptNumber: stored.attempt.number,
+    });
+    if (
+      await computeHostedClaimFencingTokenDigestV1(fencingToken)
+        !== stored.attempt.fencingTokenDigest
+    ) return null;
+    return HostedClaimV1Schema.parse({
+      ...stored,
+      attempt: { ...stored.attempt, fencingToken },
+    });
+  }
+
   return {
     async admit(command) {
       const admission = HostedAdmissionEnvelopeV1Schema.parse(command.admission);
@@ -267,9 +316,13 @@ export function createHostedRunCoordinator(input: {
           if (replay.request_digest !== requestDigest) {
             return { kind: "conflict", reason: "operation_mismatch" } as const;
           }
+          const claim = await hydrateStoredClaim(replay.claim);
+          if (!claim) {
+            return { kind: "conflict", reason: "authority_mismatch" } as const;
+          }
           return {
             kind: "replayed",
-            claim: HostedClaimV1Schema.parse(replay.claim),
+            claim,
           } as const;
         }
 
@@ -345,7 +398,13 @@ export function createHostedRunCoordinator(input: {
 
         const attemptNumber = run.current_attempt_number + 1;
         const attemptId = input.idFactory("attempt");
-        const fencingToken = input.tokenFactory();
+        const fencingToken = input.tokenFactory({
+          organizationId: principal.organizationId,
+          operationId: request.operationId,
+          runId: run.run_id,
+          attemptId,
+          attemptNumber,
+        });
         const fencingTokenDigest = await computeHostedClaimFencingTokenDigestV1(
           fencingToken,
         );
@@ -436,7 +495,7 @@ export function createHostedRunCoordinator(input: {
             request.operationId,
             requestDigest,
             run.run_id,
-            JSON.stringify(claim),
+            JSON.stringify(claimForStorage(claim)),
             now.toISOString(),
           ],
         );

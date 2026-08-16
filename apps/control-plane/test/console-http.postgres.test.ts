@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createControlPlaneApplication } from "../src/application.js";
 import { createConsoleReadModel } from "../src/modules/console-reads/index.js";
-import { createIdentityModule } from "../src/modules/identity/index.js";
+import {
+  createIdentityModule,
+  createLoginThrottleKeyFactory,
+} from "../src/modules/identity/index.js";
 import { createRunnerDirectory } from "../src/modules/runners/index.js";
 import {
   createIsolatedPostgres,
@@ -28,6 +31,7 @@ describe.skipIf(!TEST_DATABASE_URL)("same-origin console HTTP identity", () => {
       idFactory: (kind) => `${kind}_http_${++identityNumber}`,
       opaqueBearerFactory: (kind) => `console_${kind}_bearer_material`.padEnd(48, "_"),
       sessionDurationMs: 8 * 60 * 60 * 1_000,
+      throttleKeyFactory: createLoginThrottleKeyFactory("t".repeat(32)),
     });
     await identity.provisionOwner({
       organizationId: "org_console_http",

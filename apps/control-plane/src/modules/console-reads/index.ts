@@ -9,6 +9,16 @@ function boundedLimit(value: number | undefined): number {
   return value;
 }
 
+function redactFencingToken(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactFencingToken);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, child]) => key === "fencingToken"
+      ? []
+      : [[key, redactFencingToken(child)]]),
+  );
+}
+
 export function createConsoleReadModel(input: { pool: Pool }) {
   return {
     async overview(principal: ConsolePrincipal) {
@@ -199,8 +209,8 @@ export function createConsoleReadModel(input: { pool: Pool }) {
         attemptId: row.attempt_id,
         actionId: row.action_id,
         state: row.state,
-        request: row.request,
-        currentReceipt: row.current_receipt,
+        request: redactFencingToken(row.request),
+        currentReceipt: redactFencingToken(row.current_receipt),
         updatedAt: row.updated_at.toISOString(),
       }));
     },

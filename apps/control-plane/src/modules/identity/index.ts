@@ -1,5 +1,6 @@
 import {
   createHash,
+  createHmac,
   randomBytes,
   scrypt as scryptCallback,
   timingSafeEqual,
@@ -18,6 +19,22 @@ const DUMMY_HASH = Buffer.alloc(PASSWORD_KEY_BYTES).toString("hex");
 type Clock = { now(): Date };
 type IdentityId = "api_key" | "operator" | "session";
 type ConsoleRole = "owner" | "admin" | "operator" | "viewer";
+type LoginRateLimit = {
+  maxFailures: number;
+  windowMs: number;
+  lockoutMs: number;
+};
+type LoginThrottleKind = "email" | "network";
+type LoginThrottleKeyFactory = (
+  kind: LoginThrottleKind,
+  normalizedValue: string,
+) => string;
+type LoginThrottleRow = {
+  throttle_key: string;
+  failure_count: number;
+  window_started_at: Date;
+  locked_until: Date | null;
+};
 const API_KEY_SCOPES = new Set([
   "audit:read",
   "permission:resolve",
@@ -42,6 +59,30 @@ function requireAdministrator(principal: ConsolePrincipal): void {
 
 function digestOpaqueBearer(bearer: string): string {
   return createHash("sha256").update(bearer, "utf8").digest("hex");
+}
+
+export function createLoginThrottleKeyFactory(
+  secret: string,
+): LoginThrottleKeyFactory {
+  if (secret.length < 32 || secret.length > 4096 || secret !== secret.trim()) {
+    throw new Error("invalid_login_throttle_secret");
+  }
+  return (kind, normalizedValue) => createHmac("sha256", secret)
+    .update(JSON.stringify([
+      "opentag.control.login-throttle/v1",
+      kind,
+      normalizedValue,
+    ]))
+    .digest("base64url");
+}
+
+function isOperatorEmailConflict(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && error.code === "23505"
+    && "constraint" in error
+    && error.constraint === "cp_operator_email_key";
 }
 
 async function passwordHash(password: string): Promise<string> {
@@ -72,7 +113,19 @@ export function createIdentityModule(input: {
   idFactory(kind: IdentityId): string;
   opaqueBearerFactory(kind: "api_key" | "session"): string;
   sessionDurationMs: number;
+  throttleKeyFactory: LoginThrottleKeyFactory;
+  loginRateLimit?: LoginRateLimit;
 }) {
+  const loginRateLimit = input.loginRateLimit ?? {
+    maxFailures: 5,
+    windowMs: 300_000,
+    lockoutMs: 900_000,
+  };
+  const throttleRetentionMs = Math.max(
+    loginRateLimit.windowMs,
+    loginRateLimit.lockoutMs,
+  ) * 2;
+
   function issueOpaqueBearer(kind: "api_key" | "session"): string {
     const bearer = input.opaqueBearerFactory(kind);
     if (
@@ -102,67 +155,130 @@ export function createIdentityModule(input: {
       const email = command.email.trim().toLowerCase();
       if (!email || !email.includes("@")) throw new Error("invalid_email");
       const encodedPassword = await passwordHash(command.password);
-      return withPostgresTransaction(input.pool, async (client) => {
-        await client.query(
-          `INSERT INTO cp_organization(organization_id, display_name)
-           VALUES($1, $2)
-           ON CONFLICT (organization_id) DO NOTHING`,
-          [command.organizationId, command.organizationName],
-        );
-        await client.query(
-          "SELECT organization_id FROM cp_organization WHERE organization_id = $1 FOR UPDATE",
-          [command.organizationId],
-        );
-        const existing = await client.query(
-          "SELECT operator_id FROM cp_operator WHERE email = $1 FOR UPDATE",
-          [email],
-        ) as { rows: Array<{ operator_id: string }> };
-        const row = existing.rows[0];
-        if (row) {
-          const membership = await client.query(
-            `SELECT role FROM cp_membership
-             WHERE organization_id = $1 AND operator_id = $2`,
-            [command.organizationId, row.operator_id],
-          ) as { rows: Array<{ role: string }> };
-          return membership.rows[0]?.role === "owner"
-            ? { kind: "replayed", operatorId: row.operator_id } as const
-            : { kind: "conflict" } as const;
-        }
-        const operatorId = input.idFactory("operator");
-        const createdAt = input.clock.now().toISOString();
-        await client.query(
-          `INSERT INTO cp_operator(
-             operator_id, email, display_name, password_hash, created_at
-           ) VALUES($1, $2, $3, $4, $5)`,
-          [operatorId, email, command.displayName, encodedPassword, createdAt],
-        );
-        await client.query(
-          `INSERT INTO cp_membership(
-             organization_id, operator_id, role, created_at
-           ) VALUES($1, $2, 'owner', $3)`,
-          [command.organizationId, operatorId, createdAt],
-        );
-        await recordManagementAudit(client, {
-          organizationId: command.organizationId,
-          actor: { kind: "bootstrap", id: operatorId },
-          operationKind: "owner.provision",
-          resource: { kind: "operator", id: operatorId },
-          outcome: "created",
-          event: { role: "owner" },
-          createdAt,
+      try {
+        return await withPostgresTransaction(input.pool, async (client) => {
+          await client.query(
+            `INSERT INTO cp_organization(organization_id, display_name)
+             VALUES($1, $2)
+             ON CONFLICT (organization_id) DO NOTHING`,
+            [command.organizationId, command.organizationName],
+          );
+          await client.query(
+            "SELECT organization_id FROM cp_organization WHERE organization_id = $1 FOR UPDATE",
+            [command.organizationId],
+          );
+          const existing = await client.query(
+            "SELECT operator_id FROM cp_operator WHERE email = $1 FOR UPDATE",
+            [email],
+          ) as { rows: Array<{ operator_id: string }> };
+          const row = existing.rows[0];
+          if (row) {
+            const membership = await client.query(
+              `SELECT role FROM cp_membership
+               WHERE organization_id = $1 AND operator_id = $2`,
+              [command.organizationId, row.operator_id],
+            ) as { rows: Array<{ role: string }> };
+            return membership.rows[0]?.role === "owner"
+              ? { kind: "replayed", operatorId: row.operator_id } as const
+              : { kind: "conflict" } as const;
+          }
+          const operatorId = input.idFactory("operator");
+          const createdAt = input.clock.now().toISOString();
+          await client.query(
+            `INSERT INTO cp_operator(
+               operator_id, email, display_name, password_hash, created_at
+             ) VALUES($1, $2, $3, $4, $5)`,
+            [operatorId, email, command.displayName, encodedPassword, createdAt],
+          );
+          await client.query(
+            `INSERT INTO cp_membership(
+               organization_id, operator_id, role, created_at
+             ) VALUES($1, $2, 'owner', $3)`,
+            [command.organizationId, operatorId, createdAt],
+          );
+          await recordManagementAudit(client, {
+            organizationId: command.organizationId,
+            actor: { kind: "bootstrap", id: operatorId },
+            operationKind: "owner.provision",
+            resource: { kind: "operator", id: operatorId },
+            outcome: "created",
+            event: { role: "owner" },
+            createdAt,
+          });
+          return { kind: "created", operatorId } as const;
         });
-        return { kind: "created", operatorId } as const;
-      });
+      } catch (error) {
+        if (isOperatorEmailConflict(error)) return { kind: "conflict" };
+        throw error;
+      }
     },
 
     async login(command: {
       email: string;
       password: string;
       organizationId?: string;
+      networkKey?: string;
     }) {
       const email = command.email.trim().toLowerCase();
       const organizationId = command.organizationId?.trim() || null;
+      const suppliedNetworkKey = command.networkKey?.trim();
+      if (suppliedNetworkKey && suppliedNetworkKey.length > 512) {
+        throw new Error("invalid_network_key");
+      }
+      const emailThrottleKey = `email:${input.throttleKeyFactory("email", email)}`;
+      const networkThrottleKey = suppliedNetworkKey
+        ? `network:${input.throttleKeyFactory("network", suppliedNetworkKey)}`
+        : null;
+      const throttleKeys = [
+        emailThrottleKey,
+        ...(networkThrottleKey ? [networkThrottleKey] : []),
+      ].sort();
       return withPostgresTransaction(input.pool, async (client) => {
+        const now = input.clock.now();
+        const retentionCutoff = new Date(now.getTime() - throttleRetentionMs);
+        await client.query(
+          `DELETE FROM cp_login_throttle
+           WHERE throttle_key IN (
+             SELECT throttle_key
+             FROM cp_login_throttle
+             WHERE updated_at < $1
+               AND (locked_until IS NULL OR locked_until <= $2)
+             ORDER BY updated_at
+             LIMIT 1000
+             FOR UPDATE SKIP LOCKED
+           )`,
+          [retentionCutoff, now],
+        );
+        for (const throttleKey of throttleKeys) {
+          await client.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            [
+              JSON.stringify([
+                "opentag.control.console-login-throttle/v1",
+                throttleKey,
+              ]),
+            ],
+          );
+        }
+        const throttles = await client.query<LoginThrottleRow>(
+          `SELECT throttle_key, failure_count, window_started_at, locked_until
+           FROM cp_login_throttle
+           WHERE throttle_key = ANY($1::text[])
+           FOR UPDATE`,
+          [throttleKeys],
+        );
+        const retryAfterMs = throttles.rows.reduce((remaining, throttle) => {
+          const retry = throttle.locked_until
+            ? throttle.locked_until.getTime() - now.getTime()
+            : 0;
+          return Math.max(remaining, retry);
+        }, 0);
+        if (retryAfterMs > 0) {
+          return {
+            kind: "rate_limited",
+            retryAfterMs: Math.max(1, retryAfterMs),
+          } as const;
+        }
         const result = await client.query<{
           operator_id: string;
           password_hash: string | null;
@@ -183,14 +299,48 @@ export function createIdentityModule(input: {
         );
         const row = result.rows[0];
         if (!(await passwordMatches(command.password, row?.password_hash ?? null)) || !row) {
+          const storedByKey = new Map(
+            throttles.rows.map((throttle) => [throttle.throttle_key, throttle]),
+          );
+          for (const throttleKey of throttleKeys) {
+            const stored = storedByKey.get(throttleKey);
+            const withinWindow = stored
+              && now.getTime() - stored.window_started_at.getTime()
+                < loginRateLimit.windowMs;
+            const failureCount = withinWindow
+              ? stored.failure_count + 1
+              : 1;
+            const windowStartedAt = withinWindow
+              ? stored.window_started_at
+              : now;
+            const lockedUntil = failureCount >= loginRateLimit.maxFailures
+              ? new Date(now.getTime() + loginRateLimit.lockoutMs)
+              : null;
+            await client.query(
+              `INSERT INTO cp_login_throttle(
+                 throttle_key, failure_count, window_started_at,
+                 locked_until, updated_at
+               ) VALUES($1, $2, $3, $4, $5)
+               ON CONFLICT (throttle_key) DO UPDATE SET
+                 failure_count = EXCLUDED.failure_count,
+                 window_started_at = EXCLUDED.window_started_at,
+                 locked_until = EXCLUDED.locked_until,
+                 updated_at = EXCLUDED.updated_at`,
+              [throttleKey, failureCount, windowStartedAt, lockedUntil, now],
+            );
+          }
           return { kind: "invalid_credential" } as const;
         }
+        await client.query(
+          "DELETE FROM cp_login_throttle WHERE throttle_key = $1",
+          [emailThrottleKey],
+        );
         if (organizationId === null && result.rows.length > 1) {
           return { kind: "organization_required" } as const;
         }
         const sessionId = input.idFactory("session");
         const bearer = issueOpaqueBearer("session");
-        const createdAt = input.clock.now();
+        const createdAt = now;
         const expiresAt = new Date(createdAt.getTime() + input.sessionDurationMs);
         const principal: ConsolePrincipal = {
           operatorId: row.operator_id,

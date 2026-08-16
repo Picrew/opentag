@@ -11,7 +11,7 @@ const capabilities = RelayCapabilitiesResponseV1Schema.parse({
   deployment: { environment: "local", releaseSha: "local" },
   artifact: {
     packageName: "@opentag/control-plane",
-    packageVersion: "0.10.0-next.0",
+    packageVersion: "0.0.0",
   },
 });
 
@@ -95,6 +95,84 @@ describe("Control Plane Fetch application", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
     expect(response.headers.get("permissions-policy")).toContain("camera=()");
+  });
+
+  it("returns a bounded retry response when console login is throttled", async () => {
+    let observedNetworkKey: string | undefined;
+    const application = createControlPlaneApplication({
+      capabilities,
+      readiness: { check: async () => ({ ready: true }) },
+      console: {
+        publicOrigin: "http://control.test",
+        identity: {
+          login: async (command: { networkKey?: string }) => {
+            observedNetworkKey = command.networkKey;
+            return {
+              kind: "rate_limited" as const,
+              retryAfterMs: 120_000,
+            };
+          },
+        } as never,
+        reads: {} as never,
+      },
+    });
+    const response = await application.fetch(new Request(
+      "http://control.test/api/console/session",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://control.test",
+        },
+        body: JSON.stringify({
+          email: "owner@example.test",
+          password: "wrong password value",
+        }),
+      },
+    ));
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("120");
+    expect(await response.json()).toEqual({ error: "rate_limited" });
+    expect(observedNetworkKey).toBe("direct-fetch");
+  });
+
+  it("never trusts forwarded client addresses and disables the network bucket behind a trusted edge", async () => {
+    let observedNetworkKey: string | undefined;
+    const application = createControlPlaneApplication({
+      capabilities,
+      readiness: { check: async () => ({ ready: true }) },
+      console: {
+        publicOrigin: "https://control.test",
+        loginNetworkMode: "trusted-edge",
+        identity: {
+          login: async (command: { networkKey?: string }) => {
+            observedNetworkKey = command.networkKey;
+            return { kind: "invalid_credential" as const };
+          },
+        } as never,
+        reads: {} as never,
+      },
+    });
+    const response = await application.fetch(new Request(
+      "https://control.test/api/console/session",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "https://control.test",
+          "x-forwarded-for": "198.51.100.22",
+          "cf-connecting-ip": "198.51.100.23",
+        },
+        body: JSON.stringify({
+          email: "owner@example.test",
+          password: "wrong password value",
+        }),
+      },
+    ));
+
+    expect(response.status).toBe(401);
+    expect(observedNetworkKey).toBeUndefined();
   });
 
   it("returns a bounded JSON 404 for an unknown API path", async () => {
@@ -232,5 +310,63 @@ describe("Control Plane Fetch application", () => {
       deliveryId: "delivery_1",
       eventName: "issue_comment",
     }));
+  });
+
+  it("accepts GitHub deliveries above the generic Control V1 body limit", async () => {
+    const rawBody = JSON.stringify({ body: "x".repeat(300 * 1024) });
+    const receive = vi.fn(async () => ({
+      kind: "evidence_recorded" as const,
+    }));
+    const application = createControlPlaneApplication({
+      capabilities,
+      readiness: { check: async () => ({ ready: true }) },
+      github: { receive },
+    });
+
+    const response = await application.fetch(new Request(
+      "http://control.test/v1/providers/github/webhooks/binding_large",
+      {
+        method: "POST",
+        headers: {
+          "x-github-delivery": "delivery_large",
+          "x-github-event": "pull_request",
+          "x-hub-signature-256": `sha256:${"a".repeat(64)}`,
+        },
+        body: rawBody,
+      },
+    ));
+
+    expect(response.status).toBe(202);
+    expect(receive).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.objectContaining({ byteLength: expect.any(Number) }),
+    }));
+    expect(receive.mock.calls[0]?.[0].body.byteLength).toBeGreaterThan(
+      256 * 1024,
+    );
+  });
+
+  it("rejects GitHub deliveries above the dedicated webhook limit", async () => {
+    const receive = vi.fn();
+    const application = createControlPlaneApplication({
+      capabilities,
+      readiness: { check: async () => ({ ready: true }) },
+      github: { receive },
+    });
+    const response = await application.fetch(new Request(
+      "http://control.test/v1/providers/github/webhooks/binding_too_large",
+      {
+        method: "POST",
+        headers: {
+          "content-length": String(10 * 1024 * 1024 + 1),
+          "x-github-delivery": "delivery_too_large",
+          "x-github-event": "pull_request",
+          "x-hub-signature-256": `sha256:${"a".repeat(64)}`,
+        },
+        body: "{}",
+      },
+    ));
+
+    expect(response.status).toBe(413);
+    expect(receive).not.toHaveBeenCalled();
   });
 });

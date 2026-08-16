@@ -18,6 +18,7 @@ import {
   type RelayCapability,
 } from "@opentag/control-protocol";
 import { randomUUID } from "node:crypto";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
@@ -87,6 +88,7 @@ export type ControlPlaneDependencies = {
     identity: IdentityModule;
     reads: ConsoleReadModel;
     publicOrigin: string;
+    loginNetworkMode?: "direct-peer" | "trusted-edge";
     targets?: Pick<RunnerDirectory, "declareProjectTarget">;
   };
   github?: Pick<GithubIngress, "receive"> & Partial<Pick<GithubIngress, "createBinding">>;
@@ -169,8 +171,19 @@ export function createControlPlaneApplication(
     return outcome.kind === "authenticated" ? outcome.principal : null;
   };
 
-  app.use("/v1/*", bodyLimit({ maxSize: 256 * 1024 }));
-  app.use("/api/console/*", bodyLimit({ maxSize: 64 * 1024 }));
+  const boundedBody = (maxSize: number) => bodyLimit({
+    maxSize,
+    onError: (context) => context.json({ error: "payload_too_large" }, 413),
+  });
+  app.use("/v1/*", async (context, next) => {
+    const maxSize = context.req.path.startsWith(
+      "/v1/providers/github/webhooks/",
+    )
+      ? 10 * 1024 * 1024
+      : 256 * 1024;
+    return boundedBody(maxSize)(context, next);
+  });
+  app.use("/api/console/*", boundedBody(64 * 1024));
 
   app.get("/healthz", (context) => context.json({ status: "ok" }));
 
@@ -741,9 +754,28 @@ export function createControlPlaneApplication(
       } catch {
         return context.json({ error: "invalid_request" }, 400);
       }
-      const outcome = await consoleDependencies.identity.login(body);
+      let networkKey: string | undefined;
+      if (consoleDependencies.loginNetworkMode !== "trusted-edge") {
+        networkKey = "direct-fetch";
+        try {
+          networkKey = getConnInfo(context).remote.address ?? networkKey;
+        } catch {
+          // Direct Fetch API tests and non-Node adapters have no socket metadata.
+        }
+      }
+      const outcome = await consoleDependencies.identity.login({
+        ...body,
+        ...(networkKey ? { networkKey } : {}),
+      });
       if (outcome.kind === "organization_required") {
         return context.json({ error: "organization_required" }, 409);
+      }
+      if (outcome.kind === "rate_limited") {
+        context.header(
+          "retry-after",
+          String(Math.ceil(outcome.retryAfterMs / 1_000)),
+        );
+        return context.json({ error: "rate_limited" }, 429);
       }
       if (outcome.kind !== "authenticated") {
         return context.json({ error: "invalid_credential" }, 401);

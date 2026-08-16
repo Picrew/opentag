@@ -222,6 +222,62 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
     expect(counts.rows[0]).toEqual({ deliveries: 1, runs: 1 });
   });
 
+  it("allows separate tenants to bind the same provider repository id", async () => {
+    await fixture.pool.query(
+      `INSERT INTO cp_organization(organization_id, display_name)
+       VALUES('org_ingress_other', 'Other ingress')`,
+    );
+    await fixture.pool.query(
+      `INSERT INTO cp_operator(operator_id, email, display_name, created_at)
+       VALUES('operator_ingress_other', 'other-owner@example.test', 'Other owner', $1)`,
+      [now],
+    );
+    await fixture.pool.query(
+      `INSERT INTO cp_membership(organization_id, operator_id, role, created_at)
+       VALUES('org_ingress_other', 'operator_ingress_other', 'owner', $1)`,
+      [now],
+    );
+    await fixture.pool.query(
+      `INSERT INTO cp_runner(
+         organization_id, runner_id, registration_generation,
+         credential_generation, current_credential_id, capabilities,
+         created_at, updated_at
+       ) VALUES(
+         'org_ingress_other', 'runner_ingress_other', 1, 1,
+         'credential_ingress_other', '[]'::jsonb, $1, $1
+       )`,
+      [now],
+    );
+    await fixture.pool.query(
+      `INSERT INTO cp_project_target(
+         organization_id, project_target_id, runner_id, binding_digest,
+         provider, owner, repo, default_executor, version, updated_at
+       ) VALUES(
+         'org_ingress_other', 'target_ingress_other', 'runner_ingress_other',
+         'digest-other', 'github', 'acme', 'demo', 'executor_acp', 1, $1
+       )`,
+      [now],
+    );
+    const outcome = await ingress.createBinding({
+      operatorId: "operator_ingress_other",
+      organizationId: "org_ingress_other",
+      role: "owner",
+      email: "other-owner@example.test",
+      displayName: "Other owner",
+    }, {
+      bindingId: "binding_ingress_other",
+      providerRepositoryId: "123",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_ingress_other",
+      projectTargetId: "target_ingress_other",
+      allowedActorIds: ["1001"],
+      enabled: false,
+    });
+
+    expect(outcome.kind).toBe("created");
+  });
+
   it("fails closed for a bad signature or non-allowlisted stable actor id", async () => {
     const badSignatureBody = new TextEncoder().encode("{}");
     await expect(ingress.receive({

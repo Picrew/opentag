@@ -4,7 +4,9 @@ import {
   computePermissionFencingTokenDigestV1,
   computePermissionRequestDigestV1,
   HumanPermissionDecisionRequestV1Schema,
+  PermissionRequestDigestInputV1Schema,
   PermissionResolutionReceiptEnvelopeV1Schema,
+  ReceiptDigestSchema,
   RunnerPermissionCurrentQueryV1Schema,
   RunnerPermissionRequestV1Schema,
   type HumanPermissionDecisionRequestV1,
@@ -37,6 +39,13 @@ type StoredPermission = {
   request: unknown;
   current_receipt: unknown;
 };
+
+const StoredPermissionRequestV1Schema = PermissionRequestDigestInputV1Schema.extend({
+  permissionRequestDigest: ReceiptDigestSchema,
+});
+type StoredPermissionRequestV1 = ReturnType<
+  typeof StoredPermissionRequestV1Schema.parse
+>;
 
 export type PermissionCoordinator = {
   request(input: {
@@ -92,13 +101,22 @@ function permissionDigestInput(request: RunnerPermissionRequestV1) {
   };
 }
 
+function permissionRequestForStorage(
+  request: RunnerPermissionRequestV1,
+): StoredPermissionRequestV1 {
+  return StoredPermissionRequestV1Schema.parse({
+    ...permissionDigestInput(request),
+    permissionRequestDigest: request.permissionRequestDigest,
+  });
+}
+
 async function buildReceipt(input: {
   idFactory(kind: PermissionIdKind): string;
   operationId: string;
   organizationId: string;
   runId: string;
   attempt: RunnerPermissionCurrentQueryV1["attempt"];
-  request: RunnerPermissionRequestV1;
+  request: StoredPermissionRequestV1;
   resolutionId: string;
   observedAt: string;
   state: PermissionState;
@@ -312,7 +330,7 @@ export function createPermissionCoordinator(input: {
             epoch: request.attempt.epoch,
             fencingTokenDigest: request.attempt.fencingTokenDigest,
           },
-          request,
+          request: permissionRequestForStorage(request),
           resolutionId,
           observedAt,
           state: "waiting",
@@ -336,7 +354,7 @@ export function createPermissionCoordinator(input: {
             resolutionId,
             request.permissionRequestDigest,
             request.policySnapshotDigest,
-            JSON.stringify(request),
+            JSON.stringify(permissionRequestForStorage(request)),
             JSON.stringify(receipt),
             observedAt,
           ],
@@ -439,7 +457,7 @@ export function createPermissionCoordinator(input: {
           fencingTokenDigest: decision.attempt.fencingTokenDigest,
           now: input.clock.now(),
         }))) return { kind: "stale_fence" } as const;
-        const request = RunnerPermissionRequestV1Schema.parse(stored.request);
+        const request = StoredPermissionRequestV1Schema.parse(stored.request);
         const state = decision.decision === "allow_once"
           ? "authorized" as const
           : "denied" as const;

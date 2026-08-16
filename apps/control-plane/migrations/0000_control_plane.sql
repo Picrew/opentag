@@ -235,7 +235,7 @@ CREATE TABLE cp_github_binding (
   updated_at timestamptz NOT NULL,
   PRIMARY KEY (organization_id, binding_id),
   UNIQUE (binding_id),
-  UNIQUE (provider_repository_id),
+  UNIQUE (organization_id, provider_repository_id),
   FOREIGN KEY (organization_id, runner_id)
     REFERENCES cp_runner(organization_id, runner_id)
 );

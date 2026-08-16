@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   parseAdminBootstrapConfig,
@@ -21,11 +22,22 @@ describe("Control Plane configuration", () => {
       recoveryPairingToken: null,
       databaseUrl: "postgresql://opentag:secret@postgres:5432/opentag",
       environment: "local",
+      fencingTokenSecret: "bootstrap_secret",
       githubIngressMasterSecret: null,
       host: "0.0.0.0",
       jobLeaseDurationMs: 30_000,
       jobPollIntervalMs: 1_000,
       jobRetryDelayMs: 30_000,
+      loginRateLimit: {
+        secret: createHash("sha256").update(JSON.stringify([
+          "opentag.control.local-login-throttle-secret/v1",
+          "bootstrap_secret",
+        ])).digest("hex"),
+        networkMode: "direct-peer",
+        maxFailures: 5,
+        windowMs: 300_000,
+        lockoutMs: 900_000,
+      },
       poolMax: 10,
       port: 3000,
       publicOrigin: "http://127.0.0.1:3000",
@@ -40,6 +52,8 @@ describe("Control Plane configuration", () => {
         OPENTAG_BOOTSTRAP_ORGANIZATION_ID: "org_local",
         OPENTAG_BOOTSTRAP_ORGANIZATION_NAME: "Local OpenTag",
         OPENTAG_BOOTSTRAP_PAIRING_TOKEN: "bootstrap_secret",
+        OPENTAG_FENCING_TOKEN_SECRET: "f".repeat(32),
+        OPENTAG_LOGIN_THROTTLE_SECRET: "l".repeat(32),
         OPENTAG_ENVIRONMENT: "production",
         OPENTAG_PUBLIC_URL: "http://control.example.test",
         OPENTAG_RELEASE_SHA: "local",
@@ -52,11 +66,48 @@ describe("Control Plane configuration", () => {
         OPENTAG_BOOTSTRAP_ORGANIZATION_ID: "org_local",
         OPENTAG_BOOTSTRAP_ORGANIZATION_NAME: "Local OpenTag",
         OPENTAG_BOOTSTRAP_PAIRING_TOKEN: "bootstrap_secret",
+        OPENTAG_FENCING_TOKEN_SECRET: "f".repeat(32),
+        OPENTAG_LOGIN_THROTTLE_SECRET: "l".repeat(32),
         OPENTAG_ENVIRONMENT: "production",
         OPENTAG_PUBLIC_URL: "https://control.example.test",
         OPENTAG_RELEASE_SHA: "a".repeat(40),
       }).releaseSha,
     ).toBe("a".repeat(40));
+    expect(() => parseControlPlaneConfig({
+      DATABASE_URL: "postgresql://opentag:secret@postgres:5432/opentag",
+      OPENTAG_BOOTSTRAP_ORGANIZATION_ID: "org_local",
+      OPENTAG_BOOTSTRAP_ORGANIZATION_NAME: "Local OpenTag",
+      OPENTAG_BOOTSTRAP_PAIRING_TOKEN: "bootstrap_secret",
+      OPENTAG_ENVIRONMENT: "production",
+      OPENTAG_PUBLIC_URL: "https://control.example.test",
+      OPENTAG_RELEASE_SHA: "a".repeat(40),
+    })).toThrow("configuration_invalid");
+  });
+
+  it("requires independent login-throttle authority and supports trusted-edge mode", () => {
+    const base = {
+      DATABASE_URL: "postgresql://opentag:secret@postgres:5432/opentag",
+      OPENTAG_BOOTSTRAP_ORGANIZATION_ID: "org_local",
+      OPENTAG_BOOTSTRAP_ORGANIZATION_NAME: "Local OpenTag",
+      OPENTAG_BOOTSTRAP_PAIRING_TOKEN: "b".repeat(32),
+      OPENTAG_FENCING_TOKEN_SECRET: "f".repeat(32),
+      OPENTAG_ENVIRONMENT: "production",
+      OPENTAG_PUBLIC_URL: "https://control.example.test",
+      OPENTAG_RELEASE_SHA: "a".repeat(40),
+    };
+    expect(() => parseControlPlaneConfig(base)).toThrow("configuration_invalid");
+    expect(() => parseControlPlaneConfig({
+      ...base,
+      OPENTAG_LOGIN_THROTTLE_SECRET: "f".repeat(32),
+    })).toThrow("configuration_invalid");
+    expect(parseControlPlaneConfig({
+      ...base,
+      OPENTAG_LOGIN_THROTTLE_SECRET: "l".repeat(32),
+      OPENTAG_LOGIN_NETWORK_THROTTLE_MODE: "trusted-edge",
+    }).loginRateLimit).toMatchObject({
+      secret: "l".repeat(32),
+      networkMode: "trusted-edge",
+    });
   });
 
   it("rejects invalid database and public origins without echoing credentials", () => {

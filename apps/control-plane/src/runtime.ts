@@ -1,4 +1,9 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
 import type { Pool } from "pg";
 import { createControlPlaneApplication } from "./application.js";
 import type { ControlPlaneConfig } from "./config.js";
@@ -14,7 +19,10 @@ import { createHostedRunCoordinator } from "./modules/hosted-runs/index.js";
 import { createPermissionCoordinator } from "./modules/hosted-runs/permissions.js";
 import { createMaterialActionCoordinator } from "./modules/hosted-runs/material-actions.js";
 import { createConsoleReadModel } from "./modules/console-reads/index.js";
-import { createIdentityModule } from "./modules/identity/index.js";
+import {
+  createIdentityModule,
+  createLoginThrottleKeyFactory,
+} from "./modules/identity/index.js";
 import {
   createDurableJobQueue,
   scheduleControlPlaneMaintenance,
@@ -60,7 +68,7 @@ function randomIdentifier(
 }
 
 function runtimeSecret(
-  prefix: "api_key" | "fence" | "job_lease" | "runtime" | "session",
+  prefix: "api_key" | "job_lease" | "runtime" | "session",
 ): string {
   return `${prefix}_${randomBytes(32).toString("base64url")}`;
 }
@@ -86,7 +94,17 @@ export function createControlPlaneRuntime(input: {
     clock,
     leaseDurationMs: 60_000,
     idFactory: () => randomIdentifier("attempt"),
-    tokenFactory: () => runtimeSecret("fence"),
+    tokenFactory: (context) => `fence_${createHmac(
+      "sha256",
+      input.config.fencingTokenSecret,
+    ).update(JSON.stringify([
+      "opentag.control.fencing-token/v1",
+      context.organizationId,
+      context.operationId,
+      context.runId,
+      context.attemptId,
+      context.attemptNumber,
+    ])).digest("base64url")}`,
   });
   const identity = createIdentityModule({
     pool: postgres.pool,
@@ -94,6 +112,10 @@ export function createControlPlaneRuntime(input: {
     idFactory: (kind) => randomIdentifier(kind),
     opaqueBearerFactory: (kind) => runtimeSecret(kind),
     sessionDurationMs: 8 * 60 * 60 * 1_000,
+    throttleKeyFactory: createLoginThrottleKeyFactory(
+      input.config.loginRateLimit.secret,
+    ),
+    loginRateLimit: input.config.loginRateLimit,
   });
   const permissions = createPermissionCoordinator({
     pool: postgres.pool,
@@ -149,7 +171,7 @@ export function createControlPlaneRuntime(input: {
       },
       artifact: {
         packageName: "@opentag/control-plane",
-        packageVersion: "0.10.0-next.0",
+        packageVersion: "0.0.0",
       },
     },
     readiness: {
@@ -210,6 +232,7 @@ export function createControlPlaneRuntime(input: {
       identity,
       reads,
       publicOrigin: input.config.publicOrigin,
+      loginNetworkMode: input.config.loginRateLimit.networkMode,
       targets: runners,
     },
     ...(github ? { github } : {}),

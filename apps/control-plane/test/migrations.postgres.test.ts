@@ -22,6 +22,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "0001_permissions.sql",
       "0002_material_actions.sql",
       "0003_bind_session_tenant.sql",
+      "0004_login_throttle.sql",
     ]);
 
     await expect(fixture.migrate()).resolves.toBeUndefined();
@@ -49,6 +50,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
         "cp_material_action_receipt",
         "cp_material_action_current",
         "cp_management_audit_event",
+        "cp_login_throttle",
       ]),
     );
 

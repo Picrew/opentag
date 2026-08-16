@@ -66,7 +66,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     clock,
     leaseDurationMs: 60_000,
     idFactory: (kind) => `${kind}_${++identity}`,
-    tokenFactory: () => `fence_${identity}`,
+    tokenFactory: (context) => `fence_${context.attemptId}`,
   });
 
   async function admitAndClaim(suffix: string): Promise<HostedClaimV1> {
@@ -214,6 +214,58 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     );
     expect(claims).toHaveLength(2);
     expect(claims[1]).toEqual(claims[0]);
+    const persisted = await fixture.pool.query<{ claim: unknown }>(
+      `SELECT claim FROM cp_hosted_claim
+       WHERE organization_id = $1 AND operation_id = $2`,
+      [principal.organizationId, command.request.operationId],
+    );
+    expect(JSON.stringify(persisted.rows[0]?.claim)).not.toContain(
+      claims[0]?.attempt.fencingToken,
+    );
+    expect(JSON.stringify(persisted.rows[0]?.claim)).toContain(
+      claims[0]?.attempt.fencingTokenDigest,
+    );
+  });
+
+  it("fails closed when a stored claim cannot be hydrated by the current fencing authority", async () => {
+    const input = await hostedAdmissionFixture({
+      runId: "run_claim_secret_rotation",
+      suffix: "f23secretrotation",
+    });
+    const original = createHostedRunCoordinator({
+      pool: fixture.pool,
+      clock,
+      leaseDurationMs: 60_000,
+      idFactory: (kind) => `${kind}_${++identity}`,
+      tokenFactory: () => "fence_original_authority",
+    });
+    await original.admit({
+      runId: "run_claim_secret_rotation",
+      admission: input.admission,
+      policy: input.policy,
+    });
+    const command = {
+      principal,
+      request: hostedClaimRequest({
+        operationId: "operation_claim_secret_rotation",
+        requestId: "request_claim_secret_rotation",
+      }),
+    };
+    await expect(original.claim(command)).resolves.toMatchObject({
+      kind: "claimed",
+    });
+
+    const rotated = createHostedRunCoordinator({
+      pool: fixture.pool,
+      clock,
+      leaseDurationMs: 60_000,
+      idFactory: (kind) => `${kind}_${++identity}`,
+      tokenFactory: () => "fence_rotated_authority",
+    });
+    await expect(rotated.claim(command)).resolves.toEqual({
+      kind: "conflict",
+      reason: "authority_mismatch",
+    });
   });
 
   it("replays one concurrent claim operation without claiming a second pending Run", async () => {

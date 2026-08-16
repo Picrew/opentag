@@ -8,6 +8,7 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createPermissionCoordinator } from "../src/modules/hosted-runs/permissions.js";
+import { createConsoleReadModel } from "../src/modules/console-reads/index.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
 import {
   hostedAdmissionFixture,
@@ -166,6 +167,29 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
     expect(
       PermissionResolutionReceiptEnvelopeV1Schema.parse(waiting.receipt).payload,
     ).toMatchObject({ state: "waiting", nextAction: "wait_for_operator" });
+    const storedRequest = await fixture.pool.query<{ request: unknown }>(
+      `SELECT request FROM cp_permission_request
+       WHERE organization_id = $1 AND permission_request_id = $2`,
+      [principal.organizationId, request.permissionRequestId],
+    );
+    expect(JSON.stringify(storedRequest.rows[0]?.request)).not.toContain(
+      claim.attempt.fencingToken,
+    );
+    expect(JSON.stringify(storedRequest.rows[0]?.request)).toContain(
+      claim.attempt.fencingTokenDigest,
+    );
+    const consolePermissions = await createConsoleReadModel({
+      pool: fixture.pool,
+    }).listPermissions({
+      operatorId: "viewer_permission",
+      organizationId: principal.organizationId,
+      role: "viewer",
+      email: "viewer@example.test",
+      displayName: "Viewer",
+    });
+    expect(JSON.stringify(consolePermissions)).not.toContain(
+      claim.attempt.fencingToken,
+    );
     const query = RunnerPermissionCurrentQueryV1Schema.parse({
       organizationId: request.organizationId,
       runnerId: request.runnerId,
