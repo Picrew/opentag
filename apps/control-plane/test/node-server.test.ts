@@ -38,4 +38,32 @@ describe("Node HTTP process lifecycle", () => {
       "postgres-drained",
     ]);
   });
+
+  it("drains PostgreSQL even when the HTTP server reports a close error", async () => {
+    const events: string[] = [];
+    const closeError = new Error("http close failed");
+    const service = startNodeServer({
+      application: {
+        async fetch() {
+          return new Response("ok");
+        },
+      },
+      host: "127.0.0.1",
+      port: 3000,
+      serveAdapter() {
+        return {
+          close(callback) {
+            events.push("http-close-failed");
+            callback(closeError);
+          },
+        };
+      },
+      async drain() {
+        events.push("postgres-drained");
+      },
+    });
+
+    await expect(service.close()).rejects.toBe(closeError);
+    expect(events).toEqual(["http-close-failed", "postgres-drained"]);
+  });
 });

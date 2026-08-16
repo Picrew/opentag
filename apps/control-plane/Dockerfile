@@ -8,6 +8,8 @@ RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/control-plane/package.json apps/control-plane/package.json
 COPY packages/control-protocol/package.json packages/control-protocol/package.json
+COPY packages/core/package.json packages/core/package.json
+COPY packages/client/package.json packages/client/package.json
 RUN corepack pnpm install --frozen-lockfile \
   --ignore-scripts \
   --filter @opentag/control-plane...

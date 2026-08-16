@@ -37,11 +37,17 @@ export function startNodeServer(input: {
     close() {
       closePromise ??= new Promise<void>((resolve, reject) => {
         server.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          input.drain().then(resolve, reject);
+          input.drain().then(
+            () => error ? reject(error) : resolve(),
+            (drainError) => reject(
+              error
+                ? new AggregateError(
+                    [error, drainError],
+                    "HTTP close and PostgreSQL drain both failed",
+                  )
+                : drainError,
+            ),
+          );
         });
       });
       return closePromise;

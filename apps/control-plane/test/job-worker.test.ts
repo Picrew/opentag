@@ -142,4 +142,54 @@ describe("durable job worker", () => {
     expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
     vi.useRealTimers();
   });
+
+  it("logs an iteration failure, backs off, and keeps polling", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    let claimCount = 0;
+    const queue = {
+      claim: vi.fn(async () => {
+        claimCount += 1;
+        if (claimCount === 1) {
+          const error = new Error("database-secret must not be logged") as Error & {
+            code: string;
+          };
+          error.name = "DatabaseError\ndatabase-name-secret";
+          error.code = "57P01";
+          throw error;
+        }
+        return { kind: "empty" as const };
+      }),
+      succeed: vi.fn(),
+      fail: vi.fn(),
+    };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const loop = runJobLoop({
+      queue,
+      workerId: "worker_resilient",
+      handlers: {},
+      retryDelayMs: 10_000,
+      pollIntervalMs: 25,
+      clock: { now: () => new Date("2026-08-15T12:00:00.000Z") },
+      signal: controller.signal,
+    });
+    const observed = loop.catch(() => undefined);
+
+    await vi.advanceTimersByTimeAsync(25);
+    expect(queue.claim).toHaveBeenCalledTimes(2);
+    expect(errorLog).toHaveBeenCalledWith("control_plane_job_iteration_failed", {
+      workerId: "worker_resilient",
+      errorName: "UnknownError",
+      errorCode: "57P01",
+    });
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain("database-secret");
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(
+      "database-name-secret",
+    );
+
+    controller.abort();
+    await observed;
+    errorLog.mockRestore();
+    vi.useRealTimers();
+  });
 });

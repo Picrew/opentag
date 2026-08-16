@@ -50,10 +50,44 @@ describe("Control Plane deployment contract", () => {
     );
     expect(dockerfile).toContain("deploy --prod --no-optional /output");
     expect(dockerfile).toContain("/output/node_modules");
+    expect(dockerfile).toContain(
+      "COPY packages/client/package.json packages/client/package.json",
+    );
+    expect(dockerfile).toContain(
+      "COPY packages/core/package.json packages/core/package.json",
+    );
     expect(dockerfile).toContain('CMD ["node", "apps/control-plane/dist/index.js", "serve"]');
     for (const forbidden of ["cloudflare", "wrangler", "sqlite", "redis", "kafka"] ) {
       expect(`${dockerfile}\n${packageJson}`.toLowerCase()).not.toContain(forbidden);
     }
+  });
+
+  it("keeps private app metadata and workspace references aligned", async () => {
+    const [rootPackage, appPackage, clientTsconfig, protocolTsup] =
+      await Promise.all([
+        read("package.json"),
+      read("apps/control-plane/package.json"),
+      read("packages/client/tsconfig.json"),
+      read("packages/control-protocol/tsup.config.ts"),
+      ]);
+    const root = JSON.parse(rootPackage) as {
+      devDependencies: Record<string, string>;
+      pnpm: { overrides: Record<string, string> };
+    };
+    const app = JSON.parse(appPackage) as {
+      devDependencies: Record<string, string>;
+      version: string;
+    };
+    expect(app.version).toBe("0.0.0");
+    expect(app.devDependencies.vite).toBe("^8.2.1");
+    expect(root.devDependencies.vite).toBe("^6.4.3");
+    expect(root.pnpm.overrides.vite).toBeUndefined();
+    expect(root.pnpm.overrides["vite@<8"]).toBe("^6.4.3");
+    expect(clientTsconfig).toContain('{ "path": "../control-protocol" }');
+    expect(protocolTsup).not.toContain('entry: ["src/**/*.ts"]');
+    expect(protocolTsup).toContain('"src/canonical-json.ts"');
+    expect(protocolTsup).toContain('"src/completion.ts"');
+    expect(protocolTsup).toContain('"src/credential-safety.ts"');
   });
 
   it("advertises the exact private Control Plane package version", async () => {
@@ -63,5 +97,49 @@ describe("Control Plane deployment contract", () => {
     ]);
     const version = (JSON.parse(packageJson) as { version: string }).version;
     expect(runtime).toContain(`packageVersion: "${version}"`);
+  });
+
+  it("documents the production fencing and login-throttle configuration", async () => {
+    const [
+      configuration,
+      deployment,
+      composeReadme,
+      appReadme,
+      compose,
+      browserE2e,
+    ] =
+      await Promise.all([
+        read("docs/configuration.md"),
+        read("docs/control-plane-deployment.md"),
+        read("deploy/compose/README.md"),
+        read("apps/control-plane/README.md"),
+        read("deploy/compose/compose.yaml"),
+        read("scripts/test/control-plane-browser-e2e.mjs"),
+      ]);
+
+    for (const variable of [
+      "OPENTAG_FENCING_TOKEN_SECRET",
+      "OPENTAG_LOGIN_THROTTLE_SECRET",
+      "OPENTAG_LOGIN_NETWORK_THROTTLE_MODE",
+      "OPENTAG_LOGIN_MAX_FAILURES",
+      "OPENTAG_LOGIN_WINDOW_MS",
+      "OPENTAG_LOGIN_LOCKOUT_MS",
+    ]) {
+      expect(configuration).toContain(variable);
+      expect(deployment).toContain(variable);
+      expect(compose).toContain(variable);
+    }
+    expect(configuration).toContain("OpenTag Control Plane");
+    expect(deployment).toContain("fencing-token digest");
+    expect(composeReadme).toContain(
+      "independently generated fencing-token and login-throttle secrets",
+    );
+    expect(appReadme).toMatch(/never\s+persists the live fencing token/u);
+    expect(browserE2e).toContain(
+      "`OPENTAG_FENCING_TOKEN_SECRET=${fencingTokenSecret}`",
+    );
+    expect(browserE2e).toContain(
+      "`OPENTAG_LOGIN_THROTTLE_SECRET=${loginThrottleSecret}`",
+    );
   });
 });

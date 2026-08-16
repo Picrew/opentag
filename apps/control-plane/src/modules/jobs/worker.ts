@@ -105,7 +105,33 @@ export async function runJobLoop(input: {
   signal: AbortSignal;
 }): Promise<void> {
   while (!input.signal.aborted) {
-    const outcome = await runOneJob(input);
+    let outcome: Awaited<ReturnType<typeof runOneJob>>;
+    try {
+      outcome = await runOneJob(input);
+    } catch (error) {
+      const candidateName = error instanceof Error ? error.name : null;
+      const errorName =
+        candidateName && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u.test(candidateName)
+          ? candidateName
+          : "UnknownError";
+      const candidateCode =
+        typeof error === "object"
+          && error !== null
+          && "code" in error
+          && typeof error.code === "string"
+          ? error.code
+          : null;
+      const errorCode =
+        candidateCode && /^[A-Za-z0-9_.-]{1,64}$/u.test(candidateCode)
+          ? candidateCode
+          : null;
+      console.error("control_plane_job_iteration_failed", {
+        workerId: input.workerId,
+        errorName,
+        ...(errorCode ? { errorCode } : {}),
+      });
+      outcome = { kind: "empty" };
+    }
     if (outcome.kind !== "empty") continue;
     await new Promise<void>((resolve) => {
       let settled = false;

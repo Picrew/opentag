@@ -2,23 +2,17 @@ function compareCodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-type CanonicalJsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | CanonicalJsonValue[]
-  | { [key: string]: CanonicalJsonValue };
-
 function invalidJsonValue(): never {
   throw new TypeError("Canonical JSON input must be a finite, acyclic JSON data tree.");
 }
 
-function canonicalizeJson(value: unknown, ancestors: WeakSet<object>): CanonicalJsonValue {
-  if (value === null || typeof value === "boolean" || typeof value === "string") return value;
+function serializeCanonicalJson(value: unknown, ancestors: WeakSet<object>): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) invalidJsonValue();
-    return value;
+    return JSON.stringify(value);
   }
   if (!value || typeof value !== "object") return invalidJsonValue();
   if (ancestors.has(value)) return invalidJsonValue();
@@ -27,11 +21,11 @@ function canonicalizeJson(value: unknown, ancestors: WeakSet<object>): Canonical
   try {
     if (Array.isArray(value)) {
       if (Object.getOwnPropertySymbols(value).length > 0) invalidJsonValue();
-      const canonical: CanonicalJsonValue[] = [];
+      const canonical: string[] = [];
       for (let index = 0; index < value.length; index += 1) {
         const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
         if (!descriptor?.enumerable || !("value" in descriptor)) invalidJsonValue();
-        canonical.push(canonicalizeJson(descriptor.value, ancestors));
+        canonical.push(serializeCanonicalJson(descriptor.value, ancestors));
       }
       const extraKeys = Object.getOwnPropertyNames(value).filter((key) => {
         if (key === "length") return false;
@@ -39,7 +33,7 @@ function canonicalizeJson(value: unknown, ancestors: WeakSet<object>): Canonical
         return !Number.isInteger(index) || index < 0 || index >= value.length || String(index) !== key;
       });
       if (extraKeys.length > 0) invalidJsonValue();
-      return canonical;
+      return `[${canonical.join(",")}]`;
     }
 
     const prototype = Object.getPrototypeOf(value);
@@ -50,9 +44,12 @@ function canonicalizeJson(value: unknown, ancestors: WeakSet<object>): Canonical
       .sort(([left], [right]) => compareCodeUnits(left, right))
       .map(([key, descriptor]) => {
         if (!descriptor.enumerable || !("value" in descriptor)) invalidJsonValue();
-        return [key, canonicalizeJson(descriptor.value, ancestors)] as const;
+        return `${JSON.stringify(key)}:${serializeCanonicalJson(
+          descriptor.value,
+          ancestors,
+        )}`;
       });
-    return Object.fromEntries(canonicalEntries);
+    return `{${canonicalEntries.join(",")}}`;
   } finally {
     ancestors.delete(value);
   }
@@ -65,5 +62,5 @@ function canonicalizeJson(value: unknown, ancestors: WeakSet<object>): Canonical
  * their protocol requires it.
  */
 export function canonicalJsonStringify(value: unknown): string {
-  return JSON.stringify(canonicalizeJson(value, new WeakSet()));
+  return serializeCanonicalJson(value, new WeakSet());
 }

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -8,6 +8,9 @@ import { spawn } from "node:child_process";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const composeFile = join(root, "deploy/compose/compose.yaml");
+const migrationFileCount = (await readdir(
+  join(root, "apps/control-plane/migrations"),
+)).filter((file) => file.endsWith(".sql")).length;
 const suffix = `${Date.now()}${process.pid}`;
 const projectName = `opentag-e2e-${process.pid}-${Date.now()}`.toLowerCase();
 const runId = suffix.slice(-12);
@@ -121,6 +124,8 @@ const adminPassword = `E2e-owner-${randomSecret()}`;
 const pairingToken = `pair_${randomSecret()}`;
 const recoveryToken = `recovery_${randomSecret()}`;
 const postgresPassword = randomSecret();
+const fencingTokenSecret = randomSecret();
+const loginThrottleSecret = randomSecret();
 const compose = [
   "compose",
   "--project-name",
@@ -143,6 +148,9 @@ try {
     "OPENTAG_ENVIRONMENT=local",
     "OPENTAG_RELEASE_SHA=local",
     `OPENTAG_GITHUB_INGRESS_MASTER_SECRET=${randomSecret()}`,
+    `OPENTAG_FENCING_TOKEN_SECRET=${fencingTokenSecret}`,
+    `OPENTAG_LOGIN_THROTTLE_SECRET=${loginThrottleSecret}`,
+    "OPENTAG_LOGIN_NETWORK_THROTTLE_MODE=direct-peer",
     `OPENTAG_BOOTSTRAP_ADMIN_EMAIL=${adminEmail}`,
     "OPENTAG_BOOTSTRAP_ADMIN_NAME=OpenTag E2E Owner",
     `OPENTAG_BOOTSTRAP_ADMIN_PASSWORD=${adminPassword}`,
@@ -332,12 +340,13 @@ try {
        WHERE organization_id = 'org_e2e'
          AND display_name = 'OpenTag E2E 恢复 🚀');`,
   ], { capture: true });
-  if (restored.stdout.trim() !== "1|1|1|4|1") {
+  const expectedRestoredState = `1|1|1|${migrationFileCount}|1`;
+  if (restored.stdout.trim() !== expectedRestoredState) {
     throw new Error(`restored_e2e_state_mismatch:${restored.stdout.trim()}`);
   }
   console.log(
     "[control-plane-e2e] byte-safe backup and fresh-database restore verified: "
-      + "1|1|1|4|1",
+      + expectedRestoredState,
   );
 } catch (error) {
   primaryError = error;
