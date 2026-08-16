@@ -173,7 +173,7 @@ path family. GitHub ingress preserves:
 - one globally addressable active binding with one-time secret material;
 - replay and idempotency protection;
 - explicit admission rather than direct execution;
-- append-only PR-opened, merged, and required-check evidence;
+- append-only PR-opened, merged, and closed evidence;
 - no server custody of a local runner's source-read credential.
 
 Provider ingress calls the same hosted-admission Module as other trusted
@@ -185,6 +185,11 @@ so GitHub ingress is not ready for public production activation. Local tests
 may enable it with disposable secrets to prove signature, reservation, replay,
 and admission behavior; deployment operators must leave it disabled until the
 recovery lifecycle is implemented and reviewed.
+
+Required-check ingestion (`check_run` or `check_suite`) and reconciliation are
+also not implemented in this foundation. The GitHub ingress Module must not be
+described as producing required-check evidence until that bounded event seam,
+replay model, and reconciliation evidence exist.
 
 ### Console HTTP interface
 
@@ -230,7 +235,7 @@ This Module owns:
 - hosted admission and idempotency;
 - claim eligibility, leases, and fencing tokens;
 - running, progress, heartbeat, reject-start, and cancellation transitions;
-- completion validation and terminal settlement;
+- executor lifecycle completion validation and terminal settlement;
 - governed permission state linked to an attempt;
 - append-only lifecycle and audit receipts;
 - reconciliation state whose ownership belongs to OpenTag.
@@ -242,6 +247,12 @@ database rows.
 The Module is the only writer of hosted lifecycle truth. Provider evidence,
 console projections, and job processors call it; none can finalize a Run
 independently.
+
+`complete` in this Module means that the currently fenced executor Attempt
+reported its terminal lifecycle result. It does not assert that the software
+factory's configured completion gates are satisfied and it does not write a
+`CompletionAssessment`. Factory completion remains a separate, evidence-backed
+authority in `docs/software-factory-control-plane.md`.
 
 ### Runner directory
 
@@ -534,7 +545,7 @@ Examples include:
 - outbound auth mail configured;
 - external rate limiting active;
 - provider ingress enabled;
-- required-check reconciliation active.
+- required-check reconciliation active (future capability; absent today).
 
 An absent optional capability fails closed where required and does not change
 the meaning of an accepted Control V1 transition.
@@ -828,9 +839,9 @@ implementation.
 | 0 — canonical behavior and protocol | Implemented and covered by protocol/Core/Client compatibility tests |
 | 1 — headless Node/PostgreSQL application | Implemented; real-PostgreSQL and Compose lifecycle verified locally |
 | 2 — identity and minimal console | Implemented with the focused identity Module and static console; verified locally |
-| 3 — durable jobs and GitHub ingress | Partially implemented; recurring PostgreSQL jobs and local ingress safety tests pass, but binding rotation/disable remains an activation blocker |
+| 3 — durable jobs and GitHub ingress | Partially implemented; recurring PostgreSQL jobs and local ingress safety tests pass, but binding rotation/disable and required-check evidence remain activation blockers |
 | 4 — managed parity | Not performed; no managed deployment or multi-replica evidence exists |
-| 5 — public cutover | Not performed; the worktree is uncommitted and no publish/deploy is authorized |
+| 5 — public cutover | Not performed; the implementation is under pull-request review and no merge, publish, deploy, or activation is implied |
 
 ### Stage 0: Freeze observable behavior — implemented locally
 
@@ -882,7 +893,8 @@ runner pairing, and one governed Run through the UI and CLI.
 Current evidence: competing workers and duplicate ingress converge to one
 authorized lifecycle and one terminal writer in local PostgreSQL tests. Stage
 3 is not complete until audited GitHub binding rotation and disable/re-enable
-operations are implemented and their incident-recovery path is tested.
+operations are implemented, required-check evidence and reconciliation are
+bounded, and those recovery paths are tested.
 
 ### Stage 4: Prove managed deployment parity — not performed
 

@@ -37,6 +37,9 @@ describe("platform setup docs contract", () => {
     );
     expect(normalizedPrereleaseGuide).not.toMatch(/(?:16-package|all 16)/u);
     expect(normalizedPrereleaseGuide).toContain(
+      "If a future release is explicitly approved to publish a stable version directly to `latest`, do not use this document"
+    );
+    expect(normalizedPrereleaseGuide).toContain(
       "Never report `published` from local output alone"
     );
     expect(normalizedPrereleaseGuide).toContain(

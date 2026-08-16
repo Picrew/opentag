@@ -1,5 +1,10 @@
 # npm Prerelease Candidate Procedure
 
+**Historical candidate-only procedure.** It does not authorize the next OpenTag
+release. If a future release is explicitly approved to publish a stable version
+directly to `latest`, do not use this document: assign the stable version and
+update the stable release runbook in a separately authorized release change.
+
 This document defines the release contract for the coordinated
 `0.10.0-next.0` package family. It prepares an operator-controlled candidate;
 it does not authorize publication and it is not evidence that any npm or Git

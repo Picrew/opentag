@@ -31,6 +31,12 @@ Required values:
 
 - `POSTGRES_PASSWORD`: database password used only inside the installation;
 - `OPENTAG_BOOTSTRAP_PAIRING_TOKEN`: initial runner-pairing authority;
+- `OPENTAG_FENCING_TOKEN_SECRET`: independent, at least 32-character authority
+  used to derive live fencing tokens. PostgreSQL stores only a
+  fencing-token digest, never the live token;
+- `OPENTAG_LOGIN_THROTTLE_SECRET`: a different, independently generated
+  at-least-32-character HMAC authority. Durable throttle rows contain only
+  pseudonymous keyed identifiers and are bounded by expiry cleanup;
 - `OPENTAG_BOOTSTRAP_ADMIN_EMAIL`, `...NAME`, and `...PASSWORD`: initial owner;
 - `OPENTAG_PUBLIC_URL`: the exact browser and webhook origin.
 
@@ -43,8 +49,31 @@ Recommended values:
 - `OPENTAG_RELEASE_SHA`: the immutable 40-character Git commit for staging or
   production. `local` is accepted only in the local environment.
 
+Login throttling is durable and applies independently to normalized email and
+optionally to the direct network peer observed by the Node server:
+
+- `OPENTAG_LOGIN_NETWORK_THROTTLE_MODE`: `direct-peer` by default. Set
+  `trusted-edge` only when a verified external edge enforces a client-aware
+  login rate limit; that mode disables the application network bucket while
+  retaining the email bucket;
+
+- `OPENTAG_LOGIN_MAX_FAILURES`: failures allowed in the accounting window,
+  default `5`;
+- `OPENTAG_LOGIN_WINDOW_MS`: accounting window, default `300000`;
+- `OPENTAG_LOGIN_LOCKOUT_MS`: lockout after the limit is reached, default
+  `900000`.
+
+Do not trust arbitrary forwarded-address headers as a login principal. The
+application ignores them in both modes. A reverse proxy must either preserve
+meaningful direct peer addresses or use `trusted-edge` with independently
+verified client-aware rate limiting; leaving `direct-peer` enabled behind a
+single shared proxy can turn that proxy into a site-wide lockout bucket.
+
 Runtime and API-key tokens are one-time material. Store them in the runner or
-operator secret store when issued. The database retains only hashes.
+operator secret store when issued. A live hosted-claim fencing token is derived
+from the deployment secret and the immutable claim tuple. The database retains
+only credential hashes and the fencing-token digest, so replay can reconstruct
+the same response without making the token recoverable from a database dump.
 
 ## TLS and public ingress
 

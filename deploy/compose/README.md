@@ -4,8 +4,10 @@ This is the reference single-host installation. It runs PostgreSQL and four
 roles from one `opentag-control-plane:local` image: migrations, administrator
 bootstrap, the HTTP application/static console, and durable jobs.
 
-1. Copy `.env.example` to `.env` and replace every placeholder secret. Keep the
-   file out of version control.
+1. Copy `.env.example` to `.env` and replace every placeholder secret. Use an
+   independently generated fencing-token and login-throttle secrets rather
+   than reusing the pairing, recovery, administrator, or database secret. Keep
+   the file out of version control.
 2. Run `docker compose --env-file .env up --build` from this directory.
 3. Wait for `control-plane` to become healthy, then open the configured
    `OPENTAG_PUBLIC_URL`.
@@ -67,3 +69,9 @@ self-hosted and future managed installations. This profile does not claim a
 managed environment exists. See the full
 [deployment runbook](../../docs/control-plane-deployment.md) for TLS, image
 pinning, pool sizing, upgrade, backup/restore, graceful shutdown, and recovery.
+
+The default `OPENTAG_LOGIN_NETWORK_THROTTLE_MODE=direct-peer` is appropriate
+when the Node service observes distinct client peers. If a reverse proxy makes
+all requests share one socket peer, configure `trusted-edge` and enforce a
+verified client-aware login limit at that edge. The application deliberately
+ignores forwarded address headers; its normalized-email bucket remains active.

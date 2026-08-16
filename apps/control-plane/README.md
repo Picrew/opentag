@@ -123,6 +123,14 @@ containers, network, secret file, and volume in `finally`.
 - Runtime credentials and API-key material are returned once and stored only
   as hashes. The optional recovery secret can reprovision a runner credential
   without making old material valid again.
+- Durable login throttling stores only environment-keyed HMAC identifiers,
+  purges expired rows opportunistically, and never treats forwarded address
+  headers as a client principal. Deployments behind one shared proxy peer must
+  use the explicit trusted-edge mode with verified edge rate limiting.
+- A hosted claim derives its live fencing token from a deployment secret and
+  immutable claim identity. The Control Plane stores only its digest and never
+  persists the live fencing token in claims, permission requests, audit, or
+  console projections.
 - Local OpenTag continues to work without a Control Plane URL or credential.
 
 See [the runtime architecture](../../docs/control-plane-runtime-architecture.md),

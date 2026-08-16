@@ -78,6 +78,12 @@ The first release should not attempt to support every workspace, every agent, ev
 - No Rust requirement for v0. Keep the default implementation in TypeScript unless packaging, security, or performance constraints prove otherwise.
 - No autonomous background execution without an explicit mention, command, or approval boundary.
 
+The optional self-hosted Control Plane does not relax the SaaS non-goal. Its
+same-origin console is a bounded operational surface for one installation:
+identity, runner pairing, targets, permissions, evidence, and audit. It is not
+a hosted planning workspace, marketing application, general administration
+suite, or claim that an OpenTag-managed SaaS deployment exists.
+
 ## Core Product Principles
 
 - Open core, closed surfaces optional: the protocol and local runner path should be usable without depending on a hosted SaaS.

@@ -71,6 +71,12 @@ The authenticated operator console is a Vite-built React single-page
 application using TanStack Router and TanStack Query. The console and HTTP
 application deploy on one origin by default.
 
+This is a minimal installation-operations console, not the broad hosted SaaS
+control plane excluded by `docs/design.md`. It exposes only the authority and
+read models already required to operate the optional service. It does not add
+planning, source custody, hosted execution, billing, marketing, or general
+workspace features, and it does not imply that a managed service is deployed.
+
 TanStack Start will not be part of the new runtime. The Control Plane does not
 currently justify SSR, streaming, hydration, route loaders with server
 execution, or UI-private Server Functions. Public marketing, documentation,
