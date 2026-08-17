@@ -14,18 +14,20 @@ The release is first published on the npm `next` dist-tag, tested from the
 registry, then promoted to `latest`. The exact commit that produced the npm
 artifacts must also receive the matching `v0.10.0` git tag and GitHub Release.
 
-The public release set contains 18 packages, including the first publication
-of `@opentag/control-protocol`. The other 17 packages have a coordinated
-`0.9.0` release. Publishing `0.10.0` with `--tag next` must leave each
-existing package's `latest` pointer unchanged until the complete registry,
-ACP, governance, factory, and live-platform gate passes.
+The public release set contains 18 packages, including the first publications
+of `@opentag/control-protocol` and `@opentag/delivery-contract`. The other 16
+packages have a coordinated `0.9.0` release. Publishing `0.10.0` with
+`--tag next` must leave each existing package's `latest` pointer unchanged
+until the complete registry, ACP, governance, factory, and live-platform gate
+passes.
 
-First-publication exception: `@opentag/control-protocol` has never been
-published, so it has no `0.9.0` baseline. Its first `--tag next` publish
-creates only the `next` dist-tag, so it has no pre-promotion `latest` value to
-snapshot or restore. The snapshot, promotion, and rollback loops below encode
-this exception explicitly; do not "fix" a missing
-`@opentag/control-protocol` `latest` tag before promotion.
+First-publication exception: `@opentag/control-protocol` and
+`@opentag/delivery-contract` have never been published, so they have no
+`0.9.0` baseline. Their first `--tag next` publish creates only the `next`
+dist-tag, so they have no pre-promotion `latest` value to snapshot or restore.
+The snapshot, promotion, and rollback loops below encode this exception
+explicitly; do not "fix" a missing first-publication `latest` tag before
+promotion.
 
 ## Public package discovery and order
 
@@ -321,34 +323,37 @@ retry cannot replace the original rollback authority:
     [ "$(jq -r '.publishConfig.access // ""' "$manifest")" = "public" ] || continue
     package="$(jq -r '.name' "$manifest")"
     dist_tags_json="$(npm view "$package" dist-tags --json)"
-    if [ "$package" = "@opentag/control-protocol" ]; then
-      previous_latest="$(jq -r '.latest // "absent"' <<<"$dist_tags_json")"
-      case "$previous_latest" in
-        absent|"0.10.0") ;;
-        *) echo "Refusing unexpected first-publication $package latest=$previous_latest" >&2; exit 1 ;;
-      esac
-    else
-      previous_latest="$(jq -er '.latest | select(type == "string" and length > 0)' <<<"$dist_tags_json")"
-      test "$previous_latest" = "0.9.0"
-    fi
+    case "$package" in
+      "@opentag/control-protocol"|"@opentag/delivery-contract")
+        previous_latest="$(jq -r '.latest // "absent"' <<<"$dist_tags_json")"
+        case "$previous_latest" in
+          absent|"0.10.0") ;;
+          *) echo "Refusing unexpected first-publication $package latest=$previous_latest" >&2; exit 1 ;;
+        esac
+        ;;
+      *)
+        previous_latest="$(jq -er '.latest | select(type == "string" and length > 0)' <<<"$dist_tags_json")"
+        test "$previous_latest" = "0.9.0"
+        ;;
+    esac
     printf '%s\t%s\n' "$package" "$previous_latest" >>"$snapshot_tmp"
   done
   test "$(wc -l <"$snapshot_tmp" | tr -d ' ')" = "18"
   test "$(cut -f1 "$snapshot_tmp" | sort -u | wc -l | tr -d ' ')" = "18"
-  test "$(awk -F '\t' '$1 != "@opentag/control-protocol" { print $2 }' "$snapshot_tmp" | sort -u)" = "0.9.0"
+  test "$(awk -F '\t' '$1 != "@opentag/control-protocol" && $1 != "@opentag/delivery-contract" { print $2 }' "$snapshot_tmp" | sort -u)" = "0.9.0"
   mv -n "$snapshot_tmp" "$rollback_file"
   test ! -e "$snapshot_tmp"
 )
 ```
 
 Keep that exact file until the release is complete. It records the actual
-pre-promotion `latest` target for every package and fails unless the 17
+pre-promotion `latest` target for every package and fails unless the 16
 previously published packages are still on the known `0.9.0` baseline; the
-never-published `@opentag/control-protocol` records `absent` (or `0.10.0` on a
-partial-promotion retry). A registry lookup failure or a missing/unexpected
-tag on any other package stops the release; it is never interpreted as
-rollback authority. Back the snapshot up outside the ephemeral shell session
-before changing any dist-tag.
+never-published `@opentag/control-protocol` and `@opentag/delivery-contract`
+record `absent` (or `0.10.0` on a partial-promotion retry). A registry lookup
+failure or a missing/unexpected tag on any other package stops the release; it
+is never interpreted as rollback authority. Back the snapshot up outside the
+ephemeral shell session before changing any dist-tag.
 
 The following promotion loop is retryable. Every first attempt and retry must
 reuse the original `rollback_file`; never rerun the snapshot block after any
@@ -372,7 +377,7 @@ package has been promoted:
   test -f "$rollback_file"
   test "$(wc -l <"$rollback_file" | tr -d ' ')" = "18"
   test "$(cut -f1 "$rollback_file" | sort -u | wc -l | tr -d ' ')" = "18"
-  test "$(awk -F '\t' '$1 != "@opentag/control-protocol" { print $2 }' "$rollback_file" | sort -u)" = "0.9.0"
+  test "$(awk -F '\t' '$1 != "@opentag/control-protocol" && $1 != "@opentag/delivery-contract" { print $2 }' "$rollback_file" | sort -u)" = "0.9.0"
 
   for manifest in packages/*/package.json; do
     [ "$(jq -r '.publishConfig.access // ""' "$manifest")" = "public" ] || continue
@@ -381,23 +386,26 @@ package has been promoted:
     current_tags_json="$(npm view "$package" dist-tags --json)"
     current_next="$(jq -er '.next | select(type == "string" and length > 0)' <<<"$current_tags_json")"
     test "$current_next" = "0.10.0"
-    if [ "$package" = "@opentag/control-protocol" ]; then
-      case "$previous_latest" in absent|"0.10.0") ;; *) echo "Refusing corrupt snapshot for $package" >&2; exit 1 ;; esac
-      current_latest="$(jq -r '.latest // "absent"' <<<"$current_tags_json")"
-      case "$current_latest" in
-        absent) npm dist-tag add "$package@0.10.0" latest ;;
-        "0.10.0") ;;
-        *) echo "Refusing to replace drifted $package latest=$current_latest" >&2; exit 1 ;;
-      esac
-    else
-      test "$previous_latest" = "0.9.0"
-      current_latest="$(jq -er '.latest | select(type == "string" and length > 0)' <<<"$current_tags_json")"
-      case "$current_latest" in
-        "$previous_latest") npm dist-tag add "$package@0.10.0" latest ;;
-        "0.10.0") ;;
-        *) echo "Refusing to replace drifted $package latest=$current_latest" >&2; exit 1 ;;
-      esac
-    fi
+    case "$package" in
+      "@opentag/control-protocol"|"@opentag/delivery-contract")
+        case "$previous_latest" in absent|"0.10.0") ;; *) echo "Refusing corrupt snapshot for $package" >&2; exit 1 ;; esac
+        current_latest="$(jq -r '.latest // "absent"' <<<"$current_tags_json")"
+        case "$current_latest" in
+          absent) npm dist-tag add "$package@0.10.0" latest ;;
+          "0.10.0") ;;
+          *) echo "Refusing to replace drifted $package latest=$current_latest" >&2; exit 1 ;;
+        esac
+        ;;
+      *)
+        test "$previous_latest" = "0.9.0"
+        current_latest="$(jq -er '.latest | select(type == "string" and length > 0)' <<<"$current_tags_json")"
+        case "$current_latest" in
+          "$previous_latest") npm dist-tag add "$package@0.10.0" latest ;;
+          "0.10.0") ;;
+          *) echo "Refusing to replace drifted $package latest=$current_latest" >&2; exit 1 ;;
+        esac
+        ;;
+    esac
     test "$(npm view "$package" dist-tags.latest)" = "0.10.0"
     test "$(npm view "$package" dist-tags.next)" = "0.10.0"
   done
@@ -534,16 +542,18 @@ Do not unpublish immutable package versions during rollback.
   test -f "$rollback_file"
   test "$(wc -l <"$rollback_file" | tr -d ' ')" = "18"
   test "$(cut -f1 "$rollback_file" | sort -u | wc -l | tr -d ' ')" = "18"
-  test "$(awk -F '\t' '$1 != "@opentag/control-protocol" { print $2 }' "$rollback_file" | sort -u)" = "0.9.0"
+  test "$(awk -F '\t' '$1 != "@opentag/control-protocol" && $1 != "@opentag/delivery-contract" { print $2 }' "$rollback_file" | sort -u)" = "0.9.0"
   for manifest in packages/*/package.json; do
     [ "$(jq -r '.publishConfig.access // ""' "$manifest")" = "public" ] || continue
     package="$(jq -r '.name' "$manifest")"
-    if [ "$package" = "@opentag/control-protocol" ]; then
-      # First publication: there is no previous `latest` to restore, and npm
-      # refuses to delete a package's `latest` tag. Leave it at 0.10.0 and
-      # record the withdrawal in the incident note.
-      continue
-    fi
+    case "$package" in
+      "@opentag/control-protocol"|"@opentag/delivery-contract")
+        # First publication: there is no previous `latest` to restore, and npm
+        # refuses to delete a package's `latest` tag. Leave it at 0.10.0 and
+        # record the withdrawal in the incident note.
+        continue
+        ;;
+    esac
     previous_latest="$(awk -F '\t' -v package="$package" '$1 == package { print $2 }' "$rollback_file")"
     test "$previous_latest" = "0.9.0"
     test "$(npm view "$package@$previous_latest" version)" = "$previous_latest"
@@ -564,6 +574,6 @@ Do not unpublish immutable package versions during rollback.
 
 Verify all dist-tags after rollback, publish a clear incident note, then release
 the exclusive window with the guarded command above. The incident note must
-state that `@opentag/control-protocol` keeps `latest = 0.10.0` because a first
-publication has no earlier stable target. A later fix must use a new version;
-never overwrite `0.10.0`.
+state that `@opentag/control-protocol` and `@opentag/delivery-contract` keep
+`latest = 0.10.0` because a first publication has no earlier stable target. A
+later fix must use a new version; never overwrite `0.10.0`.

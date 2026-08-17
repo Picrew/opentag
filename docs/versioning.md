@@ -53,8 +53,8 @@ The `0.7.0` release completes the Phase 1 completion-governance vertical slice w
 The `0.8.0` release completes the first provider-live recipe-driven factory loop with access identity, bounded human escalation, explainable multi-runner routing, immutable recipes and WorkThread-only workstreams, restart-safe batch admission, authoritative accepted-outcome metrics, and a real GitHub issue-to-merge-to-receipt proof while keeping planning external.
 The `0.9.0` release adds an authorized, read-only Slack-to-Linear project backlog query with bounded pagination, deterministic ordering, live OAuth token use, exact channel authorization, a query-only credential boundary, and an isolated best-effort Events API lane that does not change control or mutation delivery semantics.
 The `0.10.0` release adds canonical, evidence-backed completion authority for
-governed runs, extracts the Control V1 contract into the new
-`@opentag/control-protocol` package (growing the public set to 18 packages),
+governed runs, first-publishes the new `@opentag/control-protocol` and
+`@opentag/delivery-contract` packages (growing the public set from 16 to 18),
 and introduces an optional self-hosted Control Plane distributed as a private
 OCI image. Its release procedure is documented in
 [`npm-release.md`](npm-release.md); the earlier `0.10.0-next.0` candidate

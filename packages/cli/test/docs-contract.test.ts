@@ -71,12 +71,14 @@ describe("platform setup docs contract", () => {
     expect(releaseGuide).toContain('current_next="$(jq -er');
     expect(releaseGuide).toContain('test "$current_next" = "0.10.0"');
     expect(releaseGuide).toContain("First-publication exception");
-    expect(releaseGuide.match(/if \[ "\$package" = "@opentag\/control-protocol" \]; then/gu)).toHaveLength(3);
+    expect(
+      releaseGuide.match(/"@opentag\/control-protocol"\|"@opentag\/delivery-contract"\)/gu)
+    ).toHaveLength(3);
     expect(releaseGuide).toContain("no previous `latest` to restore");
     expect(releaseGuide.match(/test "\$previous_latest" = "0\.9\.0"/gu)).toHaveLength(3);
     expect(
       releaseGuide.match(
-        /awk -F '\\t' '\$1 != "@opentag\/control-protocol" \{ print \$2 \}' "\$(?:snapshot_tmp|rollback_file)" \| sort -u\)" = "0\.9\.0"/gu
+        /awk -F '\\t' '\$1 != "@opentag\/control-protocol" && \$1 != "@opentag\/delivery-contract" \{ print \$2 \}' "\$(?:snapshot_tmp|rollback_file)" \| sort -u\)" = "0\.9\.0"/gu
       )
     ).toHaveLength(3);
     expect(releaseGuide).not.toContain('"0.8.0"');
