@@ -1,6 +1,6 @@
 {
   "name": "@opentag/discord",
-  "version": "0.10.0-next.0",
+  "version": "0.10.0",
   "description": "Discord interactions normalization and callback rendering for OpenTag.",
   "type": "module",
   "engines": {
