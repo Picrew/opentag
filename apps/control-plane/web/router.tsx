@@ -204,6 +204,12 @@ function RecoveryPage() {
   );
 }
 
+function mutationErrorMessage(error: unknown): string {
+  return error instanceof ConsoleApiError
+    ? `The Control Plane rejected this request (${error.code}).`
+    : "The Control Plane is unavailable.";
+}
+
 function Page({ title, intro, children }: { title: string; intro: string; children: ReactNode }) {
   return (
     <section className="page">
@@ -330,21 +336,27 @@ function ProjectTargetForm({
   const [repo, setRepo] = useState("");
   const [defaultExecutor, setDefaultExecutor] = useState("codex");
   const [defaultBranch, setDefaultBranch] = useState("main");
+  const [submitError, setSubmitError] = useState<string | null>(null);
   return <form className="binding-form" onSubmit={async (event) => {
     event.preventDefault();
-    await onCreate({
-      projectTargetId,
-      runnerId,
-      bindingDigest,
-      provider: "github",
-      owner,
-      repo,
-      defaultExecutor,
-      defaultBranch: defaultBranch || null,
-      version: 1,
-    });
-    setProjectTargetId("");
-    setBindingDigest("");
+    setSubmitError(null);
+    try {
+      await onCreate({
+        projectTargetId,
+        runnerId,
+        bindingDigest,
+        provider: "github",
+        owner,
+        repo,
+        defaultExecutor,
+        defaultBranch: defaultBranch || null,
+        version: 1,
+      });
+      setProjectTargetId("");
+      setBindingDigest("");
+    } catch (error) {
+      setSubmitError(mutationErrorMessage(error));
+    }
   }}>
     <label>Target ID<input required value={projectTargetId} onChange={(event) => setProjectTargetId(event.target.value)} /></label>
     <label>Runner ID<input required value={runnerId} onChange={(event) => setRunnerId(event.target.value)} /></label>
@@ -354,6 +366,7 @@ function ProjectTargetForm({
     <label>Default executor<input required value={defaultExecutor} onChange={(event) => setDefaultExecutor(event.target.value)} /></label>
     <label>Default branch<input value={defaultBranch} onChange={(event) => setDefaultBranch(event.target.value)} /></label>
     <button className="button" type="submit">Declare Project Target</button>
+    {submitError ? <div className="notice notice-error form-span">{submitError}</div> : null}
   </form>;
 }
 
@@ -378,27 +391,34 @@ function GithubBindingForm({
   const [repositoryId, setRepositoryId] = useState("");
   const [actorIds, setActorIds] = useState("");
   const [secret, setSecret] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const target = targets.find((candidate) => candidate.projectTargetId === targetId);
   return <form className="binding-form" onSubmit={async (event) => {
     event.preventDefault();
     if (!target) return;
-    const outcome = await onCreate({
-      bindingId,
-      providerRepositoryId: repositoryId,
-      owner: target.owner,
-      repo: target.repo,
-      runnerId: target.runnerId,
-      projectTargetId: target.projectTargetId,
-      allowedActorIds: actorIds.split(",").map((value) => value.trim()).filter(Boolean),
-      enabled: true,
-    });
-    setSecret(outcome.secret ?? null);
+    setSubmitError(null);
+    try {
+      const outcome = await onCreate({
+        bindingId,
+        providerRepositoryId: repositoryId,
+        owner: target.owner,
+        repo: target.repo,
+        runnerId: target.runnerId,
+        projectTargetId: target.projectTargetId,
+        allowedActorIds: actorIds.split(",").map((value) => value.trim()).filter(Boolean),
+        enabled: true,
+      });
+      setSecret(outcome.secret ?? null);
+    } catch (error) {
+      setSubmitError(mutationErrorMessage(error));
+    }
   }}>
     <label>Project Target<select value={targetId} onChange={(event) => setTargetId(event.target.value)}>{targets.map((item) => <option key={item.projectTargetId} value={item.projectTargetId}>{item.owner}/{item.repo} · {item.runnerId}</option>)}</select></label>
     <label>Binding ID<input required value={bindingId} onChange={(event) => setBindingId(event.target.value)} /></label>
     <label>GitHub repository ID<input required inputMode="numeric" value={repositoryId} onChange={(event) => setRepositoryId(event.target.value)} /></label>
     <label>Allowed actor IDs<input required placeholder="1001, 1002" value={actorIds} onChange={(event) => setActorIds(event.target.value)} /></label>
     <button className="button" type="submit">Create enabled binding</button>
+    {submitError ? <div className="notice notice-error form-span">{submitError}</div> : null}
     {secret ? <div className="notice form-span"><strong>Copy the webhook secret now.</strong><br /><code>{secret}</code></div> : null}
   </form>;
 }
@@ -475,25 +495,32 @@ function ApiKeysPage() {
   const [label, setLabel] = useState("");
   const [createdToken, setCreatedToken] = useState<string | null>(null);
   const [canResolvePermissions, setCanResolvePermissions] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const canAdminister = principal.role === "owner" || principal.role === "admin";
   return <Page title="API keys" intro="Machine credentials are tenant-scoped and separate from runner and browser sessions.">
     {createdToken ? <div className="notice"><strong>Copy this token now.</strong><br /><code>{createdToken}</code><br />It will not be shown again.</div> : null}
+    {submitError ? <div className="notice notice-error">{submitError}</div> : null}
     {canAdminister ? <form className="inline-form" onSubmit={async (event) => {
       event.preventDefault();
-      const created = await api.createApiKey({
-        label,
-        scopes: [
-          "audit:read",
-          ...(canResolvePermissions ? ["permission:resolve"] : []),
-          "run:read",
-          "runner:read",
-          "target:read",
-        ],
-      });
-      setCreatedToken(created.token);
-      setLabel("");
-      setCanResolvePermissions(false);
-      await queryClient.invalidateQueries({ queryKey: apiKeysQueryKey });
+      setSubmitError(null);
+      try {
+        const created = await api.createApiKey({
+          label,
+          scopes: [
+            "audit:read",
+            ...(canResolvePermissions ? ["permission:resolve"] : []),
+            "run:read",
+            "runner:read",
+            "target:read",
+          ],
+        });
+        setCreatedToken(created.token);
+        setLabel("");
+        setCanResolvePermissions(false);
+        await queryClient.invalidateQueries({ queryKey: apiKeysQueryKey });
+      } catch (error) {
+        setSubmitError(mutationErrorMessage(error));
+      }
     }}>
       <label>Key label<input required maxLength={100} value={label} onChange={(event) => setLabel(event.target.value)} /></label>
       <label><input checked={canResolvePermissions} type="checkbox" onChange={(event) => setCanResolvePermissions(event.target.checked)} /> Allow governed permission decisions</label>
@@ -506,8 +533,13 @@ function ApiKeysPage() {
         new Date(apiKey.createdAt).toLocaleString(),
         apiKey.revokedAt ? "revoked" : "active",
         canAdminister && !apiKey.revokedAt ? <button className="text-button" type="button" onClick={async () => {
-          await api.revokeApiKey(apiKey.apiKeyId);
-          await queryClient.invalidateQueries({ queryKey: apiKeysQueryKey });
+          setSubmitError(null);
+          try {
+            await api.revokeApiKey(apiKey.apiKeyId);
+            await queryClient.invalidateQueries({ queryKey: apiKeysQueryKey });
+          } catch (error) {
+            setSubmitError(mutationErrorMessage(error));
+          }
         }}>Revoke</button> : "—",
       ])} />
     )}
