@@ -548,9 +548,22 @@ Do not unpublish immutable package versions during rollback.
     package="$(jq -r '.name' "$manifest")"
     case "$package" in
       "@opentag/control-protocol"|"@opentag/delivery-contract")
+        previous_latest="$(awk -F '\t' -v package="$package" '$1 == package { print $2 }' "$rollback_file")"
+        case "$previous_latest" in
+          absent|"0.10.0") ;;
+          *) echo "Refusing corrupt snapshot for $package" >&2; exit 1 ;;
+        esac
+        current_tags_json="$(npm view "$package" dist-tags --json)"
+        test "$(jq -er '.next | select(type == "string" and length > 0)' <<<"$current_tags_json")" = "0.10.0"
+        current_latest="$(jq -r '.latest // "absent"' <<<"$current_tags_json")"
+        case "$previous_latest:$current_latest" in
+          absent:absent|absent:0.10.0|0.10.0:0.10.0) ;;
+          *) echo "Refusing unexpected $package latest=$current_latest" >&2; exit 1 ;;
+        esac
         # First publication: there is no previous `latest` to restore, and npm
-        # refuses to delete a package's `latest` tag. Leave it at 0.10.0 and
-        # record the withdrawal in the incident note.
+        # refuses to delete a package's `latest` tag. After validation, leave
+        # the tags unchanged (`latest` stays absent or 0.10.0) and record the
+        # withdrawal in the incident note.
         continue
         ;;
     esac
@@ -575,5 +588,6 @@ Do not unpublish immutable package versions during rollback.
 Verify all dist-tags after rollback, publish a clear incident note, then release
 the exclusive window with the guarded command above. The incident note must
 state that `@opentag/control-protocol` and `@opentag/delivery-contract` keep
-`latest = 0.10.0` because a first publication has no earlier stable target. A
-later fix must use a new version; never overwrite `0.10.0`.
+`latest` absent or at `0.10.0` (both are valid rollback outcomes, depending on
+whether promotion reached them) because a first publication has no earlier
+stable target. A later fix must use a new version; never overwrite `0.10.0`.
