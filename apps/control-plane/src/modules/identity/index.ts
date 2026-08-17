@@ -21,6 +21,7 @@ type IdentityId = "api_key" | "operator" | "session";
 type ConsoleRole = "owner" | "admin" | "operator" | "viewer";
 type LoginRateLimit = {
   maxFailures: number;
+  networkMaxFailures: number;
   windowMs: number;
   lockoutMs: number;
 };
@@ -118,6 +119,7 @@ export function createIdentityModule(input: {
 }) {
   const loginRateLimit = input.loginRateLimit ?? {
     maxFailures: 5,
+    networkMaxFailures: 50,
     windowMs: 300_000,
     lockoutMs: 900_000,
   };
@@ -313,7 +315,10 @@ export function createIdentityModule(input: {
             const windowStartedAt = withinWindow
               ? stored.window_started_at
               : now;
-            const lockedUntil = failureCount >= loginRateLimit.maxFailures
+            const maxFailures = throttleKey === networkThrottleKey
+              ? loginRateLimit.networkMaxFailures
+              : loginRateLimit.maxFailures;
+            const lockedUntil = failureCount >= maxFailures
               ? new Date(now.getTime() + loginRateLimit.lockoutMs)
               : null;
             await client.query(

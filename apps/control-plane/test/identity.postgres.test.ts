@@ -142,6 +142,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Console identity PostgreSQL module", () => 
       throttleKeyFactory: keyedFactory,
       loginRateLimit: {
         maxFailures: 3,
+        networkMaxFailures: 3,
         windowMs: 1_000,
         lockoutMs: 2_000,
       },
@@ -187,6 +188,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Console identity PostgreSQL module", () => 
       throttleKeyFactory,
       loginRateLimit: {
         maxFailures: 2,
+        networkMaxFailures: 2,
         windowMs: 60_000,
         lockoutMs: 120_000,
       },
@@ -236,6 +238,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Console identity PostgreSQL module", () => 
       throttleKeyFactory,
       loginRateLimit: {
         maxFailures: 2,
+        networkMaxFailures: 2,
         windowMs: 60_000,
         lockoutMs: 120_000,
       },
@@ -260,6 +263,66 @@ describe.skipIf(!TEST_DATABASE_URL)("Console identity PostgreSQL module", () => 
       email: "owner@example.test",
       password: "correct horse battery staple",
       networkKey: "network-preserved",
+    })).resolves.toEqual({ kind: "rate_limited", retryAfterMs: 120_000 });
+    await fixture.pool.query("DELETE FROM cp_login_throttle");
+  });
+
+  it("gives a shared network peer a larger failure budget than one email", async () => {
+    let sequence = 0;
+    const identity = createIdentityModule({
+      pool: fixture.pool,
+      clock,
+      idFactory: (kind) => `${kind}_shared_egress_${++sequence}`,
+      opaqueBearerFactory: () => bearer(`session_shared_egress_${++sequence}`),
+      sessionDurationMs: 8 * 60 * 60 * 1_000,
+      throttleKeyFactory,
+      loginRateLimit: {
+        maxFailures: 2,
+        networkMaxFailures: 4,
+        windowMs: 60_000,
+        lockoutMs: 120_000,
+      },
+    });
+
+    for (const email of [
+      "office-typo-one@example.test",
+      "office-typo-two@example.test",
+      "office-typo-three@example.test",
+    ]) {
+      await expect(identity.login({
+        email,
+        password: "wrong password value",
+        networkKey: "network-office-nat",
+      })).resolves.toEqual({ kind: "invalid_credential" });
+    }
+    await expect(identity.login({
+      email: "owner@example.test",
+      password: "correct horse battery staple",
+      networkKey: "network-office-nat",
+    })).resolves.toMatchObject({ kind: "authenticated" });
+
+    await expect(identity.login({
+      email: "office-typo-four@example.test",
+      password: "wrong password value",
+      networkKey: "network-office-nat",
+    })).resolves.toEqual({ kind: "invalid_credential" });
+    await expect(identity.login({
+      email: "owner@example.test",
+      password: "correct horse battery staple",
+      networkKey: "network-office-nat",
+    })).resolves.toEqual({ kind: "rate_limited", retryAfterMs: 120_000 });
+
+    for (const attempt of [1, 2]) {
+      await expect(identity.login({
+        email: "single-victim@example.test",
+        password: `wrong password value ${attempt}`,
+        networkKey: `network-distinct-${attempt}`,
+      })).resolves.toEqual({ kind: "invalid_credential" });
+    }
+    await expect(identity.login({
+      email: "single-victim@example.test",
+      password: "wrong password value 3",
+      networkKey: "network-distinct-3",
     })).resolves.toEqual({ kind: "rate_limited", retryAfterMs: 120_000 });
     await fixture.pool.query("DELETE FROM cp_login_throttle");
   });

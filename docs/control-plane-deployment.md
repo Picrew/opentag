@@ -33,7 +33,9 @@ Required values:
 - `OPENTAG_BOOTSTRAP_PAIRING_TOKEN`: initial runner-pairing authority;
 - `OPENTAG_FENCING_TOKEN_SECRET`: independent, at least 32-character authority
   used to derive live fencing tokens. PostgreSQL stores only a
-  fencing-token digest, never the live token;
+  fencing-token digest, never the live token. Outside `local` the server
+  refuses to start when this value equals the bootstrap, recovery, or GitHub
+  ingress authority;
 - `OPENTAG_LOGIN_THROTTLE_SECRET`: a different, independently generated
   at-least-32-character HMAC authority. Durable throttle rows contain only
   pseudonymous keyed identifiers and are bounded by expiry cleanup;
@@ -57,8 +59,12 @@ optionally to the direct network peer observed by the Node server:
   login rate limit; that mode disables the application network bucket while
   retaining the email bucket;
 
-- `OPENTAG_LOGIN_MAX_FAILURES`: failures allowed in the accounting window,
-  default `5`;
+- `OPENTAG_LOGIN_MAX_FAILURES`: failures allowed per normalized email in the
+  accounting window, default `5`;
+- `OPENTAG_LOGIN_NETWORK_MAX_FAILURES`: failures allowed per direct network
+  peer across all emails, default `50`. The higher default keeps one shared
+  egress address (office NAT, VPN) from becoming a collective lockout after a
+  few unrelated typos while still bounding single-source password spraying;
 - `OPENTAG_LOGIN_WINDOW_MS`: accounting window, default `300000`;
 - `OPENTAG_LOGIN_LOCKOUT_MS`: lockout after the limit is reached, default
   `900000`.

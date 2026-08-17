@@ -41,7 +41,7 @@ requirements and recovery procedures are in the
 | `OPENTAG_BOOTSTRAP_ORGANIZATION_ID` | yes | Stable initial organization identity. |
 | `OPENTAG_BOOTSTRAP_ORGANIZATION_NAME` | yes | Initial organization display name. |
 | `OPENTAG_BOOTSTRAP_PAIRING_TOKEN` | yes | Initial runner-pairing authority; at least 16 characters. |
-| `OPENTAG_FENCING_TOKEN_SECRET` | production; required by Compose | Independent secret used to derive live fencing tokens. PostgreSQL stores only the token digest. Local development may fall back to the bootstrap pairing secret, but deployed installations must not share those authorities. |
+| `OPENTAG_FENCING_TOKEN_SECRET` | production; required by Compose | Independent secret used to derive live fencing tokens. PostgreSQL stores only the token digest. Local development may fall back to the bootstrap pairing secret; outside `local` the server refuses to start when it equals the bootstrap, recovery, or GitHub ingress authority. |
 | `OPENTAG_LOGIN_THROTTLE_SECRET` | production; required by Compose | Independent HMAC key for pseudonymous email/network throttle identifiers. It must not equal the bootstrap, recovery, or fencing authority. Local development derives a domain-separated fallback from its bootstrap token. |
 | `OPENTAG_LOGIN_NETWORK_THROTTLE_MODE` | no | `direct-peer` (default) counts the Node socket peer. `trusted-edge` disables the application network bucket and requires a verified client-aware rate limit at the trusted edge. Forwarded address headers are never trusted by the application. |
 | `OPENTAG_RECOVERY_PAIRING_TOKEN` | no | Separate emergency authority for runner credential reprovisioning. |
@@ -53,7 +53,8 @@ requirements and recovery procedures are in the
 | `OPENTAG_JOB_LEASE_MS` | no | Durable job lease duration; defaults to `30000`. |
 | `OPENTAG_JOB_POLL_MS` | no | Job-loop poll/backoff interval; defaults to `1000`. |
 | `OPENTAG_JOB_RETRY_MS` | no | Failed-job retry delay; defaults to `30000`. |
-| `OPENTAG_LOGIN_MAX_FAILURES` | no | Failed-login limit for both normalized email and direct network peer; defaults to `5`. |
+| `OPENTAG_LOGIN_MAX_FAILURES` | no | Failed-login limit for one normalized email; defaults to `5`. |
+| `OPENTAG_LOGIN_NETWORK_MAX_FAILURES` | no | Failed-login limit for one direct network peer across all emails; defaults to `50` so a shared egress address (office NAT, VPN) is not locked out by a handful of unrelated typos. |
 | `OPENTAG_LOGIN_WINDOW_MS` | no | Failure accounting window; defaults to `300000`. |
 | `OPENTAG_LOGIN_LOCKOUT_MS` | no | Durable lockout duration after the limit is reached; defaults to `900000`. |
 | `OPENTAG_HOST` / `OPENTAG_PORT` | no | Listen address and port; defaults to `0.0.0.0:3000` inside the container. |

@@ -47,6 +47,8 @@ const RawConfigSchema = z
       .enum(["direct-peer", "trusted-edge"])
       .default("direct-peer"),
     OPENTAG_LOGIN_MAX_FAILURES: z.coerce.number().int().min(1).max(100).default(5),
+    OPENTAG_LOGIN_NETWORK_MAX_FAILURES: z.coerce.number().int().min(1)
+      .max(10_000).default(50),
     OPENTAG_LOGIN_WINDOW_MS: z.coerce.number().int().min(1_000).max(86_400_000)
       .default(300_000),
     OPENTAG_LOGIN_LOCKOUT_MS: z.coerce.number().int().min(1_000).max(86_400_000)
@@ -77,6 +79,7 @@ export type ControlPlaneConfig = {
     secret: string;
     networkMode: "direct-peer" | "trusted-edge";
     maxFailures: number;
+    networkMaxFailures: number;
     windowMs: number;
     lockoutMs: number;
   };
@@ -175,6 +178,17 @@ export function parseControlPlaneConfig(
     ) {
       throw new Error("non-local deployments require login throttle authority");
     }
+    if (
+      parsed.OPENTAG_ENVIRONMENT !== "local"
+      && parsed.OPENTAG_FENCING_TOKEN_SECRET !== undefined
+      && [
+        parsed.OPENTAG_BOOTSTRAP_PAIRING_TOKEN,
+        parsed.OPENTAG_RECOVERY_PAIRING_TOKEN,
+        parsed.OPENTAG_GITHUB_INGRESS_MASTER_SECRET,
+      ].includes(parsed.OPENTAG_FENCING_TOKEN_SECRET)
+    ) {
+      throw new Error("fencing token authority must be independent");
+    }
     const loginThrottleSecret = parsed.OPENTAG_LOGIN_THROTTLE_SECRET
       ?? createHash("sha256").update(JSON.stringify([
         "opentag.control.local-login-throttle-secret/v1",
@@ -209,6 +223,7 @@ export function parseControlPlaneConfig(
         secret: loginThrottleSecret,
         networkMode: parsed.OPENTAG_LOGIN_NETWORK_THROTTLE_MODE,
         maxFailures: parsed.OPENTAG_LOGIN_MAX_FAILURES,
+        networkMaxFailures: parsed.OPENTAG_LOGIN_NETWORK_MAX_FAILURES,
         windowMs: parsed.OPENTAG_LOGIN_WINDOW_MS,
         lockoutMs: parsed.OPENTAG_LOGIN_LOCKOUT_MS,
       },

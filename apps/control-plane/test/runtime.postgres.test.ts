@@ -35,6 +35,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
           secret: "l".repeat(32),
           networkMode: "direct-peer",
           maxFailures: 5,
+          networkMaxFailures: 50,
           windowMs: 300_000,
           lockoutMs: 900_000,
         },

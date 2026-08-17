@@ -35,6 +35,7 @@ describe("Control Plane configuration", () => {
         ])).digest("hex"),
         networkMode: "direct-peer",
         maxFailures: 5,
+        networkMaxFailures: 50,
         windowMs: 300_000,
         lockoutMs: 900_000,
       },
@@ -108,6 +109,66 @@ describe("Control Plane configuration", () => {
       secret: "l".repeat(32),
       networkMode: "trusted-edge",
     });
+  });
+
+  it("requires independent fencing-token authority outside local", () => {
+    const base = {
+      DATABASE_URL: "postgresql://opentag:secret@postgres:5432/opentag",
+      OPENTAG_BOOTSTRAP_ORGANIZATION_ID: "org_local",
+      OPENTAG_BOOTSTRAP_ORGANIZATION_NAME: "Local OpenTag",
+      OPENTAG_BOOTSTRAP_PAIRING_TOKEN: "b".repeat(32),
+      OPENTAG_LOGIN_THROTTLE_SECRET: "l".repeat(32),
+      OPENTAG_ENVIRONMENT: "production",
+      OPENTAG_PUBLIC_URL: "https://control.example.test",
+      OPENTAG_RELEASE_SHA: "a".repeat(40),
+    };
+    expect(() => parseControlPlaneConfig({
+      ...base,
+      OPENTAG_FENCING_TOKEN_SECRET: "b".repeat(32),
+    })).toThrow("configuration_invalid");
+    expect(() => parseControlPlaneConfig({
+      ...base,
+      OPENTAG_RECOVERY_PAIRING_TOKEN: "r".repeat(32),
+      OPENTAG_FENCING_TOKEN_SECRET: "r".repeat(32),
+    })).toThrow("configuration_invalid");
+    expect(() => parseControlPlaneConfig({
+      ...base,
+      OPENTAG_GITHUB_INGRESS_MASTER_SECRET: "g".repeat(32),
+      OPENTAG_FENCING_TOKEN_SECRET: "g".repeat(32),
+    })).toThrow("configuration_invalid");
+    expect(parseControlPlaneConfig({
+      ...base,
+      OPENTAG_FENCING_TOKEN_SECRET: "f".repeat(32),
+    }).fencingTokenSecret).toBe("f".repeat(32));
+    expect(parseControlPlaneConfig({
+      DATABASE_URL: base.DATABASE_URL,
+      OPENTAG_BOOTSTRAP_ORGANIZATION_ID: "org_local",
+      OPENTAG_BOOTSTRAP_ORGANIZATION_NAME: "Local OpenTag",
+      OPENTAG_BOOTSTRAP_PAIRING_TOKEN: "b".repeat(32),
+      OPENTAG_PUBLIC_URL: "http://127.0.0.1:3000",
+    }).fencingTokenSecret).toBe("b".repeat(32));
+  });
+
+  it("keeps the network login budget separate from the email budget", () => {
+    const base = {
+      DATABASE_URL: "postgresql://opentag:secret@postgres:5432/opentag",
+      OPENTAG_BOOTSTRAP_ORGANIZATION_ID: "org_local",
+      OPENTAG_BOOTSTRAP_ORGANIZATION_NAME: "Local OpenTag",
+      OPENTAG_BOOTSTRAP_PAIRING_TOKEN: "bootstrap_secret",
+      OPENTAG_PUBLIC_URL: "http://127.0.0.1:3000",
+    };
+    expect(parseControlPlaneConfig({
+      ...base,
+      OPENTAG_LOGIN_MAX_FAILURES: "3",
+      OPENTAG_LOGIN_NETWORK_MAX_FAILURES: "200",
+    }).loginRateLimit).toMatchObject({
+      maxFailures: 3,
+      networkMaxFailures: 200,
+    });
+    expect(() => parseControlPlaneConfig({
+      ...base,
+      OPENTAG_LOGIN_NETWORK_MAX_FAILURES: "0",
+    })).toThrow("configuration_invalid");
   });
 
   it("rejects invalid database and public origins without echoing credentials", () => {
