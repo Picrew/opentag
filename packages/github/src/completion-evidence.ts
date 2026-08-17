@@ -16,6 +16,7 @@ export type GitHubVerifiedPullRequestSnapshot = {
     state: "open" | "closed" | "merged";
   };
   checks: Record<string, GitHubCheckState>;
+  checksComplete: boolean;
   observedAt: string;
   payloadDigest: string;
 };
@@ -28,17 +29,23 @@ export type GitHubCompletionApi = {
     head: { sha: string };
     base: { ref: string; sha: string; repo?: { full_name?: string } | null };
   }>;
-  listCheckRunsForRef(input: { owner: string; repo: string; ref: string }): Promise<Array<{
-    name: string;
-    status: string;
-    conclusion: string | null;
-    head_sha: string;
-  }>>;
-  getCombinedStatusForRef(input: { owner: string; repo: string; ref: string }): Promise<Array<{
-    context: string;
-    state: string;
-    sha: string;
-  }>>;
+  listCheckRunsForRef(input: { owner: string; repo: string; ref: string }): Promise<{
+    totalCount: number;
+    checkRuns: Array<{
+      name: string;
+      status: string;
+      conclusion: string | null;
+      head_sha: string;
+    }>;
+  }>;
+  getCombinedStatusForRef(input: { owner: string; repo: string; ref: string }): Promise<{
+    totalCount: number;
+    statuses: Array<{
+      context: string;
+      state: string;
+      sha: string;
+    }>;
+  }>;
   listPullRequestsForCommit(input: { owner: string; repo: string; ref: string }): Promise<Array<{ number: number }>>;
 };
 
@@ -52,6 +59,10 @@ function nonEmptyString(value: unknown): string | null {
 
 function positiveInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function nonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
 function repositoryFromPayload(payload: unknown): { owner: string; repo: string } | null {
@@ -139,8 +150,8 @@ function commitStatusState(state: string): GitHubCheckState {
 
 function normalizedChecks(input: {
   headSha: string;
-  checkRuns: Awaited<ReturnType<GitHubCompletionApi["listCheckRunsForRef"]>>;
-  statuses: Awaited<ReturnType<GitHubCompletionApi["getCombinedStatusForRef"]>>;
+  checkRuns: Awaited<ReturnType<GitHubCompletionApi["listCheckRunsForRef"]>>["checkRuns"];
+  statuses: Awaited<ReturnType<GitHubCompletionApi["getCombinedStatusForRef"]>>["statuses"];
 }): Record<string, GitHubCheckState> {
   const checks = new Map<string, GitHubCheckState>();
   for (const run of input.checkRuns) {
@@ -183,11 +194,20 @@ export async function reconcileGitHubCompletionEvidence(input: {
     if (pullRequest.base.repo?.full_name && pullRequest.base.repo.full_name.toLowerCase() !== expectedRepository) {
       throw new Error("GitHub pull request reconciliation returned a mismatched target repository.");
     }
-    const [checkRuns, statuses] = await Promise.all([
+    const [checkRunPage, statusPage] = await Promise.all([
       input.api.listCheckRunsForRef({ ...correlation.repository, ref: pullRequest.head.sha }),
       input.api.getCombinedStatusForRef({ ...correlation.repository, ref: pullRequest.head.sha })
     ]);
-    const checks = normalizedChecks({ headSha: pullRequest.head.sha, checkRuns, statuses });
+    const checks = normalizedChecks({
+      headSha: pullRequest.head.sha,
+      checkRuns: checkRunPage.checkRuns,
+      statuses: statusPage.statuses
+    });
+    const checksComplete =
+      checkRunPage.checkRuns.length === checkRunPage.totalCount
+      && statusPage.statuses.length === statusPage.totalCount
+      && checkRunPage.checkRuns.every((run) => run.head_sha === pullRequest.head.sha)
+      && statusPage.statuses.every((status) => status.sha === pullRequest.head.sha);
     const state: GitHubVerifiedPullRequestSnapshot["pullRequest"]["state"] = pullRequest.merged
       ? "merged"
       : pullRequest.state === "closed"
@@ -207,13 +227,15 @@ export async function reconcileGitHubCompletionEvidence(input: {
         state
       },
       checks,
+      checksComplete,
       observedAt: input.now()
     };
     const semanticSnapshot = {
       provider: snapshotWithoutDigest.provider,
       repository: snapshotWithoutDigest.repository,
       pullRequest: snapshotWithoutDigest.pullRequest,
-      checks: snapshotWithoutDigest.checks
+      checks: snapshotWithoutDigest.checks,
+      checksComplete: snapshotWithoutDigest.checksComplete
     };
     snapshots.push({ ...snapshotWithoutDigest, payloadDigest: digest(semanticSnapshot) });
   }
@@ -264,8 +286,10 @@ export function createGitHubCompletionApi(input: {
     },
     async listCheckRunsForRef({ owner, repo, ref }) {
       const value = await request(`/repos/${segment(owner)}/${segment(repo)}/commits/${segment(ref)}/check-runs?filter=latest&per_page=100`);
-      if (!isRecord(value) || !Array.isArray(value["check_runs"])) throw new Error("GitHub check-run reconciliation returned an invalid response.");
-      return value["check_runs"].map((candidate) => {
+      if (!isRecord(value)) throw new Error("GitHub check-run reconciliation returned an invalid response.");
+      const totalCount = nonNegativeInteger(value["total_count"]);
+      if (totalCount === null || !Array.isArray(value["check_runs"])) throw new Error("GitHub check-run reconciliation returned an invalid response.");
+      const checkRuns = value["check_runs"].map((candidate) => {
         if (!isRecord(candidate) || !nonEmptyString(candidate["name"]) || !nonEmptyString(candidate["status"])
           || !nonEmptyString(candidate["head_sha"])
           || (candidate["conclusion"] !== null && typeof candidate["conclusion"] !== "string")) {
@@ -278,14 +302,16 @@ export function createGitHubCompletionApi(input: {
           head_sha: candidate["head_sha"] as string
         };
       });
+      return { totalCount, checkRuns };
     },
     async getCombinedStatusForRef({ owner, repo, ref }) {
       const value = await request(`/repos/${segment(owner)}/${segment(repo)}/commits/${segment(ref)}/status?per_page=100`);
       if (!isRecord(value)) throw new Error("GitHub commit-status reconciliation returned an invalid response.");
       const sha = nonEmptyString(value["sha"]);
+      const totalCount = nonNegativeInteger(value["total_count"]);
       const statuses = value["statuses"];
-      if (!sha || !Array.isArray(statuses)) throw new Error("GitHub commit-status reconciliation returned an invalid response.");
-      return statuses.map((candidate) => {
+      if (!sha || totalCount === null || !Array.isArray(statuses)) throw new Error("GitHub commit-status reconciliation returned an invalid response.");
+      const normalizedStatuses = statuses.map((candidate) => {
         if (!isRecord(candidate) || !nonEmptyString(candidate["context"])
           || !nonEmptyString(candidate["state"])) {
           throw new Error("GitHub commit-status reconciliation returned an invalid response.");
@@ -296,6 +322,7 @@ export function createGitHubCompletionApi(input: {
           sha
         };
       });
+      return { totalCount, statuses: normalizedStatuses };
     },
     async listPullRequestsForCommit({ owner, repo, ref }) {
       const value = await request(`/repos/${segment(owner)}/${segment(repo)}/commits/${segment(ref)}/pulls?per_page=100`);

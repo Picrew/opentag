@@ -269,16 +269,21 @@ function githubCompletionSemanticDigest(snapshot: GitHubVerifiedPullRequestSnaps
     provider: snapshot.provider,
     repository: snapshot.repository,
     pullRequest: snapshot.pullRequest,
-    checks: snapshot.checks
+    checks: snapshot.checks,
+    checksComplete: snapshot.checksComplete
   };
   return `sha256:${createHash("sha256")
     .update(JSON.stringify(canonicalizeGitHubCompletionValue(semanticSnapshot)))
     .digest("hex")}`;
 }
 
-function observedChecksRollupOutcome(checks: Record<string, "passed" | "failed" | "pending">): "passed" | "failed" | "pending" {
+function observedChecksRollupOutcome(
+  checks: Record<string, "passed" | "failed" | "pending">,
+  checksComplete: boolean
+): "passed" | "failed" | "pending" {
   const states = Object.values(checks);
   if (states.some((state) => state === "failed")) return "failed";
+  if (!checksComplete || states.length === 0) return "pending";
   if (states.some((state) => state === "pending")) return "pending";
   return "passed";
 }
@@ -342,7 +347,7 @@ function githubFactTemplates(input: {
       kind: "source_control.observed_checks_rollup",
       claim: {
         predicate: "checks_rollup",
-        outcome: observedChecksRollupOutcome(input.snapshot.checks),
+        outcome: observedChecksRollupOutcome(input.snapshot.checks, input.snapshot.checksComplete),
         observations: input.snapshot.checks
       },
       provenance: provenance("source_control.observed_checks_rollup")

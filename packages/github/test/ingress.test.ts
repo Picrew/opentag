@@ -18,10 +18,16 @@ function completionApi(): GitHubCompletionApi {
       };
     },
     async listCheckRunsForRef() {
-      return [{ name: "build", status: "completed", conclusion: "success", head_sha: COMPLETION_HEAD }];
+      return {
+        totalCount: 1,
+        checkRuns: [{ name: "build", status: "completed", conclusion: "success", head_sha: COMPLETION_HEAD }]
+      };
     },
     async getCombinedStatusForRef() {
-      return [{ context: "test", state: "success", sha: COMPLETION_HEAD }];
+      return {
+        totalCount: 1,
+        statuses: [{ context: "test", state: "success", sha: COMPLETION_HEAD }]
+      };
     },
     async listPullRequestsForCommit() {
       return [{ number: 7 }];

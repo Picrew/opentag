@@ -31,6 +31,7 @@ function githubSnapshot(input: {
   headSha?: string;
   state?: "open" | "closed" | "merged";
   checks?: Record<string, "passed" | "failed" | "pending">;
+  checksComplete?: boolean;
   observedAt?: string;
   resourceRef?: string;
 }) {
@@ -48,6 +49,7 @@ function githubSnapshot(input: {
       state: input.state ?? "merged"
     },
     checks: input.checks ?? { build: "passed", test: "passed" },
+    checksComplete: input.checksComplete ?? true,
     observedAt: input.observedAt ?? "2026-07-21T10:05:00.000Z",
     payloadDigest: `sha256:${(input.deliveryId === "delivery-old" ? "d" : "e").repeat(64)}`
   };
@@ -703,6 +705,51 @@ describe("dispatcher completion governance", () => {
     expect(green.status).toBe(201);
     await expect(green.json()).resolves.toMatchObject({
       completion: { completion: "satisfied", failedGateIds: [] }
+    });
+  });
+
+  it("keeps the zero-config observed-checks gate unsatisfied when no checks were observed", async () => {
+    const setup = await startRun({ runId: "run_default_empty_checks" });
+    await completeRun({ setup, runId: "run_default_empty_checks", conclusion: "success" });
+
+    const evidence = await setup.app.request(
+      "/v1/completion-evidence/github",
+      jsonRequest(githubSnapshot({
+        deliveryId: "delivery-default-empty",
+        state: "open",
+        checks: {}
+      }))
+    );
+
+    expect(evidence.status).toBe(201);
+    await expect(evidence.json()).resolves.toMatchObject({
+      completion: {
+        completion: "unsatisfied",
+        failedGateIds: ["observed_checks"]
+      }
+    });
+  });
+
+  it("keeps the zero-config observed-checks gate unsatisfied for an incomplete all-passed rollup", async () => {
+    const setup = await startRun({ runId: "run_default_incomplete_checks" });
+    await completeRun({ setup, runId: "run_default_incomplete_checks", conclusion: "success" });
+
+    const evidence = await setup.app.request(
+      "/v1/completion-evidence/github",
+      jsonRequest(githubSnapshot({
+        deliveryId: "delivery-default-incomplete",
+        state: "open",
+        checks: { build: "passed" },
+        checksComplete: false
+      }))
+    );
+
+    expect(evidence.status).toBe(201);
+    await expect(evidence.json()).resolves.toMatchObject({
+      completion: {
+        completion: "unsatisfied",
+        failedGateIds: ["observed_checks"]
+      }
     });
   });
 
