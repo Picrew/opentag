@@ -1,6 +1,6 @@
 {
   "name": "@opentag/gitlab",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "GitLab webhook normalization and callback rendering for OpenTag.",
   "type": "module",
   "engines": {

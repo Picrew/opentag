@@ -34,9 +34,9 @@ Private runnable apps are not published:
 
 ## Pre-1.0 Policy
 
-The source package family is prepared as the coordinated `0.10.0` release.
+The source package family is prepared as the coordinated `0.11.0` release.
 Source manifests are preparation evidence only: npm dist-tags remain
-authoritative for published channel versions, and `0.9.0` remains the
+authoritative for published channel versions, and `0.10.0` remains the
 documented stable release until registry evidence says otherwise. The public
 API is still settling, so all releases remain in the `0.x` line until the
 package contracts are stable enough for `1.0.0`.
@@ -59,8 +59,12 @@ and introduces an optional self-hosted Control Plane distributed as a private
 OCI image. Its release procedure is documented in
 [`npm-release.md`](npm-release.md); the earlier `0.10.0-next.0` candidate
 procedure in [`npm-prerelease.md`](npm-prerelease.md) was superseded before
-publication. Preparing this source state does not assert that npm publication,
-provider-live validation, or stable promotion has occurred.
+publication.
+The `0.11.0` release makes zero-config governed completion fail closed until
+GitHub proves a non-empty, complete current-head check rollup. It also updates
+the exported `GitHubCompletionApi` page-return contracts and adds the required
+`checksComplete` field to `GitHubVerifiedPullRequestSnapshot`; these pre-1.0
+TypeScript contract changes are documented in the changelog.
 
 For each npm release:
 

@@ -1,6 +1,6 @@
 {
   "name": "@opentag/client",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "HTTP client SDK for creating, claiming, and updating OpenTag dispatcher runs.",
   "type": "module",
   "engines": {

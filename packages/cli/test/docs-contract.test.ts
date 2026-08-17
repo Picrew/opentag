@@ -49,16 +49,22 @@ describe("platform setup docs contract", () => {
     expect(normalizedPrereleaseGuide).toContain(
       "The `0.10.0-next.0` candidate described here was never published"
     );
-    expect(versioningGuide).toContain("coordinated `0.10.0` release");
+    expect(versioningGuide).toContain("The `0.10.0` release");
     expect(readme).toContain("[npm prerelease candidate guide](docs/npm-prerelease.md)");
     expect(readmeZh).toContain("[npm prerelease 候选发布指南](docs/npm-prerelease.md)");
   });
 
-  it("keeps the 0.10.0 release procedure explicit and concurrency-safe", () => {
+  it("keeps the 0.11.0 release procedure explicit and concurrency-safe", () => {
     const releaseGuide = repoFile("docs/npm-release.md");
     const liveGuide = repoFile("docs/live-e2e-smoke-harness.md");
+    const versioningGuide = repoFile("docs/versioning.md");
+    const changelog = repoFile("CHANGELOG.md");
 
-    expect(liveGuide).toContain("npm install --no-audit --no-fund @opentag/cli@0.10.0");
+    expect(liveGuide).toContain("npm install --no-audit --no-fund @opentag/cli@0.11.0");
+    expect(versioningGuide).toContain("coordinated `0.11.0` release");
+    expect(changelog).toContain("## v0.11.0 - 2026-08-17");
+    expect(changelog).toContain("GitHubCompletionApi");
+    expect(changelog).toContain("checksComplete");
     expect(liveGuide).toContain('smoke_root="$(mktemp -d)"\n(\n  set -euo pipefail');
     expect(releaseGuide).toContain("refs/heads/release-lock/npm-dist-tags");
     expect(releaseGuide).toContain("npm-dist-tags.lock-sha");
@@ -69,42 +75,45 @@ describe("platform setup docs contract", () => {
     expect(releaseGuide).toContain('= "$lock_commit"');
     expect(releaseGuide).toContain('current_latest="$(jq -er');
     expect(releaseGuide).toContain('current_next="$(jq -er');
-    expect(releaseGuide).toContain('test "$current_next" = "0.10.0"');
-    expect(releaseGuide).toContain("First-publication exception");
-    expect(
-      releaseGuide.match(/"@opentag\/control-protocol"\|"@opentag\/delivery-contract"\)/gu)
-    ).toHaveLength(3);
-    expect(releaseGuide).toContain("no previous `latest` to restore");
-    expect(releaseGuide.match(/test "\$previous_latest" = "0\.9\.0"/gu)).toHaveLength(3);
+    expect(releaseGuide).toContain('test "$current_next" = "0.11.0"');
+    expect(releaseGuide).not.toContain("First-publication exception");
+    expect(releaseGuide).not.toContain('"@opentag/control-protocol"|"@opentag/delivery-contract")');
+    expect(releaseGuide).not.toContain("no previous `latest` to restore");
+    expect(releaseGuide.match(/test "\$previous_latest" = "0\.10\.0"/gu)).toHaveLength(3);
     expect(
       releaseGuide.match(
-        /awk -F '\\t' '\$1 != "@opentag\/control-protocol" && \$1 != "@opentag\/delivery-contract" \{ print \$2 \}' "\$(?:snapshot_tmp|rollback_file)" \| sort -u\)" = "0\.9\.0"/gu
+        /test "\$\(cut -f2 "\$(?:snapshot_tmp|rollback_file)" \| sort -u\)" = "0\.10\.0"/gu
       )
     ).toHaveLength(3);
-    expect(releaseGuide).not.toContain('"0.8.0"');
-    expect(releaseGuide.match(/test "\$\("\$smoke_root\/node_modules\/\.bin\/opentag" --version\)" = "0\.10\.0"/gu))
+    expect(releaseGuide).not.toContain('"0.9.0"');
+    expect(releaseGuide.match(/test "\$\("\$smoke_root\/node_modules\/\.bin\/opentag" --version\)" = "0\.11\.0"/gu))
       .toHaveLength(2);
     expect(releaseGuide).toContain('smoke_root="$(mktemp -d)"\n(\n  set -euo pipefail');
     expect(releaseGuide).toContain(
       'Also verify every package and its canary tag before promotion:\n\n```bash\n(\n  set -euo pipefail'
     );
-    expect(releaseGuide).toContain('git tag -a v0.10.0 "$release_commit" -m "OpenTag v0.10.0"');
+    expect(releaseGuide).toContain('git tag -a v0.11.0 "$release_commit" -m "OpenTag v0.11.0"');
     expect(releaseGuide).toContain(
-      "if ! gh api --include --silent repos/amplifthq/opentag/git/ref/tags/v0.10.0"
+      "if ! gh api --include --silent repos/amplifthq/opentag/git/ref/tags/v0.11.0"
     );
     expect(releaseGuide).toContain("only a confirmed 404 permits tag creation");
     expect(releaseGuide).toContain("release_tag_status=\"$(awk 'toupper($1) ~ /^HTTP\\//");
     expect(releaseGuide).toContain('case "$release_tag_status" in\n    200)');
-    expect(releaseGuide).toContain("    404)\n      if git show-ref --verify --quiet refs/tags/v0.10.0; then");
+    expect(releaseGuide).toContain("    404)\n      if git show-ref --verify --quiet refs/tags/v0.11.0; then");
     expect(releaseGuide).toContain("Refusing tag creation after upstream lookup returned HTTP");
-    expect(releaseGuide).toContain("git show-ref --verify --quiet refs/tags/v0.10.0");
-    expect(releaseGuide).toContain("git cat-file -t refs/tags/v0.10.0");
-    expect(releaseGuide).toContain('git rev-parse \'v0.10.0^{}\'');
-    expect(releaseGuide).toContain("git push origin refs/tags/v0.10.0");
+    expect(releaseGuide).toContain("git show-ref --verify --quiet refs/tags/v0.11.0");
+    expect(releaseGuide).toContain("git cat-file -t refs/tags/v0.11.0");
+    expect(releaseGuide).toContain('git rev-parse \'v0.11.0^{}\'');
+    expect(releaseGuide).toContain("git push origin refs/tags/v0.11.0");
     expect(releaseGuide).toContain('git/tags/$release_tag_object');
     expect(releaseGuide).toContain("gh api --paginate 'repos/amplifthq/opentag/releases?per_page=100'");
     expect(releaseGuide).toContain('case "$existing_release_state" in');
-    expect(releaseGuide).toContain("$'v0.10.0\\tfalse\\tfalse\\ttrue'");
+    expect(releaseGuide).toContain("$'v0.11.0\\tfalse\\tfalse\\ttrue'");
+    expect(releaseGuide).toContain('release_notes_file="$(mktemp)"');
+    expect(releaseGuide).toContain('test -s "$release_notes_file"');
+    expect(releaseGuide).toContain("trap 'rm -f -- \"$release_notes_file\"");
+    expect(releaseGuide).toContain('--notes-file "$release_notes_file"');
+    expect(releaseGuide).not.toContain("/tmp/opentag-v0.11.0-release-notes.md");
     expect(releaseGuide).toContain("'.draft'");
     expect(releaseGuide).toContain("'.prerelease'");
     expect(releaseGuide).toContain('.published_at | select(type == "string" and length > 0)');
@@ -145,12 +154,13 @@ describe("platform setup docs contract", () => {
     const controlPlane = repoFile("skills/opentag/references/control-plane.md");
     const completion = repoFile("skills/opentag/references/completion-governance.md");
     expect(skillDocs).not.toContain("@opentag/cli@latest");
+    expect(skillDocs).not.toContain("@opentag/cli@0.10.0");
     expect(skillDocs).not.toMatch(/\bnpx(?: --yes)? @opentag\/cli(?:\s|$)/u);
     expect(skillDocs).not.toMatch(/\bnpm install -g @opentag\/cli(?:\s|$)/u);
-    expect(skill).toContain("npm install -g @opentag/cli@0.10.0");
-    expect(skill).toContain("npx @opentag/cli@0.10.0 setup");
+    expect(skill).toContain("npm install -g @opentag/cli@0.11.0");
+    expect(skill).toContain("npx @opentag/cli@0.11.0 setup");
     expect(skill).toContain("For a global install, verify with `opentag --version`");
-    expect(skill).toContain("For the no-global path, verify with `npx @opentag/cli@0.10.0 --version`");
+    expect(skill).toContain("For the no-global path, verify with `npx @opentag/cli@0.11.0 --version`");
     expect(skill).toContain("request_user_input");
     expect(skill).toContain("askhuman");
     expect(skill).toContain("Codex Plan mode");
@@ -182,7 +192,7 @@ describe("platform setup docs contract", () => {
       'HTTPS_PROXY="<proxy-url>" HTTP_PROXY="<proxy-url>" npm view @opentag/cli version --fetch-timeout=15000'
     );
     expect(skill).toContain("Only after npm registry metadata is reachable");
-    expect(skill).toContain("npx --yes @opentag/cli@0.10.0 --help");
+    expect(skill).toContain("npx --yes @opentag/cli@0.11.0 --help");
     expect(skill).toContain("do not permanently change `npm config` without explicit user confirmation");
     expect(skill).toContain("Only use a proxy URL the user provides or that is already active in the environment");
     expect(skill).toContain("npm cache metadata exists");

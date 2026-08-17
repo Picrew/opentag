@@ -329,7 +329,7 @@ async function waitForSlackReply(input: {
 
 async function main(): Promise<void> {
   const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-  const expectedVersion = optionalEnv("OPENTAG_SLACK_LINEAR_EXPECTED_CLI_VERSION") ?? "0.10.0";
+  const expectedVersion = optionalEnv("OPENTAG_SLACK_LINEAR_EXPECTED_CLI_VERSION") ?? "0.11.0";
   const configSourcePath = resolve(requiredEnv("OPENTAG_CONFIG_PATH"));
   const botToken = requiredEnv("OPENTAG_SLACK_BOT_TOKEN");
   const appToken = requiredEnv("OPENTAG_SLACK_APP_TOKEN");

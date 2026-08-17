@@ -14,7 +14,7 @@ Use the published CLI first. Do not start from repo-internal apps, old shell scr
 Recommended user path:
 
 ```bash
-npm install -g @opentag/cli@0.10.0
+npm install -g @opentag/cli@0.11.0
 opentag setup
 opentag start
 ```
@@ -22,8 +22,8 @@ opentag start
 No global install:
 
 ```bash
-npx @opentag/cli@0.10.0 setup
-npx @opentag/cli@0.10.0 start
+npx @opentag/cli@0.11.0 setup
+npx @opentag/cli@0.11.0 start
 ```
 
 ## Route The Request
@@ -53,7 +53,7 @@ For platform credential steps, use the repository docs as the source of truth:
 ## Working Rules
 
 - Keep setup user-led. Never invent tokens, app IDs, Slack team/channel IDs, GitHub owner/repo names, or local project paths.
-- Use the reviewed CLI version `0.10.0` consistently in install and `npx` commands. For a global install, verify with `opentag --version`. For the no-global path, verify with `npx @opentag/cli@0.10.0 --version`. Update the pin only after reviewing a newer release.
+- Use the reviewed CLI version `0.11.0` consistently in install and `npx` commands. For a global install, verify with `opentag --version`. For the no-global path, verify with `npx @opentag/cli@0.11.0 --version`. Update the pin only after reviewing a newer release.
 - Prefer Slack, then GitHub, then GitLab, then Linear, then Lark / Feishu when listing established paths; label Telegram, Discord, and Microsoft Teams as previews.
 - Ask the user which platform and coding agent they want if it is not already clear outside Codex.
 - In Codex Plan mode, use `request_user_input` / askhuman to collect non-secret setup choices before running `opentag setup`, then pass those choices as CLI flags so the terminal wizard does not silently choose defaults.
@@ -70,7 +70,7 @@ For platform credential steps, use the repository docs as the source of truth:
 
 ## Npm Registry And Network Failures
 
-If `npm install -g @opentag/cli@0.10.0` or `npx @opentag/cli@0.10.0 ...` fails before the OpenTag CLI starts, keep the exact npm error and diagnose the package delivery path before giving up. Treat errors such as `ENOTFOUND`, `EAI_AGAIN`, `ETIMEDOUT`, `ECONNRESET`, `fetch failed`, proxy connection failures, and TLS certificate errors as network or npm-environment issues, not as OpenTag setup failures.
+If `npm install -g @opentag/cli@0.11.0` or `npx @opentag/cli@0.11.0 ...` fails before the OpenTag CLI starts, keep the exact npm error and diagnose the package delivery path before giving up. Treat errors such as `ENOTFOUND`, `EAI_AGAIN`, `ETIMEDOUT`, `ECONNRESET`, `fetch failed`, proxy connection failures, and TLS certificate errors as network or npm-environment issues, not as OpenTag setup failures.
 
 Use safe, non-secret checks first:
 
@@ -94,7 +94,7 @@ HTTPS_PROXY="<proxy-url>" HTTP_PROXY="<proxy-url>" npm view @opentag/cli version
 Only after npm registry metadata is reachable, retry the CLI help command:
 
 ```bash
-npx --yes @opentag/cli@0.10.0 --help
+npx --yes @opentag/cli@0.11.0 --help
 ```
 
 Only use a proxy URL the user provides or that is already active in the environment. Do not invent proxy hosts, tokens, certificates, or registry credentials. If npm cache metadata exists but `npx --offline` or `npm pack --offline` still fails, do not claim the CLI is available offline; report that the cache is not executable and wait for registry access to recover.
@@ -119,7 +119,7 @@ After the user chooses, run `opentag setup` with matching flags, for example `--
 
 2. Install or run the CLI.
    If npm cannot reach the published package, follow "Npm Registry And Network Failures" before treating setup as blocked.
-   Completion: `opentag --help` or `npx @opentag/cli@0.10.0 --help` works.
+   Completion: `opentag --help` or `npx @opentag/cli@0.11.0 --help` works.
 
 3. Run setup.
    Completion: `opentag setup` has collected platform, executor, project path, and credentials.

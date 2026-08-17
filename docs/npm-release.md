@@ -7,27 +7,17 @@ version.
 ## Target release
 
 ```text
-0.10.0
+0.11.0
 ```
 
 The release is first published on the npm `next` dist-tag, tested from the
 registry, then promoted to `latest`. The exact commit that produced the npm
-artifacts must also receive the matching `v0.10.0` git tag and GitHub Release.
+artifacts must also receive the matching `v0.11.0` git tag and GitHub Release.
 
-The public release set contains 18 packages, including the first publications
-of `@opentag/control-protocol` and `@opentag/delivery-contract`. The other 16
-packages have a coordinated `0.9.0` release. Publishing `0.10.0` with
-`--tag next` must leave each existing package's `latest` pointer unchanged
-until the complete registry, ACP, governance, factory, and live-platform gate
-passes.
-
-First-publication exception: `@opentag/control-protocol` and
-`@opentag/delivery-contract` have never been published, so they have no
-`0.9.0` baseline. Their first `--tag next` publish creates only the `next`
-dist-tag, so they have no pre-promotion `latest` value to snapshot or restore.
-The snapshot, promotion, and rollback loops below encode this exception
-explicitly; do not "fix" a missing first-publication `latest` tag before
-promotion.
+The public release set contains 18 packages. Every package has a coordinated
+`0.10.0` stable baseline. Publishing `0.11.0` with `--tag next` must leave each
+package's `latest` pointer at `0.10.0` until the complete registry, ACP,
+governance, factory, and live-platform gate passes.
 
 ## Public package discovery and order
 
@@ -54,7 +44,7 @@ plan.
 ## Release gate
 
 Start from the intended release commit with a clean working tree. Confirm that
-all 18 public manifests use `0.10.0` and that the frozen lockfile is current,
+all 18 public manifests use `0.11.0` and that the frozen lockfile is current,
 then run the verification ladder in this order:
 
 ```bash
@@ -125,7 +115,7 @@ authority, then confirm npm access and publish from that same commit:
   set -euo pipefail
 
   test -z "$(git status --porcelain)"
-  release_state_dir=".omx/releases/0.10.0"
+  release_state_dir=".omx/releases/0.11.0"
   release_commit_file="$release_state_dir/release-commit-sha"
   current_release_commit="$(git rev-parse HEAD)"
   mkdir -p "$release_state_dir"
@@ -151,7 +141,7 @@ authority, then confirm npm access and publish from that same commit:
 
 The publish command uses the same automatic publication set and topological
 order as `release:check`. A coordinated release is incomplete until all 18
-packages exist at `0.10.0`; do not promote a partial package family. Preserve
+packages exist at `0.11.0`; do not promote a partial package family. Preserve
 the exact `release-commit-sha` file with the release record. Every later lock,
 tag, rollback, and release check reads that authority instead of recapturing
 the current `HEAD`.
@@ -184,14 +174,14 @@ smoke_root="$(mktemp -d)"
 
   cd "$smoke_root"
   npm init --yes >/dev/null
-  npm install --no-audit --no-fund @opentag/cli@0.10.0
-  test "$("$smoke_root/node_modules/.bin/opentag" --version)" = "0.10.0"
+  npm install --no-audit --no-fund @opentag/cli@0.11.0
+  test "$("$smoke_root/node_modules/.bin/opentag" --version)" = "0.11.0"
   "$smoke_root/node_modules/.bin/opentag" --help
   npm audit --prefix "$smoke_root" --omit=dev --audit-level=high
 )
 ```
 
-The version must be `0.10.0`. With isolated config and state directories, run
+The version must be `0.11.0`. With isolated config and state directories, run
 the setup, doctor, and foreground-start path for one platform that has real
 test credentials:
 
@@ -229,12 +219,12 @@ Also verify every package and its canary tag before promotion:
 (
   set -euo pipefail
 
-  test "$("$smoke_root/node_modules/.bin/opentag" --version)" = "0.10.0"
+  test "$("$smoke_root/node_modules/.bin/opentag" --version)" = "0.11.0"
   for manifest in packages/*/package.json; do
     [ "$(jq -r '.publishConfig.access // ""' "$manifest")" = "public" ] || continue
     package="$(jq -r '.name' "$manifest")"
-    test "$(npm view "$package@0.10.0" version)" = "0.10.0"
-    test "$(npm view "$package" dist-tags.next)" = "0.10.0"
+    test "$(npm view "$package@0.11.0" version)" = "0.11.0"
+    test "$(npm view "$package" dist-tags.next)" = "0.11.0"
     npm view "$package" dist-tags --json
   done
 )
@@ -251,7 +241,7 @@ window:
 (
   set -euo pipefail
 
-  release_state_dir=".omx/releases/0.10.0"
+  release_state_dir=".omx/releases/0.11.0"
   release_commit_file="$release_state_dir/release-commit-sha"
   lock_owner_file="$release_state_dir/npm-dist-tags.lock-sha"
   test -f "$release_commit_file"
@@ -302,7 +292,7 @@ retry cannot replace the original rollback authority:
 (
   set -euo pipefail
 
-  release_state_dir=".omx/releases/0.10.0"
+  release_state_dir=".omx/releases/0.11.0"
   release_commit_file="$release_state_dir/release-commit-sha"
   lock_owner_file="$release_state_dir/npm-dist-tags.lock-sha"
   test -f "$release_commit_file"
@@ -323,37 +313,24 @@ retry cannot replace the original rollback authority:
     [ "$(jq -r '.publishConfig.access // ""' "$manifest")" = "public" ] || continue
     package="$(jq -r '.name' "$manifest")"
     dist_tags_json="$(npm view "$package" dist-tags --json)"
-    case "$package" in
-      "@opentag/control-protocol"|"@opentag/delivery-contract")
-        previous_latest="$(jq -r '.latest // "absent"' <<<"$dist_tags_json")"
-        case "$previous_latest" in
-          absent|"0.10.0") ;;
-          *) echo "Refusing unexpected first-publication $package latest=$previous_latest" >&2; exit 1 ;;
-        esac
-        ;;
-      *)
-        previous_latest="$(jq -er '.latest | select(type == "string" and length > 0)' <<<"$dist_tags_json")"
-        test "$previous_latest" = "0.9.0"
-        ;;
-    esac
+    previous_latest="$(jq -er '.latest | select(type == "string" and length > 0)' <<<"$dist_tags_json")"
+    test "$previous_latest" = "0.10.0"
     printf '%s\t%s\n' "$package" "$previous_latest" >>"$snapshot_tmp"
   done
   test "$(wc -l <"$snapshot_tmp" | tr -d ' ')" = "18"
   test "$(cut -f1 "$snapshot_tmp" | sort -u | wc -l | tr -d ' ')" = "18"
-  test "$(awk -F '\t' '$1 != "@opentag/control-protocol" && $1 != "@opentag/delivery-contract" { print $2 }' "$snapshot_tmp" | sort -u)" = "0.9.0"
+  test "$(cut -f2 "$snapshot_tmp" | sort -u)" = "0.10.0"
   mv -n "$snapshot_tmp" "$rollback_file"
   test ! -e "$snapshot_tmp"
 )
 ```
 
 Keep that exact file until the release is complete. It records the actual
-pre-promotion `latest` target for every package and fails unless the 16
-previously published packages are still on the known `0.9.0` baseline; the
-never-published `@opentag/control-protocol` and `@opentag/delivery-contract`
-record `absent` (or `0.10.0` on a partial-promotion retry). A registry lookup
-failure or a missing/unexpected tag on any other package stops the release; it
-is never interpreted as rollback authority. Back the snapshot up outside the
-ephemeral shell session before changing any dist-tag.
+pre-promotion `latest` target for every package and fails unless all 18 packages
+are still on the known `0.10.0` baseline. A registry lookup failure or a
+missing/unexpected tag stops the release; it is never interpreted as rollback
+authority. Back the snapshot up outside the ephemeral shell session before
+changing any dist-tag.
 
 The following promotion loop is retryable. Every first attempt and retry must
 reuse the original `rollback_file`; never rerun the snapshot block after any
@@ -363,7 +340,7 @@ package has been promoted:
 (
   set -euo pipefail
 
-  release_state_dir=".omx/releases/0.10.0"
+  release_state_dir=".omx/releases/0.11.0"
   release_commit_file="$release_state_dir/release-commit-sha"
   lock_owner_file="$release_state_dir/npm-dist-tags.lock-sha"
   test -f "$release_commit_file"
@@ -373,83 +350,80 @@ package has been promoted:
   lock_commit="$(<"$lock_owner_file")"
   test "$(gh api repos/amplifthq/opentag/git/ref/heads/release-lock/npm-dist-tags --jq '.object.sha')" = "$lock_commit"
   test "$(gh api "repos/amplifthq/opentag/git/commits/$lock_commit" --jq '.parents[0].sha')" = "$release_commit"
-  rollback_file=".omx/releases/0.10.0/pre-promotion-latest.tsv"
+  rollback_file=".omx/releases/0.11.0/pre-promotion-latest.tsv"
   test -f "$rollback_file"
   test "$(wc -l <"$rollback_file" | tr -d ' ')" = "18"
   test "$(cut -f1 "$rollback_file" | sort -u | wc -l | tr -d ' ')" = "18"
-  test "$(awk -F '\t' '$1 != "@opentag/control-protocol" && $1 != "@opentag/delivery-contract" { print $2 }' "$rollback_file" | sort -u)" = "0.9.0"
+  test "$(cut -f2 "$rollback_file" | sort -u)" = "0.10.0"
 
   for manifest in packages/*/package.json; do
     [ "$(jq -r '.publishConfig.access // ""' "$manifest")" = "public" ] || continue
     package="$(jq -r '.name' "$manifest")"
     previous_latest="$(awk -F '\t' -v package="$package" '$1 == package { print $2 }' "$rollback_file")"
+    test "$previous_latest" = "0.10.0"
     current_tags_json="$(npm view "$package" dist-tags --json)"
     current_next="$(jq -er '.next | select(type == "string" and length > 0)' <<<"$current_tags_json")"
-    test "$current_next" = "0.10.0"
-    case "$package" in
-      "@opentag/control-protocol"|"@opentag/delivery-contract")
-        case "$previous_latest" in absent|"0.10.0") ;; *) echo "Refusing corrupt snapshot for $package" >&2; exit 1 ;; esac
-        current_latest="$(jq -r '.latest // "absent"' <<<"$current_tags_json")"
-        case "$current_latest" in
-          absent) npm dist-tag add "$package@0.10.0" latest ;;
-          "0.10.0") ;;
-          *) echo "Refusing to replace drifted $package latest=$current_latest" >&2; exit 1 ;;
-        esac
-        ;;
-      *)
-        test "$previous_latest" = "0.9.0"
-        current_latest="$(jq -er '.latest | select(type == "string" and length > 0)' <<<"$current_tags_json")"
-        case "$current_latest" in
-          "$previous_latest") npm dist-tag add "$package@0.10.0" latest ;;
-          "0.10.0") ;;
-          *) echo "Refusing to replace drifted $package latest=$current_latest" >&2; exit 1 ;;
-        esac
-        ;;
+    test "$current_next" = "0.11.0"
+    current_latest="$(jq -er '.latest | select(type == "string" and length > 0)' <<<"$current_tags_json")"
+    case "$current_latest" in
+      "$previous_latest") npm dist-tag add "$package@0.11.0" latest ;;
+      "0.11.0") ;;
+      *) echo "Refusing to replace drifted $package latest=$current_latest" >&2; exit 1 ;;
     esac
-    test "$(npm view "$package" dist-tags.latest)" = "0.10.0"
-    test "$(npm view "$package" dist-tags.next)" = "0.10.0"
+    test "$(npm view "$package" dist-tags.latest)" = "0.11.0"
+    test "$(npm view "$package" dist-tags.next)" = "0.11.0"
   done
 )
 ```
 
 Rerun the package loop from the registry-verification section and confirm both
-`next` and `latest` point at `0.10.0` for all 18 packages.
+`next` and `latest` point at `0.11.0` for all 18 packages.
 
 ## Create the matching source release
 
 Create the source tag from the exact clean commit used for `release:publish`.
-Copy the `v0.10.0` section of `CHANGELOG.md` into a temporary release-notes file,
-then run:
+The block extracts the `v0.11.0` changelog section into a unique, validated
+temporary release-notes file:
 
 ```bash
 (
   set -euo pipefail
 
-  release_commit_file=".omx/releases/0.10.0/release-commit-sha"
+  release_commit_file=".omx/releases/0.11.0/release-commit-sha"
   test -f "$release_commit_file"
   release_commit="$(<"$release_commit_file")"
   test "$(git rev-parse HEAD)" = "$release_commit"
   test -z "$(git status --porcelain)"
 
+  release_notes_file="$(mktemp)"
+  release_tag_probe=""
+  trap 'rm -f -- "$release_notes_file"; if [ -n "$release_tag_probe" ]; then rm -f -- "$release_tag_probe"; fi' EXIT
+  awk '
+    /^## v0\.11\.0 - / { in_release = 1; next }
+    in_release && /^## v/ { exit }
+    in_release { print }
+  ' CHANGELOG.md >"$release_notes_file"
+  test -s "$release_notes_file"
+
   release_tag_probe="$(mktemp)"
-  if ! gh api --include --silent repos/amplifthq/opentag/git/ref/tags/v0.10.0 >"$release_tag_probe"; then
+  if ! gh api --include --silent repos/amplifthq/opentag/git/ref/tags/v0.11.0 >"$release_tag_probe"; then
     : # Inspect the HTTP status below; only a confirmed 404 permits tag creation.
   fi
   release_tag_status="$(awk 'toupper($1) ~ /^HTTP\// {status=$2} END {print status}' "$release_tag_probe")"
-  rm -f "$release_tag_probe"
+  rm -f -- "$release_tag_probe"
   case "$release_tag_status" in
     200)
-      release_tag_ref="$(gh api repos/amplifthq/opentag/git/ref/tags/v0.10.0)"
+      release_tag_ref="$(gh api repos/amplifthq/opentag/git/ref/tags/v0.11.0)"
       ;;
     404)
-      if git show-ref --verify --quiet refs/tags/v0.10.0; then
-        test "$(git cat-file -t refs/tags/v0.10.0)" = "tag"
-        test "$(git rev-parse 'v0.10.0^{}')" = "$release_commit"
+      if git show-ref --verify --quiet refs/tags/v0.11.0; then
+        test "$(git cat-file -t refs/tags/v0.11.0)" = "tag"
+        test "$(git rev-parse 'v0.11.0^{}')" = "$release_commit"
       else
-        git tag -a v0.10.0 "$release_commit" -m "OpenTag v0.10.0"
+        git tag -a v0.11.0 "$release_commit" -m "OpenTag v0.11.0"
       fi
-      git push origin refs/tags/v0.10.0
-      release_tag_ref="$(gh api repos/amplifthq/opentag/git/ref/tags/v0.10.0)"
+      git push origin refs/tags/v0.11.0
+      release_tag_ref="$(gh api repos/amplifthq/opentag/git/ref/tags/v0.11.0)"
       ;;
     *)
       echo "Refusing tag creation after upstream lookup returned HTTP ${release_tag_status:-unavailable}" >&2
@@ -460,19 +434,19 @@ then run:
   release_tag_object="$(jq -r '.object.sha' <<<"$release_tag_ref")"
   test "$(gh api "repos/amplifthq/opentag/git/tags/$release_tag_object" --jq '.object.sha')" = "$release_commit"
   existing_release_state="$(gh api --paginate 'repos/amplifthq/opentag/releases?per_page=100' \
-    --jq '.[] | select(.tag_name == "v0.10.0") | [.tag_name, .draft, .prerelease, (.published_at != null)] | @tsv')"
+    --jq '.[] | select(.tag_name == "v0.11.0") | [.tag_name, .draft, .prerelease, (.published_at != null)] | @tsv')"
   case "$existing_release_state" in
     "")
-      gh release create v0.10.0 \
+      gh release create v0.11.0 \
         --verify-tag \
-        --title "OpenTag v0.10.0" \
-        --notes-file /tmp/opentag-v0.10.0-release-notes.md
+        --title "OpenTag v0.11.0" \
+        --notes-file "$release_notes_file"
       ;;
-    $'v0.10.0\tfalse\tfalse\ttrue') ;;
-    *) echo "Refusing conflicting draft, prerelease, unpublished, or duplicate v0.10.0 GitHub Release state" >&2; exit 1 ;;
+    $'v0.11.0\tfalse\tfalse\ttrue') ;;
+    *) echo "Refusing conflicting draft, prerelease, unpublished, or duplicate v0.11.0 GitHub Release state" >&2; exit 1 ;;
   esac
-  release_state="$(gh api repos/amplifthq/opentag/releases/tags/v0.10.0)"
-  test "$(jq -r '.tag_name' <<<"$release_state")" = "v0.10.0"
+  release_state="$(gh api repos/amplifthq/opentag/releases/tags/v0.11.0)"
+  test "$(jq -r '.tag_name' <<<"$release_state")" = "v0.11.0"
   test "$(jq -r '.draft' <<<"$release_state")" = "false"
   test "$(jq -r '.prerelease' <<<"$release_state")" = "false"
   jq -er '.published_at | select(type == "string" and length > 0)' <<<"$release_state" >/dev/null
@@ -485,11 +459,11 @@ the pushed remote tag must also be annotated and target that commit. The
 paginated release lookup must succeed before an absent release is created, so a
 network or API failure is never misread as authoritative absence. An existing
 draft, prerelease, unpublished object, or duplicate match is conflicting state:
-stop and inspect it rather than treating it as the completed `v0.10.0` release.
+stop and inspect it rather than treating it as the completed `v0.11.0` release.
 
 Verify that the GitHub Release tag resolves to the same commit that produced
 the npm tarballs. The release is not complete until npm, git, and GitHub all
-identify version `0.10.0`. After that verification—or after a completed and
+identify version `0.11.0`. After that verification—or after a completed and
 verified rollback—release the exclusive window only when it still points at
 your release commit:
 
@@ -497,7 +471,7 @@ your release commit:
 (
   set -euo pipefail
 
-  release_state_dir=".omx/releases/0.10.0"
+  release_state_dir=".omx/releases/0.11.0"
   release_commit_file="$release_state_dir/release-commit-sha"
   lock_owner_file="$release_state_dir/npm-dist-tags.lock-sha"
   test -f "$release_commit_file"
@@ -520,15 +494,15 @@ Do not unpublish immutable package versions during rollback.
   `latest` tag unchanged and stop the rollout. Preserve `next` for diagnosis or
   move it to the corrected version.
 - If `latest` promotion fails partway, first finish or retry only the idempotent
-  promotion loop with the original snapshot. If 0.10.0 itself must be withdrawn,
-  restore each package's recorded pre-promotion target and leave 0.10.0 on `next`
+  promotion loop with the original snapshot. If 0.11.0 itself must be withdrawn,
+  restore each package's recorded pre-promotion target and leave 0.11.0 on `next`
   for diagnosis:
 
 ```bash
 (
   set -euo pipefail
 
-  release_state_dir=".omx/releases/0.10.0"
+  release_state_dir=".omx/releases/0.11.0"
   release_commit_file="$release_state_dir/release-commit-sha"
   lock_owner_file="$release_state_dir/npm-dist-tags.lock-sha"
   test -f "$release_commit_file"
@@ -538,56 +512,32 @@ Do not unpublish immutable package versions during rollback.
   lock_commit="$(<"$lock_owner_file")"
   test "$(gh api repos/amplifthq/opentag/git/ref/heads/release-lock/npm-dist-tags --jq '.object.sha')" = "$lock_commit"
   test "$(gh api "repos/amplifthq/opentag/git/commits/$lock_commit" --jq '.parents[0].sha')" = "$release_commit"
-  rollback_file=".omx/releases/0.10.0/pre-promotion-latest.tsv"
+  rollback_file=".omx/releases/0.11.0/pre-promotion-latest.tsv"
   test -f "$rollback_file"
   test "$(wc -l <"$rollback_file" | tr -d ' ')" = "18"
   test "$(cut -f1 "$rollback_file" | sort -u | wc -l | tr -d ' ')" = "18"
-  test "$(awk -F '\t' '$1 != "@opentag/control-protocol" && $1 != "@opentag/delivery-contract" { print $2 }' "$rollback_file" | sort -u)" = "0.9.0"
+  test "$(cut -f2 "$rollback_file" | sort -u)" = "0.10.0"
   for manifest in packages/*/package.json; do
     [ "$(jq -r '.publishConfig.access // ""' "$manifest")" = "public" ] || continue
     package="$(jq -r '.name' "$manifest")"
-    case "$package" in
-      "@opentag/control-protocol"|"@opentag/delivery-contract")
-        previous_latest="$(awk -F '\t' -v package="$package" '$1 == package { print $2 }' "$rollback_file")"
-        case "$previous_latest" in
-          absent|"0.10.0") ;;
-          *) echo "Refusing corrupt snapshot for $package" >&2; exit 1 ;;
-        esac
-        current_tags_json="$(npm view "$package" dist-tags --json)"
-        test "$(jq -er '.next | select(type == "string" and length > 0)' <<<"$current_tags_json")" = "0.10.0"
-        current_latest="$(jq -r '.latest // "absent"' <<<"$current_tags_json")"
-        case "$previous_latest:$current_latest" in
-          absent:absent|absent:0.10.0|0.10.0:0.10.0) ;;
-          *) echo "Refusing unexpected $package latest=$current_latest" >&2; exit 1 ;;
-        esac
-        # First publication: there is no previous `latest` to restore, and npm
-        # refuses to delete a package's `latest` tag. After validation, leave
-        # the tags unchanged (`latest` stays absent or 0.10.0) and record the
-        # withdrawal in the incident note.
-        continue
-        ;;
-    esac
     previous_latest="$(awk -F '\t' -v package="$package" '$1 == package { print $2 }' "$rollback_file")"
-    test "$previous_latest" = "0.9.0"
+    test "$previous_latest" = "0.10.0"
     test "$(npm view "$package@$previous_latest" version)" = "$previous_latest"
     current_tags_json="$(npm view "$package" dist-tags --json)"
     current_latest="$(jq -er '.latest | select(type == "string" and length > 0)' <<<"$current_tags_json")"
     current_next="$(jq -er '.next | select(type == "string" and length > 0)' <<<"$current_tags_json")"
-    test "$current_next" = "0.10.0"
+    test "$current_next" = "0.11.0"
     case "$current_latest" in
       "$previous_latest") ;;
-      "0.10.0") npm dist-tag add "$package@$previous_latest" latest ;;
+      "0.11.0") npm dist-tag add "$package@$previous_latest" latest ;;
       *) echo "Refusing to replace drifted $package latest=$current_latest" >&2; exit 1 ;;
     esac
     test "$(npm view "$package" dist-tags.latest)" = "$previous_latest"
-    test "$(npm view "$package" dist-tags.next)" = "0.10.0"
+    test "$(npm view "$package" dist-tags.next)" = "0.11.0"
   done
 )
 ```
 
 Verify all dist-tags after rollback, publish a clear incident note, then release
-the exclusive window with the guarded command above. The incident note must
-state that `@opentag/control-protocol` and `@opentag/delivery-contract` keep
-`latest` absent or at `0.10.0` (both are valid rollback outcomes, depending on
-whether promotion reached them) because a first publication has no earlier
-stable target. A later fix must use a new version; never overwrite `0.10.0`.
+the exclusive window with the guarded command above. A later fix must use a new
+version; never overwrite `0.11.0`.

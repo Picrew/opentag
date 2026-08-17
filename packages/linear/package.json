@@ -1,6 +1,6 @@
 {
   "name": "@opentag/linear",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Linear webhook normalization, callback rendering, and issue mutation helpers for OpenTag.",
   "type": "module",
   "engines": {
