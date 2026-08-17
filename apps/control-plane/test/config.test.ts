@@ -149,6 +149,33 @@ describe("Control Plane configuration", () => {
     }).fencingTokenSecret).toBe("b".repeat(32));
   });
 
+  it("rejects unchanged .env.example placeholder secrets", () => {
+    const base = {
+      DATABASE_URL: "postgresql://opentag:secret@postgres:5432/opentag",
+      OPENTAG_BOOTSTRAP_ORGANIZATION_ID: "org_local",
+      OPENTAG_BOOTSTRAP_ORGANIZATION_NAME: "Local OpenTag",
+      OPENTAG_BOOTSTRAP_PAIRING_TOKEN: "bootstrap_secret",
+      OPENTAG_PUBLIC_URL: "http://127.0.0.1:3000",
+    };
+    for (const placeholder of [
+      { OPENTAG_BOOTSTRAP_PAIRING_TOKEN: "replace-with-at-least-16-random-characters" },
+      { OPENTAG_RECOVERY_PAIRING_TOKEN: "replace-with-a-different-at-least-16-character-secret" },
+      { OPENTAG_FENCING_TOKEN_SECRET: "replace-with-at-least-32-independent-random-characters" },
+      { OPENTAG_LOGIN_THROTTLE_SECRET: "replace-with-a-different-at-least-32-character-secret" },
+      { OPENTAG_GITHUB_INGRESS_MASTER_SECRET: "replace-with-at-least-32-more-random-characters" },
+    ]) {
+      expect(() => parseControlPlaneConfig({ ...base, ...placeholder }))
+        .toThrow("configuration_invalid");
+    }
+    expect(() =>
+      parseAdminBootstrapConfig({
+        OPENTAG_BOOTSTRAP_ADMIN_EMAIL: "owner@example.test",
+        OPENTAG_BOOTSTRAP_ADMIN_NAME: "OpenTag Owner",
+        OPENTAG_BOOTSTRAP_ADMIN_PASSWORD: "replace-with-a-long-random-password",
+      }),
+    ).toThrow("configuration_invalid");
+  });
+
   it("keeps the network login budget separate from the email budget", () => {
     const base = {
       DATABASE_URL: "postgresql://opentag:secret@postgres:5432/opentag",

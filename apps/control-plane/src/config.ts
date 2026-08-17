@@ -6,6 +6,10 @@ const ReleaseShaSchema = z.union([
   z.string().regex(/^[a-f0-9]{40}$/u),
 ]);
 
+// Every secret in deploy/compose/.env.example uses this prefix so a copied
+// example file can never boot with publicly known authority values.
+const PLACEHOLDER_SECRET_PREFIX = "replace-with-";
+
 const RawConfigSchema = z
   .object({
     DATABASE_URL: z.string().min(1),
@@ -113,6 +117,13 @@ export function parseAdminBootstrapConfig(
 ) {
   try {
     const parsed = AdminBootstrapConfigSchema.parse(input);
+    if (
+      parsed.OPENTAG_BOOTSTRAP_ADMIN_PASSWORD.startsWith(
+        PLACEHOLDER_SECRET_PREFIX,
+      )
+    ) {
+      throw new Error("example placeholder password must be replaced");
+    }
     return {
       email: parsed.OPENTAG_BOOTSTRAP_ADMIN_EMAIL,
       displayName: parsed.OPENTAG_BOOTSTRAP_ADMIN_NAME,
@@ -157,6 +168,17 @@ export function parseControlPlaneConfig(
 ): ControlPlaneConfig {
   try {
     const parsed = RawConfigSchema.parse(input);
+    for (const secret of [
+      parsed.OPENTAG_BOOTSTRAP_PAIRING_TOKEN,
+      parsed.OPENTAG_RECOVERY_PAIRING_TOKEN,
+      parsed.OPENTAG_FENCING_TOKEN_SECRET,
+      parsed.OPENTAG_LOGIN_THROTTLE_SECRET,
+      parsed.OPENTAG_GITHUB_INGRESS_MASTER_SECRET,
+    ]) {
+      if (secret?.startsWith(PLACEHOLDER_SECRET_PREFIX)) {
+        throw new Error("example placeholder secrets must be replaced");
+      }
+    }
     if (parsed.OPENTAG_ENVIRONMENT !== "local" && parsed.OPENTAG_RELEASE_SHA === "local") {
       throw new Error("non-local deployments require an immutable release identity");
     }

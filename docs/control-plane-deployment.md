@@ -42,6 +42,10 @@ Required values:
 - `OPENTAG_BOOTSTRAP_ADMIN_EMAIL`, `...NAME`, and `...PASSWORD`: initial owner;
 - `OPENTAG_PUBLIC_URL`: the exact browser and webhook origin.
 
+The server refuses to start while any secret still carries the unchanged
+`replace-with-…` placeholder from `.env.example`, so a copied example file can
+never run with publicly known authority values.
+
 Recommended values:
 
 - `OPENTAG_RECOVERY_PAIRING_TOKEN`: separate emergency authority used only to
