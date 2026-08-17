@@ -25,6 +25,7 @@ import {
   ControlMutationRequestV1Schema,
   ControlErrorHttpResponseV1Schema,
   ControlWaitingHttpResponseV1Schema,
+  buildHostedLifecycleRequestV1,
   buildMaterialActionReceiptDigestInputV1,
   buildPermissionRequestDigestInputV1,
   computeMaterialActionFencingTokenDigestV1,
@@ -51,6 +52,7 @@ import {
   HostedClaimRequestV1Schema,
   HostedClaimV1Schema,
   HostedCompleteRequestV1Schema,
+  HostedCancelRequestV1Schema,
   HostedAuthorityRefV1Schema,
   HostedExecutorResultReceiptRefV1Schema,
   HostedExecutorResultReasonCodeV1Schema,
@@ -106,7 +108,7 @@ import {
   type HostedAuthorityRefV1,
   type HostedExecutorResultReceiptRefV1,
   type WorkThreadRefReceiptEnvelopeV1,
-} from "../src/control-protocol.js";
+} from "@opentag/control-protocol";
 import { canonicalJsonStringify } from "../src/canonical-json.js";
 
 const digest = `sha256:${"a".repeat(64)}`;
@@ -943,6 +945,38 @@ describe("hosted admission and claim V1 protocol", () => {
         },
       }),
     ).toBe(request.requestDigest);
+  });
+
+  it("builds a canonical hosted cancellation request", async () => {
+    const request = await buildHostedLifecycleRequestV1({
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      runId: "run_1",
+      action: "cancel",
+      attempt: {
+        attemptId: "attempt_1",
+        attemptNumber: 1,
+        epoch: 1,
+        fencingToken: "raw_fence",
+        fencingTokenDigest: await computeHostedClaimFencingTokenDigestV1(
+          "raw_fence",
+        ),
+      },
+      occurredAt: "2026-08-10T00:00:00.000Z",
+      reasonCode: "operator_cancelled",
+    });
+    expect(HostedCancelRequestV1Schema.parse(request)).toMatchObject({
+      reasonCode: "operator_cancelled",
+      requestId: expect.stringMatching(/^req_[0-9a-f]{64}$/u),
+      operationId: expect.stringMatching(/^op_[0-9a-f]{64}$/u),
+    });
+    await expect(computeHostedLifecycleRequestDigestV1({
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      runId: "run_1",
+      action: "cancel",
+      request,
+    })).resolves.toBe(request.requestDigest);
   });
 
   it("freezes hosted executor result reasons and binds them to conclusions", async () => {

@@ -172,6 +172,53 @@ OpenTag's CLI path is local-first.
 - Codex, Claude Code, Cursor, OpenCode, Hermes, and OpenClaw run through ACP against your local checkout. OpenClaw cancellation is currently best effort.
 - Platform APIs receive only the messages needed to acknowledge, reply, and apply actions you approve.
 
+## Optional Control Plane
+
+OpenTag also contains an optional open-source Control Plane for teams that need
+shared identity, runner pairing, public ingress, tenant-scoped hosted-run
+coordination, governed permissions, retained evidence, and audit views. It is
+not required by the local CLI path and it never becomes the custodian of local
+repositories, source-control credentials, agent credentials, worktrees, or
+coding-agent execution.
+
+The clean implementation is a Node/Hono application with PostgreSQL, a static
+Vite/React operator console, and a Docker Compose self-hosting profile. It does
+not require Cloudflare, TanStack Start, Redis, object storage, or a message
+broker. Start with the [Control Plane README](apps/control-plane/README.md) and
+[deployment runbook](docs/control-plane-deployment.md). A managed deployment or
+production service is not implied by the source implementation.
+
+GitHub ingress remains default-disabled: the local foundation proves signed
+delivery reservation and replay, but production activation is blocked until
+audited binding-secret rotation and disable/re-enable recovery are implemented.
+
+To validate the complete self-hosted profile, install Chromium once and run
+the production-shaped browser E2E:
+
+```bash
+corepack pnpm --dir apps/control-plane e2e:install
+corepack pnpm e2e:control-plane
+```
+
+The E2E builds the production OCI image, starts an isolated PostgreSQL 17
+Compose project, applies migrations, bootstraps the owner, runs the HTTP and
+jobs processes, and drives Chromium through authentication, API-key, runner,
+Project Target, and GitHub-binding journeys. It pairs the runner through the
+public `@opentag/client` package entry point, then completes signed local
+ingress, hosted claim, permission, material evidence, cancellation, credential
+reprovisioning, and recurring jobs before verifying exact durable records with
+`psql`. It then restarts the HTTP and jobs services, verifies HTTP readiness
+and a new jobs settlement, creates a byte-preserving PostgreSQL backup,
+restores it into a fresh database, and checks the restored migrations, durable
+records, and a non-ASCII data canary. Successful runs remove their
+containers, network, volume, generated secrets, and Playwright output; failed
+runs retain bounded browser artifacts for diagnosis.
+
+This is a local production-shape test. It does not contact GitHub, use a
+production database, deploy the service, or prove a managed environment is
+active. See the [browser E2E catalog](apps/control-plane/e2e/TEST-CATALOG.md)
+for the exact acceptance journeys and boundaries.
+
 ## Supported Coding Agents
 
 | Coding agent | Status | Notes |
@@ -283,14 +330,16 @@ Package source candidate: `v0.10.0-next.0`. This source state is prepared for
 local release validation only; it is not evidence that the candidate was
 published. npm dist-tags remain authoritative for public channel versions, and
 `0.9.0` remains the documented stable release until registry evidence says
-otherwise. The coordinated package family contains 16 public packages under
+otherwise. The coordinated package family contains 18 public packages under
 the `@opentag` scope.
 
 | Package | Purpose |
 | --- | --- |
+| [`@opentag/control-protocol`](https://www.npmjs.com/package/@opentag/control-protocol) | Canonical Control V1 schemas, types, and digest helpers |
 | [`@opentag/cli`](https://www.npmjs.com/package/@opentag/cli) | Setup and local runtime command line interface |
 | [`@opentag/local-runtime`](https://www.npmjs.com/package/@opentag/local-runtime) | In-process local dispatcher, runner, and platform runtime |
 | [`@opentag/core`](https://www.npmjs.com/package/@opentag/core) | Protocol schemas, types, mention parsing, and JSON Schema exports |
+| [`@opentag/delivery-contract`](https://www.npmjs.com/package/@opentag/delivery-contract) | Canonical delivery-observation fixtures and receipt contracts |
 | [`@opentag/governance`](https://www.npmjs.com/package/@opentag/governance) | Deterministic completion, routing, and workstream evaluation |
 | [`@opentag/client`](https://www.npmjs.com/package/@opentag/client) | Dispatcher HTTP client |
 | [`@opentag/slack`](https://www.npmjs.com/package/@opentag/slack) | Slack Socket Mode, Events API handling, and thread replies |

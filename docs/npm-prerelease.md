@@ -1,5 +1,10 @@
 # npm Prerelease Candidate Procedure
 
+**Historical candidate-only procedure.** It does not authorize the next OpenTag
+release. If a future release is explicitly approved to publish a stable version
+directly to `latest`, do not use this document: assign the stable version and
+update the stable release runbook in a separately authorized release change.
+
 This document defines the release contract for the coordinated
 `0.10.0-next.0` package family. It prepares an operator-controlled candidate;
 it does not authorize publication and it is not evidence that any npm or Git
@@ -12,12 +17,12 @@ is published.
 
 ## Invariants
 
-- Candidate version: exactly `0.10.0-next.0` for all 16 public packages.
+- Candidate version: exactly `0.10.0-next.0` for all 18 public packages.
 - Channel: npm `next` only. This procedure must not create, move, or verify
   `latest` as pointing to the candidate.
 - Immutability: never attempt to overwrite or rebuild an already published
   package version. npm package versions are immutable release artifacts.
-- Coordination: treat the 16 packages as one publication set. A partial set is
+- Coordination: treat the 18 packages as one publication set. A partial set is
   a failed candidate, not a successful release.
 - Fail closed: an ambiguous registry response, authentication failure, timeout,
   package-set mismatch, dirty release input, or changed artifact digest stops
@@ -65,7 +70,7 @@ Before any mutation, the authorized operator must capture one reviewable
 receipt containing:
 
 1. the exact release commit and a clean worktree;
-2. the automatically discovered 16-package topological order;
+2. the automatically discovered 18-package topological order;
 3. each package name, exact version, tarball filename, integrity, and digest;
 4. each package's current `latest` and `next` dist-tag values; and
 5. an authoritative registry result proving that every
@@ -108,8 +113,8 @@ and do not change `latest` to hide or compensate for a partial candidate.
 The candidate is registry-complete only after independent verification proves
 all of the following:
 
-- all 16 exact versions resolve from the public registry;
-- all 16 `next` dist-tags resolve to `0.10.0-next.0`;
+- all 18 exact versions resolve from the public registry;
+- all 18 `next` dist-tags resolve to `0.10.0-next.0`;
 - all recorded pre-publication `latest` dist-tags are unchanged;
 - a clean temporary project installs `@opentag/cli@0.10.0-next.0` explicitly;
 - the installed CLI reports `0.10.0-next.0` and passes help, setup, doctor, and

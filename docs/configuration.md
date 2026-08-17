@@ -9,7 +9,7 @@ configuration map, then jump to the runnable examples for end-to-end commands:
 
 ## Configuration Layers
 
-OpenTag has five runtime surfaces today:
+OpenTag has the following runtime surfaces today:
 
 | Surface | Process | Owns |
 | --- | --- | --- |
@@ -19,11 +19,56 @@ OpenTag has five runtime surfaces today:
 | Slack ingress | `@opentag/cli` / `apps/slack-events` | Slack Socket Mode or Events API transport and Slack event normalization |
 | Telegram ingress | `@opentag/cli` / `apps/telegram-events` | Telegram getUpdates polling by default, or advanced webhook ingestion |
 | Discord ingress | `@opentag/cli` | Discord Gateway by default, or advanced Interactions Endpoint webhook ingestion |
+| Optional Control Plane | `apps/control-plane` | Shared identity, pairing, hosted-run coordination, provider ingress, retained audit, and durable jobs; coding execution remains local |
 
 Keep these boundaries separate. Ingress apps should know how to receive platform
 events and create runs. The dispatcher should coordinate runs and enqueue
 provider-neutral delivery presentations. The daemon should decide whether it
 can claim and execute work for a bound Project Target.
+
+## OpenTag Control Plane Environment
+
+The optional, open-source Control Plane is a Node/PostgreSQL service. It does
+not change the local CLI configuration format and is not required for local
+OpenTag operation. The canonical deployment example is
+[`deploy/compose/.env.example`](../deploy/compose/.env.example); the operational
+requirements and recovery procedures are in the
+[Control Plane deployment runbook](./control-plane-deployment.md).
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `DATABASE_URL` | yes | PostgreSQL connection URL. SQLite, D1, and Redis are not supported Control Plane stores. |
+| `OPENTAG_BOOTSTRAP_ORGANIZATION_ID` | yes | Stable initial organization identity. |
+| `OPENTAG_BOOTSTRAP_ORGANIZATION_NAME` | yes | Initial organization display name. |
+| `OPENTAG_BOOTSTRAP_PAIRING_TOKEN` | yes | Initial runner-pairing authority; at least 16 characters. |
+| `OPENTAG_FENCING_TOKEN_SECRET` | production; required by Compose | Independent secret used to derive live fencing tokens. PostgreSQL stores only the token digest. Local development may fall back to the bootstrap pairing secret; outside `local` the server refuses to start when it equals the bootstrap, recovery, or GitHub ingress authority. |
+| `OPENTAG_LOGIN_THROTTLE_SECRET` | production; required by Compose | Independent HMAC key for pseudonymous email/network throttle identifiers. It must not equal the bootstrap, recovery, or fencing authority. Local development derives a domain-separated fallback from its bootstrap token. |
+| `OPENTAG_LOGIN_NETWORK_THROTTLE_MODE` | no | `direct-peer` (default) counts the Node socket peer. `trusted-edge` disables the application network bucket and requires a verified client-aware rate limit at the trusted edge. Forwarded address headers are never trusted by the application. |
+| `OPENTAG_RECOVERY_PAIRING_TOKEN` | no | Separate emergency authority for runner credential reprovisioning. |
+| `OPENTAG_PUBLIC_URL` | yes | Exact browser and webhook origin; HTTPS is mandatory outside `local`. |
+| `OPENTAG_ENVIRONMENT` | no | `local`, `staging`, or `production`; defaults to `local`. |
+| `OPENTAG_RELEASE_SHA` | staging/production | Immutable 40-character source revision. `local` is accepted only in the local environment. |
+| `OPENTAG_GITHUB_INGRESS_MASTER_SECRET` | only when enabling GitHub ingress | At least 32 characters. Keep unset until binding rotation/disable recovery is implemented and reviewed. |
+| `OPENTAG_DB_POOL_MAX` | no | Per-process PostgreSQL pool size; defaults to `10`. |
+| `OPENTAG_JOB_LEASE_MS` | no | Durable job lease duration; defaults to `30000`. |
+| `OPENTAG_JOB_POLL_MS` | no | Job-loop poll/backoff interval; defaults to `1000`. |
+| `OPENTAG_JOB_RETRY_MS` | no | Failed-job retry delay; defaults to `30000`. |
+| `OPENTAG_LOGIN_MAX_FAILURES` | no | Failed-login limit for one normalized email; defaults to `5`. |
+| `OPENTAG_LOGIN_NETWORK_MAX_FAILURES` | no | Failed-login limit for one direct network peer across all emails; defaults to `50` so a shared egress address (office NAT, VPN) is not locked out by a handful of unrelated typos. |
+| `OPENTAG_LOGIN_WINDOW_MS` | no | Failure accounting window; defaults to `300000`. |
+| `OPENTAG_LOGIN_LOCKOUT_MS` | no | Durable lockout duration after the limit is reached; defaults to `900000`. |
+| `OPENTAG_HOST` / `OPENTAG_PORT` | no | Listen address and port; defaults to `0.0.0.0:3000` inside the container. |
+
+Login throttling stores only environment-keyed HMAC identifiers and
+opportunistically purges expired rows. In `direct-peer` mode it uses the Node
+socket peer. Behind a reverse proxy, set `trusted-edge` and enforce a verified
+client-aware rate limit at that edge; this prevents one proxy address from
+becoming a site-wide lockout bucket. Forwarded address headers are never
+accepted as identity by the application. The normalized-email bucket remains
+active in both modes.
+Control Plane and provider webhook request bodies have separate limits: normal
+Control V1 remains bounded while signed GitHub webhook deliveries allow up to
+10 MiB before signature validation.
 
 ## Local Daemon Config
 

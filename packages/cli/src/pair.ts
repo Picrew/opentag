@@ -4,7 +4,7 @@ import {
   RunnerCredentialReprovisionRequestV1Schema,
   RunnerRegistrationRequestV1Schema,
   type RunnerCredentialResponseV1
-} from "@opentag/core";
+} from "@opentag/control-protocol";
 import {
   HostedControlRegistrationSchema,
   type HostedControlRegistration,

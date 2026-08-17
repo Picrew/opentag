@@ -1,0 +1,45 @@
+{
+  "name": "@opentag/control-plane",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "pnpm run build:server && pnpm run build:console",
+    "build:console": "vite build",
+    "build:server": "tsup && tsc -b tsconfig.json --emitDeclarationOnly --force",
+    "db:generate": "drizzle-kit generate --config drizzle.config.ts",
+    "e2e": "playwright test --config playwright.config.ts",
+    "e2e:install": "playwright install chromium",
+    "lint": "tsc --noEmit && tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.e2e.json --noEmit",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.11",
+    "@opentag/control-protocol": "workspace:*",
+    "@tanstack/react-query": "^5.101.4",
+    "@tanstack/react-router": "^1.170.29",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.12.34",
+    "pg": "^8.16.3",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-hook-form": "^7.85.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@opentag/client": "workspace:*",
+    "@playwright/test": "^1.58.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/pg": "^8.15.5",
+    "@vitejs/plugin-react": "^6.0.5",
+    "drizzle-kit": "^0.31.8",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vite": "^8.2.1"
+  }
+}

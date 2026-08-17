@@ -5,7 +5,16 @@ import {
   COMPLETION_REASON_ALLOWED_GATE_STATES,
   CompletionReasonCodeSchema,
   reduceCompletionGateStates,
-} from "./schema.js";
+} from "./completion.js";
+
+export {
+  COMPLETION_REASON_ALLOWED_GATE_STATES,
+  CompletionAssessmentStateSchema,
+  CompletionGateResultStateSchema,
+  CompletionReasonCodeSchema,
+  reduceCompletionGateStates,
+} from "./completion.js";
+export { canonicalJsonStringify } from "./canonical-json.js";
 
 export const CONTROL_SCHEMA_VERSION = 1 as const;
 export const CONTROL_PROTOCOL_VERSION = "1.0" as const;
@@ -2042,6 +2051,15 @@ export const HostedProgressRequestV1Schema = HostedLifecycleRequestBaseV1Schema
     progressDigest: ReceiptDigestSchema,
   })
   .strict();
+export const HostedCancelReasonCodeV1Schema = z.enum([
+  "operator_cancelled",
+  "runner_cancelled",
+  "timeout_cancelled",
+  "user_cancelled",
+]);
+export const HostedCancelRequestV1Schema = HostedLifecycleRequestBaseV1Schema
+  .extend({ reasonCode: HostedCancelReasonCodeV1Schema })
+  .strict();
 const HostedLifecycleSortedDigestsV1Schema = sortedUniqueArray(
   ReceiptDigestSchema,
 ).max(64);
@@ -2087,6 +2105,7 @@ export const HostedLifecycleRequestV1Schema = z.union([
   HostedRunningRequestV1Schema,
   HostedRejectStartRequestV1Schema,
   HostedProgressRequestV1Schema,
+  HostedCancelRequestV1Schema,
   HostedCompleteRequestV1Schema,
 ]);
 export const HostedLifecycleReceiptPayloadV1Schema = z.discriminatedUnion(
@@ -2115,6 +2134,11 @@ export const HostedLifecycleReceiptPayloadV1Schema = z.discriminatedUnion(
       occurredAt: ControlTimestampSchema,
       progressId: z.string().regex(/^progress_[0-9a-f]{64}$/u),
       progressDigest: ReceiptDigestSchema,
+    }).strict(),
+    z.object({
+      operation: z.literal("cancel"),
+      occurredAt: ControlTimestampSchema,
+      reasonCode: HostedCancelReasonCodeV1Schema,
     }).strict(),
     z.object({
       operation: z.literal("executor_result"),
@@ -2156,7 +2180,14 @@ export const HostedLifecycleReceiptEnvelopeV1Schema = z.object({
       HostedLifecycleStableIdV1Schema,
       HostedLifecycleStableIdV1Schema,
       HostedLifecycleStableIdV1Schema,
-      z.enum(["heartbeat", "running", "reject_start", "progress", "executor_result"]),
+      z.enum([
+        "heartbeat",
+        "running",
+        "reject_start",
+        "progress",
+        "cancel",
+        "executor_result",
+      ]),
       HostedLifecycleMachineOperationIdV1Schema,
     ]),
   }).strict(),
@@ -2177,6 +2208,7 @@ export type HostedHeartbeatRequestV1 = z.infer<typeof HostedHeartbeatRequestV1Sc
 export type HostedRunningRequestV1 = z.infer<typeof HostedRunningRequestV1Schema>;
 export type HostedRejectStartRequestV1 = z.infer<typeof HostedRejectStartRequestV1Schema>;
 export type HostedProgressRequestV1 = z.infer<typeof HostedProgressRequestV1Schema>;
+export type HostedCancelRequestV1 = z.infer<typeof HostedCancelRequestV1Schema>;
 export type HostedCompleteRequestV1 = z.infer<typeof HostedCompleteRequestV1Schema>;
 export type HostedExecutorResultReasonCodeV1 = z.infer<
   typeof HostedExecutorResultReasonCodeV1Schema
@@ -2189,6 +2221,7 @@ export type HostedLifecycleActionV1 =
   | "running"
   | "reject-start"
   | "progress"
+  | "cancel"
   | "complete";
 
 export async function computeHostedLifecycleRequestDigestV1(input: {
@@ -2245,16 +2278,21 @@ export async function computeHostedLifecycleRequestDigestV1(input: {
                 progressDigest: progress.progressDigest,
               };
             })()
-          : (() => {
-              const complete = HostedCompleteRequestV1Schema.parse(request);
-              return {
-                conclusion: complete.conclusion,
-                reasonCode: complete.reasonCode,
-                resultDigest: complete.resultDigest,
-                artifactDigests: complete.artifactDigests,
-                evidenceDigests: complete.evidenceDigests,
-              };
-            })();
+          : input.action === "cancel"
+            ? (() => {
+                const cancel = HostedCancelRequestV1Schema.parse(request);
+                return { reasonCode: cancel.reasonCode };
+              })()
+            : (() => {
+                const complete = HostedCompleteRequestV1Schema.parse(request);
+                return {
+                  conclusion: complete.conclusion,
+                  reasonCode: complete.reasonCode,
+                  resultDigest: complete.resultDigest,
+                  artifactDigests: complete.artifactDigests,
+                  evidenceDigests: complete.evidenceDigests,
+                };
+              })();
   return sha256Utf8V1(canonicalJsonStringify({ ...common, ...actionFields }));
 }
 
@@ -2308,6 +2346,10 @@ export async function buildHostedLifecycleRequestV1(input: {
       progressDigest: string;
     }
   | {
+      action: "cancel";
+      reasonCode: z.input<typeof HostedCancelReasonCodeV1Schema>;
+    }
+  | {
       action: "complete";
       conclusion: z.input<typeof HostedCompleteRequestV1Schema>["conclusion"];
       reasonCode: z.input<typeof HostedExecutorResultReasonCodeV1Schema>;
@@ -2341,13 +2383,15 @@ export async function buildHostedLifecycleRequestV1(input: {
               progressId: input.progressId,
               progressDigest: input.progressDigest,
             }
-          : {
-              conclusion: input.conclusion,
-              reasonCode: input.reasonCode,
-              resultDigest: input.resultDigest,
-              artifactDigests: input.artifactDigests,
-              evidenceDigests: input.evidenceDigests,
-            };
+          : input.action === "cancel"
+            ? { reasonCode: input.reasonCode }
+            : {
+                conclusion: input.conclusion,
+                reasonCode: input.reasonCode,
+                resultDigest: input.resultDigest,
+                artifactDigests: input.artifactDigests,
+                evidenceDigests: input.evidenceDigests,
+              };
   const requestSeed = HostedLifecycleRequestV1Schema.parse({
     ...common,
     ...actionFields,
@@ -2431,7 +2475,7 @@ export async function verifyHostedLifecycleReceiptV1(input: {
               reasonCode: value.reasonCode,
             };
           })()
-        : input.action === "progress"
+          : input.action === "progress"
           ? (() => {
               const value = HostedProgressRequestV1Schema.parse(request);
               return {
@@ -2441,18 +2485,27 @@ export async function verifyHostedLifecycleReceiptV1(input: {
                 progressDigest: value.progressDigest,
               };
             })()
-          : (() => {
-              const value = HostedCompleteRequestV1Schema.parse(request);
-              return {
-                operation,
-                occurredAt: value.occurredAt,
-                conclusion: value.conclusion,
-                reasonCode: value.reasonCode,
-                resultDigest: value.resultDigest,
-                artifactDigests: value.artifactDigests,
-                evidenceDigests: value.evidenceDigests,
-              };
-            })();
+          : input.action === "cancel"
+            ? (() => {
+                const value = HostedCancelRequestV1Schema.parse(request);
+                return {
+                  operation,
+                  occurredAt: value.occurredAt,
+                  reasonCode: value.reasonCode,
+                };
+              })()
+            : (() => {
+                const value = HostedCompleteRequestV1Schema.parse(request);
+                return {
+                  operation,
+                  occurredAt: value.occurredAt,
+                  conclusion: value.conclusion,
+                  reasonCode: value.reasonCode,
+                  resultDigest: value.resultDigest,
+                  artifactDigests: value.artifactDigests,
+                  evidenceDigests: value.evidenceDigests,
+                };
+              })();
   if (!expectedPayload) return false;
   const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
   return request.requestDigest === expectedRequestDigest

@@ -15,7 +15,7 @@ describe("platform setup docs contract", () => {
     const readmeZh = repoFile("README.zh-CN.md");
 
     expect(normalizedPrereleaseGuide).toContain(
-      "exactly `0.10.0-next.0` for all 16 public packages"
+      "exactly `0.10.0-next.0` for all 18 public packages"
     );
     expect(prereleaseGuide).toContain("npm `next` only");
     expect(prereleaseGuide).toContain("Absence must be a confirmed registry `404`");
@@ -25,6 +25,19 @@ describe("platform setup docs contract", () => {
     );
     expect(normalizedPrereleaseGuide).toContain(
       "all recorded pre-publication `latest` dist-tags are unchanged"
+    );
+    expect(normalizedPrereleaseGuide).toContain(
+      "the automatically discovered 18-package topological order"
+    );
+    expect(normalizedPrereleaseGuide).toContain(
+      "all 18 exact versions resolve from the public registry"
+    );
+    expect(normalizedPrereleaseGuide).toContain(
+      "all 18 `next` dist-tags resolve to `0.10.0-next.0`"
+    );
+    expect(normalizedPrereleaseGuide).not.toMatch(/(?:16-package|all 16)/u);
+    expect(normalizedPrereleaseGuide).toContain(
+      "If a future release is explicitly approved to publish a stable version directly to `latest`, do not use this document"
     );
     expect(normalizedPrereleaseGuide).toContain(
       "Never report `published` from local output alone"

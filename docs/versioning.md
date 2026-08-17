@@ -6,12 +6,14 @@ OpenTag packages are versioned and published as a coordinated package family.
 
 Public packages, shown in one valid dependency order:
 
+- `@opentag/control-protocol`
 - `@opentag/core`
-- `@opentag/governance`
 - `@opentag/client`
+- `@opentag/delivery-contract`
 - `@opentag/discord`
 - `@opentag/github`
 - `@opentag/gitlab`
+- `@opentag/governance`
 - `@opentag/lark`
 - `@opentag/linear`
 - `@opentag/runner`
@@ -97,6 +99,8 @@ After `1.0.0`, follow SemVer:
 
 - Prefer additive changes over modifying existing fields.
 - Keep `@opentag/core` as the compatibility anchor for protocol objects.
+- Import Control V1 directly from `@opentag/control-protocol` in new control-plane code;
+  the Core export is an identity-equal compatibility path.
 - Avoid leaking app-only environment variable behavior into package APIs.
 - Treat callback message shape, executor contracts, and dispatcher client method signatures as public API.
 - If a storage change requires migration behavior, document it in release notes and keep `migrateSchema` idempotent.

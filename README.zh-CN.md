@@ -170,6 +170,45 @@ OpenTag 的 CLI 路径是本地优先的。
 - Codex、Claude Code、Cursor、OpenCode、Hermes 和 OpenClaw 会通过 ACP 在你的本地 checkout 上运行；OpenClaw 的取消当前是 best effort。
 - 平台 API 只会收到 OpenTag 用来确认、回复和执行已审批 action 所需的消息。
 
+## 可选控制面
+
+OpenTag 也包含一个可选的开源控制面，面向需要共享身份、runner 配对、公开
+入口、租户隔离的 hosted-run 协调、受治理权限、留存证据和审计视图的团队。
+本地 CLI 路径不依赖它；本地仓库、源码托管凭证、agent 凭证、worktree 和
+编码 agent 执行始终不由控制面托管。
+
+这个 clean-room 实现采用 Node/Hono、PostgreSQL、静态 Vite/React 运维控制台
+和 Docker Compose 自托管方案。它不要求 Cloudflare、TanStack Start、Redis、
+对象存储或消息队列。可从 [Control Plane README](apps/control-plane/README.md)
+和[部署运行手册](docs/control-plane-deployment.md)开始。源码实现本身不代表
+托管环境或生产服务已经部署。
+
+GitHub ingress 默认关闭：当前本地基础实现已经验证签名 delivery 预留与重放，
+但在具备可审计的 binding 密钥轮换和禁用/恢复流程前，不应激活生产 webhook。
+
+要验证完整的自托管方案，先安装一次 Chromium，再运行生产形态的浏览器
+E2E：
+
+```bash
+corepack pnpm --dir apps/control-plane e2e:install
+corepack pnpm e2e:control-plane
+```
+
+这条 E2E 会构建生产 OCI 镜像，启动隔离的 PostgreSQL 17 Compose project，
+执行 migrations、bootstrap owner、HTTP 和 jobs 进程，再由 Chromium 完成
+登录、API Key、runner、Project Target 和 GitHub binding 旅程。runner 通过
+公开的 `@opentag/client` package 入口配对，随后完成本地签名 ingress、hosted
+claim、权限、material evidence、取消、凭证重发和周期 jobs，再使用 `psql`
+直接核对精确的持久化记录。随后测试会重启 HTTP 和 jobs 服务、复核 HTTP
+readiness 并确认重启后的 jobs 进程可以结算新任务，再生成保留原始字节的
+PostgreSQL 备份、恢复到一个全新数据库，并核对恢复后的 migrations、
+持久化记录和非 ASCII 数据校验值。成功时会删除容器、网络、数据卷、生成的
+密钥和 Playwright 输出；失败时保留有限的浏览器诊断产物。
+
+这是本地的生产形态测试；它不会连接 GitHub、使用生产数据库、部署服务，
+也不证明托管环境已经上线。精确的验收旅程和边界见
+[浏览器 E2E 目录](apps/control-plane/e2e/TEST-CATALOG.md)。
+
 ## 支持的 Coding Agent
 
 | Coding agent | 状态 | 说明 |
@@ -273,13 +312,15 @@ opentag-dev setup
 当前源码候选版本：`v0.10.0-next.0`。此源码状态只表示已准备本地发布验证，
 不代表候选版本已经发布；npm dist-tag 仍是公开通道版本的权威来源，在注册表
 证据表明发生变化前，`0.9.0` 仍是文档所述的稳定版本。OpenTag 在
-`@opentag` scope 下协调发布 16 个公开软件包。
+`@opentag` scope 下协调发布 18 个公开软件包。
 
 | 包 | 用途 |
 | --- | --- |
+| [`@opentag/control-protocol`](https://www.npmjs.com/package/@opentag/control-protocol) | 规范的 Control V1 schema、类型与摘要辅助函数 |
 | [`@opentag/cli`](https://www.npmjs.com/package/@opentag/cli) | setup 和本地 runtime CLI |
 | [`@opentag/local-runtime`](https://www.npmjs.com/package/@opentag/local-runtime) | 进程内本地 dispatcher、runner 和平台 runtime |
 | [`@opentag/core`](https://www.npmjs.com/package/@opentag/core) | 协议 schema、类型、mention 解析和 JSON Schema 导出 |
+| [`@opentag/delivery-contract`](https://www.npmjs.com/package/@opentag/delivery-contract) | 规范的交付观测 fixture 与回执契约 |
 | [`@opentag/governance`](https://www.npmjs.com/package/@opentag/governance) | 确定性的完成条件评估和治理编排 |
 | [`@opentag/client`](https://www.npmjs.com/package/@opentag/client) | Dispatcher HTTP client |
 | [`@opentag/slack`](https://www.npmjs.com/package/@opentag/slack) | Slack Socket Mode、Events API 和回复 |
