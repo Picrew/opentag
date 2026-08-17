@@ -326,10 +326,10 @@ opentag-dev setup
 
 ## Packages
 
-Package source release: `v0.10.0`. This source state is prepared for
+Package source release: `v0.11.0`. This source state is prepared for
 local release validation only; it is not evidence that the release was
 published. npm dist-tags remain authoritative for public channel versions, and
-`0.9.0` remains the documented stable release until registry evidence says
+`0.10.0` remains the documented stable release until registry evidence says
 otherwise. The coordinated package family contains 18 public packages under
 the `@opentag` scope.
 

@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.11.0 - 2026-08-17
+
+OpenTag 0.11.0 fixes a fail-open edge in zero-config governed completion. A
+GitHub-backed pull-request run now remains incomplete until authoritative API
+evidence proves that the current-head check rollup is both non-empty and
+complete. All 18 public packages are coordinated at `0.11.0`.
+
+### Fixed
+
+- Empty check maps no longer satisfy the default observed-checks gate.
+- Truncated GitHub check-run or commit-status pages no longer appear fully
+  passing; reconciliation compares each returned page with its provider
+  `total_count` and verifies every entry belongs to the current head.
+- Missing rollup-completeness evidence defaults to incomplete at the dispatcher
+  ingestion boundary, preserving fail-closed behavior across mixed deployments.
+
+### Changed
+
+- `GitHubCompletionApi.listCheckRunsForRef` now returns
+  `{ totalCount, checkRuns }`, and `getCombinedStatusForRef` returns
+  `{ totalCount, statuses }`.
+- `GitHubVerifiedPullRequestSnapshot` now requires `checksComplete`, and that
+  value participates in semantic evidence digests and completion assessment.
+- The OpenTag skill pins executable install paths to the reviewed 0.11.0 CLI,
+  clarifies Hosted Control V1 registration and relay trust, and corrects the
+  Microsoft Teams conversation-binding source.
+
+### Compatibility and migration
+
+- This pre-1.0 minor release intentionally changes exported TypeScript
+  contracts. Custom `GitHubCompletionApi` implementations must return the new
+  page objects, and custom snapshot producers must provide `checksComplete`.
+- Existing explicit repository completion policies remain authoritative, and
+  runs without a pull request retain executor-success semantics.
+
 ## v0.10.0 - 2026-08-17
 
 Source manifests are prepared as the coordinated `0.10.0` release for all 18
