@@ -1,6 +1,6 @@
 {
   "name": "@opentag/control-protocol",
-  "version": "0.10.0-next.0",
+  "version": "0.10.0",
   "description": "Canonical OpenTag Control V1 schemas, types, and digest helpers.",
   "type": "module",
   "engines": {

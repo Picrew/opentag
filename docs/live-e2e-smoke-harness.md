@@ -55,7 +55,7 @@ smoke_root="$(mktemp -d)"
   set -euo pipefail
   cd "$smoke_root"
   npm init -y >/dev/null
-  npm install --no-audit --no-fund @opentag/cli@0.9.0
+  npm install --no-audit --no-fund @opentag/cli@0.10.0
   ./node_modules/.bin/opentag --version
 )
 ```

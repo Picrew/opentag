@@ -34,8 +34,8 @@ Private runnable apps are not published:
 
 ## Pre-1.0 Policy
 
-The source package family is prepared as the `0.10.0-next.0` prerelease
-candidate. Source manifests are preparation evidence only: npm dist-tags remain
+The source package family is prepared as the coordinated `0.10.0` release.
+Source manifests are preparation evidence only: npm dist-tags remain
 authoritative for published channel versions, and `0.9.0` remains the
 documented stable release until registry evidence says otherwise. The public
 API is still settling, so all releases remain in the `0.x` line until the
@@ -52,12 +52,15 @@ The `0.6.0` release moves all built-in coding agents onto Generic ACP, adds Curs
 The `0.7.0` release completes the Phase 1 completion-governance vertical slice with durable work threads and contracts, deterministic evidence-backed assessments, GitHub PR/check/merge evidence ingestion, replay-safe reassessment, CLI explanations and bounded waivers, and a 16-package publication set that includes `@opentag/governance`.
 The `0.8.0` release completes the first provider-live recipe-driven factory loop with access identity, bounded human escalation, explainable multi-runner routing, immutable recipes and WorkThread-only workstreams, restart-safe batch admission, authoritative accepted-outcome metrics, and a real GitHub issue-to-merge-to-receipt proof while keeping planning external.
 The `0.9.0` release adds an authorized, read-only Slack-to-Linear project backlog query with bounded pagination, deterministic ordering, live OAuth token use, exact channel authorization, a query-only credential boundary, and an isolated best-effort Events API lane that does not change control or mutation delivery semantics.
-The `0.10.0-next.0` source candidate adds canonical, evidence-backed completion
-authority for governed runs. Its prerelease procedure is intentionally
-`next`-only, fail-closed, and immutable; see
-[`npm-prerelease.md`](npm-prerelease.md). Preparing this source candidate does
-not assert that npm publication, provider-live validation, or stable promotion
-has occurred.
+The `0.10.0` release adds canonical, evidence-backed completion authority for
+governed runs, first-publishes the new `@opentag/control-protocol` and
+`@opentag/delivery-contract` packages (growing the public set from 16 to 18),
+and introduces an optional self-hosted Control Plane distributed as a private
+OCI image. Its release procedure is documented in
+[`npm-release.md`](npm-release.md); the earlier `0.10.0-next.0` candidate
+procedure in [`npm-prerelease.md`](npm-prerelease.md) was superseded before
+publication. Preparing this source state does not assert that npm publication,
+provider-live validation, or stable promotion has occurred.
 
 For each npm release:
 

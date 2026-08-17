@@ -1,12 +1,13 @@
 # Changelog
 
-## Unreleased
+## v0.10.0 - 2026-08-17
 
-Source manifests are prepared as the coordinated `0.10.0-next.0` candidate.
-This is local release-preparation evidence only: the candidate is not claimed
-as published, the npm `next` channel must be verified independently, and the
-documented public stable release remains `0.9.0` until registry evidence says
-otherwise.
+Source manifests are prepared as the coordinated `0.10.0` release for all 18
+public packages, including the first publications of
+`@opentag/control-protocol` and `@opentag/delivery-contract`. Source state is
+release-preparation evidence only: npm registry metadata remains
+authoritative, and `0.9.0` remains the published stable release until the
+`0.10.0` publication and promotion complete on the registry.
 
 OpenTag now applies a zero-config verified completion tier to GitHub-backed
 runs. When a run ships a pull request and the repository has no explicit
@@ -36,6 +37,20 @@ executor-success semantics.
   local runtime, the daemon config field `daemon.defaultGitHubCompletion`, and
   the `OPENTAG_GITHUB_DEFAULT_COMPLETION` environment variable (`governed`
   default, `compat` preserves legacy executor-success semantics).
+- `@opentag/control-protocol`, a new public package carrying the canonical
+  Control V1 schemas, types, canonical-JSON digest helpers, completion
+  handling, and credential-safety utilities. Core keeps a compatibility
+  re-export, and Client depends on the protocol package directly.
+- `@opentag/delivery-contract`, a new public package carrying the canonical
+  delivery-observation fixtures and receipt contracts for the unified
+  delivery vertical.
+- An optional self-hosted Control Plane (private `@opentag/control-plane` OCI
+  image, not an npm package) with a Node/Hono/PostgreSQL runtime, a same-origin
+  React operator console, tenant-scoped identity with durable login throttling,
+  runner and target management, fenced hosted-run coordination, governed
+  permissions, GitHub ingress that stays disabled without an explicit master
+  secret, management audit, recurring jobs, and a Docker Compose self-hosting
+  profile.
 
 ### Compatibility and migration
 

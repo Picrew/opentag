@@ -1,16 +1,20 @@
 # npm Prerelease Candidate Procedure
 
-**Historical candidate-only procedure.** It does not authorize the next OpenTag
-release. If a future release is explicitly approved to publish a stable version
-directly to `latest`, do not use this document: assign the stable version and
-update the stable release runbook in a separately authorized release change.
+**Historical candidate-only procedure, superseded.** It does not authorize the
+next OpenTag release. If a future release is explicitly approved to publish a
+stable version directly to `latest`, do not use this document: assign the
+stable version and update the stable release runbook in a separately
+authorized release change. That authorization happened for `0.10.0`: the
+source family was reassigned to the stable `0.10.0` version and the release
+procedure moved to [`npm-release.md`](npm-release.md). The `0.10.0-next.0`
+candidate described here was never published.
 
-This document defines the release contract for the coordinated
+This document defined the release contract for the coordinated
 `0.10.0-next.0` package family. It prepares an operator-controlled candidate;
 it does not authorize publication and it is not evidence that any npm or Git
 operation has occurred.
 
-The stable `0.9.0` procedure remains in [`npm-release.md`](npm-release.md).
+The stable procedure remains in [`npm-release.md`](npm-release.md).
 Registry metadata is authoritative for public availability. Source manifests,
 local tarballs, passing tests, and this guide cannot establish that a candidate
 is published.

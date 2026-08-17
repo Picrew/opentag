@@ -326,8 +326,8 @@ opentag-dev setup
 
 ## Packages
 
-Package source candidate: `v0.10.0-next.0`. This source state is prepared for
-local release validation only; it is not evidence that the candidate was
+Package source release: `v0.10.0`. This source state is prepared for
+local release validation only; it is not evidence that the release was
 published. npm dist-tags remain authoritative for public channel versions, and
 `0.9.0` remains the documented stable release until registry evidence says
 otherwise. The coordinated package family contains 18 public packages under

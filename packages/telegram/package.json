@@ -1,6 +1,6 @@
 {
   "name": "@opentag/telegram",
-  "version": "0.10.0-next.0",
+  "version": "0.10.0",
   "description": "Telegram message normalization and callback helpers for OpenTag.",
   "type": "module",
   "engines": {
