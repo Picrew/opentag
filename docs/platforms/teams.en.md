@@ -140,16 +140,11 @@ Tenant ID: <tenant-id>          # recommended for single-tenant apps
 Webhook path: /teams/messages   # default
 ```
 
-For scripted setup, use:
-
-```bash
-opentag setup \
-  --platform teams \
-  --teams-app-id <microsoft-app-id> \
-  --teams-app-password <client-secret-value> \
-  --teams-tenant-id <tenant-id> \
-  --teams-webhook-path /teams/messages
-```
+Do not put the client secret in command-line arguments, including
+`--teams-app-password`; shell history and process listings can expose it. For
+unattended operation, provision `platforms.teams.appPassword` through an
+operator-managed ignored config or secret store before starting OpenTag. Keep
+scripted command-line flags limited to non-secret values.
 
 The setup command saves:
 

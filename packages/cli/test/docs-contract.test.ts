@@ -138,6 +138,9 @@ describe("platform setup docs contract", () => {
   it("keeps the OpenTag skill aligned with Codex askhuman setup guidance", () => {
     const skill = repoFile("skills/opentag/SKILL.md");
 
+    expect(skill).toMatch(/^---\nname: opentag\ndescription: Use when /u);
+    const controlPlane = repoFile("skills/opentag/references/control-plane.md");
+    const completion = repoFile("skills/opentag/references/completion-governance.md");
     expect(skill).toContain("request_user_input");
     expect(skill).toContain("askhuman");
     expect(skill).toContain("Codex Plan mode");
@@ -175,7 +178,9 @@ describe("platform setup docs contract", () => {
     expect(skill).toContain("npm cache metadata exists");
     expect(skill).toContain("`npx --offline` or `npm pack --offline`");
     expect(skill).toContain("do not claim the CLI is available offline");
-    expect(skill).toContain("Platform: Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, or Discord");
+    expect(skill).toContain(
+      "Platform: Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, Discord, or Microsoft Teams"
+    );
     expect(skill).toContain("Coding agent: Codex, Claude Code, Cursor, OpenCode, Hermes, OpenClaw, or Echo");
     expect(skill).toContain("Local project: the current working directory");
     expect(skill).toContain("Slack Socket Mode vs Events API");
@@ -189,6 +194,33 @@ describe("platform setup docs contract", () => {
     expect(skill).toContain("--tenant");
     expect(skill).toContain("--lark-setup");
     expect(skill).toContain("--binding");
+    expect(skill).toContain("references/control-plane.md");
+    expect(skill).toContain("references/completion-governance.md");
+    expect(skill).toContain("references/teams-setup.md");
+    expect(skill).toContain("docs/platforms/teams.en.md");
+    expect(skill).toContain("opentag service install");
+    expect(skill).toContain("opentag service logs");
+    expect(skill).toContain("opentag cancel --run <run_id>");
+    expect(controlPlane).toContain("opentag pair --relay <url>");
+    expect(controlPlane).toContain("Hosted Control V1");
+    expect(controlPlane).toContain("bootstrap pairing token");
+    expect(controlPlane).toContain("Do not use `--no-register`");
+    expect(controlPlane).toContain("opentag config show");
+    expect(completion).toContain("executor success is not completion");
+    expect(completion).toContain("all observed checks pass on the current head");
+    expect(completion).toContain("opentag status --work-thread <work_thread_id>");
+    expect(completion).toContain("opentag status --attention");
+    expect(completion).toContain("opentag completion escalations --run <run_id>");
+    expect(completion).toContain("opentag completion waive");
+    expect(completion).toContain("Do not fabricate provider evidence");
+    const teams = repoFile("skills/opentag/references/teams-setup.md");
+    expect(teams).toContain("opentag setup --platform teams");
+    expect(teams).toContain("Do not put `--teams-app-password`");
+    expect(teams).toContain("no standalone Teams channel-binding CLI command");
+    expect(teams).toContain("docs/platforms/teams.en.md");
+    const teamsGuide = repoFile("docs/platforms/teams.en.md");
+    expect(teamsGuide).not.toContain("--teams-app-password <client-secret-value>");
+    expect(teamsGuide).toContain("Do not put the client secret in command-line arguments");
     expect(skill).toContain(
       "Stop before entering any credential, token, app ID, app secret, signing secret, channel ID, repository name, or unconfirmed project path."
     );
