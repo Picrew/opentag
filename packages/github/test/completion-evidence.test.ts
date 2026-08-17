@@ -22,13 +22,19 @@ function completionApi(overrides: Partial<GitHubCompletionApi> = {}): GitHubComp
       };
     },
     async listCheckRunsForRef() {
-      return [
-        { name: "build", status: "completed", conclusion: "success", head_sha: HEAD_CURRENT },
-        { name: "test", status: "completed", conclusion: "failure", head_sha: HEAD_OLD }
-      ];
+      return {
+        totalCount: 2,
+        checkRuns: [
+          { name: "build", status: "completed", conclusion: "success", head_sha: HEAD_CURRENT },
+          { name: "test", status: "completed", conclusion: "failure", head_sha: HEAD_OLD }
+        ]
+      };
     },
     async getCombinedStatusForRef() {
-      return [{ context: "test", state: "success", sha: HEAD_CURRENT }];
+      return {
+        totalCount: 1,
+        statuses: [{ context: "test", state: "success", sha: HEAD_CURRENT }]
+      };
     },
     async listPullRequestsForCommit() {
       return [{ number: 7 }];
@@ -149,12 +155,15 @@ describe("GitHub completion evidence", () => {
         api: completionApi({
           async listCheckRunsForRef() {
             await barrier;
-            return [{
-              name: "build",
-              status: "completed",
-              conclusion: checks === "passed" ? "success" : "failure",
-              head_sha: HEAD_CURRENT
-            }];
+            return {
+              totalCount: 1,
+              checkRuns: [{
+                name: "build",
+                status: "completed",
+                conclusion: checks === "passed" ? "success" : "failure",
+                head_sha: HEAD_CURRENT
+              }]
+            };
           }
         }),
         now
@@ -186,6 +195,7 @@ describe("GitHub completion evidence", () => {
   it("uses the combined-status response SHA for status entries", async () => {
     const fetchImpl = vi.fn(async () => Response.json({
       sha: HEAD_CURRENT,
+      total_count: 2,
       statuses: [
         { context: "build", state: "success" },
         { context: "test", state: "pending" }
@@ -193,9 +203,54 @@ describe("GitHub completion evidence", () => {
     }));
     const api = createGitHubCompletionApi({ token: "github_token", fetchImpl });
 
-    await expect(api.getCombinedStatusForRef({ owner: "acme", repo: "demo", ref: HEAD_CURRENT })).resolves.toEqual([
-      { context: "build", state: "success", sha: HEAD_CURRENT },
-      { context: "test", state: "pending", sha: HEAD_CURRENT }
-    ]);
+    await expect(api.getCombinedStatusForRef({ owner: "acme", repo: "demo", ref: HEAD_CURRENT })).resolves.toEqual({
+      totalCount: 2,
+      statuses: [
+        { context: "build", state: "success", sha: HEAD_CURRENT },
+        { context: "test", state: "pending", sha: HEAD_CURRENT }
+      ]
+    });
+  });
+
+  it("marks the check rollup incomplete when a GitHub result page is truncated", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const path = String(url);
+      if (path.includes("/pulls/7")) {
+        return Response.json({
+          number: 7,
+          state: "open",
+          merged: false,
+          head: { sha: HEAD_CURRENT },
+          base: { ref: "main", sha: BASE_SHA, repo: { full_name: "acme/demo" } }
+        });
+      }
+      if (path.includes("/check-runs")) {
+        return Response.json({
+          total_count: 2,
+          check_runs: [
+            { name: "build", status: "completed", conclusion: "success", head_sha: HEAD_CURRENT }
+          ]
+        });
+      }
+      if (path.includes("/status?")) {
+        return Response.json({ sha: HEAD_CURRENT, total_count: 0, statuses: [] });
+      }
+      throw new Error(`Unexpected GitHub API request: ${path}`);
+    });
+    const api = createGitHubCompletionApi({ token: "github_token", fetchImpl });
+
+    const [snapshot] = await reconcileGitHubCompletionEvidence({
+      eventName: "pull_request",
+      deliveryId: "delivery-truncated-checks",
+      payload: {
+        number: 7,
+        repository: { name: "demo", owner: { login: "acme" } }
+      },
+      api,
+      now: () => "2026-07-21T10:00:00.000Z"
+    });
+
+    expect(snapshot).toHaveProperty("checksComplete", false);
+    expect(snapshot?.checks).toEqual({ build: "passed" });
   });
 });

@@ -7,9 +7,10 @@ WorkThread needs attention, or a human escalation or waiver must be handled.
 
 For governed runs, executor success is not completion. A GitHub-backed run that
 ships a pull request remains open until provider webhook evidence confirms that
-the pull request exists and all observed checks pass on the current head.
-Explicit repository completion policies still take precedence. Runs that ship
-no pull request retain executor-success semantics.
+the pull request exists, the complete current-head check rollup was fetched, and
+every observed check passes. Empty or truncated check results remain pending.
+Explicit repository completion policies still take precedence. Runs that ship no
+pull request retain executor-success semantics.
 
 Inspect before acting:
 

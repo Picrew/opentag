@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { globSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -137,10 +137,18 @@ describe("platform setup docs contract", () => {
 
   it("keeps the OpenTag skill aligned with Codex askhuman setup guidance", () => {
     const skill = repoFile("skills/opentag/SKILL.md");
+    const skillDocs = globSync("skills/opentag/**/*.md")
+      .map((path) => repoFile(path))
+      .join("\n");
 
     expect(skill).toMatch(/^---\nname: opentag\ndescription: Use when /u);
     const controlPlane = repoFile("skills/opentag/references/control-plane.md");
     const completion = repoFile("skills/opentag/references/completion-governance.md");
+    expect(skillDocs).not.toContain("@opentag/cli@latest");
+    expect(skillDocs).not.toMatch(/\bnpx(?: --yes)? @opentag\/cli(?:\s|$)/u);
+    expect(skillDocs).not.toMatch(/\bnpm install -g @opentag\/cli(?:\s|$)/u);
+    expect(skill).toContain("npm install -g @opentag/cli@0.10.0");
+    expect(skill).toContain("npx @opentag/cli@0.10.0 setup");
     expect(skill).toContain("request_user_input");
     expect(skill).toContain("askhuman");
     expect(skill).toContain("Codex Plan mode");
@@ -172,7 +180,7 @@ describe("platform setup docs contract", () => {
       'HTTPS_PROXY="<proxy-url>" HTTP_PROXY="<proxy-url>" npm view @opentag/cli version --fetch-timeout=15000'
     );
     expect(skill).toContain("Only after npm registry metadata is reachable");
-    expect(skill).toContain("npx --yes @opentag/cli --help");
+    expect(skill).toContain("npx --yes @opentag/cli@0.10.0 --help");
     expect(skill).toContain("do not permanently change `npm config` without explicit user confirmation");
     expect(skill).toContain("Only use a proxy URL the user provides or that is already active in the environment");
     expect(skill).toContain("npm cache metadata exists");
@@ -205,9 +213,14 @@ describe("platform setup docs contract", () => {
     expect(controlPlane).toContain("Hosted Control V1");
     expect(controlPlane).toContain("bootstrap pairing token");
     expect(controlPlane).toContain("Do not use `--no-register`");
+    expect(controlPlane).toContain("without calling `/healthz`");
+    expect(controlPlane).toContain("empty capabilities list");
+    expect(controlPlane).toContain("does not bind Project Targets");
+    expect(controlPlane).toContain("run metadata, command text, and progress");
+    expect(controlPlane).toContain("controls which queued runs the local runner claims");
     expect(controlPlane).toContain("opentag config show");
     expect(completion).toContain("executor success is not completion");
-    expect(completion).toContain("all observed checks pass on the current head");
+    expect(completion).toContain("complete current-head check rollup");
     expect(completion).toContain("opentag status --work-thread <work_thread_id>");
     expect(completion).toContain("opentag status --attention");
     expect(completion).toContain("opentag completion escalations --run <run_id>");
@@ -216,10 +229,12 @@ describe("platform setup docs contract", () => {
     const teams = repoFile("skills/opentag/references/teams-setup.md");
     expect(teams).toContain("opentag setup --platform teams");
     expect(teams).toContain("Do not put `--teams-app-password`");
+    expect(teams).toContain("`activity.conversation.id`");
+    expect(teams).toContain("removing only a trailing `;messageid=<root>` suffix");
     expect(teams).toContain("no standalone Teams channel-binding CLI command");
     expect(teams).toContain("docs/platforms/teams.en.md");
     const teamsGuide = repoFile("docs/platforms/teams.en.md");
-    expect(teamsGuide).not.toContain("--teams-app-password <client-secret-value>");
+    expect(teamsGuide).not.toMatch(/--teams-app-password(?:\s+|=)/u);
     expect(teamsGuide).toContain("Do not put the client secret in command-line arguments");
     expect(skill).toContain(
       "Stop before entering any credential, token, app ID, app secret, signing secret, channel ID, repository name, or unconfirmed project path."

@@ -25,9 +25,9 @@ Configure the Azure Bot Messaging endpoint as public HTTPS ending in
 ## Channel Binding
 
 Capture the tenant ID and base channel conversation ID from an authenticated
-Teams activity. Prefer `channelData.channel.id` or
-`channelData.teamsChannelId`; do not bind a thread-specific
-`;messageid=<root>` value.
+Teams activity. Use `activity.conversation.id` as `conversationId`, removing only a trailing `;messageid=<root>` suffix when present.
+Do not use `channelData.channel.id` or `channelData.teamsChannelId` as
+`conversationId`.
 
 There is currently no standalone Teams channel-binding CLI command. Use the
 deployment's operator-controlled local config or dispatcher API to create the

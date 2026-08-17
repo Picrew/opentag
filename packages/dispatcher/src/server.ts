@@ -719,6 +719,7 @@ const GitHubCompletionEvidenceSchema = z.object({
     state: z.enum(["open", "closed", "merged"])
   }).strict(),
   checks: z.record(z.string().min(1), z.enum(["passed", "failed", "pending"])),
+  checksComplete: z.boolean().default(false),
   observedAt: z.string().datetime(),
   payloadDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/u)
 }).strict();
