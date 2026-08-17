@@ -142,6 +142,9 @@ function parseDatabaseUrl(raw: string): string {
   if (!url.hostname || !url.pathname || url.pathname === "/") {
     throw new Error("database URL is incomplete");
   }
+  if (decodeURIComponent(url.password).startsWith(PLACEHOLDER_SECRET_PREFIX)) {
+    throw new Error("example placeholder database password must be replaced");
+  }
   return raw;
 }
 

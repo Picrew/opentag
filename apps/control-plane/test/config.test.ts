@@ -174,6 +174,11 @@ describe("Control Plane configuration", () => {
         OPENTAG_BOOTSTRAP_ADMIN_PASSWORD: "replace-with-a-long-random-password",
       }),
     ).toThrow("configuration_invalid");
+    expect(() => parseControlPlaneConfig({
+      ...base,
+      DATABASE_URL:
+        "postgresql://opentag:replace-with-a-random-database-password@postgres:5432/opentag",
+    })).toThrow("configuration_invalid");
   });
 
   it("keeps the network login budget separate from the email budget", () => {
