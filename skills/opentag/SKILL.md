@@ -53,7 +53,7 @@ For platform credential steps, use the repository docs as the source of truth:
 ## Working Rules
 
 - Keep setup user-led. Never invent tokens, app IDs, Slack team/channel IDs, GitHub owner/repo names, or local project paths.
-- Use the reviewed CLI version `0.10.0` consistently in install and `npx` commands, and verify it with `opentag --version`. Update the pin only after reviewing a newer release.
+- Use the reviewed CLI version `0.10.0` consistently in install and `npx` commands. For a global install, verify with `opentag --version`. For the no-global path, verify with `npx @opentag/cli@0.10.0 --version`. Update the pin only after reviewing a newer release.
 - Prefer Slack, then GitHub, then GitLab, then Linear, then Lark / Feishu when listing established paths; label Telegram, Discord, and Microsoft Teams as previews.
 - Ask the user which platform and coding agent they want if it is not already clear outside Codex.
 - In Codex Plan mode, use `request_user_input` / askhuman to collect non-secret setup choices before running `opentag setup`, then pass those choices as CLI flags so the terminal wizard does not silently choose defaults.

@@ -149,6 +149,8 @@ describe("platform setup docs contract", () => {
     expect(skillDocs).not.toMatch(/\bnpm install -g @opentag\/cli(?:\s|$)/u);
     expect(skill).toContain("npm install -g @opentag/cli@0.10.0");
     expect(skill).toContain("npx @opentag/cli@0.10.0 setup");
+    expect(skill).toContain("For a global install, verify with `opentag --version`");
+    expect(skill).toContain("For the no-global path, verify with `npx @opentag/cli@0.10.0 --version`");
     expect(skill).toContain("request_user_input");
     expect(skill).toContain("askhuman");
     expect(skill).toContain("Codex Plan mode");
