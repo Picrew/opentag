@@ -109,6 +109,11 @@ describe("platform setup docs contract", () => {
     expect(releaseGuide).toContain("gh api --paginate 'repos/amplifthq/opentag/releases?per_page=100'");
     expect(releaseGuide).toContain('case "$existing_release_state" in');
     expect(releaseGuide).toContain("$'v0.11.0\\tfalse\\tfalse\\ttrue'");
+    expect(releaseGuide).toContain('release_notes_file="$(mktemp)"');
+    expect(releaseGuide).toContain('test -s "$release_notes_file"');
+    expect(releaseGuide).toContain("trap 'rm -f -- \"$release_notes_file\"");
+    expect(releaseGuide).toContain('--notes-file "$release_notes_file"');
+    expect(releaseGuide).not.toContain("/tmp/opentag-v0.11.0-release-notes.md");
     expect(releaseGuide).toContain("'.draft'");
     expect(releaseGuide).toContain("'.prerelease'");
     expect(releaseGuide).toContain('.published_at | select(type == "string" and length > 0)');

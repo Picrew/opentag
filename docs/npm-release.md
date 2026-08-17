@@ -382,8 +382,8 @@ Rerun the package loop from the registry-verification section and confirm both
 ## Create the matching source release
 
 Create the source tag from the exact clean commit used for `release:publish`.
-Copy the `v0.11.0` section of `CHANGELOG.md` into a temporary release-notes file,
-then run:
+The block extracts the `v0.11.0` changelog section into a unique, validated
+temporary release-notes file:
 
 ```bash
 (
@@ -395,12 +395,22 @@ then run:
   test "$(git rev-parse HEAD)" = "$release_commit"
   test -z "$(git status --porcelain)"
 
+  release_notes_file="$(mktemp)"
+  release_tag_probe=""
+  trap 'rm -f -- "$release_notes_file"; if [ -n "$release_tag_probe" ]; then rm -f -- "$release_tag_probe"; fi' EXIT
+  awk '
+    /^## v0\.11\.0 - / { in_release = 1; next }
+    in_release && /^## v/ { exit }
+    in_release { print }
+  ' CHANGELOG.md >"$release_notes_file"
+  test -s "$release_notes_file"
+
   release_tag_probe="$(mktemp)"
   if ! gh api --include --silent repos/amplifthq/opentag/git/ref/tags/v0.11.0 >"$release_tag_probe"; then
     : # Inspect the HTTP status below; only a confirmed 404 permits tag creation.
   fi
   release_tag_status="$(awk 'toupper($1) ~ /^HTTP\// {status=$2} END {print status}' "$release_tag_probe")"
-  rm -f "$release_tag_probe"
+  rm -f -- "$release_tag_probe"
   case "$release_tag_status" in
     200)
       release_tag_ref="$(gh api repos/amplifthq/opentag/git/ref/tags/v0.11.0)"
@@ -430,7 +440,7 @@ then run:
       gh release create v0.11.0 \
         --verify-tag \
         --title "OpenTag v0.11.0" \
-        --notes-file /tmp/opentag-v0.11.0-release-notes.md
+        --notes-file "$release_notes_file"
       ;;
     $'v0.11.0\tfalse\tfalse\ttrue') ;;
     *) echo "Refusing conflicting draft, prerelease, unpublished, or duplicate v0.11.0 GitHub Release state" >&2; exit 1 ;;
