@@ -98,9 +98,9 @@ describe("normalizeLarkMessage", () => {
     expect(event?.metadata.conversationKey).toBe("lark:tk_123|oc_chat|om_msg");
     expect(event?.metadata.conversationMemory).toEqual({
       enabled: true,
-      maxRuns: 300,
-      maxCharacters: 600_000,
-      maxTurnCharacters: 50_000
+      maxRuns: 100,
+      maxCharacters: 160_000,
+      maxTurnCharacters: 20_000
     });
     expect(event?.metadata.sourceDeliveryId).toBe("evt_1");
     expect(event?.metadata.larkEventId).toBe("evt_1");

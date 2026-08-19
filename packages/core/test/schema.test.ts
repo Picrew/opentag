@@ -27,9 +27,9 @@ describe("ConversationMemoryPolicySchema", () => {
   it("defaults to a large but bounded conversation window", () => {
     expect(ConversationMemoryPolicySchema.parse({})).toEqual({
       enabled: true,
-      maxRuns: 300,
-      maxCharacters: 600_000,
-      maxTurnCharacters: 50_000
+      maxRuns: 100,
+      maxCharacters: 160_000,
+      maxTurnCharacters: 20_000
     });
   });
 
