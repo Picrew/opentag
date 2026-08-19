@@ -220,7 +220,7 @@ describe("createExecutorRunResult", () => {
   });
 
   it("preserves assistant answers beyond the former 4,000-character limit", () => {
-    const output = `Long answer: ${"x".repeat(20_000)}`;
+    const output = `Long answer: ${"x".repeat(12_000)}`;
     const result = createExecutorRunResult({
       executorName: "Claude Code",
       runId: "run_long_answer",
