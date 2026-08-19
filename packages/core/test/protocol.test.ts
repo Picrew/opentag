@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assembleContextPacketFromEvent,
+  conversationKeyFromEvent,
   conversationKeysFromEvent,
   contextPacketFromEvent,
   createAdapterMutationCompilerRegistry,
@@ -92,6 +93,28 @@ describe("protocol helpers", () => {
     expect(conversationKeysFromEvent(teamsEvent)).toEqual([
       "teams:https://smba.trafficmanager.net/amer/|19:abc@thread.tacv2;messageid=root-1|root-1",
       "teams:https://smba.trafficmanager.net/amer/|19:abc@thread.tacv2|root-1"
+    ]);
+  });
+
+  it("prefers a provider-scoped explicit conversation key while retaining the delivery address alias", () => {
+    const event: OpenTagEvent = {
+      ...githubEvent,
+      id: "evt_lark_conversation_1",
+      source: "lark",
+      sourceEventId: "om_1",
+      actor: { provider: "lark", providerUserId: "ou_1", handle: "ou_1" },
+      callback: {
+        provider: "lark",
+        uri: "lark://im/v1/messages",
+        threadKey: "tenant_1|oc_chat|om_1"
+      },
+      metadata: { conversationKey: "lark:tenant_1|oc_chat" }
+    };
+
+    expect(conversationKeyFromEvent(event)).toBe("lark:tenant_1|oc_chat");
+    expect(conversationKeysFromEvent(event)).toEqual([
+      "lark:tenant_1|oc_chat",
+      "lark:tenant_1|oc_chat|om_1"
     ]);
   });
 

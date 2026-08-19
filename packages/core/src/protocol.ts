@@ -397,6 +397,11 @@ function callbackConversationKey(callback: OpenTagEvent["callback"]): string {
   return `${callback.provider}:${callback.threadKey ?? callback.uri}`;
 }
 
+function explicitConversationKey(event: OpenTagEvent): string | undefined {
+  const key = metadataRecordString(event.metadata, "conversationKey");
+  return key?.startsWith(`${event.callback.provider}:`) ? key : undefined;
+}
+
 function canonicalTeamsConversationKey(callback: OpenTagEvent["callback"]): string | undefined {
   if (callback.provider !== "teams" || !callback.threadKey) return undefined;
   const firstSeparator = callback.threadKey.indexOf("|");
@@ -440,11 +445,15 @@ function legacyGitHubIssueConversationKey(event: OpenTagEvent): string | undefin
 }
 
 export function conversationKeyFromEvent(event: OpenTagEvent): string {
-  return callbackConversationKey(event.callback);
+  return explicitConversationKey(event) ?? callbackConversationKey(event.callback);
 }
 
 export function conversationKeysFromEvent(event: OpenTagEvent): string[] {
-  return [...new Set([...conversationKeysFromCallback(event.callback), legacyGitHubIssueConversationKey(event)].filter((key): key is string => Boolean(key)))];
+  return [...new Set([
+    conversationKeyFromEvent(event),
+    ...conversationKeysFromCallback(event.callback),
+    legacyGitHubIssueConversationKey(event)
+  ].filter((key): key is string => Boolean(key)))];
 }
 
 export function workThreadFromEvent(event: OpenTagEvent): WorkThread | undefined {
