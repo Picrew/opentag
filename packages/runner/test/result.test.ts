@@ -219,13 +219,27 @@ describe("createExecutorRunResult", () => {
     expect(result.summary).toContain("Captured one screenshot");
   });
 
-  it("drops a leading partial line when a long no-change answer is truncated before the executor report", () => {
+  it("preserves assistant answers beyond the former 4,000-character limit", () => {
+    const output = `Long answer: ${"x".repeat(20_000)}`;
+    const result = createExecutorRunResult({
+      executorName: "Claude Code",
+      runId: "run_long_answer",
+      branchName: "opentag/run_long_answer",
+      output,
+      changedFiles: []
+    });
+
+    expect(result.summary).toBe(output);
+    expect(result.summary.length).toBeGreaterThan(4_000);
+  });
+
+  it("drops a leading partial line when an answer exceeds the expanded summary limit", () => {
     const result = createExecutorRunResult({
       executorName: "Codex",
       runId: "run_1",
       branchName: "opentag/run_1",
       output: [
-        `${"OpenTag policy handoff ".repeat(260)}source-thread decisions apply/reject/continue.`,
+        `${"OpenTag policy handoff ".repeat(2_600)}source-thread decisions apply/reject/continue.`,
         "",
         "**Repository Shape**",
         "This is a PNPM workspace with packages, apps, docs, and examples.",
