@@ -12,6 +12,7 @@ import {
   CompletionGateSchema,
   CompletionGateResultSchema,
   CompletionWaiverSchema,
+  ConversationMemoryPolicySchema,
   ContextPacketSchema,
   HumanEscalationSchema,
   OpenTagEventSchema,
@@ -29,6 +30,42 @@ import {
   runResultArtifactId,
   runResultCreatedPullRequestArtifactId
 } from "../src/schema.js";
+
+describe("ConversationMemoryPolicySchema", () => {
+  it("defaults to a large but bounded conversation window", () => {
+    expect(ConversationMemoryPolicySchema.parse({})).toEqual({
+      enabled: true,
+      maxRuns: 100,
+      maxCharacters: 160_000,
+      maxTurnCharacters: 20_000
+    });
+  });
+
+  it("accepts larger explicit windows while preserving a bounded schema", () => {
+    expect(
+      ConversationMemoryPolicySchema.parse({
+        enabled: true,
+        maxRuns: 1_000,
+        maxCharacters: 2_000_000,
+        maxTurnCharacters: 200_000
+      })
+    ).toEqual({
+      enabled: true,
+      maxRuns: 1_000,
+      maxCharacters: 2_000_000,
+      maxTurnCharacters: 200_000
+    });
+  });
+
+  it("rejects a per-turn window larger than the total window", () => {
+    expect(() =>
+      ConversationMemoryPolicySchema.parse({
+        maxCharacters: 100_000,
+        maxTurnCharacters: 100_001
+      })
+    ).toThrow(/maxTurnCharacters cannot exceed maxCharacters/u);
+  });
+});
 
 describe("RFC3339 timestamp comparison", () => {
   it("compares arbitrary fractional precision without millisecond truncation", () => {

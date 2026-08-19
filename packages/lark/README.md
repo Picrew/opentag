@@ -28,11 +28,24 @@ const ingress = startLarkIngress({
   appSecret: process.env.LARK_APP_SECRET!,
   domain: "lark",
   dispatcherUrl: "http://localhost:3030",
-  agentId: "opentag"
+  agentId: "opentag",
+  conversationMemory: {
+    enabled: true,
+    maxRuns: 100,
+    maxCharacters: 160_000,
+    maxTurnCharacters: 20_000
+  }
 });
 
 await ingress.startPromise;
 ```
+
+Conversation memory is local, bounded, and opt-out. Direct messages share one
+conversation per tenant and chat; group messages are isolated by root thread.
+Only successful runs for the same Project Target are included. The defaults
+retain up to 100 runs, 160,000 characters overall, and 20,000 characters per
+turn. These limits control prompt history, not the model's response length. Set
+`conversationMemory.enabled` to `false` to keep every run stateless.
 
 ## Stability
 

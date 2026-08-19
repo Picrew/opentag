@@ -522,6 +522,7 @@ export function larkIngressConfigFromCliConfig(config: OpenTagCliConfig): LarkIn
     }),
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
     ...(lark.botOpenId ? { botOpenId: lark.botOpenId } : {}),
+    ...(lark.conversationMemory ? { conversationMemory: lark.conversationMemory } : {}),
     ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
     ...(defaultRepoBinding ? { defaultRepoBinding } : {})
   };

@@ -104,6 +104,20 @@ function input(workspace: { kind: "repository" | "scratch"; path: string }, runI
     context: [{ kind: "file", uri: "README.md", visibility: "private" as const, title: "Readme" }],
     contextPacket: {
       summary: "Only the selected readme is relevant.",
+      conversationHistory: [
+        {
+          role: "user" as const,
+          content: "Remember that the release color is indigo.",
+          runId: "run_previous",
+          occurredAt: "2026-08-19T12:00:00.000Z"
+        },
+        {
+          role: "assistant" as const,
+          content: "Noted: the release color is indigo.",
+          runId: "run_previous",
+          occurredAt: "2026-08-19T12:00:01.000Z"
+        }
+      ],
       sources: [
         {
           pointer: { kind: "file", uri: "README.md", visibility: "private" as const },
@@ -249,6 +263,9 @@ describe("ACP executor", () => {
     expect(git(repo, ["show", "opentag/run_acp:acp-output.txt"])).toContain("ACP fixture");
     const prompt = JSON.parse(git(repo, ["show", "opentag/run_acp:acp-prompt.json"]));
     expect(prompt.text).toContain("prepare the report");
+    expect(prompt.text).toContain("Conversation history (oldest to newest; the current command takes priority)");
+    expect(prompt.text).toContain("User: Remember that the release color is indigo.");
+    expect(prompt.text).toContain("Assistant: Noted: the release color is indigo.");
     expect(prompt.text).toContain("Do not inspect .env files");
     expect(prompt.text).toContain("github.repository.read");
     expect(prompt.text).not.toContain("Read the selected repository");
@@ -297,6 +314,26 @@ describe("ACP executor", () => {
 
     expect(result.summary).toContain("OPENTAG_CHUNK_OK");
     expect(result.summary).not.toContain("OPENTAG_\nCHUNK_OK");
+  }, 15_000);
+
+  it("uses a successful Claude raw SDK result when ACP emits no assistant text", async () => {
+    const scratch = tempDir("raw-result-fallback");
+    const executor = createAcpExecutor({
+      manifest: manifest("raw-result-only"),
+      captureRawResultFallback: true
+    });
+
+    const result = await executor.run(input({ kind: "scratch", path: scratch }, "run_raw_result_fallback"), {
+      emit: async () => undefined
+    });
+
+    expect(result).toMatchObject({
+      conclusion: "success",
+      summary: "Raw SDK result fallback completed the requested work."
+    });
+    expect(JSON.parse(readFileSync(join(scratch, "acp-session.json"), "utf8"))).toMatchObject({
+      rawResultRequested: true
+    });
   }, 15_000);
 
   it("selects a required ACP session mode before prompting", async () => {

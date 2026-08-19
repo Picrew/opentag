@@ -110,6 +110,33 @@ export const ContextPacketSourceSchema = z.object({
 
 export const ContextPacketFactConfidenceSchema = z.enum(["observed", "inferred", "uncertain"]);
 
+export const ConversationHistoryTurnSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string().min(1),
+  runId: z.string().min(1),
+  occurredAt: z.string().datetime()
+});
+
+export const DEFAULT_CONVERSATION_MEMORY_POLICY = {
+  enabled: true,
+  maxRuns: 100,
+  maxCharacters: 160_000,
+  maxTurnCharacters: 20_000
+} as const;
+
+export const ConversationMemoryPolicySchema = z
+  .object({
+    enabled: z.boolean().default(DEFAULT_CONVERSATION_MEMORY_POLICY.enabled),
+    maxRuns: z.number().int().min(1).max(1_000).default(DEFAULT_CONVERSATION_MEMORY_POLICY.maxRuns),
+    maxCharacters: z.number().int().min(1_000).max(2_000_000).default(DEFAULT_CONVERSATION_MEMORY_POLICY.maxCharacters),
+    maxTurnCharacters: z.number().int().min(256).max(200_000).default(DEFAULT_CONVERSATION_MEMORY_POLICY.maxTurnCharacters)
+  })
+  .strict()
+  .refine((policy) => policy.maxTurnCharacters <= policy.maxCharacters, {
+    message: "maxTurnCharacters cannot exceed maxCharacters",
+    path: ["maxTurnCharacters"]
+  });
+
 export const ContextPacketSchema = z.object({
   summary: z.string().min(1),
   sourcePointers: z.array(ContextPointerSchema),
@@ -128,6 +155,7 @@ export const ContextPacketSchema = z.object({
   risks: z.array(z.string().min(1)).optional(),
   exclusions: z.array(z.string().min(1)).optional(),
   mustPreserve: z.array(z.string().min(1)).optional(),
+  conversationHistory: z.array(ConversationHistoryTurnSchema).optional(),
   redactions: z
     .array(
       z.object({
@@ -1918,6 +1946,8 @@ export type ContextPacketIntent = z.infer<typeof ContextPacketIntentSchema>;
 export type ContextPacketSourceRole = z.infer<typeof ContextPacketSourceRoleSchema>;
 export type ContextPacketSource = z.infer<typeof ContextPacketSourceSchema>;
 export type ContextPacketFactConfidence = z.infer<typeof ContextPacketFactConfidenceSchema>;
+export type ConversationHistoryTurn = z.infer<typeof ConversationHistoryTurnSchema>;
+export type ConversationMemoryPolicy = z.infer<typeof ConversationMemoryPolicySchema>;
 export type ContextPacket = z.infer<typeof ContextPacketSchema>;
 export type PermissionGrant = z.infer<typeof PermissionGrantSchema>;
 export type ConnectionRef = z.infer<typeof ConnectionRefSchema>;

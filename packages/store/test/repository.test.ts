@@ -113,6 +113,64 @@ function larkEvent(input: { id: string; sourceEventId: string; owner?: string; r
 }
 
 describe("OpenTag repository", () => {
+  it("captures bounded successful history from the same conversation and project", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const firstEvent = {
+      ...larkEvent({ id: "evt_memory_1", sourceEventId: "om_memory_1" }),
+      command: { rawText: "Remember that the release color is indigo.", intent: "run" as const, args: {} },
+      metadata: {
+        ...larkEvent({ id: "unused", sourceEventId: "unused" }).metadata,
+        conversationKey: "lark:tenant_1|oc_chat",
+        conversationMemory: { enabled: true, maxRuns: 6, maxCharacters: 12_000, maxTurnCharacters: 4_000 }
+      }
+    };
+    await repo.createRun({ id: "run_memory_1", event: firstEvent });
+    await repo.completeRun({
+      runId: "run_memory_1",
+      result: { conclusion: "success", summary: "I will remember indigo for this conversation." }
+    });
+    const firstCompleted = await repo.getRun({ runId: "run_memory_1" });
+
+    const secondEvent = {
+      ...larkEvent({ id: "evt_memory_2", sourceEventId: "om_memory_2" }),
+      command: { rawText: "What color did I choose?", intent: "run" as const, args: {} },
+      callback: { provider: "lark" as const, uri: "lark://im/v1/messages", threadKey: "tenant_1|oc_chat|om_memory_2" },
+      metadata: {
+        ...firstEvent.metadata,
+        messageId: "om_memory_2"
+      }
+    };
+    const created = await repo.createRun({ id: "run_memory_2", event: secondEvent });
+
+    expect(created.run.contextPacket?.conversationHistory).toEqual([
+      {
+        role: "user",
+        content: "Remember that the release color is indigo.",
+        runId: "run_memory_1",
+        occurredAt: firstEvent.receivedAt
+      },
+      {
+        role: "assistant",
+        content: "I will remember indigo for this conversation.",
+        runId: "run_memory_1",
+        occurredAt: firstCompleted!.run.updatedAt
+      }
+    ]);
+
+    const statelessEvent = {
+      ...larkEvent({ id: "evt_memory_disabled", sourceEventId: "om_memory_disabled" }),
+      metadata: {
+        ...firstEvent.metadata,
+        conversationMemory: { ...firstEvent.metadata.conversationMemory, enabled: false }
+      }
+    };
+    const stateless = await repo.createRun({ id: "run_memory_disabled", event: statelessEvent });
+    expect(stateless.run.contextPacket?.conversationHistory).toBeUndefined();
+  });
+
   it("returns only a completed canonical latest run for each WorkThread", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);

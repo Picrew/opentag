@@ -5,6 +5,7 @@ import {
   parseProjectTargetRef,
   renderOpenTagPresentationPlainText,
   type OpenTagDoctorSummaryPresentation,
+  type ConversationMemoryPolicy,
   type OpenTagEvent,
   type OpenTagSourceThreadStatusPresentation
 } from "@opentag/core";
@@ -85,6 +86,7 @@ export type LarkMessageHandlerConfig = {
   domain?: "lark" | "feishu";
   renderLocale?: LarkRenderLocale;
   callbackUri?: string;
+  conversationMemory?: ConversationMemoryPolicy;
   defaultRepoBinding?: { repoProvider: string; owner: string; repo: string };
   resolveChannelBinding(input: { tenantKey: string; chatId: string }): Promise<LarkChannelBinding | null>;
   createRun(event: OpenTagEvent): Promise<CreateRunResult>;
@@ -691,6 +693,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       ...(config.domain ? { domain: config.domain } : {}),
       renderLocale,
       ...(config.callbackUri ? { callbackUri: config.callbackUri } : {}),
+      ...(config.conversationMemory ? { conversationMemory: config.conversationMemory } : {}),
       binding
     });
     if (!event) {

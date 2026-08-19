@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   encodeLarkThreadKey,
+  larkConversationKey,
   type LarkMessageInput,
   normalizeLarkChannelMessage,
   normalizeLarkMessage,
@@ -52,6 +53,20 @@ describe("lark thread key", () => {
   });
 });
 
+describe("lark conversation key", () => {
+  it("keeps direct messages in one private conversation", () => {
+    expect(larkConversationKey({ ...baseInput, chatType: "p2p", messageId: "om_first" })).toBe("lark:tk_123|oc_chat");
+    expect(larkConversationKey({ ...baseInput, chatType: "p2p", messageId: "om_second" })).toBe("lark:tk_123|oc_chat");
+  });
+
+  it("isolates group conversations by root thread", () => {
+    expect(larkConversationKey({ ...baseInput, messageId: "om_reply", rootId: "om_root" })).toBe(
+      "lark:tk_123|oc_chat|om_root"
+    );
+    expect(larkConversationKey({ ...baseInput, messageId: "om_other" })).toBe("lark:tk_123|oc_chat|om_other");
+  });
+});
+
 describe("normalizeLarkMessage", () => {
   it("normalizes native Lark ingress through opentag.channel.v1", () => {
     expect(normalizeLarkChannelMessage(baseInput)).toMatchObject({
@@ -78,6 +93,15 @@ describe("normalizeLarkMessage", () => {
     expect(event?.metadata.repoProvider).toBe("github");
     expect(event?.metadata.chatId).toBe("oc_chat");
     expect(event?.metadata.tenantKey).toBe("tk_123");
+    expect(event?.metadata.accountId).toBe("tk_123");
+    expect(event?.metadata.conversationId).toBe("oc_chat");
+    expect(event?.metadata.conversationKey).toBe("lark:tk_123|oc_chat|om_msg");
+    expect(event?.metadata.conversationMemory).toEqual({
+      enabled: true,
+      maxRuns: 100,
+      maxCharacters: 160_000,
+      maxTurnCharacters: 20_000
+    });
     expect(event?.metadata.sourceDeliveryId).toBe("evt_1");
     expect(event?.metadata.larkEventId).toBe("evt_1");
     expect(event?.metadata.larkRenderLocale).toBe("en-US");
@@ -85,6 +109,20 @@ describe("normalizeLarkMessage", () => {
     expect(event?.permissions.map((permission) => permission.scope)).toEqual(
       expect.arrayContaining(["chat:postMessage", "runner:local", "repo:read", "repo:write", "pr:create"])
     );
+  });
+
+  it("carries an explicit disabled memory policy", () => {
+    const event = normalizeLarkMessage({
+      ...baseInput,
+      conversationMemory: { enabled: false, maxRuns: 3, maxCharacters: 6_000, maxTurnCharacters: 2_000 }
+    });
+
+    expect(event?.metadata.conversationMemory).toEqual({
+      enabled: false,
+      maxRuns: 3,
+      maxCharacters: 6_000,
+      maxTurnCharacters: 2_000
+    });
   });
 
   it("derives Feishu render locale from the domain", () => {

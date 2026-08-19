@@ -1,7 +1,9 @@
 import {
   commandFromRawText,
   OpenTagChannelInboundMessageSchema,
+  DEFAULT_CONVERSATION_MEMORY_POLICY,
   type ContextPointer,
+  type ConversationMemoryPolicy,
   type OpenTagChannelInboundMessage,
   type OpenTagCommand,
   type OpenTagEvent,
@@ -30,6 +32,7 @@ export type LarkMessageInput = {
   domain?: "lark" | "feishu";
   renderLocale?: LarkRenderLocale;
   callbackUri?: string;
+  conversationMemory?: ConversationMemoryPolicy;
   binding: LarkChannelBinding;
 };
 
@@ -51,6 +54,13 @@ export function parseLarkThreadKey(threadKey: string): { tenantKey: string; chat
     throw new Error(`Invalid Lark thread key: ${threadKey}`);
   }
   return { tenantKey, chatId, messageId };
+}
+
+export function larkConversationKey(input: Pick<LarkMessageInput, "tenantKey" | "chatId" | "chatType" | "messageId" | "rootId">): string {
+  const conversationId = input.chatType === "p2p"
+    ? input.chatId
+    : `${input.chatId}|${input.rootId ?? input.messageId}`;
+  return `lark:${input.tenantKey}|${conversationId}`;
 }
 
 export function normalizeLarkChannelMessage(input: LarkMessageInput): OpenTagChannelInboundMessage | null {
@@ -219,6 +229,10 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
     metadata: {
       tenantKey: input.tenantKey,
       chatId: input.chatId,
+      accountId: input.tenantKey,
+      conversationId: input.chatId,
+      conversationKey: larkConversationKey(input),
+      conversationMemory: input.conversationMemory ?? DEFAULT_CONVERSATION_MEMORY_POLICY,
       messageId: input.messageId,
       chatType: input.chatType,
       sourceDeliveryId: input.eventId,
