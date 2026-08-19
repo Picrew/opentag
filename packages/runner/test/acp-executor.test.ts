@@ -302,6 +302,26 @@ describe("ACP executor", () => {
     expect(result.summary).not.toContain("OPENTAG_\nCHUNK_OK");
   }, 15_000);
 
+  it("uses a successful Claude raw SDK result when ACP emits no assistant text", async () => {
+    const scratch = tempDir("raw-result-fallback");
+    const executor = createAcpExecutor({
+      manifest: manifest("raw-result-only"),
+      captureRawResultFallback: true
+    });
+
+    const result = await executor.run(input({ kind: "scratch", path: scratch }, "run_raw_result_fallback"), {
+      emit: async () => undefined
+    });
+
+    expect(result).toMatchObject({
+      conclusion: "success",
+      summary: "Raw SDK result fallback completed the requested work."
+    });
+    expect(JSON.parse(readFileSync(join(scratch, "acp-session.json"), "utf8"))).toMatchObject({
+      rawResultRequested: true
+    });
+  }, 15_000);
+
   it("selects a required ACP session mode before prompting", async () => {
     const scratch = tempDir("session-mode");
     const executor = createAcpExecutor({ manifest: manifest("session-mode"), sessionModeId: "default" });
