@@ -321,9 +321,17 @@ type RawSdkResultNotification = {
     subtype?: string;
     is_error?: boolean;
     result?: string;
-    origin?: unknown;
+    origin?: { kind?: unknown } | null;
   };
 };
+
+const AUTONOMOUS_RAW_RESULT_ORIGINS = new Set([
+  "task-notification",
+  "peer",
+  "coordinator",
+  "observer",
+  "observer-activity"
+]);
 
 function parseRawSdkResultNotification(value: unknown): RawSdkResultNotification {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -333,11 +341,12 @@ function parseRawSdkResultNotification(value: unknown): RawSdkResultNotification
 function terminalTextFromRawSdkResult(notification: RawSdkResultNotification, sessionId: string | undefined): string | undefined {
   if (!sessionId || notification.sessionId !== sessionId) return undefined;
   const message = notification.message;
+  const originKind = message?.origin?.kind;
   if (
     message?.type !== "result" ||
     message.subtype !== "success" ||
     message.is_error === true ||
-    message.origin != null ||
+    (typeof originKind === "string" && AUTONOMOUS_RAW_RESULT_ORIGINS.has(originKind)) ||
     typeof message.result !== "string"
   ) {
     return undefined;

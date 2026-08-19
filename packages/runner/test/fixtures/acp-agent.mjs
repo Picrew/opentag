@@ -196,6 +196,7 @@ const app = acp
             type: "result",
             subtype: "success",
             is_error: false,
+            origin: { kind: "human" },
             result: fixtureConfig.OPENTAG_ACP_TEST_OUTPUT ?? "Raw SDK result fallback completed the requested work."
           }
         });
