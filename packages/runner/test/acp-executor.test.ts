@@ -104,6 +104,20 @@ function input(workspace: { kind: "repository" | "scratch"; path: string }, runI
     context: [{ kind: "file", uri: "README.md", visibility: "private" as const, title: "Readme" }],
     contextPacket: {
       summary: "Only the selected readme is relevant.",
+      conversationHistory: [
+        {
+          role: "user" as const,
+          content: "Remember that the release color is indigo.",
+          runId: "run_previous",
+          occurredAt: "2026-08-19T12:00:00.000Z"
+        },
+        {
+          role: "assistant" as const,
+          content: "Noted: the release color is indigo.",
+          runId: "run_previous",
+          occurredAt: "2026-08-19T12:00:01.000Z"
+        }
+      ],
       sources: [
         {
           pointer: { kind: "file", uri: "README.md", visibility: "private" as const },
@@ -235,6 +249,9 @@ describe("ACP executor", () => {
     expect(git(repo, ["show", "opentag/run_acp:acp-output.txt"])).toContain("ACP fixture");
     const prompt = JSON.parse(git(repo, ["show", "opentag/run_acp:acp-prompt.json"]));
     expect(prompt.text).toContain("prepare the report");
+    expect(prompt.text).toContain("Conversation history (oldest to newest; the current command takes priority)");
+    expect(prompt.text).toContain("User: Remember that the release color is indigo.");
+    expect(prompt.text).toContain("Assistant: Noted: the release color is indigo.");
     expect(prompt.text).toContain("Do not inspect .env files");
     expect(prompt.text).toContain("github.repository.read");
     expect(prompt.text).not.toContain("Read the selected repository");

@@ -363,6 +363,16 @@ function promptForRun(input: ExecutorRunInput): string {
   }
   if (input.contextPacket) {
     lines.push("", "Context summary:", input.contextPacket.summary);
+    if (input.contextPacket.conversationHistory?.length) {
+      lines.push(
+        "",
+        "Conversation history (oldest to newest; the current command takes priority):",
+        ...input.contextPacket.conversationHistory.map((turn) => {
+          const label = turn.role === "user" ? "User" : "Assistant";
+          return `${label}: ${turn.content.replace(/\n/gu, "\n  ")}`;
+        })
+      );
+    }
     if (input.contextPacket.exclusions?.length) {
       lines.push("", "Exclusions:", ...input.contextPacket.exclusions.map((exclusion) => `- ${exclusion}`));
     }
