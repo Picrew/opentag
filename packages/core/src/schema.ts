@@ -119,9 +119,9 @@ export const ConversationHistoryTurnSchema = z.object({
 
 export const DEFAULT_CONVERSATION_MEMORY_POLICY = {
   enabled: true,
-  maxRuns: 300,
-  maxCharacters: 600_000,
-  maxTurnCharacters: 50_000
+  maxRuns: 100,
+  maxCharacters: 160_000,
+  maxTurnCharacters: 20_000
 } as const;
 
 export const ConversationMemoryPolicySchema = z
