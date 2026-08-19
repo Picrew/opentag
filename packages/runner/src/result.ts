@@ -1,7 +1,7 @@
 import type { OpenTagRunResult, WorkContextMutationRequest } from "@opentag/core";
 import { EXECUTOR_REPORT_START, parseExecutorReport, renderExecutorReportSummary } from "./executor-report.js";
 
-const MAX_EXECUTOR_SUMMARY_LENGTH = 50_000;
+const MAX_EXECUTOR_SUMMARY_LENGTH = 20_000;
 const MAX_ARTIFACT_SUMMARY_LENGTH = 1200;
 
 type ResultArtifact = NonNullable<OpenTagRunResult["artifacts"]>[number];
