@@ -158,6 +158,18 @@ async function waitForFile(path: string): Promise<void> {
   }
 }
 
+async function readJsonFileWhenReady<T>(path: string): Promise<T> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    try {
+      return JSON.parse(readFileSync(path, "utf8")) as T;
+    } catch (error) {
+      if (Date.now() > deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+}
+
 describe("ACP executor", () => {
   it("derives workspace capability from the required manifest conformance declaration", () => {
     expect(createAcpExecutor({ manifest: manifest() }).capability).toMatchObject({
@@ -804,8 +816,7 @@ describe("ACP executor", () => {
     const running = executor.run(input({ kind: "scratch", path: scratch }, "run_cancel_process_tree"), {
       emit: async () => undefined
     });
-    await waitForFile(join(scratch, "acp-descendant.json"));
-    const { pid } = JSON.parse(readFileSync(join(scratch, "acp-descendant.json"), "utf8")) as { pid: number };
+    const { pid } = await readJsonFileWhenReady<{ pid: number }>(join(scratch, "acp-descendant.json"));
 
     try {
       expect(processIsAlive(pid)).toBe(true);
