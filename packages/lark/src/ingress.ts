@@ -7,6 +7,7 @@ import {
   parseProjectTargetRef,
   renderOpenTagPresentationPlainText,
   type OpenTagDoctorSummaryPresentation,
+  type ConversationMemoryPolicy,
   type OpenTagEvent,
   type OpenTagSourceThreadStatusPresentation
 } from "@opentag/core";
@@ -37,6 +38,7 @@ export type LarkIngressConfig = {
   bindingAdminUserIds?: string[];
   bindingAdminUnionIds?: string[];
   runTimeoutMs?: number;
+  conversationMemory?: ConversationMemoryPolicy;
   defaultRepoBinding?: { repoProvider: string; owner: string; repo: string };
 };
 
@@ -393,6 +395,7 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
     domain: config.domain,
     ...(config.botOpenId ? { botOpenId: config.botOpenId } : {}),
     ...(config.defaultRepoBinding ? { defaultRepoBinding: config.defaultRepoBinding } : {}),
+    ...(config.conversationMemory ? { conversationMemory: config.conversationMemory } : {}),
     resolveChannelBinding,
     async bindChannel(input) {
       await dispatcherClient.bindChannel({

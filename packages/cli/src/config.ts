@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   AdapterMutationMappingSchema,
+  ConversationMemoryPolicySchema,
   OpenTagManagedChannelBindingOwnershipSchema
 } from "@opentag/core";
 import {
@@ -267,6 +268,7 @@ const LarkPlatformSchema = z
     appSecret: SecretStringSchema,
     domain: z.enum(["lark", "feishu"]),
     botOpenId: z.string().min(1).optional(),
+    conversationMemory: ConversationMemoryPolicySchema.optional(),
     defaultProjectBinding: z.boolean().optional()
   })
   .strict();

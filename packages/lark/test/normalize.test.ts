@@ -96,6 +96,12 @@ describe("normalizeLarkMessage", () => {
     expect(event?.metadata.accountId).toBe("tk_123");
     expect(event?.metadata.conversationId).toBe("oc_chat");
     expect(event?.metadata.conversationKey).toBe("lark:tk_123|oc_chat|om_msg");
+    expect(event?.metadata.conversationMemory).toEqual({
+      enabled: true,
+      maxRuns: 6,
+      maxCharacters: 12_000,
+      maxTurnCharacters: 4_000
+    });
     expect(event?.metadata.sourceDeliveryId).toBe("evt_1");
     expect(event?.metadata.larkEventId).toBe("evt_1");
     expect(event?.metadata.larkRenderLocale).toBe("en-US");
@@ -103,6 +109,20 @@ describe("normalizeLarkMessage", () => {
     expect(event?.permissions.map((permission) => permission.scope)).toEqual(
       expect.arrayContaining(["chat:postMessage", "runner:local", "repo:read", "repo:write", "pr:create"])
     );
+  });
+
+  it("carries an explicit disabled memory policy", () => {
+    const event = normalizeLarkMessage({
+      ...baseInput,
+      conversationMemory: { enabled: false, maxRuns: 3, maxCharacters: 6_000, maxTurnCharacters: 2_000 }
+    });
+
+    expect(event?.metadata.conversationMemory).toEqual({
+      enabled: false,
+      maxRuns: 3,
+      maxCharacters: 6_000,
+      maxTurnCharacters: 2_000
+    });
   });
 
   it("derives Feishu render locale from the domain", () => {

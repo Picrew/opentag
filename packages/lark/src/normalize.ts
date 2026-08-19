@@ -1,7 +1,9 @@
 import {
   commandFromRawText,
   OpenTagChannelInboundMessageSchema,
+  DEFAULT_CONVERSATION_MEMORY_POLICY,
   type ContextPointer,
+  type ConversationMemoryPolicy,
   type OpenTagChannelInboundMessage,
   type OpenTagCommand,
   type OpenTagEvent,
@@ -30,6 +32,7 @@ export type LarkMessageInput = {
   domain?: "lark" | "feishu";
   renderLocale?: LarkRenderLocale;
   callbackUri?: string;
+  conversationMemory?: ConversationMemoryPolicy;
   binding: LarkChannelBinding;
 };
 
@@ -229,6 +232,7 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
       accountId: input.tenantKey,
       conversationId: input.chatId,
       conversationKey: larkConversationKey(input),
+      conversationMemory: input.conversationMemory ?? DEFAULT_CONVERSATION_MEMORY_POLICY,
       messageId: input.messageId,
       chatType: input.chatType,
       sourceDeliveryId: input.eventId,

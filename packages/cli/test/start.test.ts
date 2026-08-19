@@ -854,6 +854,12 @@ describe("OpenTag CLI start wiring", () => {
   it("derives Lark ingress config with a default repo binding for one Project Target", () => {
     const built = config();
     built.daemon.runTimeoutMs = 30_000;
+    built.platforms.lark!.conversationMemory = {
+      enabled: true,
+      maxRuns: 4,
+      maxCharacters: 8_000,
+      maxTurnCharacters: 2_000
+    };
     const ingress = larkIngressConfigFromCliConfig(built);
     const repository = built.daemon.repositories[0]!;
 
@@ -866,6 +872,12 @@ describe("OpenTag CLI start wiring", () => {
       channelPrincipalCredential: expect.any(String),
       botOpenId: "ou_bot",
       runTimeoutMs: 30_000,
+      conversationMemory: {
+        enabled: true,
+        maxRuns: 4,
+        maxCharacters: 8_000,
+        maxTurnCharacters: 2_000
+      },
       defaultRepoBinding: {
         repoProvider: repository.provider,
         owner: repository.owner,
