@@ -273,6 +273,16 @@ export type AcpPermissionResolver = (request: AcpPermissionRequest) => Promise<A
 
 export type AcpExecutorOptions = {
   manifest: OpenTagIntegrationManifestInput;
+  /**
+   * Capture Claude Code's terminal SDK result as a last-resort text source.
+   *
+   * Some Anthropic-compatible gateways return a populated terminal result but
+   * omit both streaming deltas and the consolidated assistant message. The
+   * Claude ACP adapter intentionally does not promote that result when usage
+   * reports non-zero output tokens, so an otherwise successful turn becomes
+   * textless at the ACP boundary.
+   */
+  captureRawResultFallback?: boolean;
   launchEnvironment?: Readonly<Record<string, string>>;
   preflight?: () => Promise<{ ready: boolean; reason?: string }>;
   permissionResolver?: AcpPermissionResolver;
@@ -303,6 +313,38 @@ type ActiveRun = {
   terminationPromise?: Promise<boolean>;
   terminationConfirmed?: boolean;
 };
+
+type RawSdkResultNotification = {
+  sessionId?: string;
+  message?: {
+    type?: string;
+    subtype?: string;
+    is_error?: boolean;
+    result?: string;
+    origin?: unknown;
+  };
+};
+
+function parseRawSdkResultNotification(value: unknown): RawSdkResultNotification {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as RawSdkResultNotification;
+}
+
+function terminalTextFromRawSdkResult(notification: RawSdkResultNotification, sessionId: string | undefined): string | undefined {
+  if (!sessionId || notification.sessionId !== sessionId) return undefined;
+  const message = notification.message;
+  if (
+    message?.type !== "result" ||
+    message.subtype !== "success" ||
+    message.is_error === true ||
+    message.origin != null ||
+    typeof message.result !== "string"
+  ) {
+    return undefined;
+  }
+  const text = message.result.trim();
+  return text || undefined;
+}
 
 function activeRunKey(runId: string, attemptId?: string): string {
   return `${runId}\u0000${attemptId ?? "legacy"}`;
@@ -895,6 +937,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         }
 
         const output: string[] = [];
+        let rawResultFallback = "";
         const governedActions = new Map<string, { resolution: ExecutorPermissionResolution; reported: boolean }>();
         const childOutput = strictAcpOutput(Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>);
         const stream = acp.ndJsonStream(
@@ -903,7 +946,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         );
         let stopReason: acp.StopReason;
         try {
-          stopReason = await acp
+          const clientApp = acp
             .client({ name: "opentag" })
             .onRequest(acp.methods.client.session.requestPermission, async (ctx) => {
               const requestOptions = ctx.params.options.map((option) => ({
@@ -955,8 +998,18 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
               if (!options.permissionResolver) return { outcome: { outcome: "cancelled" as const } };
               const decision = await options.permissionResolver(request);
               return permissionResponseForDecision(decision, requestOptions);
-            })
-            .connectWith(stream, async (client) => {
+            });
+          if (options.captureRawResultFallback) {
+            clientApp.onNotification(
+              "_claude/sdkMessage",
+              parseRawSdkResultNotification,
+              (ctx) => {
+                const text = terminalTextFromRawSdkResult(ctx.params, active.sessionId);
+                if (text) rawResultFallback = text;
+              }
+            );
+          }
+          stopReason = await clientApp.connectWith(stream, async (client) => {
               active.client = client;
               const initialized = await client.request(acp.methods.agent.initialize, {
                 protocolVersion: acp.PROTOCOL_VERSION,
@@ -965,7 +1018,15 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
               if (initialized.protocolVersion !== 1) {
                 throw new Error(`Agent negotiated unsupported ACP protocol version ${initialized.protocolVersion}.`);
               }
-              return client.buildSession({ cwd: childCwd, mcpServers: [] }).withSession(async (session) => {
+              return client
+                .buildSession({
+                  cwd: childCwd,
+                  mcpServers: [],
+                  ...(options.captureRawResultFallback
+                    ? { _meta: { claudeCode: { emitRawSDKMessages: [{ type: "result" }] } } }
+                    : {})
+                })
+                .withSession(async (session) => {
                 active.sessionId = session.sessionId;
                 if (options.sessionModeId) {
                   const available = session.modes?.availableModes.some((mode) => mode.id === options.sessionModeId) ?? false;
@@ -1081,7 +1142,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           run: input,
           branchName,
           baseBranch,
-          output: output.join("").trim(),
+          output: output.join("").trim() || rawResultFallback,
           files,
           cancelTerminationConfirmed: supportsCancel && terminationObserved
         });

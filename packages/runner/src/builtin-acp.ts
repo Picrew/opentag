@@ -140,7 +140,10 @@ export function createBuiltInAcpExecutors(options: BuiltInAcpAgentOptions = {}):
   const shared = options.security ? { security: options.security } : {};
   return {
     codex: createAcpAgentExecutor(definitions.codex, shared),
-    "claude-code": createAcpAgentExecutor(definitions["claude-code"], shared),
+    "claude-code": createAcpAgentExecutor(definitions["claude-code"], {
+      ...shared,
+      captureRawResultFallback: true
+    }),
     cursor: createAcpAgentExecutor(definitions.cursor, shared),
     opencode: createAcpAgentExecutor(definitions.opencode, shared),
     hermes: createAcpAgentExecutor(definitions.hermes, shared),

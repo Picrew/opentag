@@ -65,11 +65,14 @@ const app = acp
       await new Promise((resolve) => setTimeout(resolve, 10_000));
     }
     const sessionId = crypto.randomUUID();
-    sessions.set(sessionId, { cwd: ctx.params.cwd, cancelled: false });
+    const rawResultRequested = Array.isArray(ctx.params._meta?.claudeCode?.emitRawSDKMessages) &&
+      ctx.params._meta.claudeCode.emitRawSDKMessages.some((filter) => filter?.type === "result");
+    sessions.set(sessionId, { cwd: ctx.params.cwd, cancelled: false, rawResultRequested });
     await record(ctx.params.cwd, "acp-session.json", {
       cwd: ctx.params.cwd,
       mcpServers: ctx.params.mcpServers,
       pid: process.pid,
+      rawResultRequested,
       inheritedSecret: process.env.OPENTAG_ACP_HOST_SECRET ?? null,
       explicitValue: process.env.OPENTAG_ACP_EXPLICIT ?? null
     });
@@ -185,6 +188,20 @@ const app = acp
         status: "completed"
       }
     });
+    if (mode === "raw-result-only") {
+      if (session.rawResultRequested) {
+        await ctx.client.notify("_claude/sdkMessage", {
+          sessionId: ctx.params.sessionId,
+          message: {
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            result: fixtureConfig.OPENTAG_ACP_TEST_OUTPUT ?? "Raw SDK result fallback completed the requested work."
+          }
+        });
+      }
+      return { stopReason: "end_turn" };
+    }
     const messageChunks = mode === "chunked-output"
       ? ["OPENTAG_", "CHUNK_OK"]
       : [fixtureConfig.OPENTAG_ACP_TEST_OUTPUT ?? "ACP fixture completed the requested work."];
