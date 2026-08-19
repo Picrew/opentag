@@ -117,6 +117,26 @@ export const ConversationHistoryTurnSchema = z.object({
   occurredAt: z.string().datetime()
 });
 
+export const DEFAULT_CONVERSATION_MEMORY_POLICY = {
+  enabled: true,
+  maxRuns: 6,
+  maxCharacters: 12_000,
+  maxTurnCharacters: 4_000
+} as const;
+
+export const ConversationMemoryPolicySchema = z
+  .object({
+    enabled: z.boolean().default(DEFAULT_CONVERSATION_MEMORY_POLICY.enabled),
+    maxRuns: z.number().int().min(1).max(20).default(DEFAULT_CONVERSATION_MEMORY_POLICY.maxRuns),
+    maxCharacters: z.number().int().min(1_000).max(50_000).default(DEFAULT_CONVERSATION_MEMORY_POLICY.maxCharacters),
+    maxTurnCharacters: z.number().int().min(256).max(10_000).default(DEFAULT_CONVERSATION_MEMORY_POLICY.maxTurnCharacters)
+  })
+  .strict()
+  .refine((policy) => policy.maxTurnCharacters <= policy.maxCharacters, {
+    message: "maxTurnCharacters cannot exceed maxCharacters",
+    path: ["maxTurnCharacters"]
+  });
+
 export const ContextPacketSchema = z.object({
   summary: z.string().min(1),
   sourcePointers: z.array(ContextPointerSchema),
@@ -1927,6 +1947,7 @@ export type ContextPacketSourceRole = z.infer<typeof ContextPacketSourceRoleSche
 export type ContextPacketSource = z.infer<typeof ContextPacketSourceSchema>;
 export type ContextPacketFactConfidence = z.infer<typeof ContextPacketFactConfidenceSchema>;
 export type ConversationHistoryTurn = z.infer<typeof ConversationHistoryTurnSchema>;
+export type ConversationMemoryPolicy = z.infer<typeof ConversationMemoryPolicySchema>;
 export type ContextPacket = z.infer<typeof ContextPacketSchema>;
 export type PermissionGrant = z.infer<typeof PermissionGrantSchema>;
 export type ConnectionRef = z.infer<typeof ConnectionRefSchema>;

@@ -36,6 +36,7 @@ import {
   compareRfc3339Timestamps,
   ContextPacketSchema,
   conversationKeyFromEvent,
+  conversationMemoryPolicyFromEvent,
   conversationKeysFromEvent,
   defaultRunEventMetadata,
   OpenTagEventSchema,
@@ -2828,16 +2829,14 @@ function aggregateMetrics(input: {
 }
 
 export function createOpenTagRepository(db: BetterSQLite3Database) {
-  const conversationHistoryMaxRuns = 6;
-  const conversationHistoryMaxCharacters = 12_000;
-  const conversationHistoryMaxTurnCharacters = 4_000;
-
-  function boundedHistoryContent(content: string): string {
-    if (content.length <= conversationHistoryMaxTurnCharacters) return content;
-    return `${content.slice(0, conversationHistoryMaxTurnCharacters - 1)}…`;
+  function boundedHistoryContent(content: string, maxCharacters: number): string {
+    if (content.length <= maxCharacters) return content;
+    return `${content.slice(0, maxCharacters - 1)}…`;
   }
 
   async function conversationHistoryForEvent(event: OpenTagEvent): Promise<ConversationHistoryTurn[]> {
+    const policy = conversationMemoryPolicyFromEvent(event);
+    if (!policy) return [];
     const conversationKey = conversationKeyFromEvent(event);
     const projectTarget = projectTargetRefFromEvent(event);
     const projectScope = projectTarget
@@ -2862,7 +2861,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         projectScope
       ))
       .orderBy(desc(runs.createdAt), desc(runs.id))
-      .limit(conversationHistoryMaxRuns);
+      .limit(policy.maxRuns);
 
     let usedCharacters = 0;
     const selected: ConversationHistoryTurn[][] = [];
@@ -2873,20 +2872,21 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         {
           role: "user",
           content: boundedHistoryContent(
-            previousEvent.command.rawText.trim() || `OpenTag ${previousEvent.command.intent} request`
+            previousEvent.command.rawText.trim() || `OpenTag ${previousEvent.command.intent} request`,
+            policy.maxTurnCharacters
           ),
           runId: row.id,
           occurredAt: previousEvent.receivedAt
         },
         {
           role: "assistant",
-          content: boundedHistoryContent(previousResult.summary),
+          content: boundedHistoryContent(previousResult.summary, policy.maxTurnCharacters),
           runId: row.id,
           occurredAt: row.updatedAt
         }
       ];
       const pairCharacters = pair.reduce((total, turn) => total + turn.content.length, 0);
-      if (selected.length > 0 && usedCharacters + pairCharacters > conversationHistoryMaxCharacters) break;
+      if (selected.length > 0 && usedCharacters + pairCharacters > policy.maxCharacters) break;
       selected.unshift(pair);
       usedCharacters += pairCharacters;
     }

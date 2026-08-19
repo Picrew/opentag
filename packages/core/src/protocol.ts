@@ -14,6 +14,7 @@ import type {
   WorkItemReference,
   WorkThread
 } from "./schema.js";
+import { ConversationMemoryPolicySchema } from "./schema.js";
 
 const CONTEXT_PACKET_STAGES = ["collect", "classify", "filter", "preserve", "summarize", "budget", "emit"] as const;
 const POLICY_SCOPE_ORDER: PolicyScope[] = [
@@ -446,6 +447,11 @@ function legacyGitHubIssueConversationKey(event: OpenTagEvent): string | undefin
 
 export function conversationKeyFromEvent(event: OpenTagEvent): string {
   return explicitConversationKey(event) ?? callbackConversationKey(event.callback);
+}
+
+export function conversationMemoryPolicyFromEvent(event: OpenTagEvent) {
+  const parsed = ConversationMemoryPolicySchema.safeParse(event.metadata["conversationMemory"]);
+  return parsed.success && parsed.data.enabled ? parsed.data : undefined;
 }
 
 export function conversationKeysFromEvent(event: OpenTagEvent): string[] {

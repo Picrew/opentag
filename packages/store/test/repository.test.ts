@@ -123,7 +123,8 @@ describe("OpenTag repository", () => {
       command: { rawText: "Remember that the release color is indigo.", intent: "run" as const, args: {} },
       metadata: {
         ...larkEvent({ id: "unused", sourceEventId: "unused" }).metadata,
-        conversationKey: "lark:tenant_1|oc_chat"
+        conversationKey: "lark:tenant_1|oc_chat",
+        conversationMemory: { enabled: true, maxRuns: 6, maxCharacters: 12_000, maxTurnCharacters: 4_000 }
       }
     };
     await repo.createRun({ id: "run_memory_1", event: firstEvent });
@@ -158,6 +159,16 @@ describe("OpenTag repository", () => {
         occurredAt: firstCompleted!.run.updatedAt
       }
     ]);
+
+    const statelessEvent = {
+      ...larkEvent({ id: "evt_memory_disabled", sourceEventId: "om_memory_disabled" }),
+      metadata: {
+        ...firstEvent.metadata,
+        conversationMemory: { ...firstEvent.metadata.conversationMemory, enabled: false }
+      }
+    };
+    const stateless = await repo.createRun({ id: "run_memory_disabled", event: statelessEvent });
+    expect(stateless.run.contextPacket?.conversationHistory).toBeUndefined();
   });
 
   it("returns only a completed canonical latest run for each WorkThread", async () => {
