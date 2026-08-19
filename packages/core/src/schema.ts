@@ -110,6 +110,13 @@ export const ContextPacketSourceSchema = z.object({
 
 export const ContextPacketFactConfidenceSchema = z.enum(["observed", "inferred", "uncertain"]);
 
+export const ConversationHistoryTurnSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string().min(1),
+  runId: z.string().min(1),
+  occurredAt: z.string().datetime()
+});
+
 export const ContextPacketSchema = z.object({
   summary: z.string().min(1),
   sourcePointers: z.array(ContextPointerSchema),
@@ -128,6 +135,7 @@ export const ContextPacketSchema = z.object({
   risks: z.array(z.string().min(1)).optional(),
   exclusions: z.array(z.string().min(1)).optional(),
   mustPreserve: z.array(z.string().min(1)).optional(),
+  conversationHistory: z.array(ConversationHistoryTurnSchema).optional(),
   redactions: z
     .array(
       z.object({
@@ -1918,6 +1926,7 @@ export type ContextPacketIntent = z.infer<typeof ContextPacketIntentSchema>;
 export type ContextPacketSourceRole = z.infer<typeof ContextPacketSourceRoleSchema>;
 export type ContextPacketSource = z.infer<typeof ContextPacketSourceSchema>;
 export type ContextPacketFactConfidence = z.infer<typeof ContextPacketFactConfidenceSchema>;
+export type ConversationHistoryTurn = z.infer<typeof ConversationHistoryTurnSchema>;
 export type ContextPacket = z.infer<typeof ContextPacketSchema>;
 export type PermissionGrant = z.infer<typeof PermissionGrantSchema>;
 export type ConnectionRef = z.infer<typeof ConnectionRefSchema>;

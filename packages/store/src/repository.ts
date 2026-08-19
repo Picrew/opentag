@@ -109,6 +109,7 @@ import {
   type CompletionContract,
   type CompletionWaiver,
   type CompletionAssessmentReceiptEnvelopeV1,
+  type ConversationHistoryTurn,
   type CompletionEvidenceObservationPayloadV1,
   type CompletionEvidenceObservationReceiptEnvelopeV1,
   type CompletionContractRefReceiptEnvelopeV1,
@@ -2827,6 +2828,71 @@ function aggregateMetrics(input: {
 }
 
 export function createOpenTagRepository(db: BetterSQLite3Database) {
+  const conversationHistoryMaxRuns = 6;
+  const conversationHistoryMaxCharacters = 12_000;
+  const conversationHistoryMaxTurnCharacters = 4_000;
+
+  function boundedHistoryContent(content: string): string {
+    if (content.length <= conversationHistoryMaxTurnCharacters) return content;
+    return `${content.slice(0, conversationHistoryMaxTurnCharacters - 1)}…`;
+  }
+
+  async function conversationHistoryForEvent(event: OpenTagEvent): Promise<ConversationHistoryTurn[]> {
+    const conversationKey = conversationKeyFromEvent(event);
+    const projectTarget = projectTargetRefFromEvent(event);
+    const projectScope = projectTarget
+      ? and(
+          eq(runs.repoProvider, projectTarget.provider),
+          eq(runs.repoOwner, projectTarget.owner),
+          eq(runs.repoName, projectTarget.repo)
+        )
+      : and(isNull(runs.repoProvider), isNull(runs.repoOwner), isNull(runs.repoName));
+    const historyRows = await db
+      .select({
+        id: runs.id,
+        eventJson: runs.eventJson,
+        resultJson: runs.resultJson,
+        updatedAt: runs.updatedAt
+      })
+      .from(runs)
+      .where(and(
+        eq(runs.conversationKey, conversationKey),
+        eq(runs.status, "succeeded"),
+        isNotNull(runs.resultJson),
+        projectScope
+      ))
+      .orderBy(desc(runs.createdAt), desc(runs.id))
+      .limit(conversationHistoryMaxRuns);
+
+    let usedCharacters = 0;
+    const selected: ConversationHistoryTurn[][] = [];
+    for (const row of historyRows) {
+      const previousEvent = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
+      const previousResult = OpenTagRunResultSchema.parse(JSON.parse(row.resultJson!));
+      const pair: ConversationHistoryTurn[] = [
+        {
+          role: "user",
+          content: boundedHistoryContent(
+            previousEvent.command.rawText.trim() || `OpenTag ${previousEvent.command.intent} request`
+          ),
+          runId: row.id,
+          occurredAt: previousEvent.receivedAt
+        },
+        {
+          role: "assistant",
+          content: boundedHistoryContent(previousResult.summary),
+          runId: row.id,
+          occurredAt: row.updatedAt
+        }
+      ];
+      const pairCharacters = pair.reduce((total, turn) => total + turn.content.length, 0);
+      if (selected.length > 0 && usedCharacters + pairCharacters > conversationHistoryMaxCharacters) break;
+      selected.unshift(pair);
+      usedCharacters += pairCharacters;
+    }
+    return selected.flat();
+  }
+
   function activeAttemptLease(input: AttemptLease):
     | { outcome: "active"; run: typeof runs.$inferSelect; attempt: typeof attempts.$inferSelect }
     | { outcome: "stale_attempt" | "not_found" } {
@@ -10584,7 +10650,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       }
       const triggeredByAction = input.triggeredByAction ? ActionHintSchema.parse(input.triggeredByAction) : undefined;
       const createdAt = nowIso();
-      const protocolFields = protocolRunFieldsFromEvent(event, createdAt);
+      const baseProtocolFields = protocolRunFieldsFromEvent(event, createdAt);
+      const conversationHistory = await conversationHistoryForEvent(event);
+      const protocolFields = {
+        ...baseProtocolFields,
+        contextPacket: {
+          ...baseProtocolFields.contextPacket,
+          ...(conversationHistory.length > 0 ? { conversationHistory } : {})
+        }
+      };
       const durableThread = protocolFields.thread
         ? (await upsertWorkThreadRecord({ thread: protocolFields.thread, recordedAt: createdAt })).thread
         : undefined;
