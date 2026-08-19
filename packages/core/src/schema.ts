@@ -105,17 +105,17 @@ export const ConversationHistoryTurnSchema = z.object({
 
 export const DEFAULT_CONVERSATION_MEMORY_POLICY = {
   enabled: true,
-  maxRuns: 6,
-  maxCharacters: 12_000,
-  maxTurnCharacters: 4_000
+  maxRuns: 300,
+  maxCharacters: 600_000,
+  maxTurnCharacters: 50_000
 } as const;
 
 export const ConversationMemoryPolicySchema = z
   .object({
     enabled: z.boolean().default(DEFAULT_CONVERSATION_MEMORY_POLICY.enabled),
-    maxRuns: z.number().int().min(1).max(20).default(DEFAULT_CONVERSATION_MEMORY_POLICY.maxRuns),
-    maxCharacters: z.number().int().min(1_000).max(50_000).default(DEFAULT_CONVERSATION_MEMORY_POLICY.maxCharacters),
-    maxTurnCharacters: z.number().int().min(256).max(10_000).default(DEFAULT_CONVERSATION_MEMORY_POLICY.maxTurnCharacters)
+    maxRuns: z.number().int().min(1).max(1_000).default(DEFAULT_CONVERSATION_MEMORY_POLICY.maxRuns),
+    maxCharacters: z.number().int().min(1_000).max(2_000_000).default(DEFAULT_CONVERSATION_MEMORY_POLICY.maxCharacters),
+    maxTurnCharacters: z.number().int().min(256).max(200_000).default(DEFAULT_CONVERSATION_MEMORY_POLICY.maxTurnCharacters)
   })
   .strict()
   .refine((policy) => policy.maxTurnCharacters <= policy.maxCharacters, {

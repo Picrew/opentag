@@ -8,6 +8,7 @@ import {
   CompletionAssessmentSchema,
   CompletionContractSchema,
   CompletionGateSchema,
+  ConversationMemoryPolicySchema,
   ContextPacketSchema,
   HumanEscalationSchema,
   OpenTagEventSchema,
@@ -22,6 +23,41 @@ import {
   WorkThreadSchema
 } from "../src/schema.js";
 
+describe("ConversationMemoryPolicySchema", () => {
+  it("defaults to a large but bounded conversation window", () => {
+    expect(ConversationMemoryPolicySchema.parse({})).toEqual({
+      enabled: true,
+      maxRuns: 300,
+      maxCharacters: 600_000,
+      maxTurnCharacters: 50_000
+    });
+  });
+
+  it("accepts larger explicit windows while preserving a bounded schema", () => {
+    expect(
+      ConversationMemoryPolicySchema.parse({
+        enabled: true,
+        maxRuns: 1_000,
+        maxCharacters: 2_000_000,
+        maxTurnCharacters: 200_000
+      })
+    ).toEqual({
+      enabled: true,
+      maxRuns: 1_000,
+      maxCharacters: 2_000_000,
+      maxTurnCharacters: 200_000
+    });
+  });
+
+  it("rejects a per-turn window larger than the total window", () => {
+    expect(() =>
+      ConversationMemoryPolicySchema.parse({
+        maxCharacters: 100_000,
+        maxTurnCharacters: 100_001
+      })
+    ).toThrow(/maxTurnCharacters cannot exceed maxCharacters/u);
+  });
+});
 describe("ActionPermissionRequestSchema", () => {
   it("rejects credential-like titles before they enter durable action storage", () => {
     const base = {
