@@ -7,6 +7,7 @@ const PERSONAL_AGENT_TENANT_SCOPES = [
   "im:message:send_as_bot",
   "im:message.p2p_msg:readonly",
   "im:message.group_msg:readonly",
+  "im:message.history:readonly",
   "im:chat:readonly",
   "docx:document:readonly",
   "drive:drive:readonly",

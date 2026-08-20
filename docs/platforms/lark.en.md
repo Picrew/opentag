@@ -97,6 +97,7 @@ docx:document:readonly
 drive:drive:readonly
 wiki:wiki:readonly
 im:message.group_msg
+im:message.history:readonly
 sheets:spreadsheet:readonly
 bitable:app:readonly
 ```
@@ -106,10 +107,13 @@ existing or manually managed app, enable them and publish the updated app
 version before running the login command. `offline_access` is requested during
 user OAuth so the local session can refresh; it is not a tenant app permission.
 
-Access requires both an app API scope and the target resource ACL. OpenTag uses
-a `user_access_token`, so it can only read content that the authorizing user can
-already open. Granting an app scope does not bypass document, folder, Wiki, or
-chat membership permissions.
+Access requires both an app API scope and the target resource ACL. Documents,
+folders, and Wikis use a `user_access_token`, so OpenTag can only read content
+that the authorizing user can already open. Chat history always uses the bot's
+`tenant_access_token`, so an expired optional user OAuth session cannot remove
+group context. The bot must be in the target chat and the app identity must have
+`im:message.history:readonly`. App scopes do not bypass resource ACLs or chat
+membership boundaries.
 
 Once enabled, an addressed message can:
 
@@ -127,14 +131,17 @@ OpenTag's native reader handles that step. Downloads and parsing are limited to
 100 MB per resource. Images, audio, and video remain typed attachment
 references in this first version; OCR and transcription are disabled.
 
-When an addressed request arrives, OpenTag preloads at most the 20 most recent
-relevant messages from the same conversation. Main-channel requests use recent
-top-level messages; topic replies use only that topic. This bounded context is
-marked as untrusted background, not as new instructions. OpenTag still reads
-only explicit URLs, current-message attachments, and resources requested through
-a tool. It does not ambiently scan an entire Drive or chat history. Enabling
-resource access also does not relax chat addressing: group messages must still
-@-mention the bot.
+When an addressed request arrives, OpenTag normally preloads at most the 20 most
+recent relevant messages from the same conversation. A request that explicitly
+names a range such as "this week", "last N days", or "chat history" is paginated
+by time, with defaults of 200 messages, 10 pages, and 40,000 characters. Context
+is marked incomplete when a limit is reached, so the agent must not present a
+partial summary as exhaustive. Main-channel requests use top-level messages;
+topic replies use only that topic. The bot can read available messages from
+before it joined after it becomes a member, but OpenTag never ambiently copies
+the whole chat when nobody addresses it. This bounded context is untrusted
+background, not new instructions. Enabling resource access also does not relax
+chat addressing: group messages must still @-mention the bot.
 
 ## Group Chat And Task Topics
 

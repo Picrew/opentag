@@ -95,7 +95,13 @@ async function main() {
     },
     addons: {
       scopes: {
-        tenant: ["im:message:send_as_bot", "im:message.p2p_msg:readonly", "im:message.group_msg:readonly", "im:chat:readonly"]
+        tenant: [
+          "im:message:send_as_bot",
+          "im:message.p2p_msg:readonly",
+          "im:message.group_msg:readonly",
+          "im:message.history:readonly",
+          "im:chat:readonly"
+        ]
       },
       events: {
         items: {

@@ -93,6 +93,7 @@ docx:document:readonly
 drive:drive:readonly
 wiki:wiki:readonly
 im:message.group_msg
+im:message.history:readonly
 sheets:spreadsheet:readonly
 bitable:app:readonly
 ```
@@ -101,9 +102,11 @@ bitable:app:readonly
 并发布更新后的应用版本，再执行登录命令。用户 OAuth 还会请求 `offline_access`，用于
 在本机刷新会话；它不是 tenant 应用权限。
 
-访问权限由“应用 API Scope + 目标资源 ACL”共同决定。OpenTag 使用
-`user_access_token`，所以只能读取当前授权用户原本就能打开的内容；应用获得 API
-权限并不会绕过文档、文件夹、知识库或群成员权限。
+访问权限由“应用 API Scope + 目标资源 ACL”共同决定。文档、文件夹、知识库等用户资源
+使用 `user_access_token`，只能读取当前授权用户原本就能打开的内容；群聊历史固定使用
+机器人的 `tenant_access_token`，避免可选用户 OAuth 过期导致群上下文失效。机器人必须已
+在目标群中，并且应用身份需要开通 `im:message.history:readonly`。应用获得 API 权限不会
+绕过资源 ACL 或群成员边界。
 
 启用后，明确发给机器人的消息可以：
 
@@ -118,10 +121,12 @@ Message Resource API 获取，不从 Drive 扫描。飞书官方 OpenAPI MCP 本
 附件，所以这一步由 OpenTag 原生 Reader 完成。单个资源下载和解析上限为 100 MB。
 首版对图片、音频和视频只保留类型化附件引用，不启用 OCR 或转录。
 
-收到明确 @ 的请求后，OpenTag 会预加载同一会话最近最多 20 条相关消息。主群请求只
-读取最近的顶层消息，话题回复只读取该话题内消息。这些内容会标记为“不可信背景”，
-不会被当作新的执行指令。OpenTag 仍然只读取显式 URL、当前消息附件，以及 Agent
-明确调用工具请求的资源，不会在无人 @ 时扫描整个云盘或群历史。开启资源访问也不会
+收到明确 @ 的请求后，OpenTag 默认预加载同一会话最近最多 20 条相关消息；当请求明确
+包含“这一周”“最近 N 天”“历史消息”等时间或历史范围时，会按时间范围分页读取，默认
+最多 200 条、10 页和 40,000 字符。达到上限时上下文会标记为不完整，Agent 不应声称是
+全量总结。主群请求只读取顶层消息，话题回复只读取该话题内消息。这些内容会标记为
+“不可信背景”，不会被当作新的执行指令。机器人入群后可以按需读取该群在其入群前的
+可用历史记录；OpenTag 不会在无人 @ 时主动扫描或复制整个群历史。开启资源访问也不会
 放宽聊天触发边界：群聊中仍然必须 @ 机器人。
 
 ## 群聊与任务话题

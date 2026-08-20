@@ -48,6 +48,7 @@ describe("Lark Personal Agent registration", () => {
               "im:message:send_as_bot",
               "im:message.p2p_msg:readonly",
               "im:message.group_msg:readonly",
+              "im:message.history:readonly",
               "im:chat:readonly",
               "docx:document:readonly",
               "drive:drive:readonly",

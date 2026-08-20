@@ -35,12 +35,75 @@ export type FeishuFetch = typeof fetch;
 const TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000;
 const TOKEN_REQUEST_TIMEOUT_MS = 15_000;
 
+type FeishuTenantTokenResponse = {
+  code?: number;
+  msg?: string;
+  tenant_access_token?: string;
+  expire?: number;
+};
+
 function openApiOrigin(domain: LarkDomain): string {
   return domain === "feishu" ? "https://open.feishu.cn" : "https://open.larksuite.com";
 }
 
 function accountOrigin(domain: LarkDomain): string {
   return domain === "feishu" ? "https://accounts.feishu.cn" : "https://accounts.larksuite.com";
+}
+
+export function createFeishuTenantTokenProvider(input: {
+  appId: string;
+  appSecret: string;
+  domain?: LarkDomain;
+  fetchImpl?: FeishuFetch;
+  now?: () => number;
+  refreshSkewMs?: number;
+  timeoutMs?: number;
+}): FeishuTokenProvider {
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const now = input.now ?? Date.now;
+  const refreshSkewMs = Math.max(input.refreshSkewMs ?? TOKEN_REFRESH_SKEW_MS, 0);
+  let accessToken: string | undefined;
+  let refreshAt = 0;
+  let inFlight: Promise<string> | undefined;
+
+  async function refresh(): Promise<string> {
+    const response = await fetchImpl(
+      `${openApiOrigin(input.domain ?? "feishu")}/open-apis/auth/v3/tenant_access_token/internal`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8", accept: "application/json" },
+        body: JSON.stringify({ app_id: input.appId, app_secret: input.appSecret }),
+        signal: AbortSignal.timeout(input.timeoutMs ?? TOKEN_REQUEST_TIMEOUT_MS)
+      }
+    );
+    const payload = (await response.json().catch(() => ({}))) as FeishuTenantTokenResponse;
+    if (
+      !response.ok ||
+      payload.code !== 0 ||
+      typeof payload.tenant_access_token !== "string" ||
+      payload.tenant_access_token.length === 0
+    ) {
+      const detail = typeof payload.msg === "string" ? payload.msg : response.statusText || "unknown_error";
+      throw new Error(`Feishu tenant token request failed with status ${response.status}: ${detail}`);
+    }
+    accessToken = payload.tenant_access_token;
+    const lifetimeMs = Math.max((payload.expire ?? 7200) * 1000, 0);
+    refreshAt = now() + Math.max(lifetimeMs - refreshSkewMs, 0);
+    return accessToken;
+  }
+
+  return {
+    async getToken() {
+      if (accessToken && now() < refreshAt) return accessToken;
+      inFlight ??= refresh().finally(() => {
+        inFlight = undefined;
+      });
+      return inFlight;
+    },
+    invalidate() {
+      refreshAt = 0;
+    }
+  };
 }
 
 function parseScope(value: unknown): string[] | undefined {

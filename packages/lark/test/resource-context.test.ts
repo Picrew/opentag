@@ -69,6 +69,61 @@ describe("Feishu current-message resource context", () => {
     expect(result[0]?.text).not.toContain("Other thread");
   });
 
+  it("paginates the requested prior week instead of limiting an explicit summary to recent messages", async () => {
+    const eventTimeMs = Date.UTC(2026, 7, 20, 12, 0, 0);
+    const getChatHistory = vi.fn(async (_chatId: string, options: { pageToken?: string }) => options.pageToken
+      ? {
+          items: [
+            {
+              id: "om-oldest",
+              type: "message" as const,
+              text: "Monday decision",
+              metadata: { creatorId: "ou-1", createTime: eventTimeMs - 6 * 24 * 60 * 60 * 1000 }
+            }
+          ],
+          hasMore: false
+        }
+      : {
+          items: [
+            { id: "om-current", type: "message" as const, text: "总结一下这一周的消息", metadata: {} },
+            {
+              id: "om-newest",
+              type: "message" as const,
+              text: "Thursday update",
+              metadata: { creatorId: "ou-2", createTime: eventTimeMs - 60 * 60 * 1000 }
+            }
+          ],
+          hasMore: true,
+          pageToken: "next-page"
+        });
+    const resolve = createFeishuResourceContextResolver({
+      tools: { readResource: vi.fn(), downloadMessageFile: vi.fn(), getChatHistory },
+      maxExpandedConversationMessages: 10
+    });
+
+    const result = await resolve({
+      chatId: "oc-chat",
+      chatType: "group",
+      messageId: "om-current",
+      text: "总结一下这一周的消息",
+      attachments: [],
+      eventTimeMs
+    });
+
+    expect(getChatHistory).toHaveBeenCalledTimes(2);
+    expect(getChatHistory.mock.calls[0]?.[1]).toMatchObject({
+      pageSize: 50,
+      sortType: "ByCreateTimeDesc",
+      startTime: Math.floor(eventTimeMs / 1000) - 7 * 24 * 60 * 60,
+      endTime: Math.floor(eventTimeMs / 1000)
+    });
+    expect(getChatHistory.mock.calls[1]?.[1]).toMatchObject({ pageToken: "next-page" });
+    expect(result[0]).toMatchObject({
+      title: "Requested Feishu channel history",
+      text: expect.stringMatching(/Monday decision.*Thursday update/s)
+    });
+  });
+
   it("makes missing recent-message access visible to the agent", async () => {
     const resolve = createFeishuResourceContextResolver({
       tools: {

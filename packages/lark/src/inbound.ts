@@ -106,6 +106,7 @@ export type LarkMessageHandlerConfig = {
     rootId?: string;
     text: string;
     attachments: OpenTagChannelAttachmentRef[];
+    eventTimeMs?: number;
   }): Promise<LarkResolvedResourceContext[]>;
   submitThreadAction?(action: LarkThreadActionInput): Promise<unknown>;
   // Self-service binding from within Lark (`/bind owner/repo`); optional so tests can omit it.
@@ -752,7 +753,8 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       messageId,
       ...(message.root_id ? { rootId: message.root_id } : {}),
       text: parsedContent.text,
-      attachments: parsedContent.attachments
+      attachments: parsedContent.attachments,
+      eventTimeMs
     });
 
     const event = normalizeLarkMessage({

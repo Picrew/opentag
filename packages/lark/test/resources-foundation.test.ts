@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildFeishuOAuthAuthorizationUrl,
   createFeishuOpenApiClient,
+  createFeishuTenantTokenProvider,
   createFeishuUserTokenProvider,
   exchangeFeishuOAuthCode,
   findFeishuResourceReferences,
@@ -93,6 +94,38 @@ describe("Feishu user OAuth", () => {
     await expect(Promise.all([provider.getToken(), provider.getToken()])).resolves.toEqual(["access_2", "access_2"]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(onTokensChanged).toHaveBeenCalledWith(expect.objectContaining({ refreshToken: "refresh_2" }));
+  });
+});
+
+describe("Feishu tenant access token", () => {
+  it("coalesces token requests, caches the result, and refreshes after invalidation", async () => {
+    let sequence = 0;
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      sequence += 1;
+      expect(JSON.parse(String(init?.body))).toEqual({ app_id: "cli_1", app_secret: "secret_1" });
+      return Response.json({
+        code: 0,
+        tenant_access_token: `tenant_${sequence}`,
+        expire: 7200
+      });
+    }) as unknown as typeof fetch;
+    const provider = createFeishuTenantTokenProvider({
+      appId: "cli_1",
+      appSecret: "secret_1",
+      fetchImpl,
+      now: () => 1_000_000
+    });
+
+    await expect(Promise.all([provider.getToken(), provider.getToken()])).resolves.toEqual(["tenant_1", "tenant_1"]);
+    await expect(provider.getToken()).resolves.toBe("tenant_1");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
+      "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+    );
+
+    provider.invalidate?.();
+    await expect(provider.getToken()).resolves.toBe("tenant_2");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -9,6 +9,7 @@ import {
 import {
   createFeishuOpenApiClient,
   createFeishuResourceContextResolver,
+  createFeishuTenantTokenProvider,
   createFeishuTools,
   type LarkMessageHandlerConfig
 } from "@opentag/lark";
@@ -71,14 +72,37 @@ export function feishuResourceContextFromCliConfig(
   config: OpenTagCliConfig
 ): LarkMessageHandlerConfig["resolveResourceContext"] | undefined {
   const lark = config.platforms.lark;
-  if (!lark?.userResourceAccess?.enabled) return undefined;
-  const tokenProvider = createLarkMcpUserTokenProvider({
+  if (!lark) return undefined;
+  const tenantTokenProvider = createFeishuTenantTokenProvider({
     appId: lark.appId,
     appSecret: lark.appSecret,
     domain: lark.domain
   });
-  const client = createFeishuOpenApiClient({ tokenProvider, domain: lark.domain });
-  return createFeishuResourceContextResolver({ tools: createFeishuTools(client) });
+  const tenantTools = createFeishuTools(createFeishuOpenApiClient({
+    tokenProvider: tenantTokenProvider,
+    domain: lark.domain
+  }));
+  if (!lark.userResourceAccess?.enabled) {
+    return createFeishuResourceContextResolver({ tools: tenantTools });
+  }
+  const userTokenProvider = createLarkMcpUserTokenProvider({
+    appId: lark.appId,
+    appSecret: lark.appSecret,
+    domain: lark.domain
+  });
+  const userTools = createFeishuTools(createFeishuOpenApiClient({
+    tokenProvider: userTokenProvider,
+    domain: lark.domain
+  }));
+  return createFeishuResourceContextResolver({
+    tools: {
+      ...userTools,
+      // Conversation history belongs to the bot installation, not to one
+      // operator's OAuth session. Keeping it on the tenant token means group
+      // context remains available when that optional user session expires.
+      getChatHistory: tenantTools.getChatHistory
+    }
+  });
 }
 
 export async function runFeishuLoginCommand(
