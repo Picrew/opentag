@@ -37,7 +37,8 @@
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.71.1",
     "@opentag/client": "workspace:*",
-    "@opentag/core": "workspace:*"
+    "@opentag/core": "workspace:*",
+    "officeparser": "^7.8.0"
   },
   "devDependencies": {
     "tsup": "^8.5.1",
