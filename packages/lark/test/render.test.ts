@@ -24,7 +24,7 @@ import {
 } from "../src/index.js";
 
 describe("renderLarkAcknowledgement", () => {
-  it("renders immutable governed permission choices as native buttons", () => {
+  it("renders governed permission choices as trusted topic-reply commands", () => {
     const card = createLarkApprovalPromptCard(OpenTagApprovalPromptPresentationSchema.parse({
       kind: "approval_prompt",
       runId: "run_1",
@@ -49,16 +49,9 @@ describe("renderLarkAcknowledgement", () => {
     expect(JSON.stringify(card)).toContain("npm / npm:team / publish / @acme/report / next");
     expect(JSON.stringify(card)).toContain('grantScope={\\"package\\":\\"@acme/report\\",\\"versions\\":\\"*\\"}');
     expect(JSON.stringify(card)).toContain("Allow for run applies only to the Run scope shown above");
-    expect(JSON.stringify(card)).toContain("按钮不可用时，在本话题回复 approve 1（仅一次）、approve 1 本次运行，或 reject 1。");
+    expect(JSON.stringify(card)).toContain("请在本话题回复：approve 1（仅一次）、approve 1 本次运行、reject 1。");
     expect(JSON.stringify(card)).toContain('\\"urlQuery\\":{\\"environment\\":\\"staging\\",\\"force\\":\\"false\\"}');
-    const action = card.elements.find((element) => element.tag === "action");
-    expect(action).toMatchObject({ tag: "action", actions: [{ text: { content: "Allow once" } }, { text: { content: "Allow for run" } }, { text: { content: "Deny" } }] });
-    if (!action || action.tag !== "action") throw new Error("expected action");
-    expect(action.actions.map((button) => parseLarkThreadActionButtonValue(button.value))).toEqual([
-      expect.objectContaining({ command: "approve 1", permissionDecision: "allow_once", proposalHash: "hash_1", actionId: "action_1" }),
-      expect.objectContaining({ command: "approve 1", permissionDecision: "allow_run", proposalHash: "hash_1", actionId: "action_1" }),
-      expect.objectContaining({ command: "reject 1", permissionDecision: "deny", proposalHash: "hash_1", actionId: "action_1" })
-    ]);
+    expect(card.elements.some((element) => element.tag === "action")).toBe(false);
   });
   it("renders a quiet received acknowledgement with audit guidance", () => {
     expect(renderLarkAcknowledgement("run_1")).toBe(

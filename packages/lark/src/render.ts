@@ -147,39 +147,21 @@ export function renderLarkApprovalPrompt(presentation: OpenTagApprovalPromptPres
 }
 
 export function createLarkApprovalPromptCard(presentation: OpenTagApprovalPromptPresentation): LarkCard {
-  const labels = { allow_once: "Allow once", allow_run: "Allow for run", deny: "Deny" } as const;
+  const replyCommands = presentation.decisions.map((decision) => {
+    if (decision === "allow_once") return "approve 1（仅一次）";
+    if (decision === "allow_run") return "approve 1 本次运行";
+    return "reject 1";
+  });
   return {
     config: { wide_screen_mode: true },
     header: { template: "yellow", title: { tag: "plain_text", content: presentation.title } },
     elements: [
       { tag: "div", text: { tag: "lark_md", content: renderLarkApprovalPrompt(presentation).split(" Choose Allow once")[0]! } },
       {
-        tag: "action",
-        layout: "trisection",
-        actions: presentation.decisions.map((permissionDecision) => ({
-          tag: "button",
-          text: { tag: "plain_text", content: labels[permissionDecision] },
-          type: permissionDecision === "allow_once" ? "primary" : permissionDecision === "deny" ? "danger" : "default",
-          value: {
-            opentag: "thread_action",
-            version: 1,
-            command: permissionDecision === "deny" ? "reject 1" : "approve 1",
-            decision: permissionDecision === "deny" ? "reject" : "approve",
-            index: 1,
-            proposalId: presentation.proposalId,
-            intentId: presentation.intentId,
-            permissionDecision,
-            proposalHash: presentation.proposalHash,
-            approvalEpoch: presentation.approvalEpoch,
-            actionId: presentation.actionId
-          }
-        }))
-      },
-      {
         tag: "note",
         elements: [{
           tag: "plain_text",
-          content: "按钮不可用时，在本话题回复 approve 1（仅一次）、approve 1 本次运行，或 reject 1。"
+          content: `请在本话题回复：${replyCommands.join("、")}。`
         }]
       }
     ]
