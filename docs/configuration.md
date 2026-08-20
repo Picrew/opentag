@@ -86,7 +86,8 @@ Minimal local config:
   "runnerToken": "dev_runner_token",
   "pollIntervalMs": 5000,
   "heartbeatIntervalMs": 15000,
-  "runTimeoutMs": 1800000,
+  "maxConcurrentRuns": 4,
+  "runTimeoutMs": 600000,
   "repositories": [
     {
       "provider": "github",
@@ -317,7 +318,8 @@ that Gateway-owned tool subprocesses have stopped.
 | `allowAutoCreatePullRequest` | `false` | Legacy mode that creates a PR immediately when executor results include changes |
 | `pollIntervalMs` | `5000` | Poll interval for `serve` |
 | `heartbeatIntervalMs` | `15000` | Heartbeat interval for claimed runs |
-| `runTimeoutMs` | none | Optional hard timeout for one executor run. When it fires, OpenTag requests cancellation and records the run as `timed_out`. |
+| `maxConcurrentRuns` | `4` | Maximum number of independent executor runs handled concurrently by one local runner. Each repository run uses an attempt-isolated worktree. |
+| `runTimeoutMs` | `600000` | Hard timeout for one executor run. When it fires, OpenTag requests cancellation and records the run as `timed_out`. |
 
 ### Hermes execution profile
 
@@ -645,7 +647,8 @@ for repeatable setups.
 | `OPENTAG_RUNNER_TOKEN` | `OPENTAG_PAIRING_TOKEN` fallback | Preferred runner-scoped dispatcher token for claim/progress/completion, status, cancel, and local hook ingest |
 | `OPENTAG_POLL_INTERVAL_MS` | `5000` | Poll interval |
 | `OPENTAG_HEARTBEAT_INTERVAL_MS` | `15000` | Heartbeat interval |
-| `OPENTAG_RUN_TIMEOUT_MS` | none | Optional hard timeout for one executor run |
+| `OPENTAG_MAX_CONCURRENT_RUNS` | `4` | Maximum independent runs handled concurrently by the local runner |
+| `OPENTAG_RUN_TIMEOUT_MS` | `600000` | Hard timeout for one executor run |
 
 ## Linear Dispatcher / Relay Environment
 

@@ -53,6 +53,7 @@ Describe only capabilities that are actually configured:
 - Workflow control: show `/status`, diagnose with `/doctor`, stop with `/stop`, and accept bounded approvals through topic replies or cards when callbacks are configured.
 - Multi-agent routing: use the configured executor such as Claude Code, Codex, Cursor, OpenCode, Hermes, or OpenClaw. Do not imply that the source application itself is the executor.
 - Asynchronous work: let the group continue chatting while a task runs, preserve its topic context, and post the final result when complete.
+- Concurrent requests: isolate independent top-level requests so one slow or approval-blocked task does not serialize unrelated chat. Keep replies attached to their own source message or task topic.
 
 ## Security And Governance
 
@@ -123,4 +124,5 @@ Tag：嗯，搞定就行。
 - OpenTag does not join unaddressed group conversation by default.
 - Recent-message context depends on Lark / Feishu user resource access and the `im:message:readonly` scope.
 - Interactive approval buttons depend on a configured card callback endpoint; topic text commands remain the fallback.
+- Local execution defaults to four concurrent runs and a ten-minute hard timeout per run; administrators may tune both limits for machine capacity and workload risk.
 - Proactive reminders, unattended schedules, and standing instructions require explicit automation support and administrator configuration.
