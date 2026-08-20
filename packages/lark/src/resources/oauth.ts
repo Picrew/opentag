@@ -5,7 +5,7 @@ export const DEFAULT_FEISHU_USER_SCOPES = [
   "docx:document:readonly",
   "drive:drive:readonly",
   "wiki:wiki:readonly",
-  "im:message.group_msg",
+  "im:message.group_msg:get_as_user",
   "sheets:spreadsheet:readonly",
   "bitable:app:readonly"
 ] as const;
