@@ -6,6 +6,7 @@ import {
   renderOpenTagPresentationPlainText,
   type OpenTagDoctorSummaryPresentation,
   type ConversationMemoryPolicy,
+  type OpenTagChannelAttachmentRef,
   type OpenTagEvent,
   type OpenTagSourceThreadStatusPresentation
 } from "@opentag/core";
@@ -260,14 +261,62 @@ function shouldMigrateLegacyLocalBinding(input: {
   );
 }
 
-function extractText(content: string | undefined): string {
-  if (!content) return "";
-  try {
-    const parsed = JSON.parse(content) as { text?: unknown };
-    return typeof parsed.text === "string" ? parsed.text : "";
-  } catch {
-    return "";
+type ParsedInboundContent = { text: string; attachments: OpenTagChannelAttachmentRef[] };
+
+function collectPostText(value: unknown, output: string[]): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectPostText(item, output);
+    return;
   }
+  if (!value || typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  if (typeof record.title === "string" && record.title.trim()) output.push(record.title.trim());
+  if (typeof record.text === "string" && record.text.trim()) output.push(record.text.trim());
+  if (record.tag === "a" && typeof record.href === "string" && record.href.trim()) output.push(record.href.trim());
+  for (const [key, child] of Object.entries(record)) {
+    if (key !== "title" && key !== "text" && key !== "href" && key !== "tag") collectPostText(child, output);
+  }
+}
+
+function attachmentKind(messageType: string): OpenTagChannelAttachmentRef["kind"] {
+  if (messageType === "image") return "image";
+  if (messageType === "audio") return "audio";
+  if (messageType === "media") return "video";
+  return "file";
+}
+
+function parseInboundContent(message: NonNullable<LarkInboundMessageEvent["message"]>): ParsedInboundContent {
+  let content: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(message.content ?? "{}") as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) content = parsed as Record<string, unknown>;
+  } catch {
+    return { text: "", attachments: [] };
+  }
+  const messageType = message.message_type ?? "text";
+  if (messageType === "text") {
+    return { text: typeof content.text === "string" ? content.text : "", attachments: [] };
+  }
+  if (messageType === "post" || messageType === "interactive") {
+    const parts: string[] = [];
+    collectPostText(content, parts);
+    return { text: [...new Set(parts)].join("\n"), attachments: [] };
+  }
+  const resourceKey = typeof content.file_key === "string"
+    ? content.file_key
+    : typeof content.image_key === "string" ? content.image_key : undefined;
+  if (!resourceKey || !message.message_id) return { text: "", attachments: [] };
+  const kind = attachmentKind(messageType);
+  const name = typeof content.file_name === "string" && content.file_name.trim() ? content.file_name.trim() : undefined;
+  const resourceType = kind === "image" ? "image" : "file";
+  const attachment: OpenTagChannelAttachmentRef = {
+    id: resourceKey,
+    kind,
+    ...(name ? { name } : {}),
+    uri: `lark://message/${encodeURIComponent(message.message_id)}/resource/${encodeURIComponent(resourceKey)}?type=${resourceType}`
+  };
+  const label = name ?? kind;
+  return { text: `Read the attached ${kind}: ${label}`, attachments: [attachment] };
 }
 
 function mentionsBot(mentions: LarkMention[] | undefined, botOpenId: string): boolean {
@@ -456,7 +505,8 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
   return async function handleLarkMessage(data: LarkInboundMessageEvent): Promise<LarkMessageHandlerOutcome> {
     const renderLocale = config.renderLocale ?? larkRenderLocaleFromDomain(config.domain);
     const message = data.message;
-    if (!message || message.message_type !== "text") {
+    const supportedMessageTypes = new Set(["text", "post", "interactive", "file", "image", "audio", "media"]);
+    if (!message || !message.message_type || !supportedMessageTypes.has(message.message_type)) {
       return { status: "ignored_non_text" };
     }
 
@@ -469,7 +519,8 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       return { status: "ignored_invalid_payload" };
     }
 
-    const command = stripLarkMention(extractText(message.content));
+    const parsedContent = parseInboundContent(message);
+    const command = stripLarkMention(parsedContent.text);
     const threadActionCommand = parseLarkThreadActionCommand(command);
     const isThreadReply = Boolean(message.root_id || message.parent_id);
 
@@ -682,7 +733,8 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       chatId,
       chatType: message.chat_type ?? "group",
       senderOpenId,
-      text: extractText(message.content),
+      text: parsedContent.text,
+      ...(parsedContent.attachments.length ? { attachments: parsedContent.attachments } : {}),
       messageId,
       ...(message.root_id ? { rootId: message.root_id } : {}),
       eventId,

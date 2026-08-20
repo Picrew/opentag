@@ -158,6 +158,49 @@ function createInteractiveHandler(input: {
 }
 
 describe("createLarkMessageHandler", () => {
+  it("normalizes explicitly addressed group file messages as attachment context", async () => {
+    const { handler, createRun } = createInteractiveHandler({ result: runCreated });
+    const outcome = await handler({
+      ...message,
+      message: {
+        ...message.message,
+        message_type: "file",
+        content: JSON.stringify({ file_key: "file_1", file_name: "report.pdf" })
+      }
+    });
+
+    expect(outcome.status).toBe("created");
+    const event = createRun.mock.calls[0]?.[0];
+    expect(event?.command.rawText).toBe("Read the attached file: report.pdf");
+    expect(event?.context).toContainEqual(expect.objectContaining({
+      kind: "attachment",
+      uri: "lark://message/om_msg/resource/file_1?type=file",
+      title: "report.pdf"
+    }));
+    expect(event?.metadata.larkAttachments).toEqual([expect.objectContaining({ id: "file_1", kind: "file" })]);
+  });
+
+  it("extracts rich post text while preserving the group mention boundary", async () => {
+    const { handler, createRun } = createInteractiveHandler({ result: runCreated });
+    const outcome = await handler({
+      ...message,
+      message: {
+        ...message.message,
+        message_type: "post",
+        content: JSON.stringify({ zh_cn: { title: "Request", content: [[{ tag: "text", text: "@_user_1 read the linked doc" }]] } })
+      }
+    });
+
+    expect(outcome.status).toBe("created");
+    expect(createRun.mock.calls[0]?.[0].command.rawText).toBe("Request read the linked doc");
+
+    const ignored = await handler({
+      ...message,
+      message: { ...message.message, message_type: "post", mentions: [], content: JSON.stringify({ en_us: { content: [[{ text: "run" }]] } }) }
+    });
+    expect(ignored.status).toBe("ignored_not_addressed");
+  });
+
   it("reports created only when dispatcher creates a run", async () => {
     const outcome = await createHandler(runCreated)(message);
 

@@ -4,6 +4,7 @@ import {
   DEFAULT_CONVERSATION_MEMORY_POLICY,
   type ContextPointer,
   type ConversationMemoryPolicy,
+  type OpenTagChannelAttachmentRef,
   type OpenTagChannelInboundMessage,
   type OpenTagCommand,
   type OpenTagEvent,
@@ -22,6 +23,7 @@ export type LarkMessageInput = {
   chatType: string;
   senderOpenId: string;
   text: string;
+  attachments?: OpenTagChannelAttachmentRef[];
   messageId: string;
   rootId?: string;
   eventId: string;
@@ -81,7 +83,7 @@ export function normalizeLarkChannelMessage(input: LarkMessageInput): OpenTagCha
       actor: { provider: "lark", id: input.senderOpenId }
     },
     text,
-    attachments: [],
+    attachments: input.attachments ?? [],
     replyTarget: { channel, thread, purpose: "all" }
   });
 }
@@ -214,7 +216,14 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
         visibility: "organization",
         title: "Lark message text"
       },
-      ...contextPointersForCommand(command)
+      ...contextPointersForCommand(command),
+      ...(input.attachments ?? []).map((attachment) => ({
+        provider: "lark",
+        kind: "attachment",
+        uri: attachment.uri ?? `lark://attachment/${attachment.id}`,
+        visibility: "organization" as const,
+        title: attachment.name ?? `Lark ${attachment.kind} attachment`
+      }))
     ],
     permissions: permissionsForIntent(command.intent, repositoryMetadata !== undefined),
     callback: {
@@ -242,6 +251,7 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
       ...(input.rootId ? { rootId: input.rootId } : {}),
       ...(input.botOpenId ? { larkBotOpenId: input.botOpenId } : {}),
       ...(input.applicationId ? { channelApplicationId: input.applicationId } : {}),
+      ...(input.attachments?.length ? { larkAttachments: input.attachments } : {}),
       ...(input.botOpenId ? { channelBotId: input.botOpenId } : {}),
       ...commandMetadata(command),
       ...repositoryMetadata
