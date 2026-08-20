@@ -262,6 +262,7 @@ describe("ACP executor", () => {
     expect(result.changedFiles).toEqual(["acp-output.txt", "acp-prompt.json", "acp-session.json"]);
     expect(git(repo, ["show", "opentag/run_acp:acp-output.txt"])).toContain("ACP fixture");
     const prompt = JSON.parse(git(repo, ["show", "opentag/run_acp:acp-prompt.json"]));
+    expect(prompt.promptCount).toBe(1);
     expect(prompt.text).toContain("Enterprise teammate contract:");
     expect(prompt.text).toContain("Speak like a capable colleague");
     expect(prompt.text).toContain("interaction mode: task");
@@ -274,6 +275,40 @@ describe("ACP executor", () => {
     expect(prompt.text).toContain("github.repository.read");
     expect(prompt.text).not.toContain("Read the selected repository");
   }, 15_000);
+
+  it("retries exactly once when an ACP turn ends without text", async () => {
+    const scratch = tempDir("empty-first");
+    const executor = createAcpExecutor({ manifest: manifest("empty-first") });
+
+    const result = await executor.run(input({ kind: "scratch", path: scratch }, "run_empty_first"), {
+      emit: async () => undefined
+    });
+
+    expect(result).toMatchObject({
+      conclusion: "success",
+      summary: "ACP fixture completed the requested work."
+    });
+    expect(JSON.parse(readFileSync(join(scratch, "acp-prompt.json"), "utf8"))).toMatchObject({
+      promptCount: 2,
+      text: expect.stringContaining("previous turn ended without a textual answer")
+    });
+  });
+
+  it("does not report an empty ACP result as successful completion", async () => {
+    const scratch = tempDir("empty-output");
+    const executor = createAcpExecutor({ manifest: manifest("empty-output") });
+
+    const result = await executor.run({
+      ...input({ kind: "scratch", path: scratch }, "run_empty_output"),
+      metadata: { larkRenderLocale: "zh-CN" }
+    }, { emit: async () => undefined });
+
+    expect(result).toMatchObject({
+      conclusion: "needs_human",
+      summary: "这次没有生成有效回复，自动重试后仍然是空结果。"
+    });
+    expect(result.summary).not.toContain("completed without textual output");
+  });
 
   it.skipIf(process.platform === "win32")("does not signal a foreign process group after the ACP child exits", async () => {
     const scratch = tempDir("foreign-process-group");
@@ -338,6 +373,22 @@ describe("ACP executor", () => {
     expect(JSON.parse(readFileSync(join(scratch, "acp-session.json"), "utf8"))).toMatchObject({
       rawResultRequested: true
     });
+  }, 15_000);
+
+  it("prefers the clean Claude terminal result over streamed protocol artifacts", async () => {
+    const scratch = tempDir("raw-result-and-stream");
+    const executor = createAcpExecutor({
+      manifest: manifest("raw-result-and-stream"),
+      captureRawResultFallback: true
+    });
+
+    const result = await executor.run(input({ kind: "scratch", path: scratch }, "run_clean_terminal_result"), {
+      emit: async () => undefined
+    });
+
+    expect(result).toMatchObject({ conclusion: "success", summary: "Clean terminal result." });
+    expect(result.summary).not.toContain("</think>");
+    expect(result.summary).not.toContain("arg_value");
   }, 15_000);
 
   it("selects a required ACP session mode before prompting", async () => {

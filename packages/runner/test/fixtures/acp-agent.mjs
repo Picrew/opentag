@@ -67,7 +67,7 @@ const app = acp
     const sessionId = crypto.randomUUID();
     const rawResultRequested = Array.isArray(ctx.params._meta?.claudeCode?.emitRawSDKMessages) &&
       ctx.params._meta.claudeCode.emitRawSDKMessages.some((filter) => filter?.type === "result");
-    sessions.set(sessionId, { cwd: ctx.params.cwd, cancelled: false, rawResultRequested });
+    sessions.set(sessionId, { cwd: ctx.params.cwd, cancelled: false, rawResultRequested, promptCount: 0 });
     await record(ctx.params.cwd, "acp-session.json", {
       cwd: ctx.params.cwd,
       mcpServers: ctx.params.mcpServers,
@@ -100,11 +100,16 @@ const app = acp
   .onRequest(acp.methods.agent.session.prompt, async (ctx) => {
     const session = sessions.get(ctx.params.sessionId);
     if (!session) throw new Error("unknown test session");
+    session.promptCount += 1;
     const text = ctx.params.prompt
       .filter((block) => block.type === "text")
       .map((block) => block.text)
       .join("\n");
-    await record(session.cwd, "acp-prompt.json", { text });
+    await record(session.cwd, "acp-prompt.json", { text, promptCount: session.promptCount });
+
+    if (mode === "empty-output" || (mode === "empty-first" && session.promptCount === 1)) {
+      return { stopReason: "end_turn" };
+    }
 
     await ctx.client.notify(acp.methods.client.session.update, {
       sessionId: ctx.params.sessionId,
@@ -188,7 +193,7 @@ const app = acp
         status: "completed"
       }
     });
-    if (mode === "raw-result-only") {
+    if (mode === "raw-result-only" || mode === "raw-result-and-stream") {
       if (session.rawResultRequested) {
         await ctx.client.notify("_claude/sdkMessage", {
           sessionId: ctx.params.sessionId,
@@ -197,15 +202,19 @@ const app = acp
             subtype: "success",
             is_error: false,
             origin: { kind: "human" },
-            result: fixtureConfig.OPENTAG_ACP_TEST_OUTPUT ?? "Raw SDK result fallback completed the requested work."
+            result: mode === "raw-result-and-stream"
+              ? "Clean terminal result."
+              : fixtureConfig.OPENTAG_ACP_TEST_OUTPUT ?? "Raw SDK result fallback completed the requested work."
           }
         });
       }
-      return { stopReason: "end_turn" };
+      if (mode === "raw-result-only") return { stopReason: "end_turn" };
     }
     const messageChunks = mode === "chunked-output"
       ? ["OPENTAG_", "CHUNK_OK"]
-      : [fixtureConfig.OPENTAG_ACP_TEST_OUTPUT ?? "ACP fixture completed the requested work."];
+      : [mode === "raw-result-and-stream"
+          ? "dirty stream </think><arg_value>"
+          : fixtureConfig.OPENTAG_ACP_TEST_OUTPUT ?? "ACP fixture completed the requested work."];
     for (const text of messageChunks) {
       await ctx.client.notify(acp.methods.client.session.update, {
         sessionId: ctx.params.sessionId,

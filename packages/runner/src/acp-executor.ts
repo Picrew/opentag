@@ -741,12 +741,25 @@ function stopResult(input: {
   cancelTerminationConfirmed: boolean;
 }) {
   if (input.stopReason === "end_turn") {
+    if (!input.output.trim()) {
+      const isChinese = input.run.metadata?.["larkRenderLocale"] === "zh-CN";
+      return {
+        conclusion: "needs_human" as const,
+        summary: isChinese
+          ? "这次没有生成有效回复，自动重试后仍然是空结果。"
+          : `${input.manifest.label} returned an empty result after one automatic retry.`,
+        changedFiles: input.files,
+        nextAction: isChinese
+          ? "请再试一次；如果持续出现，请检查 Claude Agent ACP 的连接和输出日志。"
+          : "Retry once; if this persists, inspect the Claude Agent ACP connection and output logs."
+      };
+    }
     return createExecutorRunResult({
       executorName: input.manifest.label,
       runId: input.run.runId,
       branchName: input.branchName,
       baseBranch: input.baseBranch,
-      output: input.output || `${input.manifest.label} completed without textual output.`,
+      output: input.output,
       changedFiles: input.files
     });
   }
@@ -1062,34 +1075,56 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                   }
                   return "cancelled";
                 }
-                void session.prompt(promptForRun(input));
-                for (;;) {
-                  const message = await session.nextUpdate();
-                  if (message.kind === "stop") return message.stopReason;
-                  await emitSessionUpdate(sink, message.update, output);
-                  if (message.update.sessionUpdate === "tool_call_update") {
-                    const governed = governedActions.get(message.update.toolCallId);
-                    if (governed && !governed.reported && (message.update.status === "completed" || message.update.status === "failed")) {
-                      try {
-                        await input.materialActionReporter?.({
-                          actionId: governed.resolution.actionId,
-                          toolCallId: message.update.toolCallId,
-                          provider: "acp",
-                          receiptRef: `acp:${session.sessionId}:${message.update.toolCallId}`,
-                          outcome: "unknown",
-                          reportedOutcome: message.update.status
-                        });
-                        governed.reported = true;
-                      } catch {
-                        await sink.emit({
-                          type: "executor.progress",
-                          message: `Could not durably correlate material action ${governed.resolution.actionId}; retrying as unknown before session cleanup.`,
-                          at: new Date().toISOString()
-                        });
+                let turnPrompt = promptForRun(input);
+                for (let turn = 0; turn < 2; turn += 1) {
+                  void session.prompt(turnPrompt);
+                  let turnStopReason: acp.StopReason;
+                  for (;;) {
+                    const message = await session.nextUpdate();
+                    if (message.kind === "stop") {
+                      turnStopReason = message.stopReason;
+                      break;
+                    }
+                    await emitSessionUpdate(sink, message.update, output);
+                    if (message.update.sessionUpdate === "tool_call_update") {
+                      const governed = governedActions.get(message.update.toolCallId);
+                      if (governed && !governed.reported && (message.update.status === "completed" || message.update.status === "failed")) {
+                        try {
+                          await input.materialActionReporter?.({
+                            actionId: governed.resolution.actionId,
+                            toolCallId: message.update.toolCallId,
+                            provider: "acp",
+                            receiptRef: `acp:${session.sessionId}:${message.update.toolCallId}`,
+                            outcome: "unknown",
+                            reportedOutcome: message.update.status
+                          });
+                          governed.reported = true;
+                        } catch {
+                          await sink.emit({
+                            type: "executor.progress",
+                            message: `Could not durably correlate material action ${governed.resolution.actionId}; retrying as unknown before session cleanup.`,
+                            at: new Date().toISOString()
+                          });
+                        }
                       }
                     }
                   }
+                  if (
+                    turnStopReason !== "end_turn" ||
+                    output.join("").trim() ||
+                    rawResultFallback ||
+                    turn === 1
+                  ) {
+                    return turnStopReason;
+                  }
+                  await sink.emit({
+                    type: "executor.progress",
+                    message: `${manifest.label} returned no final text; retrying the final response once.`,
+                    at: new Date().toISOString()
+                  });
+                  turnPrompt = "Your previous turn ended without a textual answer. Reply now with only the final answer to the user's original request. Do not call tools or repeat internal status.";
                 }
+                return "end_turn";
               });
             });
         } catch (error) {
@@ -1158,7 +1193,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           run: input,
           branchName,
           baseBranch,
-          output: output.join("").trim() || rawResultFallback,
+          output: rawResultFallback || output.join("").trim(),
           files,
           cancelTerminationConfirmed: supportsCancel && terminationObserved
         });
