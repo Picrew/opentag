@@ -52,7 +52,7 @@ export type LarkWsClient = {
 export type LarkIngressDependencies = {
   createWsClient?(config: LarkIngressConfig): LarkWsClient;
   createEventDispatcher?(handler: (data: LarkInboundMessageEvent) => Promise<void>): unknown;
-  reply?(input: { messageId: string; text: string; card?: LarkCard }): Promise<void>;
+  reply?(input: { messageId: string; text: string; card?: LarkCard; replyInThread?: boolean }): Promise<void>;
   logIgnored?(outcome: LarkMessageHandlerOutcome): void;
 };
 
@@ -363,7 +363,7 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
   let replyClient: ReturnType<typeof createLarkReplyClient> | undefined;
   const reply =
     dependencies.reply ??
-    ((input: { messageId: string; text: string; card?: LarkCard }) => {
+    ((input: { messageId: string; text: string; card?: LarkCard; replyInThread?: boolean }) => {
       replyClient ??= createLarkReplyClient({ appId: config.appId, appSecret: config.appSecret, domain: config.domain });
       return replyLarkMessage(replyClient, input);
     });

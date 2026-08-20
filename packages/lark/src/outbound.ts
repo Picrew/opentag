@@ -75,14 +75,25 @@ function larkReplyMessageId(response: unknown): string | undefined {
   return undefined;
 }
 
-export async function replyLarkMessage(client: LarkReplyClient, input: { messageId: string; text: string; card?: LarkCard }): Promise<LarkReplyResult> {
+export async function replyLarkMessage(
+  client: LarkReplyClient,
+  input: { messageId: string; text: string; card?: LarkCard; replyInThread?: boolean }
+): Promise<LarkReplyResult> {
   const reply = larkMessageApi(client, "reply").reply;
   if (!reply) throw new Error("Lark client does not support message.reply.");
   const response = await reply({
     path: { message_id: input.messageId },
     data: input.card
-      ? { content: createLarkInteractiveMessageContent(input.card), msg_type: "interactive", reply_in_thread: true }
-      : { content: createLarkTextMessageContent(input.text), msg_type: "text", reply_in_thread: true }
+      ? {
+          content: createLarkInteractiveMessageContent(input.card),
+          msg_type: "interactive",
+          reply_in_thread: input.replyInThread ?? true
+        }
+      : {
+          content: createLarkTextMessageContent(input.text),
+          msg_type: "text",
+          reply_in_thread: input.replyInThread ?? true
+        }
   });
   const messageId = larkReplyMessageId(response);
   return messageId ? { messageId } : {};

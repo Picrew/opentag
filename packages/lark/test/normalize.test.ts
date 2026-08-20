@@ -105,10 +105,28 @@ describe("normalizeLarkMessage", () => {
     expect(event?.metadata.sourceDeliveryId).toBe("evt_1");
     expect(event?.metadata.larkEventId).toBe("evt_1");
     expect(event?.metadata.larkRenderLocale).toBe("en-US");
+    expect(event?.metadata).toMatchObject({
+      larkInteractionMode: "task",
+      larkInteractionReason: "explicit_fix_intent",
+      larkReplyInThread: true
+    });
     expect(event?.metadata).toMatchObject({ channelApplicationId: "cli_app_123", channelBotId: "ou_bot" });
     expect(event?.permissions.map((permission) => permission.scope)).toEqual(
       expect.arrayContaining(["chat:postMessage", "runner:local", "repo:read", "repo:write", "pr:create"])
     );
+  });
+
+  it("marks a natural question for a main-channel reply", () => {
+    const event = normalizeLarkMessage({
+      ...baseInput,
+      text: "@_user_1 为什么这个项目会使用 Claude Code？"
+    });
+
+    expect(event?.metadata).toMatchObject({
+      larkInteractionMode: "chat",
+      larkInteractionReason: "conversational_default",
+      larkReplyInThread: false
+    });
   });
 
   it("carries an explicit disabled memory policy", () => {

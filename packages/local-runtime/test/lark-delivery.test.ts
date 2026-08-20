@@ -7,6 +7,8 @@ function larkBusiness(input: {
   phase: "progress" | "final";
   body: string;
   card?: Record<string, unknown>;
+  interactionMode?: "chat" | "task";
+  replyInThread?: boolean;
 }): DispatcherDeliveryPresentation {
   return {
     kind: "business",
@@ -17,6 +19,8 @@ function larkBusiness(input: {
     statusMessageKey: "run_hello:status",
     phase: input.phase,
     body: input.body,
+    ...(input.interactionMode ? { larkInteractionMode: input.interactionMode } : {}),
+    ...(input.replyInThread !== undefined ? { larkReplyInThread: input.replyInThread } : {}),
     ...(input.card ? { rich: { provider: "lark", payload: input.card } } : {})
   };
 }
@@ -40,6 +44,40 @@ describe("local Lark delivery compatibility path", () => {
     }));
     expect(patch).toHaveBeenCalledOnce();
     expect(patch).toHaveBeenCalledWith(expect.objectContaining({ path: { message_id: "om_status" } }));
+  });
+
+  it("suppresses chat lifecycle cards and posts one plain channel reply", async () => {
+    const reply = vi.fn().mockResolvedValue({ data: { message_id: "om_answer" } });
+    const patch = vi.fn().mockResolvedValue({});
+    const client: LarkReplyClient = { im: { message: { reply, patch } } };
+    const producer = createLocalLarkDeliveryProducer({ client });
+
+    const card = { config: { wide_screen_mode: true }, elements: [] };
+    await producer.enqueue(larkBusiness({
+      phase: "progress",
+      body: "Running.",
+      card,
+      interactionMode: "chat",
+      replyInThread: false
+    }));
+    await producer.enqueue(larkBusiness({
+      phase: "final",
+      body: "这是普通群聊回答。",
+      card,
+      interactionMode: "chat",
+      replyInThread: false
+    }));
+
+    expect(reply).toHaveBeenCalledOnce();
+    expect(reply).toHaveBeenCalledWith({
+      path: { message_id: "om_source" },
+      data: {
+        content: JSON.stringify({ text: "这是普通群聊回答。" }),
+        msg_type: "text",
+        reply_in_thread: false
+      }
+    });
+    expect(patch).not.toHaveBeenCalled();
   });
 
   it("does not call the reaction API for optional source receipts", async () => {

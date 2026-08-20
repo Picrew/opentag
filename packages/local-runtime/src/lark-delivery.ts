@@ -23,6 +23,9 @@ function larkPresentation(input: DispatcherDeliveryPresentation): {
   card?: LarkCard;
   statusMessageKey?: string;
   idempotencyKey?: string;
+  phase?: "acknowledgement" | "progress" | "final" | "received" | "running";
+  interactionMode?: "chat" | "task";
+  replyInThread?: boolean;
 } | null {
   const provider = input.kind === "source_thread_control" ? input.request.callback.provider : input.provider;
   if (provider !== "lark" || input.kind === "source_receipt") return null;
@@ -36,13 +39,20 @@ function larkPresentation(input: DispatcherDeliveryPresentation): {
     };
   }
 
+  const larkInput = input as typeof input & {
+    larkInteractionMode?: "chat" | "task";
+    larkReplyInThread?: boolean;
+  };
   const rich = input.rich?.provider === "lark" ? input.rich.payload as LarkCard : undefined;
   return {
     ...(input.threadKey ? { threadKey: input.threadKey } : {}),
     body: input.body ?? "",
     ...(rich ? { card: rich } : {}),
     ...(input.statusMessageKey ? { statusMessageKey: input.statusMessageKey } : {}),
-    ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
+    ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+    phase: input.phase,
+    ...(larkInput.larkInteractionMode ? { interactionMode: larkInput.larkInteractionMode } : {}),
+    ...(larkInput.larkReplyInThread !== undefined ? { replyInThread: larkInput.larkReplyInThread } : {})
   };
 }
 
@@ -90,11 +100,23 @@ export function createLocalLarkDeliveryProducer(input: {
         return { outcome: "queued", sideEffectIntentId: message.idempotencyKey };
       }
 
+      // Conversational mentions should feel like ordinary group-chat replies:
+      // keep transient lifecycle noise in audit and publish only the final text.
+      if (message.interactionMode === "chat" && message.phase !== "final") {
+        const runId = presentation.kind === "source_thread_control"
+          ? presentation.auditRunId ?? "control"
+          : presentation.runId;
+        return {
+          outcome: "queued",
+          sideEffectIntentId: message.idempotencyKey ?? `${runId}:${message.phase ?? "progress"}:chat-suppressed`
+        };
+      }
+
       const existingMessageId = message.statusMessageKey
         ? statusMessageIds.get(message.statusMessageKey)
         : undefined;
       if (existingMessageId) {
-        if (message.card) {
+        if (message.card && message.interactionMode !== "chat") {
           await patchLarkMessageCard(client, { messageId: existingMessageId, card: message.card });
         } else {
           await updateLarkTextMessage(client, { messageId: existingMessageId, text: message.body });
@@ -104,7 +126,8 @@ export function createLocalLarkDeliveryProducer(input: {
         const reply = await replyLarkMessage(client, {
           messageId: sourceMessageId,
           text: message.body,
-          ...(message.card ? { card: message.card } : {})
+          ...(message.card && message.interactionMode !== "chat" ? { card: message.card } : {}),
+          ...(message.replyInThread !== undefined ? { replyInThread: message.replyInThread } : {})
         });
         if (message.statusMessageKey && reply.messageId) {
           statusMessageIds.set(message.statusMessageKey, reply.messageId);

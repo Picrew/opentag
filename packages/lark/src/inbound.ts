@@ -18,6 +18,7 @@ import {
   normalizeLarkMessage,
   stripLarkMention
 } from "./normalize.js";
+import { classifyLarkInteraction } from "./interaction.js";
 import {
   createLarkDoctorSummaryCard,
   createLarkSourceThreadStatusCard,
@@ -116,7 +117,7 @@ export type LarkMessageHandlerConfig = {
   status?(input: LarkSelfServiceContext): Promise<LarkSelfServiceReply | string>;
   doctor?(input: LarkSelfServiceContext): Promise<LarkSelfServiceReply | string>;
   // Reply into the originating thread (onboarding hints, bind confirmations); optional.
-  reply?(input: { messageId: string; text: string; card?: LarkCard }): Promise<void>;
+  reply?(input: { messageId: string; text: string; card?: LarkCard; replyInThread?: boolean }): Promise<void>;
   // Unified delivery can acknowledge accepted runs through provider-native receipts.
   // When that lifecycle path is enabled, avoid also posting the ingress text acknowledgement.
   suppressRunCreatedReply?: boolean;
@@ -536,6 +537,8 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
     const command = stripLarkMention(parsedContent.text);
     const threadActionCommand = parseLarkThreadActionCommand(command);
     const isThreadReply = Boolean(message.root_id || message.parent_id);
+    const replyToSource = (input: { messageId: string; text: string; card?: LarkCard; replyInThread?: boolean }) =>
+      config.reply?.({ ...input, replyInThread: input.replyInThread ?? isThreadReply });
 
     // Group messages must @-mention the bot before triggering a write-capable run. Exact source-thread
     // action replies are allowed without a mention only when Lark marks the message as threaded.
@@ -557,7 +560,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
     }
     if (bindRequest && config.bindChannel) {
       if (!bindRequest.ok) {
-        await config.reply?.({ messageId, text: BIND_USAGE });
+        await replyToSource({ messageId, text: BIND_USAGE });
         return { status: "ignored_bind_usage", tenantKey, chatId };
       }
       const authorized = await canManageLarkBinding(config, {
@@ -572,7 +575,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
         eventId
       });
       if (!authorized) {
-        await config.reply?.({ messageId, text: BINDING_AUTH_DENIED_TEXT });
+        await replyToSource({ messageId, text: BINDING_AUTH_DENIED_TEXT });
         return { status: "ignored_bind_unauthorized", tenantKey, chatId };
       }
       await config.bindChannel({
@@ -582,7 +585,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
         owner: bindRequest.owner,
         repo: bindRequest.repo
       });
-      await config.reply?.({
+      await replyToSource({
         messageId,
         text: `Connected this chat to Project Target ${bindRequest.repoProvider}:${bindRequest.owner}/${bindRequest.repo}. @-mention me with a task to start a run.`
       });
@@ -595,7 +598,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
     }
     if (unbindRequest && config.unbindChannel) {
       if (!unbindRequest.ok) {
-        await config.reply?.({ messageId, text: UNBIND_USAGE });
+        await replyToSource({ messageId, text: UNBIND_USAGE });
         return { status: "ignored_unbind_usage", tenantKey, chatId };
       }
       const authorized = await canManageLarkBinding(config, {
@@ -610,16 +613,16 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
         eventId
       });
       if (!authorized) {
-        await config.reply?.({ messageId, text: BINDING_AUTH_DENIED_TEXT });
+        await replyToSource({ messageId, text: BINDING_AUTH_DENIED_TEXT });
         return { status: "ignored_unbind_unauthorized", tenantKey, chatId };
       }
       const binding = await config.resolveChannelBinding({ tenantKey, chatId });
       if (!binding) {
-        await config.reply?.({ messageId, text: UNBOUND_HINT });
+        await replyToSource({ messageId, text: UNBOUND_HINT });
         return { status: "ignored_unbound_chat", tenantKey, chatId };
       }
       await config.unbindChannel({ tenantKey, chatId });
-      await config.reply?.({
+      await replyToSource({
         messageId,
         text: `Disconnected this chat from Project Target ${formatProjectTarget(binding)}. @-mention me with \`/bind <owner>/<repo>\` to connect a new target.`
       });
@@ -633,7 +636,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
     const stopRequest = parseStopCommand(command);
     if (stopRequest) {
       if (!config.stopRun) {
-        await config.reply?.({ messageId, text: STOP_UNAVAILABLE_TEXT });
+        await replyToSource({ messageId, text: STOP_UNAVAILABLE_TEXT });
         return { status: "self_service_stop_unavailable", tenantKey, chatId };
       }
       const result = await config.stopRun({
@@ -642,13 +645,13 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
         ...(stopRequest.runId ? { runId: stopRequest.runId } : {}),
         requestedBy: `lark:${senderOpenId}`
       });
-      await config.reply?.({ messageId, text: formatStopResultText(result) });
+      await replyToSource({ messageId, text: formatStopResultText(result) });
       return { status: "self_service_stop", ...(result.runId ? { runId: result.runId } : {}), tenantKey, chatId };
     }
 
     const selfServiceCommand = parseSelfServiceCommand(command);
     if (selfServiceCommand === "help") {
-      await config.reply?.({ messageId, text: HELP_TEXT });
+      await replyToSource({ messageId, text: HELP_TEXT });
       return { status: "self_service_help", tenantKey, chatId };
     }
     if (selfServiceCommand === "status" || selfServiceCommand === "doctor") {
@@ -658,7 +661,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
         selfServiceCommand === "status"
           ? normalizeSelfServiceReply(await (config.status?.(context) ?? Promise.resolve(statusReply({ tenantKey, chatId, binding }))))
           : normalizeSelfServiceReply(await (config.doctor?.(context) ?? Promise.resolve(doctorReply({ tenantKey, chatId, binding }))));
-      await config.reply?.({ messageId, text: reply.text, ...(reply.card ? { card: reply.card } : {}) });
+      await replyToSource({ messageId, text: reply.text, ...(reply.card ? { card: reply.card } : {}) });
       return { status: selfServiceCommand === "status" ? "self_service_status" : "self_service_doctor", tenantKey, chatId };
     }
 
@@ -686,19 +689,19 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
         });
         binding = bindingFromDefault({ tenantKey, chatId, binding: config.defaultRepoBinding });
       } else {
-        await config.reply?.({ messageId, text: UNBOUND_HINT });
+        await replyToSource({ messageId, text: UNBOUND_HINT });
         return { status: "ignored_unbound_chat", tenantKey, chatId };
       }
     }
 
     if (threadActionCommand) {
       if (!config.submitThreadAction) {
-        await config.reply?.({ messageId, text: THREAD_ACTION_UNAVAILABLE_TEXT });
+        await replyToSource({ messageId, text: THREAD_ACTION_UNAVAILABLE_TEXT });
         return { status: "ignored_thread_action_unavailable", tenantKey, chatId };
       }
       const callbackMessageId = larkCallbackMessageId(message);
       if (!callbackMessageId) {
-        await config.reply?.({ messageId, text: THREAD_ACTION_INVALID_THREAD_TEXT });
+        await replyToSource({ messageId, text: THREAD_ACTION_INVALID_THREAD_TEXT });
         return { status: "ignored_invalid_payload", tenantKey, chatId };
       }
       await config.submitThreadAction({
@@ -772,17 +775,27 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
     if (!event) {
       return { status: "ignored_empty_command" };
     }
+    const interaction = classifyLarkInteraction({
+      text: event.command.rawText,
+      command: event.command,
+      isThreadReply
+    });
 
     const result = await config.createRun(event);
     if (result.outcome === "run_created") {
       if (!result.idempotentReplay && !config.suppressRunCreatedReply) {
-        await config.reply?.({ messageId, text: formatRunReceivedText(result.run.id) });
+        await replyToSource({
+          messageId,
+          text: formatRunReceivedText(result.run.id),
+          replyInThread: interaction.replyInThread
+        });
       }
       return { status: "created", runId: result.run.id, tenantKey, chatId };
     }
     if (result.outcome === "follow_up_queued") {
-      await config.reply?.({
+      await replyToSource({
         messageId,
+        replyInThread: interaction.replyInThread,
         text: formatFollowUpQueuedText({
           followUpRequestId: result.followUpRequest.id,
           ...(result.decision.activeRunId ? { activeRunId: result.decision.activeRunId } : {}),

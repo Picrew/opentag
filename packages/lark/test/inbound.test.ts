@@ -243,6 +243,7 @@ describe("createLarkMessageHandler", () => {
     expect(outcome.status).toBe("created");
     expect(reply).toHaveBeenCalledWith({
       messageId: "om_msg",
+      replyInThread: true,
       text: expect.stringContaining("Received. Run: run_dispatcher.")
     });
     expect(reply.mock.calls[0]?.[0].text).toContain("/status");
@@ -404,6 +405,7 @@ describe("createLarkMessageHandler", () => {
     expect(createRun).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
       messageId: "om_action_reply",
+      replyInThread: true,
       text: expect.stringContaining("Source-thread actions are not configured")
     });
   });

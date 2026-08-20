@@ -11,6 +11,7 @@ import {
   type PermissionGrant
 } from "@opentag/core";
 import { larkRenderLocaleFromDomain, type LarkRenderLocale } from "./render.js";
+import { classifyLarkInteraction } from "./interaction.js";
 
 export type LarkChannelBinding = {
   tenantKey: string;
@@ -189,6 +190,11 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
   const rawText = channelMessage.text;
 
   const command = commandFromRawText(rawText);
+  const interaction = classifyLarkInteraction({
+    text: rawText,
+    command,
+    isThreadReply: Boolean(input.rootId)
+  });
   const agentId = input.agentId ?? "opentag";
   const renderLocale = input.renderLocale ?? larkRenderLocaleFromDomain(input.domain);
   const repositoryMetadata = repositoryMetadataFromBinding(input.binding);
@@ -263,6 +269,9 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
       larkEventId: input.eventId,
       ...(input.domain ? { larkDomain: input.domain } : {}),
       larkRenderLocale: renderLocale,
+      larkInteractionMode: interaction.mode,
+      larkInteractionReason: interaction.reason,
+      larkReplyInThread: interaction.replyInThread,
       ...(input.rootId ? { rootId: input.rootId } : {}),
       ...(input.botOpenId ? { larkBotOpenId: input.botOpenId } : {}),
       ...(input.applicationId ? { channelApplicationId: input.applicationId } : {}),

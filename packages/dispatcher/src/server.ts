@@ -2397,6 +2397,8 @@ export type DispatcherDeliveryPresentation =
       statusMessageKey?: string;
       phase: "acknowledgement" | "progress" | "final" | "received" | "running";
       sourceEvent?: OpenTagEvent;
+      larkInteractionMode?: "chat" | "task";
+      larkReplyInThread?: boolean;
     } & Partial<PresentedProviderBody>)
   | SourceThreadControlDeliveryPresentation;
 
@@ -2845,6 +2847,14 @@ export function createDispatcherApp(input: {
   ) {
     const callback = "callback" in event ? event.callback : event;
     const agentId = "target" in event ? event.target.agentId : undefined;
+    const larkInteractionMode = "metadata" in event && (
+      event.metadata["larkInteractionMode"] === "chat" || event.metadata["larkInteractionMode"] === "task"
+    )
+      ? event.metadata["larkInteractionMode"]
+      : undefined;
+    const larkReplyInThread = "metadata" in event && typeof event.metadata["larkReplyInThread"] === "boolean"
+      ? event.metadata["larkReplyInThread"]
+      : undefined;
     return enqueueDelivery({
       runId,
       kind: "business",
@@ -2855,6 +2865,8 @@ export function createDispatcherApp(input: {
       ...(callback.threadKey ? { threadKey: callback.threadKey } : {}),
       ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
       ...(rendered.rich ? { rich: rendered.rich } : {}),
+      ...(larkInteractionMode ? { larkInteractionMode } : {}),
+      ...(larkReplyInThread !== undefined ? { larkReplyInThread } : {}),
       phase: "progress",
       ...options
     });

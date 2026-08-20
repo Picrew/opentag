@@ -27,6 +27,11 @@ describe("Lark outbound messages", () => {
         elements: [{ tag: "div", text: { tag: "lark_md", content: "Working" } }]
       }
     });
+    await replyLarkMessage(client, {
+      messageId: "om_source",
+      text: "A conversational answer.",
+      replyInThread: false
+    });
 
     expect(textReply).toEqual({});
     expect(cardReply).toEqual({});
@@ -52,6 +57,14 @@ describe("Lark outbound messages", () => {
           }),
           msg_type: "interactive",
           reply_in_thread: true
+        }
+      },
+      {
+        path: { message_id: "om_source" },
+        data: {
+          content: JSON.stringify({ text: "A conversational answer." }),
+          msg_type: "text",
+          reply_in_thread: false
         }
       }
     ]);
