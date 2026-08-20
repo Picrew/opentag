@@ -24,6 +24,7 @@ export type LarkMessageInput = {
   senderOpenId: string;
   text: string;
   attachments?: OpenTagChannelAttachmentRef[];
+  resourceContext?: LarkResolvedResourceContext[];
   messageId: string;
   rootId?: string;
   eventId: string;
@@ -36,6 +37,13 @@ export type LarkMessageInput = {
   callbackUri?: string;
   conversationMemory?: ConversationMemoryPolicy;
   binding: LarkChannelBinding;
+};
+
+export type LarkResolvedResourceContext = {
+  id: string;
+  title: string;
+  text: string;
+  sourceUrl?: string;
 };
 
 // Strip `@_user_N` mention placeholders (whole \d+ index) and collapse whitespace.
@@ -223,6 +231,13 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
         uri: attachment.uri ?? `lark://attachment/${attachment.id}`,
         visibility: "organization" as const,
         title: attachment.name ?? `Lark ${attachment.kind} attachment`
+      })),
+      ...(input.resourceContext ?? []).map((resource) => ({
+        provider: "lark",
+        kind: "text",
+        uri: resource.text,
+        visibility: "organization" as const,
+        title: resource.title
       }))
     ],
     permissions: permissionsForIntent(command.intent, repositoryMetadata !== undefined),
@@ -252,6 +267,13 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
       ...(input.botOpenId ? { larkBotOpenId: input.botOpenId } : {}),
       ...(input.applicationId ? { channelApplicationId: input.applicationId } : {}),
       ...(input.attachments?.length ? { larkAttachments: input.attachments } : {}),
+      ...(input.resourceContext?.length ? {
+        larkResourceContext: input.resourceContext.map((resource) => ({
+          id: resource.id,
+          title: resource.title,
+          ...(resource.sourceUrl ? { sourceUrl: resource.sourceUrl } : {})
+        }))
+      } : {}),
       ...(input.botOpenId ? { channelBotId: input.botOpenId } : {}),
       ...commandMetadata(command),
       ...repositoryMetadata

@@ -5,6 +5,7 @@ export * from "./outbound.js";
 export * from "./registration.js";
 export * from "./render.js";
 export * from "./resources/client.js";
+export * from "./resources/context.js";
 export * from "./resources/bitable.js";
 export * from "./resources/docs.js";
 export * from "./resources/drive.js";

@@ -33,9 +33,112 @@ export const FEISHU_MCP_OAUTH_SCOPES = [
 
 export type AcpMcpServerResolver = (input: ExecutorRunInput) => acp.McpServer[];
 
+type StoredAuthInfo = {
+  clientId: string;
+  token: string;
+  scopes: string[];
+  expiresAt?: number;
+  extra?: { refreshToken?: string };
+};
+
+type LarkMcpAuthStore = {
+  getLocalAccessToken(appId: string): Promise<string | undefined>;
+  getToken(accessToken: string): Promise<StoredAuthInfo | undefined>;
+  removeToken(accessToken: string): Promise<void>;
+  storeLocalAccessToken(accessToken: string, appId: string): Promise<string>;
+};
+
+type LarkMcpOAuthProvider = {
+  exchangeRefreshToken(
+    client: { client_id: string; redirect_uris: string[] },
+    refreshToken: string,
+    scopes: string[]
+  ): Promise<{ access_token: string }>;
+};
+
+export type LarkMcpUserTokenProvider = {
+  getToken(): Promise<string>;
+  invalidate(): void;
+};
+
 export function larkMcpCliPath(): string {
   const require = createRequire(import.meta.url);
   return join(dirname(require.resolve("@larksuiteoapi/lark-mcp/package.json")), "dist", "cli.js");
+}
+
+function larkMcpPackageRoot(): string {
+  const require = createRequire(import.meta.url);
+  return dirname(require.resolve("@larksuiteoapi/lark-mcp/package.json"));
+}
+
+function defaultAuthDependencies(input: { appId: string; appSecret: string; domain: "feishu" | "lark" }): {
+  store: LarkMcpAuthStore;
+  provider: LarkMcpOAuthProvider;
+} {
+  const require = createRequire(import.meta.url);
+  const root = larkMcpPackageRoot();
+  const store = (require(join(root, "dist", "auth", "store.js")) as { authStore: LarkMcpAuthStore }).authStore;
+  const Provider = (require(join(root, "dist", "auth", "provider", "oauth.js")) as {
+    LarkOAuth2OAuthServerProvider: new (options: Record<string, unknown>) => LarkMcpOAuthProvider;
+  }).LarkOAuth2OAuthServerProvider;
+  return {
+    store,
+    provider: new Provider({
+      appId: input.appId,
+      appSecret: input.appSecret,
+      domain: input.domain === "feishu" ? "https://open.feishu.cn" : "https://open.larksuite.com",
+      host: "localhost",
+      port: "3000",
+      callbackUrl: "http://localhost:3000/callback"
+    })
+  };
+}
+
+export function createLarkMcpUserTokenProvider(
+  input: { appId: string; appSecret: string; domain: "feishu" | "lark"; refreshSkewSeconds?: number },
+  dependencies?: { store: LarkMcpAuthStore; provider: LarkMcpOAuthProvider; now?: () => number }
+): LarkMcpUserTokenProvider {
+  const auth = dependencies ?? { ...defaultAuthDependencies(input), now: () => Date.now() };
+  const now = auth.now ?? (() => Date.now());
+  const refreshSkewSeconds = Math.max(input.refreshSkewSeconds ?? 300, 0);
+  let invalidated = false;
+  let refreshInFlight: Promise<string> | undefined;
+
+  async function current(): Promise<{ accessToken: string; info: StoredAuthInfo }> {
+    const accessToken = await auth.store.getLocalAccessToken(input.appId);
+    if (!accessToken) throw new Error("Feishu user OAuth session is missing. Run `opentag feishu login`.");
+    const info = await auth.store.getToken(accessToken);
+    if (!info) throw new Error("Feishu user OAuth session is unreadable. Run `opentag feishu login` again.");
+    return { accessToken, info };
+  }
+
+  async function refresh(): Promise<string> {
+    const { accessToken, info } = await current();
+    const refreshToken = info.extra?.refreshToken;
+    if (!refreshToken) throw new Error("Feishu user OAuth session cannot be refreshed. Run `opentag feishu login` again.");
+    const token = await auth.provider.exchangeRefreshToken(
+      { client_id: info.clientId, redirect_uris: ["http://localhost:3000/callback"] },
+      refreshToken,
+      info.scopes
+    );
+    await auth.store.storeLocalAccessToken(token.access_token, input.appId);
+    if (token.access_token !== accessToken) await auth.store.removeToken(accessToken);
+    invalidated = false;
+    return token.access_token;
+  }
+
+  return {
+    async getToken() {
+      const { accessToken, info } = await current();
+      const expiresSoon = info.expiresAt !== undefined && info.expiresAt <= now() / 1000 + refreshSkewSeconds;
+      if (!invalidated && !expiresSoon) return accessToken;
+      refreshInFlight ??= refresh().finally(() => { refreshInFlight = undefined; });
+      return refreshInFlight;
+    },
+    invalidate() {
+      invalidated = true;
+    }
+  };
 }
 
 export function createFeishuMcpServerResolver(input: {

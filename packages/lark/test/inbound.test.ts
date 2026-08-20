@@ -108,6 +108,7 @@ function createInteractiveHandler(input: {
   canManageBinding?: LarkHandlerConfig["canManageBinding"] | null;
   suppressRunCreatedReply?: boolean;
   domain?: LarkHandlerConfig["domain"];
+  resolveResourceContext?: LarkHandlerConfig["resolveResourceContext"];
 } = {}) {
   const createRun = vi.fn(async (event: OpenTagEvent) => (input.result ?? runCreated)(event));
   const bindChannel = vi.fn(async () => {});
@@ -133,6 +134,7 @@ function createInteractiveHandler(input: {
     agentId: "opentag",
     botOpenId: "ou_bot",
     ...(input.domain ? { domain: input.domain } : {}),
+    ...(input.resolveResourceContext ? { resolveResourceContext: input.resolveResourceContext } : {}),
     async resolveChannelBinding() {
       if ("binding" in input) return input.binding ?? null;
       return {
@@ -178,6 +180,27 @@ describe("createLarkMessageHandler", () => {
       title: "report.pdf"
     }));
     expect(event?.metadata.larkAttachments).toEqual([expect.objectContaining({ id: "file_1", kind: "file" })]);
+  });
+
+  it("adds resolved Feishu content to the final run context", async () => {
+    const resolveResourceContext = vi.fn(async () => [{
+      id: "document:doc1",
+      title: "Guide",
+      text: "Resolved document body",
+      sourceUrl: "https://acme.feishu.cn/docx/doc1"
+    }]);
+    const { handler, createRun } = createInteractiveHandler({ result: runCreated, resolveResourceContext });
+    await handler(message);
+    expect(resolveResourceContext).toHaveBeenCalledWith(expect.objectContaining({
+      chatId: "oc_chat",
+      messageId: "om_msg",
+      text: "@_user_1 fix this"
+    }));
+    expect(createRun.mock.calls[0]?.[0].context).toContainEqual(expect.objectContaining({
+      kind: "text",
+      uri: "Resolved document body",
+      title: "Guide"
+    }));
   });
 
   it("extracts rich post text while preserving the group mention boundary", async () => {

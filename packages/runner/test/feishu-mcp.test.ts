@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createFeishuMcpServerResolver,
+  createLarkMcpUserTokenProvider,
   FEISHU_MCP_OAUTH_SCOPES,
   FEISHU_MCP_READ_ONLY_TOOLS
 } from "../src/feishu-mcp.js";
@@ -44,5 +45,34 @@ describe("Feishu MCP session configuration", () => {
     expect(FEISHU_MCP_READ_ONLY_TOOLS.some((tool) => /create|update|delete|patch|reply/iu.test(tool))).toBe(false);
     expect(FEISHU_MCP_OAUTH_SCOPES).toContain("offline_access");
     expect(FEISHU_MCP_OAUTH_SCOPES).toContain("im:message.group_msg");
+  });
+
+  it("coalesces refresh and rotates the official local token mapping", async () => {
+    let localToken = "expired";
+    const tokens = new Map([["expired", {
+      clientId: "local",
+      token: "expired",
+      scopes: ["offline_access"],
+      expiresAt: 1,
+      extra: { refreshToken: "refresh_1" }
+    }]]);
+    const store = {
+      getLocalAccessToken: async () => localToken,
+      getToken: async (token: string) => tokens.get(token),
+      storeLocalAccessToken: async (token: string) => { localToken = token; return token; },
+      removeToken: async (token: string) => { tokens.delete(token); }
+    };
+    const provider = { exchangeRefreshToken: vi.fn(async () => {
+      tokens.set("current", { clientId: "local", token: "current", scopes: [], expiresAt: 9999999999 });
+      return { access_token: "current" };
+    }) };
+    const tokensProvider = createLarkMcpUserTokenProvider(
+      { appId: "cli_1", appSecret: "secret_1", domain: "feishu" },
+      { store, provider, now: () => 10_000 }
+    );
+    await expect(Promise.all([tokensProvider.getToken(), tokensProvider.getToken()])).resolves.toEqual(["current", "current"]);
+    expect(provider.exchangeRefreshToken).toHaveBeenCalledOnce();
+    expect(localToken).toBe("current");
+    expect(tokens.has("expired")).toBe(false);
   });
 });

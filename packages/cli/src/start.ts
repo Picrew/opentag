@@ -57,7 +57,7 @@ import {
   writeCliConfigAtomic,
   type OpenTagCliConfig
 } from "./config.js";
-import { feishuMcpServersFromCliConfig } from "./feishu-login.js";
+import { feishuMcpServersFromCliConfig, feishuResourceContextFromCliConfig } from "./feishu-login.js";
 import { probeDispatcherHealth } from "./health.js";
 import { linearBacklogConfigDiagnostics } from "./linear-backlog-config.js";
 import { discordLocalInteractionsUrl, discordPublicInteractionsUrlPlaceholder } from "./platforms/discord/display.js";
@@ -510,6 +510,7 @@ function defaultRepoBindingFromConfig(config: OpenTagCliConfig): LarkIngressConf
 export function larkIngressConfigFromCliConfig(config: OpenTagCliConfig): LarkIngressConfig {
   const lark = requireLarkConfig(config);
   const defaultRepoBinding = defaultRepoBindingFromConfig(config);
+  const resolveResourceContext = feishuResourceContextFromCliConfig(config);
   return {
     appId: lark.appId,
     appSecret: lark.appSecret,
@@ -524,6 +525,7 @@ export function larkIngressConfigFromCliConfig(config: OpenTagCliConfig): LarkIn
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
     ...(lark.botOpenId ? { botOpenId: lark.botOpenId } : {}),
     ...(lark.conversationMemory ? { conversationMemory: lark.conversationMemory } : {}),
+    ...(resolveResourceContext ? { resolveResourceContext } : {}),
     ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
     ...(defaultRepoBinding ? { defaultRepoBinding } : {})
   };

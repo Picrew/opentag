@@ -11,7 +11,13 @@ import {
   type OpenTagSourceThreadStatusPresentation
 } from "@opentag/core";
 import type { CreateRunResult } from "@opentag/client";
-import { encodeLarkThreadKey, type LarkChannelBinding, normalizeLarkMessage, stripLarkMention } from "./normalize.js";
+import {
+  encodeLarkThreadKey,
+  type LarkChannelBinding,
+  type LarkResolvedResourceContext,
+  normalizeLarkMessage,
+  stripLarkMention
+} from "./normalize.js";
 import {
   createLarkDoctorSummaryCard,
   createLarkSourceThreadStatusCard,
@@ -91,6 +97,13 @@ export type LarkMessageHandlerConfig = {
   defaultRepoBinding?: { repoProvider: string; owner: string; repo: string };
   resolveChannelBinding(input: { tenantKey: string; chatId: string }): Promise<LarkChannelBinding | null>;
   createRun(event: OpenTagEvent): Promise<CreateRunResult>;
+  resolveResourceContext?(input: {
+    tenantKey: string;
+    chatId: string;
+    messageId: string;
+    text: string;
+    attachments: OpenTagChannelAttachmentRef[];
+  }): Promise<LarkResolvedResourceContext[]>;
   submitThreadAction?(action: LarkThreadActionInput): Promise<unknown>;
   // Self-service binding from within Lark (`/bind owner/repo`); optional so tests can omit it.
   bindChannel?(input: { tenantKey: string; chatId: string; repoProvider: string; owner: string; repo: string }): Promise<void>;
@@ -727,6 +740,13 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
 
     const parsedTime = data.create_time ? Number(data.create_time) : Number.NaN;
     const eventTimeMs = Number.isFinite(parsedTime) ? parsedTime : (config.now?.() ?? Date.now());
+    const resourceContext = await config.resolveResourceContext?.({
+      tenantKey,
+      chatId,
+      messageId,
+      text: parsedContent.text,
+      attachments: parsedContent.attachments
+    });
 
     const event = normalizeLarkMessage({
       tenantKey,
@@ -735,6 +755,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       senderOpenId,
       text: parsedContent.text,
       ...(parsedContent.attachments.length ? { attachments: parsedContent.attachments } : {}),
+      ...(resourceContext?.length ? { resourceContext } : {}),
       messageId,
       ...(message.root_id ? { rootId: message.root_id } : {}),
       eventId,

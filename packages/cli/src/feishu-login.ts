@@ -1,10 +1,17 @@
 import { spawn } from "node:child_process";
 import {
   createFeishuMcpServerResolver,
+  createLarkMcpUserTokenProvider,
   FEISHU_MCP_OAUTH_SCOPES,
   larkMcpCliPath,
   type AcpMcpServerResolver
 } from "@opentag/runner";
+import {
+  createFeishuOpenApiClient,
+  createFeishuResourceContextResolver,
+  createFeishuTools,
+  type LarkMessageHandlerConfig
+} from "@opentag/lark";
 import {
   defaultConfigPath,
   readCliConfig,
@@ -58,6 +65,20 @@ export function feishuMcpServersFromCliConfig(config: OpenTagCliConfig): AcpMcpS
   const lark = config.platforms.lark;
   if (!lark?.userResourceAccess?.enabled) return undefined;
   return createFeishuMcpServerResolver({ appId: lark.appId, appSecret: lark.appSecret, domain: lark.domain });
+}
+
+export function feishuResourceContextFromCliConfig(
+  config: OpenTagCliConfig
+): LarkMessageHandlerConfig["resolveResourceContext"] | undefined {
+  const lark = config.platforms.lark;
+  if (!lark?.userResourceAccess?.enabled) return undefined;
+  const tokenProvider = createLarkMcpUserTokenProvider({
+    appId: lark.appId,
+    appSecret: lark.appSecret,
+    domain: lark.domain
+  });
+  const client = createFeishuOpenApiClient({ tokenProvider, domain: lark.domain });
+  return createFeishuResourceContextResolver({ tools: createFeishuTools(client) });
 }
 
 export async function runFeishuLoginCommand(

@@ -19,6 +19,7 @@ import {
   type LarkCardActionHandlerOutcome,
   type LarkInboundMessageEvent,
   type LarkMessageHandlerOutcome,
+  type LarkMessageHandlerConfig,
   type LarkSelfServiceReply
 } from "./inbound.js";
 import { createLarkDoctorSummaryCard, createLarkSourceThreadStatusCard, type LarkCard } from "./render.js";
@@ -40,6 +41,7 @@ export type LarkIngressConfig = {
   runTimeoutMs?: number;
   conversationMemory?: ConversationMemoryPolicy;
   defaultRepoBinding?: { repoProvider: string; owner: string; repo: string };
+  resolveResourceContext?: LarkMessageHandlerConfig["resolveResourceContext"];
 };
 
 export type LarkWsClient = {
@@ -396,6 +398,7 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
     ...(config.botOpenId ? { botOpenId: config.botOpenId } : {}),
     ...(config.defaultRepoBinding ? { defaultRepoBinding: config.defaultRepoBinding } : {}),
     ...(config.conversationMemory ? { conversationMemory: config.conversationMemory } : {}),
+    ...(config.resolveResourceContext ? { resolveResourceContext: config.resolveResourceContext } : {}),
     resolveChannelBinding,
     async bindChannel(input) {
       await dispatcherClient.bindChannel({
