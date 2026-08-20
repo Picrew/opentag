@@ -1,5 +1,5 @@
 import type { FeishuOpenApiClient } from "./client.js";
-import type { FeishuPage, FeishuResource, FeishuResourceType } from "./types.js";
+import type { FeishuDownloadedResource, FeishuPage, FeishuResource, FeishuResourceType } from "./types.js";
 
 type DriveFile = {
   token?: string;
@@ -57,6 +57,11 @@ function driveResource(file: DriveFile): FeishuResource | undefined {
 }
 
 export function createFeishuDriveReader(client: FeishuOpenApiClient) {
+  async function downloadDriveFile(fileToken: string, options: { maxBytes?: number } = {}): Promise<FeishuDownloadedResource> {
+    if (!fileToken.trim()) throw new Error("Feishu Drive file token must not be empty.");
+    return client.requestBinary(`/open-apis/drive/v1/medias/${encodeURIComponent(fileToken)}/download`, options);
+  }
+
   async function listDriveFolder(
     folderToken: string,
     options: { pageSize?: number; pageToken?: string } = {}
@@ -123,7 +128,7 @@ export function createFeishuDriveReader(client: FeishuOpenApiClient) {
     return resources.slice(0, maxItems);
   }
 
-  return { listDriveFolder, walkDrive };
+  return { listDriveFolder, walkDrive, downloadDriveFile };
 }
 
 export type FeishuDriveReader = ReturnType<typeof createFeishuDriveReader>;
