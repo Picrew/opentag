@@ -228,6 +228,7 @@ describe("createLarkMessageHandler", () => {
     });
     expect(reply).toHaveBeenCalledWith({
       messageId: "om_msg",
+      replyInThread: true,
       text: expect.stringContaining("Received. Run: run_1.")
     });
     const event = createRun.mock.calls[0]?.[0];
