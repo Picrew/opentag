@@ -122,7 +122,7 @@ describe("Lark ingress runtime", () => {
 
     expect(start).toHaveBeenCalledWith({ eventDispatcher });
     await capturedHandler?.({
-      message: { message_type: "image" }
+      message: { message_type: "sticker" }
     });
     expect(logIgnored).toHaveBeenCalledWith({ status: "ignored_non_text" });
   });

@@ -15,6 +15,7 @@ function messageEvent(overrides?: {
   eventId?: string;
   openId?: string;
   mentionBot?: boolean;
+  content?: Record<string, unknown>;
 }): LarkInboundMessageEvent {
   const mentionBot = overrides?.mentionBot ?? true;
   return {
@@ -32,7 +33,7 @@ function messageEvent(overrides?: {
       chat_id: overrides?.chatId ?? "oc_chat",
       chat_type: overrides?.chatType ?? "group",
       message_type: overrides?.messageType ?? "text",
-      content: JSON.stringify({ text: overrides?.text ?? "@_user_1 fix the bug" }),
+      content: JSON.stringify(overrides?.content ?? { text: overrides?.text ?? "@_user_1 fix the bug" }),
       mentions: mentionBot ? [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "OpenTag" }] : []
     }
   };
@@ -116,9 +117,23 @@ describe("createLarkMessageHandler", () => {
     expect((await handler(messageEvent())).status).toBe("ignored_group_requires_bot_open_id");
   });
 
-  it("ignores non-text messages", async () => {
+  it("normalizes supported image messages as attachment context", async () => {
+    const { handler, createRun } = makeHandler();
+    const outcome = await handler(messageEvent({
+      messageType: "image",
+      content: { image_key: "img_1" }
+    }));
+
+    expect(outcome.status).toBe("created");
+    expect(createRun.mock.calls[0]?.[0].context).toContainEqual(expect.objectContaining({
+      kind: "attachment",
+      uri: "lark://message/om_msg/resource/img_1?type=image"
+    }));
+  });
+
+  it("ignores unsupported message types", async () => {
     const { handler } = makeHandler();
-    expect((await handler(messageEvent({ messageType: "image" }))).status).toBe("ignored_non_text");
+    expect((await handler(messageEvent({ messageType: "sticker" }))).status).toBe("ignored_non_text");
   });
 
   it("binds the chat via /bind owner/repo and confirms in-thread", async () => {
