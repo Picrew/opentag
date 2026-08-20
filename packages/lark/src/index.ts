@@ -4,3 +4,7 @@ export * from "./ingress.js";
 export * from "./outbound.js";
 export * from "./registration.js";
 export * from "./render.js";
+export * from "./resources/client.js";
+export * from "./resources/oauth.js";
+export * from "./resources/types.js";
+export * from "./resources/urls.js";
