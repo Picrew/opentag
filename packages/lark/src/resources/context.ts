@@ -87,7 +87,11 @@ export function createFeishuResourceContextResolver(input: {
           });
         }
       } catch {
-        // Missing history scope or membership must not block the addressed request.
+        append({
+          id: `conversation:${message.chatId}:${message.rootId ?? "channel"}:unavailable`,
+          title: "Feishu conversation context unavailable",
+          text: "Context status: recent Feishu messages could not be read. Do not imply that the earlier conversation was available; say so briefly if the answer depends on it."
+        });
       }
     }
 

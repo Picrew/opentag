@@ -26,6 +26,7 @@ function larkPresentation(input: DispatcherDeliveryPresentation): {
   phase?: "acknowledgement" | "progress" | "final" | "received" | "running";
   interactionMode?: "chat" | "task";
   replyInThread?: boolean;
+  attentionRequired?: boolean;
 } | null {
   const provider = input.kind === "source_thread_control" ? input.request.callback.provider : input.provider;
   if (provider !== "lark" || input.kind === "source_receipt") return null;
@@ -42,17 +43,20 @@ function larkPresentation(input: DispatcherDeliveryPresentation): {
   const larkInput = input as typeof input & {
     larkInteractionMode?: "chat" | "task";
     larkReplyInThread?: boolean;
+    larkChatBody?: string;
+    larkAttentionRequired?: boolean;
   };
   const rich = input.rich?.provider === "lark" ? input.rich.payload as LarkCard : undefined;
   return {
     ...(input.threadKey ? { threadKey: input.threadKey } : {}),
-    body: input.body ?? "",
+    body: larkInput.larkChatBody ?? input.body ?? "",
     ...(rich ? { card: rich } : {}),
     ...(input.statusMessageKey ? { statusMessageKey: input.statusMessageKey } : {}),
     ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
     phase: input.phase,
     ...(larkInput.larkInteractionMode ? { interactionMode: larkInput.larkInteractionMode } : {}),
-    ...(larkInput.larkReplyInThread !== undefined ? { replyInThread: larkInput.larkReplyInThread } : {})
+    ...(larkInput.larkReplyInThread !== undefined ? { replyInThread: larkInput.larkReplyInThread } : {}),
+    ...(larkInput.larkAttentionRequired ? { attentionRequired: true } : {})
   };
 }
 
@@ -102,7 +106,7 @@ export function createLocalLarkDeliveryProducer(input: {
 
       // Conversational mentions should feel like ordinary group-chat replies:
       // keep transient lifecycle noise in audit and publish only the final text.
-      if (message.interactionMode === "chat" && message.phase !== "final") {
+      if (message.interactionMode === "chat" && message.phase !== "final" && !message.attentionRequired) {
         const runId = presentation.kind === "source_thread_control"
           ? presentation.auditRunId ?? "control"
           : presentation.runId;
@@ -127,7 +131,11 @@ export function createLocalLarkDeliveryProducer(input: {
           messageId: sourceMessageId,
           text: message.body,
           ...(message.card && message.interactionMode !== "chat" ? { card: message.card } : {}),
-          ...(message.replyInThread !== undefined ? { replyInThread: message.replyInThread } : {})
+          ...(message.attentionRequired
+            ? { replyInThread: true, ...(message.card ? { card: message.card } : {}) }
+            : message.replyInThread !== undefined
+              ? { replyInThread: message.replyInThread }
+              : {})
         });
         if (message.statusMessageKey && reply.messageId) {
           statusMessageIds.set(message.statusMessageKey, reply.messageId);

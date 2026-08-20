@@ -2399,6 +2399,8 @@ export type DispatcherDeliveryPresentation =
       sourceEvent?: OpenTagEvent;
       larkInteractionMode?: "chat" | "task";
       larkReplyInThread?: boolean;
+      larkChatBody?: string;
+      larkAttentionRequired?: boolean;
     } & Partial<PresentedProviderBody>)
   | SourceThreadControlDeliveryPresentation;
 
@@ -2843,6 +2845,8 @@ export function createDispatcherApp(input: {
       phase?: "acknowledgement" | "progress" | "final";
       statusMessageKey?: string;
       idempotencyKey?: string;
+      larkChatBody?: string;
+      larkAttentionRequired?: boolean;
     } = {}
   ) {
     const callback = "callback" in event ? event.callback : event;
@@ -2867,6 +2871,8 @@ export function createDispatcherApp(input: {
       ...(rendered.rich ? { rich: rendered.rich } : {}),
       ...(larkInteractionMode ? { larkInteractionMode } : {}),
       ...(larkReplyInThread !== undefined ? { larkReplyInThread } : {}),
+      ...(options.larkChatBody ? { larkChatBody: options.larkChatBody } : {}),
+      ...(options.larkAttentionRequired ? { larkAttentionRequired: true } : {}),
       phase: "progress",
       ...options
     });
@@ -5879,7 +5885,8 @@ export function createDispatcherApp(input: {
         });
         await enqueueRenderedDelivery(runId, stored.event, rendered, {
           idempotencyKey: `action-permission:${resolution.action.id}`,
-          statusMessageKey: `${runId}:status`
+          statusMessageKey: `${runId}:status`,
+          larkAttentionRequired: true
         });
       }
     }
@@ -6183,7 +6190,8 @@ export function createDispatcherApp(input: {
         presentation: waitingPresentation
       });
       await enqueueRenderedDelivery(runId, stored.event, waiting, {
-        statusMessageKey: `${runId}:status`
+        statusMessageKey: `${runId}:status`,
+        larkAttentionRequired: true
       });
     }
     const strictExecutionWaiting = completedResult.conclusion === "success"
@@ -6232,6 +6240,9 @@ export function createDispatcherApp(input: {
     const statusMessageKey = lifecycleStatusMessageKey({ provider: stored.event.callback.provider, runId });
     await enqueueRenderedDelivery(runId, stored.event, renderedFinalPresentation, {
       phase: "final",
+      ...(stored.event.metadata["larkInteractionMode"] === "chat"
+        ? { larkChatBody: completedResult.summary }
+        : {}),
       ...(statusMessageKey ? { statusMessageKey } : {})
     });
     const shouldPromoteFollowUp = completedResult.conclusion !== "needs_human" && completedResult.conclusion !== "cancelled";

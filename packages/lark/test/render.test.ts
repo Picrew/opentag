@@ -13,6 +13,7 @@ import {
   createLarkDoctorSummaryCard,
   createLarkFinalSummaryCard,
   createLarkInteractiveMessageContent,
+  createLarkRunStatusCard,
   createLarkSourceThreadStatusCard,
   createLarkTextMessageContent,
   parseLarkThreadActionButtonValue,
@@ -62,6 +63,17 @@ describe("renderLarkAcknowledgement", () => {
     expect(renderLarkAcknowledgement("run_1")).toBe(
       ["Received. OpenTag is working.", "Run: run_1", "Use /status here for queue state; audit locally with opentag status --run run_1."].join("\n")
     );
+  });
+  it("uses a colleague-style Feishu task acknowledgement", () => {
+    expect(renderLarkAcknowledgement("run_1", { locale: "zh-CN" })).toBe(
+      ["我接了，跑完回这个话题。", "任务：run_1", "想看进度就在这里发 /status。"].join("\n")
+    );
+    expect(createLarkRunStatusCard({
+      kind: "run_status",
+      runId: "run_1",
+      state: "running",
+      detailVisibility: "source_thread"
+    }, { locale: "zh-CN" }).header.title.content).toBe("在处理了");
   });
 });
 

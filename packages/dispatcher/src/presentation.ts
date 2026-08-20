@@ -101,7 +101,7 @@ export type ProviderPresentation = {
   }): PresentedProviderBody;
 };
 
-function renderRunStatus(provider: string, presentation: OpenTagRunStatusPresentation): PresentedProviderBody {
+function renderRunStatus(provider: string, presentation: OpenTagRunStatusPresentation, options: { larkRenderLocale?: LarkRenderLocale } = {}): PresentedProviderBody {
   const canRenderRich = supportsRichPresentation(provider);
   if (canRenderRich && provider === "slack") {
     return {
@@ -110,11 +110,12 @@ function renderRunStatus(provider: string, presentation: OpenTagRunStatusPresent
     };
   }
   if (canRenderRich && provider === "lark") {
+    const larkOptions = options.larkRenderLocale ? { locale: options.larkRenderLocale } : {};
     return {
-      body: renderLarkRunStatusPresentation(presentation),
+      body: renderLarkRunStatusPresentation(presentation, larkOptions),
       rich: {
         provider: "lark",
-        payload: createLarkRunStatusCard(presentation)
+        payload: createLarkRunStatusCard(presentation, larkOptions)
       }
     };
   }
@@ -342,7 +343,9 @@ export function createDefaultProviderPresentation(): ProviderPresentation {
         return renderApprovalPrompt(input.provider, input.presentation);
       }
       if (input.presentation.kind === "run_status") {
-        return renderRunStatus(input.provider, input.presentation);
+        return renderRunStatus(input.provider, input.presentation, {
+          ...(input.larkRenderLocale ? { larkRenderLocale: input.larkRenderLocale } : {})
+        });
       }
       if (input.presentation.kind === "final_summary") {
         return renderFinalSummary(input.provider, input.presentation, {

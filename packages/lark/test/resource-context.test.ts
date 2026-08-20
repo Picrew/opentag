@@ -69,6 +69,29 @@ describe("Feishu current-message resource context", () => {
     expect(result[0]?.text).not.toContain("Other thread");
   });
 
+  it("makes missing recent-message access visible to the agent", async () => {
+    const resolve = createFeishuResourceContextResolver({
+      tools: {
+        readResource: vi.fn(),
+        downloadMessageFile: vi.fn(),
+        getChatHistory: vi.fn(async () => { throw new Error("forbidden"); })
+      }
+    });
+
+    await expect(resolve({
+      chatId: "oc-chat",
+      messageId: "om-current",
+      text: "总结上面的讨论",
+      attachments: []
+    })).resolves.toEqual([
+      expect.objectContaining({
+        id: "conversation:oc-chat:channel:unavailable",
+        text: expect.stringContaining("could not be read")
+      })
+    ]);
+  });
+
+
   it("reads explicit document URLs and current message files with a shared bound", async () => {
     const readResource = vi.fn(async () => ({
       id: "doc1",

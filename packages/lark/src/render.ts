@@ -187,13 +187,41 @@ function auditCommand(runId: string): string {
   return `opentag status --run ${runId}`;
 }
 
-export function renderLarkAcknowledgement(runId: string): string {
+export function renderLarkAcknowledgement(runId: string, options: { locale?: LarkRenderLocale } = {}): string {
+  if (larkRenderLocale(options) === "zh-CN") {
+    return ["我接了，跑完回这个话题。", `任务：${runId}`, "想看进度就在这里发 /status。"].join("\n");
+  }
   return ["Received. OpenTag is working.", `Run: ${runId}`, `Use /status here for queue state; audit locally with ${auditCommand(runId)}.`].join("\n");
 }
 
-export function renderLarkRunStatusPresentation(presentation: OpenTagRunStatusPresentation): string {
+export function renderLarkRunStatusPresentation(presentation: OpenTagRunStatusPresentation, options: { locale?: LarkRenderLocale } = {}): string {
+  const locale = larkRenderLocale(options);
   if (presentation.state === "received") {
-    return renderLarkAcknowledgement(presentation.runId);
+    return renderLarkAcknowledgement(presentation.runId, options);
+  }
+  if (locale === "zh-CN") {
+    if (presentation.state === "queued") {
+      return ["前面还有个任务，我排在后面了。", `任务：${presentation.runId}`, "想看队列就在这里发 /status。"].join("\n");
+    }
+    if (presentation.state === "waiting_for_approval") {
+      return ["这一步得你确认一下。", presentation.message, presentation.nextAction]
+        .filter((line): line is string => Boolean(line))
+        .join("\n");
+    }
+    if (presentation.state === "waiting_for_human") {
+      return [presentation.message ?? "这里缺个决定，得你补一下。", presentation.nextAction]
+        .filter((line): line is string => Boolean(line))
+        .join("\n");
+    }
+    if (presentation.state === "running") {
+      return ["我在处理，跑完回这里。", "想看细节就在这里发 /status。"].join("\n");
+    }
+    if (presentation.state === "completed") return "弄好了，结果在下面。";
+    if (presentation.state === "cancelled") return "这个任务停掉了。";
+    if (presentation.state === "timed_out") return "这次跑超时了，细节在 /status。";
+    if (presentation.state === "failed" || presentation.state === "interrupted") {
+      return ["这次没跑成。", presentation.nextAction].filter((line): line is string => Boolean(line)).join("\n");
+    }
   }
   if (presentation.state === "queued") {
     return ["Queued behind an active run.", `Run: ${presentation.runId}`, "Use /status here for queue details."].join("\n");
@@ -227,7 +255,18 @@ function larkRunStatusHeaderTemplate(state: OpenTagRunStatusPresentation["state"
   return "blue";
 }
 
-function larkRunStatusTitle(state: OpenTagRunStatusPresentation["state"]): string {
+function larkRunStatusTitle(state: OpenTagRunStatusPresentation["state"], locale: LarkRenderLocale): string {
+  if (locale === "zh-CN") {
+    if (state === "received") return "我接了";
+    if (state === "queued") return "排队中";
+    if (state === "running") return "在处理了";
+    if (state === "waiting_for_approval") return "等你确认";
+    if (state === "waiting_for_human") return "需要你补一下";
+    if (state === "completed") return "弄好了";
+    if (state === "cancelled") return "已经停了";
+    if (state === "timed_out") return "跑超时了";
+    return "这次没跑成";
+  }
   if (state === "received") return "OpenTag received this";
   if (state === "queued") return "OpenTag queued this";
   if (state === "running") return "OpenTag is working";
@@ -236,8 +275,9 @@ function larkRunStatusTitle(state: OpenTagRunStatusPresentation["state"]): strin
   return `OpenTag ${state}`;
 }
 
-export function createLarkRunStatusCard(presentation: OpenTagRunStatusPresentation): LarkCard {
-  const statusText = renderLarkRunStatusPresentation(presentation);
+export function createLarkRunStatusCard(presentation: OpenTagRunStatusPresentation, options: { locale?: LarkRenderLocale } = {}): LarkCard {
+  const locale = larkRenderLocale(options);
+  const statusText = renderLarkRunStatusPresentation(presentation, options);
   return {
     config: {
       wide_screen_mode: true,
@@ -247,7 +287,7 @@ export function createLarkRunStatusCard(presentation: OpenTagRunStatusPresentati
       template: larkRunStatusHeaderTemplate(presentation.state),
       title: {
         tag: "plain_text",
-        content: larkRunStatusTitle(presentation.state)
+        content: larkRunStatusTitle(presentation.state, locale)
       }
     },
     elements: [

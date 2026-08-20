@@ -13,6 +13,8 @@ const TASK_OVERRIDE = /^(?:\/task\b|task\s*[:：]|任务\s*[:：])/iu;
 
 const ENGLISH_TASK_ACTION = /\b(?:build|change|commit|configure|create|debug|delete|deploy|execute|fix|implement|install|investigate|migrate|modify|open\s+(?:a\s+)?pr|publish|push|refactor|release|remove|review|run|ship|test|troubleshoot|update|upgrade|write)\b/iu;
 const CHINESE_TASK_ACTION = /(?:实现|开发|写(?:一份|一个|代码|程序|脚本|文档)|编码|修改|改一下|修复|重构|提交|推送|部署|发布|上线|回滚|创建|新建|删除|移除|配置|安装|升级|迁移|运行|执行|跑(?:一下)?(?:测试|脚本|命令|程序)?|测试(?:一下)?|验证(?:一下)?|排查|调试|审查|代码审查|查(?:一下)?(?:日志|进程|故障)|看(?:一下)?(?:日志|进程))/u;
+const INFORMATIONAL_QUESTION = /^(?:(?:what|why|how|when|where|which)\b|(?:什么是|为什么|为何|怎么|如何|有哪些|是否|会不会)|.*(?:是什么意思|是什么|怎么做|如何做|吗)[？?]?$)/iu;
+const EXPLICIT_ACTION_REQUEST = /^(?:(?:please|can you|could you|would you)\b|(?:请|帮我|麻烦|直接|现在|立刻|给我))/iu;
 
 const EXPLICIT_TASK_INTENTS = new Set<OpenTagCommand["intent"]>([
   "fix",
@@ -53,8 +55,13 @@ export function classifyLarkInteraction(input: {
     mode = "task";
     reason = "explicit_permission_scope";
   } else if (ENGLISH_TASK_ACTION.test(text) || CHINESE_TASK_ACTION.test(text)) {
-    mode = "task";
-    reason = "execution_language";
+    if (INFORMATIONAL_QUESTION.test(text) && !EXPLICIT_ACTION_REQUEST.test(text)) {
+      mode = "chat";
+      reason = "informational_question";
+    } else {
+      mode = "task";
+      reason = "execution_language";
+    }
   } else {
     mode = "chat";
     reason = "conversational_default";

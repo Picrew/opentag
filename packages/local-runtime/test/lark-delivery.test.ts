@@ -9,6 +9,8 @@ function larkBusiness(input: {
   card?: Record<string, unknown>;
   interactionMode?: "chat" | "task";
   replyInThread?: boolean;
+  chatBody?: string;
+  attentionRequired?: boolean;
 }): DispatcherDeliveryPresentation {
   return {
     kind: "business",
@@ -21,6 +23,8 @@ function larkBusiness(input: {
     body: input.body,
     ...(input.interactionMode ? { larkInteractionMode: input.interactionMode } : {}),
     ...(input.replyInThread !== undefined ? { larkReplyInThread: input.replyInThread } : {}),
+    ...(input.chatBody ? { larkChatBody: input.chatBody } : {}),
+    ...(input.attentionRequired ? { larkAttentionRequired: true } : {}),
     ...(input.card ? { rich: { provider: "lark", payload: input.card } } : {})
   };
 }
@@ -62,7 +66,8 @@ describe("local Lark delivery compatibility path", () => {
     }));
     await producer.enqueue(larkBusiness({
       phase: "final",
-      body: "这是普通群聊回答。",
+      body: "已完成：success。\n\n这是普通群聊回答。\n\nAudit: opentag status --run run_hello",
+      chatBody: "这是普通群聊回答。",
       card,
       interactionMode: "chat",
       replyInThread: false
@@ -78,6 +83,31 @@ describe("local Lark delivery compatibility path", () => {
       }
     });
     expect(patch).not.toHaveBeenCalled();
+  });
+
+  it("keeps an approval visible by moving chat attention into a thread", async () => {
+    const reply = vi.fn().mockResolvedValue({ data: { message_id: "om_approval" } });
+    const client: LarkReplyClient = { im: { message: { reply } } };
+    const producer = createLocalLarkDeliveryProducer({ client });
+    const approvalCard = { config: { wide_screen_mode: true }, elements: [{ tag: "action" }] };
+
+    await producer.enqueue(larkBusiness({
+      phase: "progress",
+      body: "需要确认权限。",
+      card: approvalCard,
+      interactionMode: "chat",
+      replyInThread: false,
+      attentionRequired: true
+    }));
+
+    expect(reply).toHaveBeenCalledWith({
+      path: { message_id: "om_source" },
+      data: {
+        content: JSON.stringify(approvalCard),
+        msg_type: "interactive",
+        reply_in_thread: true
+      }
+    });
   });
 
   it("does not call the reaction API for optional source receipts", async () => {
