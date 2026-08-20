@@ -38,6 +38,7 @@ import {
   conversationKeyFromEvent,
   conversationMemoryPolicyFromEvent,
   conversationKeysFromEvent,
+  memoryConversationKeyFromEvent,
   defaultRunEventMetadata,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
@@ -2837,7 +2838,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
   async function conversationHistoryForEvent(event: OpenTagEvent): Promise<ConversationHistoryTurn[]> {
     const policy = conversationMemoryPolicyFromEvent(event);
     if (!policy) return [];
-    const conversationKey = conversationKeyFromEvent(event);
+    const conversationKey = memoryConversationKeyFromEvent(event);
     const projectTarget = projectTargetRefFromEvent(event);
     const projectScope = projectTarget
       ? and(
@@ -2855,7 +2856,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       })
       .from(runs)
       .where(and(
-        eq(runs.conversationKey, conversationKey),
+        sql`coalesce(json_extract(${runs.eventJson}, '$.metadata.memoryConversationKey'), ${runs.conversationKey}) = ${conversationKey}`,
         eq(runs.status, "succeeded"),
         isNotNull(runs.resultJson),
         projectScope

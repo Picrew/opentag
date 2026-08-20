@@ -449,6 +449,11 @@ export function conversationKeyFromEvent(event: OpenTagEvent): string {
   return explicitConversationKey(event) ?? callbackConversationKey(event.callback);
 }
 
+export function memoryConversationKeyFromEvent(event: OpenTagEvent): string {
+  const key = metadataRecordString(event.metadata, "memoryConversationKey");
+  return key?.startsWith(`${event.callback.provider}:`) ? key : conversationKeyFromEvent(event);
+}
+
 export function conversationMemoryPolicyFromEvent(event: OpenTagEvent) {
   const parsed = ConversationMemoryPolicySchema.safeParse(event.metadata["conversationMemory"]);
   return parsed.success && parsed.data.enabled ? parsed.data : undefined;

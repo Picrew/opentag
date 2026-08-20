@@ -69,10 +69,16 @@ export function parseLarkThreadKey(threadKey: string): { tenantKey: string; chat
 }
 
 export function larkConversationKey(
-  input: Pick<LarkMessageInput, "tenantKey" | "chatId" | "chatType" | "messageId" | "rootId">,
+  input: Pick<LarkMessageInput, "tenantKey" | "chatId" | "messageId" | "rootId">
+): string {
+  return `lark:${input.tenantKey}|${input.chatId}|${input.rootId ?? input.messageId}`;
+}
+
+export function larkMemoryConversationKey(
+  input: Pick<LarkMessageInput, "tenantKey" | "chatId" | "messageId" | "rootId">,
   interactionMode: LarkInteractionMode = "task"
 ): string {
-  const conversationId = input.chatType === "p2p" || (!input.rootId && interactionMode === "chat")
+  const conversationId = !input.rootId && interactionMode === "chat"
     ? input.chatId
     : `${input.chatId}|${input.rootId ?? input.messageId}`;
   return `lark:${input.tenantKey}|${conversationId}`;
@@ -265,7 +271,8 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
       chatId: input.chatId,
       accountId: input.tenantKey,
       conversationId: input.chatId,
-      conversationKey: larkConversationKey(input, interaction.mode),
+      conversationKey: larkConversationKey(input),
+      memoryConversationKey: larkMemoryConversationKey(input, interaction.mode),
       conversationMemory: input.conversationMemory ?? DEFAULT_CONVERSATION_MEMORY_POLICY,
       messageId: input.messageId,
       chatType: input.chatType,

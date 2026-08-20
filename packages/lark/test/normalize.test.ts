@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   encodeLarkThreadKey,
   larkConversationKey,
+  larkMemoryConversationKey,
   type LarkMessageInput,
   normalizeLarkChannelMessage,
   normalizeLarkMessage,
@@ -54,9 +55,9 @@ describe("lark thread key", () => {
 });
 
 describe("lark conversation key", () => {
-  it("keeps direct messages in one private conversation", () => {
-    expect(larkConversationKey({ ...baseInput, chatType: "p2p", messageId: "om_first" })).toBe("lark:tk_123|oc_chat");
-    expect(larkConversationKey({ ...baseInput, chatType: "p2p", messageId: "om_second" })).toBe("lark:tk_123|oc_chat");
+  it("isolates top-level requests so they can execute concurrently", () => {
+    expect(larkConversationKey({ ...baseInput, messageId: "om_first" })).toBe("lark:tk_123|oc_chat|om_first");
+    expect(larkConversationKey({ ...baseInput, messageId: "om_second" })).toBe("lark:tk_123|oc_chat|om_second");
   });
 
   it("isolates group conversations by root thread", () => {
@@ -66,10 +67,10 @@ describe("lark conversation key", () => {
     expect(larkConversationKey({ ...baseInput, messageId: "om_other" })).toBe("lark:tk_123|oc_chat|om_other");
   });
 
-  it("shares conversational main-channel memory without merging task threads", () => {
-    expect(larkConversationKey({ ...baseInput, messageId: "om_question" }, "chat")).toBe("lark:tk_123|oc_chat");
-    expect(larkConversationKey({ ...baseInput, messageId: "om_task" }, "task")).toBe("lark:tk_123|oc_chat|om_task");
-    expect(larkConversationKey({ ...baseInput, messageId: "om_reply", rootId: "om_task" }, "chat")).toBe(
+  it("shares conversational memory without merging task topics", () => {
+    expect(larkMemoryConversationKey({ ...baseInput, messageId: "om_question" }, "chat")).toBe("lark:tk_123|oc_chat");
+    expect(larkMemoryConversationKey({ ...baseInput, messageId: "om_task" }, "task")).toBe("lark:tk_123|oc_chat|om_task");
+    expect(larkMemoryConversationKey({ ...baseInput, messageId: "om_reply", rootId: "om_task" }, "chat")).toBe(
       "lark:tk_123|oc_chat|om_task"
     );
   });
@@ -134,7 +135,8 @@ describe("normalizeLarkMessage", () => {
       larkInteractionMode: "chat",
       larkInteractionReason: "conversational_default",
       larkReplyInThread: false,
-      conversationKey: "lark:tk_123|oc_chat"
+      conversationKey: "lark:tk_123|oc_chat|om_msg",
+      memoryConversationKey: "lark:tk_123|oc_chat"
     });
   });
 

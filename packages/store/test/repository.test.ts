@@ -123,7 +123,8 @@ describe("OpenTag repository", () => {
       command: { rawText: "Remember that the release color is indigo.", intent: "run" as const, args: {} },
       metadata: {
         ...larkEvent({ id: "unused", sourceEventId: "unused" }).metadata,
-        conversationKey: "lark:tenant_1|oc_chat",
+        conversationKey: "lark:tenant_1|oc_chat|om_memory_1",
+        memoryConversationKey: "lark:tenant_1|oc_chat",
         conversationMemory: { enabled: true, maxRuns: 6, maxCharacters: 12_000, maxTurnCharacters: 4_000 }
       }
     };
@@ -140,6 +141,7 @@ describe("OpenTag repository", () => {
       callback: { provider: "lark" as const, uri: "lark://im/v1/messages", threadKey: "tenant_1|oc_chat|om_memory_2" },
       metadata: {
         ...firstEvent.metadata,
+        conversationKey: "lark:tenant_1|oc_chat|om_memory_2",
         messageId: "om_memory_2"
       }
     };
