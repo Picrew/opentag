@@ -21,6 +21,24 @@ export const FEISHU_MCP_READ_ONLY_TOOLS = [
   "bitable.v1.appTableRecord.search"
 ] as const;
 
+export const FEISHU_MCP_READ_ONLY_SERVER_NAME = "feishu-openapi-readonly";
+
+const FEISHU_MCP_READ_ONLY_RESOURCES = new Set(
+  FEISHU_MCP_READ_ONLY_TOOLS.map(
+    (tool) => `mcp__${FEISHU_MCP_READ_ONLY_SERVER_NAME}__${tool.replaceAll(".", "_")}`
+  )
+);
+
+/**
+ * Claude Code identifies MCP calls by an encoded resource name in ACP
+ * permission requests. Keep this check tied to both OpenTag's dedicated
+ * read-only server and its explicit tool allowlist; a caller-controlled
+ * "readonly" substring must never be enough to downgrade an action.
+ */
+export function isFeishuReadOnlyMcpResource(resource: string | undefined): boolean {
+  return resource !== undefined && FEISHU_MCP_READ_ONLY_RESOURCES.has(resource);
+}
+
 export const FEISHU_MCP_OAUTH_SCOPES = [
   "offline_access",
   "docx:document:readonly",
@@ -157,7 +175,7 @@ export function createFeishuMcpServerResolver(input: {
   return (run) => {
     if (run.metadata?.larkDomain !== input.domain) return [];
     return [{
-      name: "feishu-openapi-readonly",
+      name: FEISHU_MCP_READ_ONLY_SERVER_NAME,
       command: process.execPath,
       args: [
         cliPath,

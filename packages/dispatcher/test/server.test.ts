@@ -7331,6 +7331,92 @@ describe("dispatcher API", () => {
     expect(finalMessage).not.toContain("authorization");
   });
 
+  it("accepts a governed Feishu approval as a trusted topic reply when card callbacks are unavailable", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "opentag-lark-text-approval-"));
+    onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
+    const delivered: CapturedBusinessDelivery[] = [];
+    const app = createDispatcherApp({
+      databasePath: join(directory, "dispatcher.sqlite"),
+      deliveryProducer: captureBusinessDeliveries(async (message) => { delivered.push(message); })
+    });
+    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_lark", name: "Local Runner" }));
+    await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "lark",
+      accountId: "tenant_1",
+      conversationId: "chat_1",
+      metadata: { allowedActors: ["lark:ou_1"] }
+    }));
+    const event = {
+      id: "evt_lark_permission",
+      source: "lark",
+      sourceEventId: "om_root",
+      receivedAt: "2026-08-20T12:00:00.000Z",
+      actor: { provider: "lark", providerUserId: "ou_1", handle: "alice" },
+      target: { mention: "@opentag", agentId: "opentag", executorHint: "custom" },
+      command: { rawText: "publish the report", intent: "run", args: {} },
+      context: [],
+      permissions: [],
+      callback: { provider: "lark", uri: "lark://im/v1/messages", threadKey: "tenant_1|chat_1|om_root" },
+      metadata: { tenantKey: "tenant_1", chatId: "chat_1", messageId: "om_root" }
+    };
+    expect((await app.request("/v1/runs", jsonRequest({ runId: "run_lark_permission", event }))).status).toBe(201);
+    const claim = await (await app.request("/v1/runners/runner_lark/claim", { method: "POST" })).json() as {
+      attemptId: string;
+      fencingToken: string;
+    };
+    const lease = { attemptId: claim.attemptId, fencingToken: claim.fencingToken };
+    await app.request("/v1/runners/runner_lark/runs/run_lark_permission/running", jsonRequest({ ...lease, executor: "fixture-agent" }));
+    const permission = await app.request(
+      "/v1/runners/runner_lark/runs/run_lark_permission/action-permissions",
+      jsonRequest({
+        ...lease,
+        request: {
+          toolCallId: "tool_publish_lark",
+          title: "Publish report",
+          kind: "publish",
+          provider: "connector",
+          connectionId: "connector:team",
+          operation: "publish",
+          resource: "report:lark",
+          targetFingerprint: `sha256:${"c".repeat(64)}`,
+          permissionScopes: ["report:publish"],
+          mode: "ask"
+        }
+      })
+    );
+    expect(permission.status).toBe(202);
+    const permissionBody = await permission.json() as { resolution: { action: { id: string } } };
+
+    const approval = await app.request("/v1/thread-actions", jsonRequest({
+      id: "approval_lark_text_evt_1",
+      rawText: "approve 1 本次运行",
+      actor: { provider: "lark", providerUserId: "ou_1", handle: "alice", organizationId: "tenant_1" },
+      callback: { provider: "lark", uri: "lark://im/v1/messages", threadKey: "tenant_1|chat_1|om_root" },
+      metadata: {
+        source: "lark_reply",
+        tenantKey: "tenant_1",
+        chatId: "chat_1",
+        messageId: "om_reply",
+        rootId: "om_root",
+        larkEventId: "evt_lark_reply_1"
+      }
+    }));
+    expect(approval.status, await approval.clone().text()).toBe(201);
+    await expect(approval.json()).resolves.toMatchObject({
+      outcome: "approved",
+      decision: { metadata: { permissionDecision: "allow_run" } }
+    });
+    expect(delivered.at(-1)?.body).toContain("Allowed for this run: Publish report.");
+
+    const resolved = await app.request(
+      `/v1/runners/runner_lark/runs/run_lark_permission/action-permissions/${permissionBody.resolution.action.id}/resolve`,
+      jsonRequest(lease)
+    );
+    await expect(resolved.json()).resolves.toMatchObject({
+      resolution: { state: "authorized", decision: "allow_run" }
+    });
+  });
+
   it("resumes a repo-less ACP permission through the managed source-thread approval path", async () => {
     const directory = mkdtempSync(join(tmpdir(), "opentag-reconciliation-fences-"));
     onTestFinished(() => rmSync(directory, { recursive: true, force: true }));

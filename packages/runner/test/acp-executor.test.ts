@@ -461,6 +461,44 @@ describe("ACP executor", () => {
     ]);
   }, 15_000);
 
+  it("classifies allowlisted Feishu MCP document reads as non-material read actions", async () => {
+    const workspace = permissionWorkspace("feishu-readonly", {
+      OPENTAG_ACP_TEST_PERMISSION_TITLE: "Allow other?",
+      OPENTAG_ACP_TEST_PERMISSION_KIND: "other",
+      OPENTAG_ACP_TEST_PROVIDER: "acp",
+      OPENTAG_ACP_TEST_CONNECTION: "acp:agent-managed",
+      OPENTAG_ACP_TEST_RESOURCE: "mcp__feishu-openapi-readonly__wiki_v2_space_getNode"
+    });
+    const requests: Array<Record<string, unknown>> = [];
+    const executor = createAcpExecutor({ manifest: permissionManifest() });
+
+    await executor.run({
+      ...input({ kind: "scratch", path: workspace }, "run_feishu_readonly"),
+      permissions: [
+        { scope: "chat:postMessage", reason: "Reply to the source chat" },
+        { scope: "runner:local", reason: "Run locally" }
+      ],
+      permissionResolver: async (request) => {
+        requests.push(request);
+        return { actionId: "action_feishu_read", decision: "allow_once", material: false };
+      }
+    }, { emit: async () => undefined });
+
+    expect(requests).toEqual([
+      expect.objectContaining({
+        kind: "read",
+        provider: "acp",
+        connectionId: "acp:agent-managed",
+        operation: "read",
+        resource: "mcp__feishu-openapi-readonly__wiki_v2_space_getNode",
+        permissionScopes: []
+      })
+    ]);
+    expect(JSON.parse(readFileSync(join(workspace, "acp-permission.json"), "utf8"))).toEqual({
+      outcome: { outcome: "selected", optionId: "allow-once" }
+    });
+  }, 15_000);
+
   it("removes credential values from ACP target identity while retaining structured resource changes", async () => {
     const requests: Array<{ provider?: string; targetFingerprint?: string; connectionId?: string; operation?: string; resource?: string; resourceVersion?: string }> = [];
     for (const [index, env] of [

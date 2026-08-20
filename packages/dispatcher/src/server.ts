@@ -2242,6 +2242,24 @@ function governedPermissionDecision(value: unknown): GovernedPermissionDecision 
   return value === "allow_once" || value === "allow_run" || value === "deny" ? value : undefined;
 }
 
+function governedPermissionDecisionFromTrustedThreadReply(input: {
+  command: ThreadActionCommand;
+  callbackProvider: string;
+  metadata?: Record<string, unknown>;
+}): GovernedPermissionDecision | undefined {
+  if (
+    input.callbackProvider !== "lark" ||
+    input.metadata?.["source"] !== "lark_reply" ||
+    (!input.metadata["rootId"] && !input.metadata["parentId"]) ||
+    typeof input.metadata["larkEventId"] !== "string"
+  ) return undefined;
+  if (input.command.verb === "reject") return "deny";
+  if (input.command.verb !== "approve") return undefined;
+  return /(?:always|this run|本次运行|同类任务)/iu.test(input.command.reason ?? "")
+    ? "allow_run"
+    : "allow_once";
+}
+
 function renderGovernedPermissionDecisionBody(input: {
   decision: GovernedPermissionDecision;
   selectionText: string;
@@ -5509,19 +5527,29 @@ export function createDispatcherApp(input: {
     const proposalMetadata = resolved.resolved.proposal.snapshot.metadata;
     const governedPermission = proposalMetadata?.["kind"] === "acp_permission";
     const requestedPermissionDecision = governedPermissionDecision(parsed.metadata?.["permissionDecision"]);
+    const trustedThreadReplyDecision = governedPermission
+      ? governedPermissionDecisionFromTrustedThreadReply({
+          command,
+          callbackProvider: parsed.callback.provider,
+          ...(parsed.metadata ? { metadata: parsed.metadata } : {})
+        })
+      : undefined;
+    const effectivePermissionDecision = requestedPermissionDecision ?? trustedThreadReplyDecision;
     if (governedPermission) {
       const expectedActionId = proposalMetadata?.["actionId"];
       const expectedProposalHash = proposalMetadata?.["proposalHash"];
       const expectedApprovalEpoch = proposalMetadata?.["approvalEpoch"];
       const expectedIntentId = typeof expectedActionId === "string" ? `intent_${expectedActionId}` : undefined;
-      const compatibleVerb = requestedPermissionDecision === "deny" ? command.verb === "reject" : command.verb === "approve";
+      const compatibleVerb = effectivePermissionDecision === "deny" ? command.verb === "reject" : command.verb === "approve";
+      const hasImmutableCardIdentity = Boolean(requestedPermissionDecision) &&
+        parsed.metadata?.["proposalHash"] === expectedProposalHash &&
+        parsed.metadata?.["approvalEpoch"] === expectedApprovalEpoch &&
+        parsed.metadata?.["governedActionId"] === expectedActionId &&
+        parsed.metadata?.["proposalId"] === resolved.resolved.proposal.snapshot.proposalId &&
+        parsed.metadata?.["intentId"] === expectedIntentId;
       if (
-        !requestedPermissionDecision ||
-        parsed.metadata?.["proposalHash"] !== expectedProposalHash ||
-        parsed.metadata?.["approvalEpoch"] !== expectedApprovalEpoch ||
-        parsed.metadata?.["governedActionId"] !== expectedActionId ||
-        parsed.metadata?.["proposalId"] !== resolved.resolved.proposal.snapshot.proposalId ||
-        parsed.metadata?.["intentId"] !== expectedIntentId ||
+        !effectivePermissionDecision ||
+        (!trustedThreadReplyDecision && !hasImmutableCardIdentity) ||
         !compatibleVerb
       ) {
         return c.json({ outcome: "approval_identity_mismatch", message: "The governed approval payload does not match the immutable proposal." }, 409);
@@ -5598,7 +5626,7 @@ export function createDispatcherApp(input: {
         callback: parsed.callback,
         ...(governedPermission
           ? {
-              permissionDecision: requestedPermissionDecision,
+              permissionDecision: effectivePermissionDecision,
               actionId: proposalMetadata?.["actionId"],
               proposalHash: proposalMetadata?.["proposalHash"],
               approvalEpoch: proposalMetadata?.["approvalEpoch"]
@@ -5617,8 +5645,8 @@ export function createDispatcherApp(input: {
       if (existingDecision) {
         return c.json({ outcome: "already_rejected", decision }, 200);
       }
-      const body = governedPermission && requestedPermissionDecision
-        ? renderGovernedPermissionDecisionBody({ decision: requestedPermissionDecision, selectionText })
+      const body = governedPermission && effectivePermissionDecision
+        ? renderGovernedPermissionDecisionBody({ decision: effectivePermissionDecision, selectionText })
         : renderThreadActionRecordedBody({ verb: "reject", selectionText });
       await reply(body);
       return c.json({ outcome: "rejected", decision }, 201);
@@ -5629,8 +5657,8 @@ export function createDispatcherApp(input: {
         return c.json({ outcome: "already_approved", decision }, 200);
       }
       let body: string;
-      if (governedPermission && requestedPermissionDecision) {
-        body = renderGovernedPermissionDecisionBody({ decision: requestedPermissionDecision, selectionText });
+      if (governedPermission && effectivePermissionDecision) {
+        body = renderGovernedPermissionDecisionBody({ decision: effectivePermissionDecision, selectionText });
       } else {
         const linearApply = await linearApplyOptionsForEvent(resolved.resolved.proposal.event);
         const directApply = await selectedDirectApplyStatus({

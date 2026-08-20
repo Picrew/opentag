@@ -23,6 +23,7 @@ import {
   type ExecutorWorkspace
 } from "./executor.js";
 import { renderEnterpriseTeammatePrompt } from "./enterprise-teammate.js";
+import { isFeishuReadOnlyMcpResource } from "./feishu-mcp.js";
 import {
   branchNameForRun,
   changedFiles,
@@ -985,17 +986,27 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
               }));
               const governedResolver = input.permissionResolver;
               const target = structuredPermissionTarget(ctx.params.toolCall.rawInput, ctx.params.toolCall.kind);
+              const trustedReadOnlyFeishuTool = isFeishuReadOnlyMcpResource(target.resource);
               const request = {
                 runId: input.runId,
                 toolCall: {
                   toolCallId: ctx.params.toolCall.toolCallId,
                   title: safeToolTitle(ctx.params.toolCall.title ?? "Untitled tool call"),
-                  ...(ctx.params.toolCall.kind ? { kind: ctx.params.toolCall.kind } : {}),
+                  ...(trustedReadOnlyFeishuTool
+                    ? { kind: "read" }
+                    : ctx.params.toolCall.kind ? { kind: ctx.params.toolCall.kind } : {}),
                   ...(ctx.params.toolCall.status ? { status: ctx.params.toolCall.status } : {}),
                   ...(target.targetFingerprint ? { targetFingerprint: target.targetFingerprint } : {})
                 },
                 options: requestOptions,
-                permissionScopes: input.permissions?.map((permission) => permission.scope) ?? []
+                // Run-level scopes describe OpenTag's reply/runner authority,
+                // not the MCP method. The dedicated Feishu server is already
+                // constrained to an explicit read-only allowlist, so carrying
+                // scopes such as chat:postMessage would incorrectly classify
+                // a document read as a material write.
+                permissionScopes: trustedReadOnlyFeishuTool
+                  ? []
+                  : input.permissions?.map((permission) => permission.scope) ?? []
               };
               if (governedResolver) {
                 const resolution = await governedResolver({
@@ -1004,7 +1015,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                   ...(request.toolCall.kind ? { kind: request.toolCall.kind } : {}),
                   provider: target.provider,
                   connectionId: target.connectionId,
-                  operation: target.operation,
+                  operation: trustedReadOnlyFeishuTool ? "read" : target.operation,
                   ...(target.resource ? { resource: target.resource } : {}),
                   ...(target.resourceVersion ? { resourceVersion: target.resourceVersion } : {}),
                   ...(target.targetConstraints ? { targetConstraints: target.targetConstraints } : {}),

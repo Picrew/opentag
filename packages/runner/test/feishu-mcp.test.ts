@@ -3,7 +3,8 @@ import {
   createFeishuMcpServerResolver,
   createLarkMcpUserTokenProvider,
   FEISHU_MCP_OAUTH_SCOPES,
-  FEISHU_MCP_READ_ONLY_TOOLS
+  FEISHU_MCP_READ_ONLY_TOOLS,
+  isFeishuReadOnlyMcpResource
 } from "../src/feishu-mcp.js";
 import type { ExecutorRunInput } from "../src/executor.js";
 
@@ -46,6 +47,21 @@ describe("Feishu MCP session configuration", () => {
     expect(FEISHU_MCP_OAUTH_SCOPES).toContain("offline_access");
     expect(FEISHU_MCP_OAUTH_SCOPES).toContain("im:message.group_msg:get_as_user");
     expect(FEISHU_MCP_OAUTH_SCOPES).toContain("im:message:readonly");
+  });
+
+  it("recognizes only resources from the dedicated read-only MCP allowlist", () => {
+    expect(isFeishuReadOnlyMcpResource(
+      "mcp__feishu-openapi-readonly__wiki_v2_space_getNode"
+    )).toBe(true);
+    expect(isFeishuReadOnlyMcpResource(
+      "mcp__feishu-openapi-readonly__docx_v1_document_rawContent"
+    )).toBe(true);
+    expect(isFeishuReadOnlyMcpResource(
+      "mcp__feishu-openapi-readonly__docx_v1_document_update"
+    )).toBe(false);
+    expect(isFeishuReadOnlyMcpResource(
+      "mcp__caller-controlled-readonly__wiki_v2_space_getNode"
+    )).toBe(false);
   });
 
   it("coalesces refresh and rotates the official local token mapping", async () => {

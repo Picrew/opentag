@@ -49,6 +49,7 @@ describe("renderLarkAcknowledgement", () => {
     expect(JSON.stringify(card)).toContain("npm / npm:team / publish / @acme/report / next");
     expect(JSON.stringify(card)).toContain('grantScope={\\"package\\":\\"@acme/report\\",\\"versions\\":\\"*\\"}');
     expect(JSON.stringify(card)).toContain("Allow for run applies only to the Run scope shown above");
+    expect(JSON.stringify(card)).toContain("按钮不可用时，在本话题回复 approve 1（仅一次）、approve 1 本次运行，或 reject 1。");
     expect(JSON.stringify(card)).toContain('\\"urlQuery\\":{\\"environment\\":\\"staging\\",\\"force\\":\\"false\\"}');
     const action = card.elements.find((element) => element.tag === "action");
     expect(action).toMatchObject({ tag: "action", actions: [{ text: { content: "Allow once" } }, { text: { content: "Allow for run" } }, { text: { content: "Deny" } }] });

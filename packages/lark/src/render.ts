@@ -174,6 +174,13 @@ export function createLarkApprovalPromptCard(presentation: OpenTagApprovalPrompt
             actionId: presentation.actionId
           }
         }))
+      },
+      {
+        tag: "note",
+        elements: [{
+          tag: "plain_text",
+          content: "按钮不可用时，在本话题回复 approve 1（仅一次）、approve 1 本次运行，或 reject 1。"
+        }]
       }
     ]
   };

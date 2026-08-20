@@ -135,7 +135,7 @@ const app = acp
         toolCall: {
           toolCallId: "material-1",
           title: fixtureConfig.OPENTAG_ACP_TEST_PERMISSION_TITLE ?? "Publish report",
-          kind: "execute",
+          kind: fixtureConfig.OPENTAG_ACP_TEST_PERMISSION_KIND ?? "execute",
           status: "pending",
           rawInput: {
             provider: fixtureConfig.OPENTAG_ACP_TEST_PROVIDER ?? "npm",
