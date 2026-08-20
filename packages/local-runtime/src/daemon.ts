@@ -206,6 +206,8 @@ function executorMetadata(event: OpenTagEvent): Record<string, unknown> {
   return {
     ...metadata,
     provider: event.source,
+    sourceActorId: event.actor.providerUserId,
+    sourceOccurredAt: event.receivedAt,
     ...(accountId ? { accountId } : {}),
     ...(conversationId ? { conversationId } : {})
   };

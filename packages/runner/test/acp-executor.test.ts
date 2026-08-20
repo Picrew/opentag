@@ -262,6 +262,10 @@ describe("ACP executor", () => {
     expect(result.changedFiles).toEqual(["acp-output.txt", "acp-prompt.json", "acp-session.json"]);
     expect(git(repo, ["show", "opentag/run_acp:acp-output.txt"])).toContain("ACP fixture");
     const prompt = JSON.parse(git(repo, ["show", "opentag/run_acp:acp-prompt.json"]));
+    expect(prompt.text).toContain("Enterprise teammate contract:");
+    expect(prompt.text).toContain("Speak like a capable colleague");
+    expect(prompt.text).toContain("interaction mode: task");
+    expect(prompt.text).toContain("Avoid assistant clichés");
     expect(prompt.text).toContain("prepare the report");
     expect(prompt.text).toContain("Conversation history (oldest to newest; the current command takes priority)");
     expect(prompt.text).toContain("User: Remember that the release color is indigo.");

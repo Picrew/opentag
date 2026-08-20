@@ -22,6 +22,7 @@ import {
   type ExecutorRunInput,
   type ExecutorWorkspace
 } from "./executor.js";
+import { renderEnterpriseTeammatePrompt } from "./enterprise-teammate.js";
 import {
   branchNameForRun,
   changedFiles,
@@ -402,6 +403,8 @@ function assertExplicitWorkspace(input: ExecutorRunInput): ExecutorWorkspace {
 
 function promptForRun(input: ExecutorRunInput): string {
   const lines = [
+    ...renderEnterpriseTeammatePrompt(input),
+    "",
     `OpenTag run: ${input.runId}`,
     "",
     "Command:",

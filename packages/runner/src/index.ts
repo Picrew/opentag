@@ -3,6 +3,7 @@ export * from "./acp-agent.js";
 export * from "./builtin-acp.js";
 export * from "./command.js";
 export * from "./echo.js";
+export * from "./enterprise-teammate.js";
 export * from "./executor.js";
 export * from "./feishu-mcp.js";
 export * from "./git.js";
