@@ -73,6 +73,7 @@
     "@opentag/gitlab": "workspace:*",
     "@opentag/github": "workspace:*",
     "@opentag/linear": "workspace:*",
+    "@opentag/lark": "workspace:*",
     "@opentag/teams": "workspace:*",
     "@opentag/telegram": "workspace:*",
     "@opentag/runner": "workspace:*",

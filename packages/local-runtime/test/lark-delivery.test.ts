@@ -1,0 +1,60 @@
+import type { DispatcherDeliveryPresentation } from "@opentag/dispatcher";
+import type { LarkReplyClient } from "@opentag/lark";
+import { describe, expect, it, vi } from "vitest";
+import { createLocalLarkDeliveryProducer } from "../src/lark-delivery.js";
+
+function larkBusiness(input: {
+  phase: "progress" | "final";
+  body: string;
+  card?: Record<string, unknown>;
+}): DispatcherDeliveryPresentation {
+  return {
+    kind: "business",
+    runId: "run_hello",
+    provider: "lark",
+    uri: "lark://im/v1/messages",
+    threadKey: "tenant_1|chat_1|om_source",
+    statusMessageKey: "run_hello:status",
+    phase: input.phase,
+    body: input.body,
+    ...(input.card ? { rich: { provider: "lark", payload: input.card } } : {})
+  };
+}
+
+describe("local Lark delivery compatibility path", () => {
+  it("creates the running card and patches it with the final answer", async () => {
+    const reply = vi.fn().mockResolvedValue({ data: { message_id: "om_status" } });
+    const patch = vi.fn().mockResolvedValue({});
+    const client: LarkReplyClient = { im: { message: { reply, patch } } };
+    const producer = createLocalLarkDeliveryProducer({ client });
+
+    const runningCard = { config: { wide_screen_mode: true }, elements: [] };
+    const finalCard = { config: { wide_screen_mode: true }, elements: [{ tag: "div" }] };
+    await producer.enqueue(larkBusiness({ phase: "progress", body: "Running.", card: runningCard }));
+    await producer.enqueue(larkBusiness({ phase: "final", body: "你好！", card: finalCard }));
+
+    expect(reply).toHaveBeenCalledOnce();
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({
+      path: { message_id: "om_source" },
+      data: expect.objectContaining({ msg_type: "interactive", reply_in_thread: true })
+    }));
+    expect(patch).toHaveBeenCalledOnce();
+    expect(patch).toHaveBeenCalledWith(expect.objectContaining({ path: { message_id: "om_status" } }));
+  });
+
+  it("does not call the reaction API for optional source receipts", async () => {
+    const request = vi.fn();
+    const client: LarkReplyClient = { request, im: { message: {} } };
+    const producer = createLocalLarkDeliveryProducer({ client });
+    const result = await producer.enqueue({
+      kind: "source_receipt",
+      runId: "run_hello",
+      provider: "lark",
+      uri: "lark://im/v1/messages",
+      phase: "running"
+    });
+
+    expect(result.outcome).toBe("queued");
+    expect(request).not.toHaveBeenCalled();
+  });
+});

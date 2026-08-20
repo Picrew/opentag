@@ -623,6 +623,9 @@ importers:
       '@opentag/gitlab':
         specifier: workspace:*
         version: link:../gitlab
+      '@opentag/lark':
+        specifier: workspace:*
+        version: link:../lark
       '@opentag/linear':
         specifier: workspace:*
         version: link:../linear

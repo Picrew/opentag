@@ -24,6 +24,7 @@ import {
   type AdapterMutationMapping,
   type OpenTagSourceThreadQueuedFollowUp
 } from "@opentag/core";
+import { createLocalLarkDeliveryProducer } from "./lark-delivery.js";
 export { getUnifiedDeliveryActivationState } from "@opentag/dispatcher";
 
 export type LocalDispatcherRuntimeInput = {
@@ -739,6 +740,15 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
   const app = createDispatcherApp({
     databasePath: input.databasePath,
     sqlite,
+    ...(input.lark
+      ? {
+          deliveryProducer: createLocalLarkDeliveryProducer({
+            appId: input.lark.appId,
+            appSecret: input.lark.appSecret,
+            domain: input.lark.domain
+          })
+        }
+      : {}),
     ...(input.completionPolicies ? { completionPolicies: input.completionPolicies } : {}),
     ...(input.defaultGitHubCompletion ? { defaultGitHubCompletion: input.defaultGitHubCompletion } : {}),
     ...(reassessmentObligations ? { reassessmentObligations } : {}),
