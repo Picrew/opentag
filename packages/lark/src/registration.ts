@@ -12,6 +12,7 @@ const PERSONAL_AGENT_TENANT_SCOPES = [
   "drive:drive:readonly",
   "wiki:wiki:readonly",
   "im:message.group_msg:get_as_user",
+  "im:message:readonly",
   "sheets:spreadsheet:readonly",
   "bitable:app:readonly"
 ] as const;

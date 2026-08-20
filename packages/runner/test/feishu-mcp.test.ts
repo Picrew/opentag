@@ -45,6 +45,7 @@ describe("Feishu MCP session configuration", () => {
     expect(FEISHU_MCP_READ_ONLY_TOOLS.some((tool) => /create|update|delete|patch|reply/iu.test(tool))).toBe(false);
     expect(FEISHU_MCP_OAUTH_SCOPES).toContain("offline_access");
     expect(FEISHU_MCP_OAUTH_SCOPES).toContain("im:message.group_msg:get_as_user");
+    expect(FEISHU_MCP_OAUTH_SCOPES).toContain("im:message:readonly");
   });
 
   it("coalesces refresh and rotates the official local token mapping", async () => {

@@ -27,6 +27,7 @@ export const FEISHU_MCP_OAUTH_SCOPES = [
   "drive:drive:readonly",
   "wiki:wiki:readonly",
   "im:message.group_msg:get_as_user",
+  "im:message:readonly",
   "sheets:spreadsheet:readonly",
   "bitable:app:readonly"
 ] as const;

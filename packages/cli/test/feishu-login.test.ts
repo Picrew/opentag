@@ -36,7 +36,12 @@ describe("Feishu OAuth login command", () => {
       appId: "cli_1",
       appSecret: "secret_1",
       domain: "feishu",
-      scopes: expect.arrayContaining(["offline_access", "docx:document:readonly", "im:message.group_msg:get_as_user"])
+      scopes: expect.arrayContaining([
+        "offline_access",
+        "docx:document:readonly",
+        "im:message.group_msg:get_as_user",
+        "im:message:readonly"
+      ])
     }));
     expect(writeConfig).toHaveBeenCalledWith("/tmp/config.json", expect.objectContaining({
       platforms: { lark: expect.objectContaining({ userResourceAccess: { enabled: true } }) }
