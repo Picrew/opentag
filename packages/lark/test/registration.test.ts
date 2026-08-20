@@ -44,7 +44,18 @@ describe("Lark Personal Agent registration", () => {
         source: "opentag",
         addons: expect.objectContaining({
           scopes: expect.objectContaining({
-            tenant: expect.arrayContaining(["im:message:send_as_bot"])
+            tenant: [
+              "im:message:send_as_bot",
+              "im:message.p2p_msg:readonly",
+              "im:message.group_msg:readonly",
+              "im:chat:readonly",
+              "docx:document:readonly",
+              "drive:drive:readonly",
+              "wiki:wiki:readonly",
+              "im:message.group_msg",
+              "sheets:spreadsheet:readonly",
+              "bitable:app:readonly"
+            ]
           }),
           callbacks: expect.objectContaining({
             items: expect.arrayContaining(["card.action.trigger"])

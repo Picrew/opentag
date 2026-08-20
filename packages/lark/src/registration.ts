@@ -3,6 +3,18 @@ import * as lark from "@larksuiteoapi/node-sdk";
 const REGISTRATION_SOURCE = "opentag";
 const BOT_INFO_RETRIES = 6;
 const BOT_INFO_RETRY_DELAY_MS = 2000;
+const PERSONAL_AGENT_TENANT_SCOPES = [
+  "im:message:send_as_bot",
+  "im:message.p2p_msg:readonly",
+  "im:message.group_msg:readonly",
+  "im:chat:readonly",
+  "docx:document:readonly",
+  "drive:drive:readonly",
+  "wiki:wiki:readonly",
+  "im:message.group_msg",
+  "sheets:spreadsheet:readonly",
+  "bitable:app:readonly"
+] as const;
 
 export type LarkDomain = "lark" | "feishu";
 
@@ -197,7 +209,7 @@ export async function registerLarkPersonalAgent(
     },
     addons: {
       scopes: {
-        tenant: ["im:message:send_as_bot", "im:message.p2p_msg:readonly", "im:message.group_msg:readonly", "im:chat:readonly"]
+        tenant: [...PERSONAL_AGENT_TENANT_SCOPES]
       },
       events: {
         items: {
