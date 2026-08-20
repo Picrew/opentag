@@ -57,6 +57,7 @@ External local runtimes can report lifecycle hooks through the public [Hook Inge
 
 ```bash
 opentag setup
+opentag feishu login
 opentag start
 opentag service start
 opentag service stop
@@ -72,6 +73,13 @@ opentag config show
 opentag platforms
 opentag executors
 ```
+
+For a configured Lark / Feishu platform, `opentag feishu login --config <path>`
+authorizes read-only documents, Drive, Wiki, Sheets, Bitable, chat history, and
+current-message attachment access with the current user's permissions. Omit
+`--config` for the default config, and restart a running OpenTag service after
+login. See the Lark / Feishu platform guide for required app scopes and resource
+ACL behavior.
 
 ## Local Config
 

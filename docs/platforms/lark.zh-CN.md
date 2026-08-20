@@ -73,6 +73,55 @@ OpenTag 会在写入当前 CLI 配置前向平台验证复用的历史凭据和�
 
 如果用命令行配置已有应用，传 `--tenant feishu` 或 `--tenant lark`。手动配置时如果省略 `--tenant`，OpenTag 默认使用 `feishu`。
 
+## 只读用户资源访问
+
+完成 Lark/飞书平台配置后，用当前飞书用户身份授权 OpenTag：
+
+```bash
+opentag feishu login --config <path>
+```
+
+使用默认 OpenTag 配置时可以省略 `--config`。命令会启动飞书官方 OpenAPI MCP 的
+OAuth 流程，并把用户会话保存在它的本地加密 token store 中。默认回调地址是
+`http://localhost:3000/callback`；如果使用自己维护的应用，需要先在开发者后台添加
+这个完整的重定向 URL。登录成功后，正在运行的 OpenTag 服务需要重启才能加载工具。
+
+应用需要在开发者后台启用以下资源权限：
+
+```text
+docx:document:readonly
+drive:drive:readonly
+wiki:wiki:readonly
+im:message.group_msg
+sheets:spreadsheet:readonly
+bitable:app:readonly
+```
+
+扫码新建的个人代理应用会请求这些权限。已有应用或手动维护的应用需要先添加权限，
+并发布更新后的应用版本，再执行登录命令。用户 OAuth 还会请求 `offline_access`，用于
+在本机刷新会话；它不是 tenant 应用权限。
+
+访问权限由“应用 API Scope + 目标资源 ACL”共同决定。OpenTag 使用
+`user_access_token`，所以只能读取当前授权用户原本就能打开的内容；应用获得 API
+权限并不会绕过文档、文件夹、知识库或群成员权限。
+
+启用后，明确发给机器人的消息可以：
+
+- 携带 Lark/飞书文档、云盘文件、文件夹、Wiki、Sheet 或 Bitable URL，OpenTag 会在
+  有界限制内预加载内容；
+- 让 Agent 使用只读工具读取文档、发现云盘资源、遍历 Wiki、读取 Bitable 或查询群聊历史；
+- 附带当前消息中的文本、PDF、DOCX、PPTX、XLSX，以及支持的 OpenDocument/RTF
+  文件，在本机提取文本。
+
+Drive 和 Wiki 只负责发现资源，之后会分发给对应内容 Reader。群聊附件通过 IM
+Message Resource API 获取，不从 Drive 扫描。飞书官方 OpenAPI MCP 本身不下载消息
+附件，所以这一步由 OpenTag 原生 Reader 完成。单个资源下载和解析上限为 100 MB。
+首版对图片、音频和视频只保留类型化附件引用，不启用 OCR 或转录。
+
+OpenTag 只读取显式 URL、当前消息附件，以及 Agent 明确调用工具请求的资源，不会
+自动扫描整个云盘或完整群历史。开启资源访问也不会放宽聊天触发边界：群聊中仍然
+必须 @ 机器人。
+
 ## 聊天内命令
 
 OpenTag 在 Lark/飞书里的命令都围绕 Project Target，而不是本机绝对路径：

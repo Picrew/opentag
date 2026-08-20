@@ -74,6 +74,64 @@ Pick the one that matches the app you created.
 
 For non-interactive setup with an existing app, pass `--tenant feishu` or `--tenant lark`. If you omit `--tenant` in manual setup, OpenTag defaults to `feishu`.
 
+## Read-Only User Resource Access
+
+After the Lark / Feishu platform is configured, authorize OpenTag with your own
+user identity:
+
+```bash
+opentag feishu login --config <path>
+```
+
+Omit `--config` when you use the default OpenTag config. The command opens the
+official Lark OpenAPI MCP OAuth flow and stores the resulting user session in
+its encrypted local token store. The default callback is
+`http://localhost:3000/callback`; add that exact redirect URL to a manually
+managed app before logging in. Restart a running OpenTag service after a
+successful login.
+
+The app must have these resource permissions enabled in the developer console:
+
+```text
+docx:document:readonly
+drive:drive:readonly
+wiki:wiki:readonly
+im:message.group_msg
+sheets:spreadsheet:readonly
+bitable:app:readonly
+```
+
+QR-created Personal Agent apps request these permissions for new apps. For an
+existing or manually managed app, enable them and publish the updated app
+version before running the login command. `offline_access` is requested during
+user OAuth so the local session can refresh; it is not a tenant app permission.
+
+Access requires both an app API scope and the target resource ACL. OpenTag uses
+a `user_access_token`, so it can only read content that the authorizing user can
+already open. Granting an app scope does not bypass document, folder, Wiki, or
+chat membership permissions.
+
+Once enabled, an addressed message can:
+
+- include an explicit Lark / Feishu document, Drive, folder, Wiki, Sheet, or
+  Bitable URL for bounded content preloading;
+- ask the agent to use read-only tools for documents, Drive discovery, Wiki,
+  Bitable, or chat history;
+- attach a current-message text file, PDF, DOCX, PPTX, XLSX, or supported
+  OpenDocument / RTF file for local text extraction.
+
+Drive and Wiki discover resources, then dispatch them to the matching content
+reader. Chat attachments are fetched from the IM message-resource API instead
+of Drive. The official OpenAPI MCP does not download message attachments, so
+OpenTag's native reader handles that step. Downloads and parsing are limited to
+100 MB per resource. Images, audio, and video remain typed attachment
+references in this first version; OCR and transcription are disabled.
+
+OpenTag reads only explicit URLs, current-message attachments, and resources
+requested through a tool. It does not automatically scan an entire Drive or
+chat history. Enabling resource access also does not relax chat addressing:
+group messages must still @-mention the bot.
+
 ## In-Chat Commands
 
 OpenTag keeps Lark / Feishu commands Project Target based:
