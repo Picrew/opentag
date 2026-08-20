@@ -1,4 +1,4 @@
 interface:
   display_name: "OpenTag"
-  short_description: "Set up OpenTag with the CLI"
-  default_prompt: "Use $opentag to set up OpenTag with the published CLI for Slack, GitHub, GitLab, Lark / Feishu, Telegram, or Discord."
+  short_description: "Set up and operate an enterprise OpenTag teammate"
+  default_prompt: "Use $opentag to set up, operate, or define enterprise teammate behavior for OpenTag across Slack, GitHub, GitLab, Lark / Feishu, Telegram, or Discord."

@@ -127,10 +127,27 @@ OpenTag's native reader handles that step. Downloads and parsing are limited to
 100 MB per resource. Images, audio, and video remain typed attachment
 references in this first version; OCR and transcription are disabled.
 
-OpenTag reads only explicit URLs, current-message attachments, and resources
-requested through a tool. It does not automatically scan an entire Drive or
-chat history. Enabling resource access also does not relax chat addressing:
-group messages must still @-mention the bot.
+When an addressed request arrives, OpenTag preloads at most the 20 most recent
+relevant messages from the same conversation. Main-channel requests use recent
+top-level messages; topic replies use only that topic. This bounded context is
+marked as untrusted background, not as new instructions. OpenTag still reads
+only explicit URLs, current-message attachments, and resources requested through
+a tool. It does not ambiently scan an entire Drive or chat history. Enabling
+resource access also does not relax chat addressing: group messages must still
+@-mention the bot.
+
+## Group Chat And Task Topics
+
+OpenTag routes addressed requests before delivery:
+
+- Questions, explanations, capability checks, and other answer-only requests
+  receive one plain-text reply in the main conversation.
+- Code changes, tests, deployments, investigations, and other multi-step work
+  run asynchronously and keep status, approvals, and the final result in a topic.
+- Replies already inside a topic stay there.
+- `/chat` forces an answer-only reply; `/task` forces an asynchronous topic task.
+- Unaddressed group conversation remains quiet. A previously accepted task may
+  still post its completion without another mention.
 
 ## In-Chat Commands
 

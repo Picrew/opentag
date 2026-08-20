@@ -1,6 +1,6 @@
 ---
 name: opentag
-description: Use when installing, pairing, operating, or troubleshooting OpenTag through the published CLI, self-hosted Control Plane, governed completion, supported collaboration platforms, or built-in coding agents.
+description: Use when installing, pairing, operating, troubleshooting, or defining enterprise teammate behavior for OpenTag through the published CLI, self-hosted Control Plane, governed completion, supported collaboration platforms, or built-in coding agents.
 ---
 
 # OpenTag
@@ -38,6 +38,7 @@ Read only the reference needed for the user's path:
 - Self-hosted Control Plane or trusted remote relay: `references/control-plane.md`
 - Runs waiting on governed completion: `references/completion-governance.md`
 - Broken setup, missing provider delivery, rejected runs, or auth errors: `references/troubleshooting.md`
+- Enterprise Tag behavior, group-chat routing, context, safety, or assistant prompt: `references/enterprise-tag.md`
 
 For platform credential steps, use the repository docs as the source of truth:
 
