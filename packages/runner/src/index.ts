@@ -4,6 +4,7 @@ export * from "./builtin-acp.js";
 export * from "./command.js";
 export * from "./echo.js";
 export * from "./executor.js";
+export * from "./feishu-mcp.js";
 export * from "./git.js";
 export * from "./hermes-profile.js";
 export * from "./result.js";

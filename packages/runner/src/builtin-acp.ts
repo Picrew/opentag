@@ -2,7 +2,8 @@ import type { OpenTagIntegrationManifest } from "@opentag/core";
 import {
   createAcpAgentExecutor,
   createAcpAgentManifest,
-  type AcpAgentDefinition
+  type AcpAgentDefinition,
+  type AcpAgentExecutorOptions
 } from "./acp-agent.js";
 import type { ExecutorAdapter } from "./executor.js";
 import { DEFAULT_HERMES_PROFILE } from "./hermes-profile.js";
@@ -12,6 +13,7 @@ import type { RunnerSecurityPolicy } from "./security.js";
 export type BuiltInAcpAgentId = "codex" | "claude-code" | "cursor" | "opencode" | "hermes" | "openclaw";
 
 export type BuiltInAcpAgentOptions = {
+  mcpServers?: AcpAgentExecutorOptions["mcpServers"];
   security?: RunnerSecurityPolicy;
   hermes?: {
     command?: string;
@@ -137,7 +139,10 @@ export function builtInAcpAgentManifests(options: BuiltInAcpAgentOptions = {}): 
 
 export function createBuiltInAcpExecutors(options: BuiltInAcpAgentOptions = {}): Record<BuiltInAcpAgentId, ExecutorAdapter> {
   const definitions = builtInAcpAgentDefinitions(options);
-  const shared = options.security ? { security: options.security } : {};
+  const shared = {
+    ...(options.security ? { security: options.security } : {}),
+    ...(options.mcpServers ? { mcpServers: options.mcpServers } : {})
+  };
   return {
     codex: createAcpAgentExecutor(definitions.codex, shared),
     "claude-code": createAcpAgentExecutor(definitions["claude-code"], {

@@ -284,6 +284,7 @@ export type AcpExecutorOptions = {
    */
   captureRawResultFallback?: boolean;
   launchEnvironment?: Readonly<Record<string, string>>;
+  mcpServers?: readonly acp.McpServer[] | ((input: ExecutorRunInput) => readonly acp.McpServer[]);
   preflight?: () => Promise<{ ready: boolean; reason?: string }>;
   permissionResolver?: AcpPermissionResolver;
   runner?: CommandRunner;
@@ -786,6 +787,9 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
   const cancelGraceMs = options.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS;
   const readinessTimeoutMs = options.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
   const supportsCancel = options.capabilityOverrides?.supportsCancel ?? false;
+  const mcpServersForRun = (input: ExecutorRunInput): acp.McpServer[] => [
+    ...(typeof options.mcpServers === "function" ? options.mcpServers(input) : options.mcpServers ?? [])
+  ];
   const runPreflight = async (): Promise<{ ready: boolean; reason?: string }> => {
     if (!options.preflight) return { ready: true };
     try {
@@ -1030,7 +1034,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
               return client
                 .buildSession({
                   cwd: childCwd,
-                  mcpServers: [],
+                  mcpServers: mcpServersForRun(input),
                   ...(options.captureRawResultFallback
                     ? { _meta: { claudeCode: { emitRawSDKMessages: [{ type: "result" }] } } }
                     : {})
