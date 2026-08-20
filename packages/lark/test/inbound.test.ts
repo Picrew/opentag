@@ -595,7 +595,7 @@ describe("createLarkMessageHandler", () => {
     expect(reply.mock.calls[0]?.[0].text).toContain("isn't connected to a Project Target");
   });
 
-  it("replies with queue, stop, and timeout UX when a follow-up is queued", async () => {
+  it("replies with queue, stop, and timeout UX when a task follow-up is queued", async () => {
     const { handler, reply } = createInteractiveHandler({ result: followUpQueued });
 
     const outcome = await handler(message);
@@ -604,6 +604,22 @@ describe("createLarkMessageHandler", () => {
     expect(reply.mock.calls[0]?.[0].text).toContain("Queued as a follow-up");
     expect(reply.mock.calls[0]?.[0].text).toContain("Active run: run_active");
     expect(reply.mock.calls[0]?.[0].text).toContain("Stop/timeout");
+  });
+
+  it("keeps conversational follow-up queueing silent until the final answer", async () => {
+    const { handler, createRun, reply } = createInteractiveHandler({ result: followUpQueued });
+
+    const outcome = await handler({
+      ...message,
+      message: {
+        ...message.message!,
+        content: JSON.stringify({ text: "@_user_1 你是谁啊" })
+      }
+    });
+
+    expect(outcome.status).toBe("follow_up_queued");
+    expect(createRun.mock.calls[0]?.[0].metadata["larkInteractionMode"]).toBe("chat");
+    expect(reply).not.toHaveBeenCalled();
   });
 
   it("requests cancellation for a specific run from /stop", async () => {

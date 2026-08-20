@@ -797,15 +797,23 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       return { status: "created", runId: result.run.id, tenantKey, chatId };
     }
     if (result.outcome === "follow_up_queued") {
-      await replyToSource({
-        messageId,
-        replyInThread: interaction.replyInThread,
-        text: formatFollowUpQueuedText({
-          followUpRequestId: result.followUpRequest.id,
-          ...(result.decision.activeRunId ? { activeRunId: result.decision.activeRunId } : {}),
-          reason: result.decision.reason
-        })
-      });
+      // A conversational follow-up is an internal scheduling detail. Replying
+      // here leaks run IDs and queue mechanics into ordinary chat, then the
+      // user receives the real answer later as a second message. Keep chat
+      // follow-ups silent and let the promoted run's final delivery be the
+      // only user-visible response. Task mode still acknowledges queueing so
+      // explicit work requests have clear asynchronous status.
+      if (interaction.mode === "task") {
+        await replyToSource({
+          messageId,
+          replyInThread: interaction.replyInThread,
+          text: formatFollowUpQueuedText({
+            followUpRequestId: result.followUpRequest.id,
+            ...(result.decision.activeRunId ? { activeRunId: result.decision.activeRunId } : {}),
+            reason: result.decision.reason
+          })
+        });
+      }
       return {
         status: "follow_up_queued",
         followUpRequestId: result.followUpRequest.id,
