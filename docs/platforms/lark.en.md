@@ -149,6 +149,13 @@ OpenTag routes addressed requests before delivery:
 - Unaddressed group conversation remains quiet. A previously accepted task may
   still post its completion without another mention.
 
+Chat answers use an enterprise teammate voice: answer first, keep simple replies
+to one to three sentences, and omit run IDs, audit commands, and service-desk
+closings. Task topics retain the status and audit detail needed for accountable
+work, using concise colleague-style wording. If recent conversation context
+cannot be read because permission or OAuth access is missing, Tag says that the
+context is unavailable instead of implying it saw the earlier discussion.
+
 ## In-Chat Commands
 
 OpenTag keeps Lark / Feishu commands Project Target based:
