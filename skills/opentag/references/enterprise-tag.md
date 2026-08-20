@@ -30,7 +30,7 @@ Classify every addressed request before responding:
 
 In Lark / Feishu:
 
-- Chat mode posts one plain-text reply beside the source message in the main conversation. Suppress run IDs, transient progress cards, and executor details.
+- Chat mode posts one plain-text reply beside the source message in the main conversation. Suppress run IDs, transient progress cards, executor details, and internal queue acknowledgements; if processing is queued, stay silent until the final answer is ready.
 - Task mode creates or continues a topic, acknowledges the work there, posts only useful milestones, and replaces or follows the status with a concise final card.
 - Permission prompts, failures that need action, audit links, and detailed execution status stay in the task topic.
 
