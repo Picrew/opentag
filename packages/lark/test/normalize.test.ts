@@ -65,6 +65,14 @@ describe("lark conversation key", () => {
     );
     expect(larkConversationKey({ ...baseInput, messageId: "om_other" })).toBe("lark:tk_123|oc_chat|om_other");
   });
+
+  it("shares conversational main-channel memory without merging task threads", () => {
+    expect(larkConversationKey({ ...baseInput, messageId: "om_question" }, "chat")).toBe("lark:tk_123|oc_chat");
+    expect(larkConversationKey({ ...baseInput, messageId: "om_task" }, "task")).toBe("lark:tk_123|oc_chat|om_task");
+    expect(larkConversationKey({ ...baseInput, messageId: "om_reply", rootId: "om_task" }, "chat")).toBe(
+      "lark:tk_123|oc_chat|om_task"
+    );
+  });
 });
 
 describe("normalizeLarkMessage", () => {
@@ -125,7 +133,8 @@ describe("normalizeLarkMessage", () => {
     expect(event?.metadata).toMatchObject({
       larkInteractionMode: "chat",
       larkInteractionReason: "conversational_default",
-      larkReplyInThread: false
+      larkReplyInThread: false,
+      conversationKey: "lark:tk_123|oc_chat"
     });
   });
 

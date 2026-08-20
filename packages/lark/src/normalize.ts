@@ -12,6 +12,7 @@ import {
 } from "@opentag/core";
 import { larkRenderLocaleFromDomain, type LarkRenderLocale } from "./render.js";
 import { classifyLarkInteraction } from "./interaction.js";
+import type { LarkInteractionMode } from "./interaction.js";
 
 export type LarkChannelBinding = {
   tenantKey: string;
@@ -67,8 +68,11 @@ export function parseLarkThreadKey(threadKey: string): { tenantKey: string; chat
   return { tenantKey, chatId, messageId };
 }
 
-export function larkConversationKey(input: Pick<LarkMessageInput, "tenantKey" | "chatId" | "chatType" | "messageId" | "rootId">): string {
-  const conversationId = input.chatType === "p2p"
+export function larkConversationKey(
+  input: Pick<LarkMessageInput, "tenantKey" | "chatId" | "chatType" | "messageId" | "rootId">,
+  interactionMode: LarkInteractionMode = "task"
+): string {
+  const conversationId = input.chatType === "p2p" || (!input.rootId && interactionMode === "chat")
     ? input.chatId
     : `${input.chatId}|${input.rootId ?? input.messageId}`;
   return `lark:${input.tenantKey}|${conversationId}`;
@@ -261,7 +265,7 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
       chatId: input.chatId,
       accountId: input.tenantKey,
       conversationId: input.chatId,
-      conversationKey: larkConversationKey(input),
+      conversationKey: larkConversationKey(input, interaction.mode),
       conversationMemory: input.conversationMemory ?? DEFAULT_CONVERSATION_MEMORY_POLICY,
       messageId: input.messageId,
       chatType: input.chatType,

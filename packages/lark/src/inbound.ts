@@ -101,7 +101,9 @@ export type LarkMessageHandlerConfig = {
   resolveResourceContext?(input: {
     tenantKey: string;
     chatId: string;
+    chatType: string;
     messageId: string;
+    rootId?: string;
     text: string;
     attachments: OpenTagChannelAttachmentRef[];
   }): Promise<LarkResolvedResourceContext[]>;
@@ -746,7 +748,9 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
     const resourceContext = await config.resolveResourceContext?.({
       tenantKey,
       chatId,
+      chatType,
       messageId,
+      ...(message.root_id ? { rootId: message.root_id } : {}),
       text: parsedContent.text,
       attachments: parsedContent.attachments
     });
