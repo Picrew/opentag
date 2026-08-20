@@ -292,7 +292,8 @@ const LarkPlatformSchema = z
     domain: z.enum(["lark", "feishu"]),
     botOpenId: z.string().min(1).optional(),
     conversationMemory: ConversationMemoryPolicySchema.optional(),
-    defaultProjectBinding: z.boolean().optional()
+    defaultProjectBinding: z.boolean().optional(),
+    userResourceAccess: z.object({ enabled: z.literal(true) }).strict().optional()
   })
   .strict();
 

@@ -15,6 +15,7 @@ import {
   runCompletionWaiveCommand
 } from "./completion.js";
 import { runDoctorCommand } from "./doctor.js";
+import { runFeishuLoginCommand } from "./feishu-login.js";
 import {
   runFactoryBatchGetCommand,
   runFactoryBatchSubmitCommand,
@@ -165,6 +166,14 @@ program
   .description("Start the local OpenTag stack")
   .option("--config <path>", "Config file path")
   .action(runCliAction(runStartCommand));
+
+program
+  .command("feishu")
+  .description("Manage Feishu user resource access")
+  .command("login")
+  .description("Authorize read-only Feishu document, Drive, Wiki, and message access")
+  .option("--config <path>", "Config file path")
+  .action(runCliAction(runFeishuLoginCommand));
 
 program
   .command("status")

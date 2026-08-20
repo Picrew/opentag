@@ -9,6 +9,7 @@ import {
   createEchoExecutor,
   DEFAULT_HERMES_PROFILE,
   type BuiltInAcpAgentOptions,
+  type AcpMcpServerResolver,
   type ExecutorAdapter,
   type RunnerSecurityPolicy
 } from "@opentag/runner";
@@ -45,10 +46,14 @@ export function hermesProfileConfigurationWarning(config: OpenTagDaemonConfig): 
   );
 }
 
-export function builtInAcpOptionsFromConfig(config: OpenTagDaemonConfig): BuiltInAcpAgentOptions {
+export function builtInAcpOptionsFromConfig(
+  config: OpenTagDaemonConfig,
+  options: { mcpServers?: AcpMcpServerResolver } = {}
+): BuiltInAcpAgentOptions {
   const security = securityFromConfig(config);
   return {
     ...(security ? { security } : {}),
+    ...(options.mcpServers ? { mcpServers: options.mcpServers } : {}),
     hermes: {
       ...(config.hermes?.command ? { command: config.hermes.command } : {}),
       ...(config.hermes?.profile ? { profile: config.hermes.profile } : {})
@@ -62,9 +67,9 @@ export function builtInAcpOptionsFromConfig(config: OpenTagDaemonConfig): BuiltI
   };
 }
 
-export function executorsFromConfig(config: OpenTagDaemonConfig) {
+export function executorsFromConfig(config: OpenTagDaemonConfig, options: { mcpServers?: AcpMcpServerResolver } = {}) {
   const security = securityFromConfig(config);
-  const builtInAcpExecutors = createBuiltInAcpExecutors(builtInAcpOptionsFromConfig(config));
+  const builtInAcpExecutors = createBuiltInAcpExecutors(builtInAcpOptionsFromConfig(config, options));
 
   const executors: Record<string, ExecutorAdapter> = {
     echo: createEchoExecutor(),
@@ -93,7 +98,10 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
         capabilities: { supportsProfile: agent.supportsProfile, supportsCancel: agent.supportsCancel },
         ...(agent.readinessTimeoutMs ? { readinessTimeoutMs: agent.readinessTimeoutMs } : {})
       },
-      security ? { security } : {}
+      {
+        ...(security ? { security } : {}),
+        ...(options.mcpServers ? { mcpServers: options.mcpServers } : {})
+      }
     );
   }
   return executors;
@@ -149,11 +157,11 @@ export function pullRequestOptionsFromConfig(config: OpenTagDaemonConfig): PullR
 
 export function createDaemonRuntimeInput(
   config: OpenTagDaemonConfig,
-  options: { databasePath?: string; githubApiOrigin?: string } = {},
+  options: { databasePath?: string; githubApiOrigin?: string; mcpServers?: AcpMcpServerResolver } = {},
 ): DaemonRuntimeInput {
   const security = securityFromConfig(config);
   const pullRequestOptions = pullRequestOptionsFromConfig(config);
-  const executors = executorsFromConfig(config);
+  const executors = executorsFromConfig(config, options);
   if (options.githubApiOrigin !== undefined && !config.controlRegistration) {
     throw new Error(
       "Hosted Control V1 E2E GitHub API origin requires paired Hosted Control V1."

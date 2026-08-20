@@ -57,6 +57,7 @@ import {
   writeCliConfigAtomic,
   type OpenTagCliConfig
 } from "./config.js";
+import { feishuMcpServersFromCliConfig } from "./feishu-login.js";
 import { probeDispatcherHealth } from "./health.js";
 import { linearBacklogConfigDiagnostics } from "./linear-backlog-config.js";
 import { discordLocalInteractionsUrl, discordPublicInteractionsUrlPlaceholder } from "./platforms/discord/display.js";
@@ -1049,6 +1050,7 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
   const logger = dependencies.logger;
   const config = input.config;
   const env = dependencies.env ?? process.env;
+  const feishuMcpServers = feishuMcpServersFromCliConfig(config);
   const ingresses: PlatformIngressHandle[] = [];
   const dispatcherInput = dispatcherRuntimeInputFromCliConfig(config, { env });
   const linearTokenProvider = createLinearOAuthTokenProvider({
@@ -1074,7 +1076,10 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     await dependencies.bootstrapDispatcher(config);
 
     daemonPromise = dependencies.serveDaemon({
-      ...createDaemonRuntimeInput(config.daemon, { databasePath: config.state.databasePath }),
+      ...createDaemonRuntimeInput(config.daemon, {
+        databasePath: config.state.databasePath,
+        ...(feishuMcpServers ? { mcpServers: feishuMcpServers } : {})
+      }),
       signal: abortController.signal
     });
     abortOnSubsystemFailure(daemonPromise, abortController);
@@ -1236,6 +1241,7 @@ async function startRelayMode(
   const dependencies = defaultStartDependencies(input.dependencies);
   const logger = dependencies.logger;
   const config = input.config;
+  const feishuMcpServers = feishuMcpServersFromCliConfig(config);
   assertRelayModePlatformsSupported(config);
   const relayUrl = relayUrlFromConfig(config) ?? config.daemon.dispatcherUrl;
   assertRelayTransportAllowed(relayUrl);
@@ -1251,6 +1257,7 @@ async function startRelayMode(
       ...createDaemonRuntimeInput(config.daemon, {
         databasePath: config.state.databasePath,
         ...(githubApiOrigin !== undefined ? { githubApiOrigin } : {}),
+        ...(feishuMcpServers ? { mcpServers: feishuMcpServers } : {}),
       }),
       signal: abortController.signal
     });
