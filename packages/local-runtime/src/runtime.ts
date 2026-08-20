@@ -16,6 +16,8 @@ import {
 import type { RunnerExecutorRegistration } from "@opentag/core";
 import {
   assertHostedRelayAuthorization,
+  effectiveMaxConcurrentRuns,
+  effectiveRunTimeoutMs,
   hostedRunnerAuthProblem,
   runnerDispatcherToken,
   type OpenTagDaemonConfig
@@ -214,7 +216,8 @@ export function createDaemonRuntimeInput(
     ...(security ? { security } : {}),
     ...(pullRequestOptions ? { pullRequestOptions } : {}),
     ...(config.heartbeatIntervalMs ? { heartbeatIntervalMs: config.heartbeatIntervalMs } : {}),
-    ...(config.runTimeoutMs ? { runTimeoutMs: config.runTimeoutMs } : {}),
+    maxConcurrentRuns: effectiveMaxConcurrentRuns(config),
+    runTimeoutMs: effectiveRunTimeoutMs(config),
     ...(config.agentSessionProfile ? { agentSessionProfile: config.agentSessionProfile } : {}),
     ...(config.pollIntervalMs ? { pollIntervalMs: config.pollIntervalMs } : {}),
     client: createDaemonClient(config)

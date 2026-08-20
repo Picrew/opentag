@@ -27,7 +27,10 @@ import {
   type WorkstreamEvaluation,
   type WorkstreamMetrics
 } from "@opentag/core";
-import { DEFAULT_AGENT_SESSION_PROFILE_TEMPLATE } from "@opentag/local-runtime";
+import {
+  DEFAULT_AGENT_SESSION_PROFILE_TEMPLATE,
+  effectiveRunTimeoutMs
+} from "@opentag/local-runtime";
 import { formatConfiguredCapabilities } from "./catalogs/capabilities.js";
 import type { PlatformId } from "./catalogs/platforms.js";
 import {
@@ -245,7 +248,7 @@ export async function statusFromConfig(input: {
     controlPlaneAlerts: controlPlaneAlertState.alerts,
     ...(controlPlaneAlertState.error ? { controlPlaneAlertsError: controlPlaneAlertState.error } : {}),
     runnerId: input.config.daemon.runnerId,
-    runTimeoutPolicy: formatRunTimeoutPolicy(input.config.daemon.runTimeoutMs),
+    runTimeoutPolicy: formatRunTimeoutPolicy(effectiveRunTimeoutMs(input.config.daemon)),
     secrets: formatSecretReadiness(input.secretConfig ?? redactedCliConfig(input.config)),
     repositories: input.config.daemon.repositories.map((repository) => {
       return formatConfiguredProjectTargetSummary(repository);
@@ -488,7 +491,7 @@ export async function channelStatusFromConfig(input: {
   return {
     configPath: input.configPath,
     dispatcherUrl: input.config.daemon.dispatcherUrl,
-    runTimeoutPolicy: formatRunTimeoutPolicy(input.config.daemon.runTimeoutMs),
+    runTimeoutPolicy: formatRunTimeoutPolicy(effectiveRunTimeoutMs(input.config.daemon)),
     ...channel,
     status: await client.getChannelRuntimeStatus(channel)
   };
@@ -536,7 +539,7 @@ export async function runStatusFromConfig(input: {
     run: claimed.run,
     event: claimed.event,
     metrics: metrics.metrics,
-    runTimeoutPolicy: formatRunTimeoutPolicy(input.config.daemon.runTimeoutMs),
+    runTimeoutPolicy: formatRunTimeoutPolicy(effectiveRunTimeoutMs(input.config.daemon)),
     events: events.events as RunAuditEvent[],
     ...(ledger?.ledger && Array.isArray(ledger.ledger.entries) ? { ledgerEntries: ledger.ledger.entries as RunLedgerEntry[] } : {}),
     ...(completion?.completion ? { completion: completion.completion } : {})

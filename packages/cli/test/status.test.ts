@@ -679,7 +679,7 @@ describe("OpenTag CLI status", () => {
     expect(formatted).toContain("Dispatcher: offline");
     expect(formatted).toContain("Runner Directory:\n  unavailable (dispatcher offline)");
     expect(formatted).toContain("Accepted Progress:\n  unavailable (dispatcher offline)");
-    expect(formatted).toContain("Run Timeout: disabled");
+    expect(formatted).toContain("Run Timeout: hard timeout after 10 minute(s)");
     expect(formatted).toContain("Secrets:");
     expect(formatted).toContain("daemon.pairingToken: inline (redacted)");
     expect(formatted).toContain("daemon.runnerToken: daemon.pairingToken fallback");

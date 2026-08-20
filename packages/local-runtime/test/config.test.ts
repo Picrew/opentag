@@ -7,6 +7,8 @@ import {
   beginHostedCredentialRotation,
   beginHostedCredentialRotationSuccessor,
   confirmHostedCredentialRevocation,
+  effectiveMaxConcurrentRuns,
+  effectiveRunTimeoutMs,
   finalizeHostedCredentialRotation,
   hostedCredentialOperationProblem,
   hostedCredentialMutationRequestDigest,
@@ -574,6 +576,13 @@ describe("parseDaemonConfig agent session profile", () => {
 });
 
 describe("parseDaemonConfig run timeout", () => {
+  it("defaults local execution to four concurrent runs with a ten minute timeout", () => {
+    const config = parseDaemonConfig({ repositories: [{ ...baseRepository }] });
+
+    expect(effectiveMaxConcurrentRuns(config)).toBe(4);
+    expect(effectiveRunTimeoutMs(config)).toBe(600_000);
+  });
+
   it("accepts an explicit hard run timeout", () => {
     const config = parseDaemonConfig({
       repositories: [{ ...baseRepository }],
@@ -590,6 +599,15 @@ describe("parseDaemonConfig run timeout", () => {
         runTimeoutMs: 0
       })
     ).toThrow();
+  });
+
+  it("accepts an explicit runner concurrency limit", () => {
+    const config = parseDaemonConfig({
+      repositories: [{ ...baseRepository }],
+      maxConcurrentRuns: 8
+    });
+
+    expect(effectiveMaxConcurrentRuns(config)).toBe(8);
   });
 });
 

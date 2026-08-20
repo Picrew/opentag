@@ -3,7 +3,13 @@ import { writeFileSync } from "node:fs";
 import { chmodSync } from "node:fs";
 import { createDispatcherAdminClient } from "@opentag/client";
 import { Command } from "commander";
-import { createInitialConfig, formatConfigError, loadConfigFromEnv, normalizeChannelBindings } from "./config.js";
+import {
+  createInitialConfig,
+  effectiveMaxConcurrentRuns,
+  formatConfigError,
+  loadConfigFromEnv,
+  normalizeChannelBindings
+} from "./config.js";
 import { runOneDaemonIteration, serveDaemon } from "./daemon.js";
 import { doctorHasFailures, formatDoctorChecks, runDoctor } from "./doctor.js";
 import { createDaemonRuntimeInput, executorsFromConfig, runnerExecutorRegistrations } from "./runtime.js";
@@ -115,7 +121,7 @@ program
     }).registerRunner(config.runnerId, {
       locality: "local",
       executors: runnerExecutorRegistrations(executorsFromConfig(config)),
-      maxConcurrentRuns: 1
+      maxConcurrentRuns: effectiveMaxConcurrentRuns(config)
     });
     console.log(`Registered OpenTag runner ${config.runnerId}`);
   });

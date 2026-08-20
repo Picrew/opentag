@@ -622,6 +622,7 @@ export const OpenTagDaemonConfigSchema = z
     trustedRelay: TrustedRelayAuthorizationV1Schema.optional(),
     pollIntervalMs: PositiveIntegerSchema.default(5000),
     heartbeatIntervalMs: PositiveIntegerSchema.default(15000),
+    maxConcurrentRuns: PositiveIntegerSchema.optional(),
     runTimeoutMs: PositiveIntegerSchema.optional()
   })
   .superRefine((config, ctx) => {
@@ -922,6 +923,17 @@ export type LarkChannelBindingConfig = z.infer<typeof LarkChannelBindingConfigSc
 export type AgentSessionProfileConfig = z.infer<typeof AgentSessionProfileConfigSchema>;
 export type AcpAgentConfig = z.infer<typeof AcpAgentConfigSchema>;
 export type OpenTagDaemonConfig = z.infer<typeof OpenTagDaemonConfigSchema>;
+
+export const DEFAULT_MAX_CONCURRENT_RUNS = 4;
+export const DEFAULT_RUN_TIMEOUT_MS = 10 * 60 * 1000;
+
+export function effectiveMaxConcurrentRuns(config: Pick<OpenTagDaemonConfig, "maxConcurrentRuns">): number {
+  return config.maxConcurrentRuns ?? DEFAULT_MAX_CONCURRENT_RUNS;
+}
+
+export function effectiveRunTimeoutMs(config: Pick<OpenTagDaemonConfig, "runTimeoutMs">): number {
+  return config.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
+}
 
 function channelBindingIdentity(binding: Pick<ChannelBindingConfig, "provider" | "accountId" | "conversationId">): string {
   return JSON.stringify([binding.provider, binding.accountId, binding.conversationId]);
@@ -1696,6 +1708,9 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
     ...(process.env.OPENTAG_POLL_INTERVAL_MS ? { pollIntervalMs: parseNumberFromEnv("OPENTAG_POLL_INTERVAL_MS") } : {}),
     ...(process.env.OPENTAG_HEARTBEAT_INTERVAL_MS
       ? { heartbeatIntervalMs: parseNumberFromEnv("OPENTAG_HEARTBEAT_INTERVAL_MS") }
+      : {}),
+    ...(process.env.OPENTAG_MAX_CONCURRENT_RUNS
+      ? { maxConcurrentRuns: parseNumberFromEnv("OPENTAG_MAX_CONCURRENT_RUNS") }
       : {}),
     ...(process.env.OPENTAG_RUN_TIMEOUT_MS ? { runTimeoutMs: parseNumberFromEnv("OPENTAG_RUN_TIMEOUT_MS") } : {})
   };

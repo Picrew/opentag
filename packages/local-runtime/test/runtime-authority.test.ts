@@ -204,4 +204,44 @@ describe("local-runtime public authority boundary", () => {
     });
     expect(claim).toHaveBeenCalledTimes(1);
   });
+
+  it("polls independent legacy workers up to the configured concurrency", async () => {
+    const abort = new AbortController();
+    let enteredClaims = 0;
+    let releaseClaims!: () => void;
+    const claimsReleased = new Promise<void>((resolve) => {
+      releaseClaims = resolve;
+    });
+    const claim = vi.fn(async () => {
+      enteredClaims += 1;
+      if (enteredClaims === 3) {
+        abort.abort();
+        releaseClaims();
+      }
+      await claimsReleased;
+      return null;
+    });
+
+    await serveDaemon({
+      mode: "legacy",
+      runnerId: "runner_parallel",
+      repositories: [],
+      executors: {},
+      maxConcurrentRuns: 3,
+      pollIntervalMs: 60_000,
+      signal: abort.signal,
+      client: {
+        claim,
+        async markRunning() {},
+        async heartbeat() {},
+        async progress() {},
+        async complete() {},
+        async requestActionPermission() { throw new Error("should not run"); },
+        async resolveActionPermission() { throw new Error("should not run"); },
+        async recordMaterialActionReceipt() { throw new Error("should not run"); }
+      }
+    });
+
+    expect(claim).toHaveBeenCalledTimes(3);
+  });
 });

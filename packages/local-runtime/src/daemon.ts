@@ -225,6 +225,7 @@ export type LegacyDaemonIterationInput = {
   security?: RunnerSecurityPolicy;
   pullRequestOptions?: PullRequestOptions;
   heartbeatIntervalMs?: number;
+  maxConcurrentRuns?: number;
   runTimeoutMs?: number;
   agentSessionProfile?: AgentSessionProfileConfig;
   client: DaemonClient;
@@ -965,16 +966,19 @@ export async function serveDaemon(input: DaemonRuntimeInput): Promise<void> {
     return;
   }
 
-  while (!input.signal?.aborted) {
-    try {
-      const didWork = await runOneDaemonIteration(input);
-      if (!didWork) {
+  const workerCount = Math.max(1, Math.floor(input.maxConcurrentRuns ?? 1));
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (!input.signal?.aborted) {
+      try {
+        const didWork = await runOneDaemonIteration(input);
+        if (!didWork) {
+          await sleep(pollIntervalMs, input.signal);
+        }
+      } catch (error) {
+        if (input.signal?.aborted) break;
+        console.warn("OpenTag daemon iteration failed; retrying:", error);
         await sleep(pollIntervalMs, input.signal);
       }
-    } catch (error) {
-      if (input.signal?.aborted) break;
-      console.warn("OpenTag daemon iteration failed; retrying:", error);
-      await sleep(pollIntervalMs, input.signal);
     }
-  }
+  }));
 }

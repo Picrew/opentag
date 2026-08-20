@@ -973,8 +973,8 @@ describe("OpenTag CLI start wiring", () => {
     const calls: string[] = [];
 
     await bootstrapLocalDispatcher(built, {
-      async registerRunner(name) {
-        calls.push(`runner:${name}`);
+      async registerRunner(name, registration) {
+        calls.push(`runner:${name}:${registration.maxConcurrentRuns}`);
       },
       async bindRepository(binding) {
         calls.push(`repo:${binding.provider}:${binding.owner}/${binding.repo}`);
@@ -985,7 +985,7 @@ describe("OpenTag CLI start wiring", () => {
     });
 
     expect(calls).toEqual([
-      "runner:runner_local",
+      "runner:runner_local:4",
       `repo:${built.daemon.repositories[0]!.provider}:${built.daemon.repositories[0]!.owner}/${built.daemon.repositories[0]!.repo}`,
       "channel:lark:tenant_1/chat_1"
     ]);

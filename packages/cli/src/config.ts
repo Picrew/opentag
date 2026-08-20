@@ -281,6 +281,7 @@ const DaemonConfigSchema = z
     trustedRelay: TrustedRelayAuthorizationV1Schema.optional(),
     pollIntervalMs: PositiveIntegerSchema,
     heartbeatIntervalMs: PositiveIntegerSchema,
+    maxConcurrentRuns: PositiveIntegerSchema.optional(),
     runTimeoutMs: PositiveIntegerSchema.optional()
   })
   .strict();

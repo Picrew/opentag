@@ -29,6 +29,8 @@ import {
 import {
   createDaemonRuntimeInput,
   dispatcherRuntimeHardeningInputFromEnv,
+  effectiveMaxConcurrentRuns,
+  effectiveRunTimeoutMs,
   getUnifiedDeliveryActivationState,
   hermesProfileConfigurationWarning,
   normalizeChannelBindings,
@@ -526,7 +528,7 @@ export function larkIngressConfigFromCliConfig(config: OpenTagCliConfig): LarkIn
     ...(lark.botOpenId ? { botOpenId: lark.botOpenId } : {}),
     ...(lark.conversationMemory ? { conversationMemory: lark.conversationMemory } : {}),
     ...(resolveResourceContext ? { resolveResourceContext } : {}),
-    ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
+    runTimeoutMs: effectiveRunTimeoutMs(config.daemon),
     ...(defaultRepoBinding ? { defaultRepoBinding } : {})
   };
 }
@@ -560,7 +562,7 @@ export function slackIngressConfigFromCliConfig(
         }
       : {}),
     ...(slack.appId ? { appId: slack.appId } : {}),
-    ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
+    runTimeoutMs: effectiveRunTimeoutMs(config.daemon),
     ...(maxRequestBodyBytes ? { maxRequestBodyBytes } : {}),
     ...(slack.port ? { port: slack.port } : {}),
     linear: createSlackLinearBacklogHandler({
@@ -592,7 +594,7 @@ export function slackSocketModeIngressConfigFromCliConfig(
           })
         }
       : {}),
-    ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
+    runTimeoutMs: effectiveRunTimeoutMs(config.daemon),
     ...(slack.appId ? { appId: slack.appId } : {}),
     linear: createSlackLinearBacklogHandler({
       ...(config.platforms.linear ? { linear: config.platforms.linear } : {}),
@@ -784,7 +786,7 @@ export async function bootstrapLocalDispatcher(config: OpenTagCliConfig, client?
   await admin.registerRunner(config.daemon.runnerId, {
     locality: "local",
     executors: runnerExecutorRegistrations(executorsFromConfig(config.daemon)),
-    maxConcurrentRuns: 1
+    maxConcurrentRuns: effectiveMaxConcurrentRuns(config.daemon)
   });
   for (const repository of config.daemon.repositories) {
     await admin.bindRepository({
