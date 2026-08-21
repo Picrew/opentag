@@ -801,6 +801,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
   const launchEnvironment = normalizeLaunchEnvironment(options.launchEnvironment);
   const runner = options.runner ?? nodeCommandRunner;
   const activeRuns = new Map<string, ActiveRun>();
+  let activeReadinessProbe: Promise<{ ready: true } | { ready: false; reason: string }> | undefined;
   const cancelGraceMs = options.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS;
   const readinessTimeoutMs = options.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
   const supportsCancel = options.capabilityOverrides?.supportsCancel ?? false;
@@ -877,13 +878,25 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       }
       const preflight = await runPreflight();
       if (!preflight.ready) return preflight;
-      return probeAcpInitialization({
-        manifest,
-        cwd: childCwd,
-        timeoutMs: readinessTimeoutMs,
-        launchEnvironment,
-        ...(options.security ? { security: options.security } : {})
-      });
+      if (!activeReadinessProbe) {
+        const probe = probeAcpInitialization({
+          manifest,
+          cwd: childCwd,
+          timeoutMs: readinessTimeoutMs,
+          launchEnvironment,
+          ...(options.security ? { security: options.security } : {})
+        });
+        activeReadinessProbe = probe;
+        probe.then(
+          () => {
+            if (activeReadinessProbe === probe) activeReadinessProbe = undefined;
+          },
+          () => {
+            if (activeReadinessProbe === probe) activeReadinessProbe = undefined;
+          }
+        );
+      }
+      return activeReadinessProbe;
     },
     async run(input, sink) {
       const workspace = assertExplicitWorkspace(input);

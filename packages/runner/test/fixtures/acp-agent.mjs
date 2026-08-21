@@ -54,11 +54,16 @@ async function record(cwd, name, value) {
 
 const app = acp
   .agent({ name: "opentag-test-agent" })
-  .onRequest(acp.methods.agent.initialize, (ctx) => ({
-    protocolVersion: acp.PROTOCOL_VERSION,
-    agentCapabilities: { loadSession: false },
-    agentInfo: { name: "opentag-test-agent", version: "1.0.0" }
-  }))
+  .onRequest(acp.methods.agent.initialize, async (ctx) => {
+    if (mode === "readiness-record") {
+      await writeFile(join(process.cwd(), `acp-readiness-${process.pid}.json`), `${JSON.stringify({ pid: process.pid })}\n`);
+    }
+    return {
+      protocolVersion: acp.PROTOCOL_VERSION,
+      agentCapabilities: { loadSession: false },
+      agentInfo: { name: "opentag-test-agent", version: "1.0.0" }
+    };
+  })
   .onRequest(acp.methods.agent.session.new, async (ctx) => {
     if (mode === "delay-session") {
       await record(ctx.params.cwd, "acp-session-new-started.json", { started: true });

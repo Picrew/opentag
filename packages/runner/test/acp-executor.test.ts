@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -196,6 +196,18 @@ describe("ACP executor", () => {
     const executor = createAcpExecutor({ manifest: manifest() });
 
     await expect(executor.canRun(input({ kind: "scratch", path: scratch }, "run_readiness"))).resolves.toEqual({ ready: true });
+  });
+
+  it("coalesces concurrent readiness probes for the same ACP adapter", async () => {
+    const scratch = tempDir("readiness-concurrent");
+    const executor = createAcpExecutor({ manifest: manifest("readiness-record") });
+
+    await expect(Promise.all([
+      executor.canRun(input({ kind: "scratch", path: scratch }, "run_readiness_a")),
+      executor.canRun(input({ kind: "scratch", path: scratch }, "run_readiness_b"))
+    ])).resolves.toEqual([{ ready: true }, { ready: true }]);
+
+    expect(readdirSync(scratch).filter((name) => name.startsWith("acp-readiness-"))).toHaveLength(1);
   });
 
   it("fails closed before ACP startup when a provider compatibility preflight rejects the runtime", async () => {
