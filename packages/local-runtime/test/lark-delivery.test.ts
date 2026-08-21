@@ -110,6 +110,44 @@ describe("local Lark delivery compatibility path", () => {
     });
   });
 
+  it("posts a fresh final chat reply after an interactive approval card", async () => {
+    const reply = vi.fn()
+      .mockResolvedValueOnce({ data: { message_id: "om_approval" } })
+      .mockResolvedValueOnce({ data: { message_id: "om_answer" } });
+    const patch = vi.fn().mockResolvedValue({});
+    const update = vi.fn().mockResolvedValue({});
+    const client: LarkReplyClient = { im: { message: { reply, patch, update } } };
+    const producer = createLocalLarkDeliveryProducer({ client });
+
+    await producer.enqueue(larkBusiness({
+      phase: "progress",
+      body: "需要确认权限。",
+      card: { config: { wide_screen_mode: true }, elements: [{ tag: "action" }] },
+      interactionMode: "chat",
+      replyInThread: false,
+      attentionRequired: true
+    }));
+    await producer.enqueue(larkBusiness({
+      phase: "final",
+      body: "已完成。",
+      chatBody: "这是最终答案。",
+      interactionMode: "chat",
+      replyInThread: false
+    }));
+
+    expect(reply).toHaveBeenCalledTimes(2);
+    expect(reply).toHaveBeenNthCalledWith(2, {
+      path: { message_id: "om_source" },
+      data: {
+        content: JSON.stringify({ text: "这是最终答案。" }),
+        msg_type: "text",
+        reply_in_thread: false
+      }
+    });
+    expect(patch).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it("does not call the reaction API for optional source receipts", async () => {
     const request = vi.fn();
     const client: LarkReplyClient = { request, im: { message: {} } };

@@ -119,11 +119,17 @@ export function createLocalLarkDeliveryProducer(input: {
       const existingMessageId = message.statusMessageKey
         ? statusMessageIds.get(message.statusMessageKey)
         : undefined;
-      if (existingMessageId) {
+      // An attention-required chat update is an interactive card posted in a
+      // thread. Feishu cannot turn that existing card into a plain-text
+      // channel message, so the final chat answer must be a fresh reply.
+      const reusableExistingMessageId = message.interactionMode === "chat" && message.phase === "final"
+        ? undefined
+        : existingMessageId;
+      if (reusableExistingMessageId) {
         if (message.card && message.interactionMode !== "chat") {
-          await patchLarkMessageCard(client, { messageId: existingMessageId, card: message.card });
+          await patchLarkMessageCard(client, { messageId: reusableExistingMessageId, card: message.card });
         } else {
-          await updateLarkTextMessage(client, { messageId: existingMessageId, text: message.body });
+          await updateLarkTextMessage(client, { messageId: reusableExistingMessageId, text: message.body });
         }
       } else {
         const { messageId: sourceMessageId } = parseLarkThreadKey(message.threadKey);
