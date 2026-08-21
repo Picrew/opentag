@@ -28,17 +28,17 @@ describe("governed material actions", () => {
   });
 
   it("classifies only allowlisted Feishu MCP resources as low-risk reads", () => {
-    for (const resource of [
-      "mcp__feishu-openapi-readonly__wiki_v2_space_getNode",
-      "mcp__feishu-openapi-readonly__docx_v1_document_rawContent"
-    ]) {
+    for (const [resource, includeResource] of [
+      ["mcp__feishu-openapi-readonly__wiki_v2_space_getNode", true],
+      ["mcp__feishu-openapi-readonly__docx_v1_document_rawContent", false]
+    ] as const) {
       const read = normalizeMaterialActionRequest({
         title: resource,
         kind: "other",
         provider: "acp",
         connectionId: "acp:agent-managed",
         operation: "other",
-        resource,
+        ...(includeResource ? { resource } : {}),
         permissionScopes: ["chat:postMessage", "runner:local"]
       });
       expect(read).toMatchObject({

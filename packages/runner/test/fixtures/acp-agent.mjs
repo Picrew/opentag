@@ -145,7 +145,9 @@ const app = acp
           rawInput: {
             provider: fixtureConfig.OPENTAG_ACP_TEST_PROVIDER ?? "npm",
             connectionId: fixtureConfig.OPENTAG_ACP_TEST_CONNECTION ?? "npm:team",
-            package: fixtureConfig.OPENTAG_ACP_TEST_RESOURCE ?? "@acme/report",
+            ...(fixtureConfig.OPENTAG_ACP_TEST_OMIT_RESOURCE === "true"
+              ? {}
+              : { package: fixtureConfig.OPENTAG_ACP_TEST_RESOURCE ?? "@acme/report" }),
             tag: fixtureConfig.OPENTAG_ACP_TEST_VERSION ?? "next",
             ...(fixtureConfig.OPENTAG_ACP_TEST_ENVIRONMENT ? { environment: fixtureConfig.OPENTAG_ACP_TEST_ENVIRONMENT } : {}),
             ...(fixtureConfig.OPENTAG_ACP_TEST_FORCE ? { force: fixtureConfig.OPENTAG_ACP_TEST_FORCE === "true" } : {}),

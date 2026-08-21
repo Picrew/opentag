@@ -935,12 +935,11 @@ describe("ACP daemon workspaces", () => {
       async run(run) {
         await expect(run.permissionResolver?.({
           toolCallId: "tool_feishu_read",
-          title: "Allow other?",
+          title: "mcp__feishu-openapi-readonly__wiki_v2_space_getNode",
           kind: "other",
           provider: "acp",
           connectionId: "acp:agent-managed",
           operation: "other",
-          resource: "mcp__feishu-openapi-readonly__wiki_v2_space_getNode",
           permissionScopes: ["chat:postMessage", "runner:local"]
         })).resolves.toMatchObject({ decision: "allow_once", material: false });
         return { conclusion: "success", summary: "done" };

@@ -41,8 +41,11 @@ function targetExtensions(value: Record<string, unknown> | undefined): Record<st
 }
 
 export function normalizeMaterialActionRequest(input: MaterialActionRequestInput): NormalizedMaterialAction {
-  const trustedReadOnlyFeishuTool = isFeishuReadOnlyMcpResource(input.resource);
   const title = input.title.trim().replace(/\s+/gu, " ").slice(0, 240) || "untitled action";
+  const explicitResource = input.resource?.trim();
+  const trustedReadOnlyFeishuTool = isFeishuReadOnlyMcpResource(
+    explicitResource ?? (isFeishuReadOnlyMcpResource(title) ? title : undefined)
+  );
   const kind = trustedReadOnlyFeishuTool
     ? "read"
     : input.kind?.trim().toLowerCase().replace(/[^a-z0-9._:-]+/gu, "_") || "tool";
@@ -55,7 +58,7 @@ export function normalizeMaterialActionRequest(input: MaterialActionRequestInput
   const operation = trustedReadOnlyFeishuTool
     ? "read"
     : input.operation?.trim().toLowerCase() || actionFamily || kind;
-  const resource = input.resource?.trim() || title;
+  const resource = explicitResource || title;
   const resourceVersion = input.resourceVersion?.trim();
   const targetFingerprint = input.targetFingerprint?.trim().toLowerCase();
   const probe = `${actionFamily} ${title} ${permissionScopes.join(" ")}`;

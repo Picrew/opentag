@@ -999,12 +999,15 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
               }));
               const governedResolver = input.permissionResolver;
               const target = structuredPermissionTarget(ctx.params.toolCall.rawInput, ctx.params.toolCall.kind);
-              const trustedReadOnlyFeishuTool = isFeishuReadOnlyMcpResource(target.resource);
+              const title = safeToolTitle(ctx.params.toolCall.title ?? "Untitled tool call");
+              const permissionResource = target.resource
+                ?? (isFeishuReadOnlyMcpResource(title) ? title : undefined);
+              const trustedReadOnlyFeishuTool = isFeishuReadOnlyMcpResource(permissionResource);
               const request = {
                 runId: input.runId,
                 toolCall: {
                   toolCallId: ctx.params.toolCall.toolCallId,
-                  title: safeToolTitle(ctx.params.toolCall.title ?? "Untitled tool call"),
+                  title,
                   ...(trustedReadOnlyFeishuTool
                     ? { kind: "read" }
                     : ctx.params.toolCall.kind ? { kind: ctx.params.toolCall.kind } : {}),
@@ -1029,7 +1032,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                   provider: target.provider,
                   connectionId: target.connectionId,
                   operation: trustedReadOnlyFeishuTool ? "read" : target.operation,
-                  ...(target.resource ? { resource: target.resource } : {}),
+                  ...(permissionResource ? { resource: permissionResource } : {}),
                   ...(target.resourceVersion ? { resourceVersion: target.resourceVersion } : {}),
                   ...(target.targetConstraints ? { targetConstraints: target.targetConstraints } : {}),
                   ...(request.toolCall.targetFingerprint ? { targetFingerprint: request.toolCall.targetFingerprint } : {}),

@@ -475,11 +475,11 @@ describe("ACP executor", () => {
 
   it("classifies allowlisted Feishu MCP document reads as non-material read actions", async () => {
     const workspace = permissionWorkspace("feishu-readonly", {
-      OPENTAG_ACP_TEST_PERMISSION_TITLE: "Allow other?",
+      OPENTAG_ACP_TEST_PERMISSION_TITLE: "mcp__feishu-openapi-readonly__wiki_v2_space_getNode",
       OPENTAG_ACP_TEST_PERMISSION_KIND: "other",
       OPENTAG_ACP_TEST_PROVIDER: "acp",
       OPENTAG_ACP_TEST_CONNECTION: "acp:agent-managed",
-      OPENTAG_ACP_TEST_RESOURCE: "mcp__feishu-openapi-readonly__wiki_v2_space_getNode"
+      OPENTAG_ACP_TEST_OMIT_RESOURCE: "true"
     });
     const requests: Array<Record<string, unknown>> = [];
     const executor = createAcpExecutor({ manifest: permissionManifest() });

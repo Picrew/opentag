@@ -584,7 +584,9 @@ export async function executeClaimedRun(
           if (!(await hostedExecutionIsCurrent())) {
             return { actionId: deniedActionId, decision: "deny" as const };
           }
-          const trustedReadOnlyFeishuTool = isFeishuReadOnlyMcpResource(request.resource);
+          const permissionResource = request.resource
+            ?? (isFeishuReadOnlyMcpResource(request.title) ? request.title : undefined);
+          const trustedReadOnlyFeishuTool = isFeishuReadOnlyMcpResource(permissionResource);
           let resolution = await input.client.requestActionPermission(runId, lease, {
             toolCallId: request.toolCallId,
             title: request.title,
@@ -595,7 +597,7 @@ export async function executeClaimedRun(
                 : {}),
             connectionId: request.connectionId,
             operation: trustedReadOnlyFeishuTool ? "read" : request.operation,
-            ...(request.resource ? { resource: request.resource } : {}),
+            ...(permissionResource ? { resource: permissionResource } : {}),
             ...(request.resourceVersion ? { resourceVersion: request.resourceVersion } : {}),
             ...(request.targetFingerprint ? { targetFingerprint: request.targetFingerprint } : {}),
             ...(request.targetConstraints ? { targetConstraints: request.targetConstraints } : {}),
