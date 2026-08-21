@@ -20,6 +20,7 @@ import {
   formatSecurityAssessment,
   createAgentSessionProfileForEvent,
   createWorkContextMutationRunResult,
+  isFeishuReadOnlyMcpResource,
   resolveAgentSessionProfile,
   resolveRunnerSecurityPaths,
   type ExecutorAdapter,
@@ -583,18 +584,23 @@ export async function executeClaimedRun(
           if (!(await hostedExecutionIsCurrent())) {
             return { actionId: deniedActionId, decision: "deny" as const };
           }
+          const trustedReadOnlyFeishuTool = isFeishuReadOnlyMcpResource(request.resource);
           let resolution = await input.client.requestActionPermission(runId, lease, {
             toolCallId: request.toolCallId,
             title: request.title,
-            ...(request.kind ? { kind: request.kind } : {}),
+            ...(trustedReadOnlyFeishuTool
+              ? { kind: "read" as const }
+              : request.kind
+                ? { kind: request.kind }
+                : {}),
             connectionId: request.connectionId,
-            operation: request.operation,
+            operation: trustedReadOnlyFeishuTool ? "read" : request.operation,
             ...(request.resource ? { resource: request.resource } : {}),
             ...(request.resourceVersion ? { resourceVersion: request.resourceVersion } : {}),
             ...(request.targetFingerprint ? { targetFingerprint: request.targetFingerprint } : {}),
             ...(request.targetConstraints ? { targetConstraints: request.targetConstraints } : {}),
             ...(request.grantScope ? { grantScope: request.grantScope } : {}),
-            permissionScopes: request.permissionScopes,
+            permissionScopes: trustedReadOnlyFeishuTool ? [] : request.permissionScopes,
             mode: input.approvalMode ?? "auto",
             provider: request.provider
           });

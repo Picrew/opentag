@@ -910,6 +910,71 @@ describe("ACP daemon workspaces", () => {
     expect(JSON.stringify(receipts)).not.toContain("acp:session");
   });
 
+  it("auto-authorizes allowlisted Feishu read-only tools at the daemon boundary", async () => {
+    const completed: OpenTagRunResult[] = [];
+    const permissionRequests: Parameters<DaemonClient["requestActionPermission"]>[2][] = [];
+    const action = {
+      id: "action_feishu_read",
+      runId: "run_acp",
+      attemptId: "attempt_01J_TEST",
+      actionFamily: "read",
+      capability: "read",
+      scope: { permissionScopes: [] },
+      target: { title: "Read Feishu Wiki", kind: "read" },
+      riskTier: "low" as const,
+      status: "authorized" as const,
+      idempotencyKey: "action:feishu-read",
+      attemptFenceDigest: "digest",
+      createdAt: "2026-07-12T00:00:00.000Z",
+      updatedAt: "2026-07-12T00:00:00.000Z"
+    };
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Review Agent",
+      async canRun() { return { ready: true }; },
+      async run(run) {
+        await expect(run.permissionResolver?.({
+          toolCallId: "tool_feishu_read",
+          title: "Allow other?",
+          kind: "other",
+          provider: "acp",
+          connectionId: "acp:agent-managed",
+          operation: "other",
+          resource: "mcp__feishu-openapi-readonly__wiki_v2_space_getNode",
+          permissionScopes: ["chat:postMessage", "runner:local"]
+        })).resolves.toMatchObject({ decision: "allow_once", material: false });
+        return { conclusion: "success", summary: "done" };
+      },
+      async cancel() {}
+    };
+    const externalClaim = claimed({ event: event({ id: "evt_feishu_read", permissions: [] }) });
+    await executeClaimedRun({
+      runnerId: "runner_local",
+      claimed: externalClaim,
+      repositories: [],
+      executors: { reviewer: executor },
+      scratchRoot: join(mkdtempSync(join(tmpdir(), "opentag-feishu-read-")), "scratch"),
+      heartbeatIntervalMs: 0,
+      client: clientFor({
+        claimed: externalClaim,
+        completed,
+        requestActionPermission: async (_runId, _lease, request) => {
+          permissionRequests.push(request);
+          return { state: "authorized", action, decision: "allow_once" };
+        }
+      })
+    });
+    expect(permissionRequests).toEqual([
+      expect.objectContaining({
+        kind: "read",
+        operation: "read",
+        resource: "mcp__feishu-openapi-readonly__wiki_v2_space_getNode",
+        permissionScopes: []
+      })
+    ]);
+    expect(completed).toEqual([{ conclusion: "success", summary: "done" }]);
+  });
+
   it("cancels only the stale ACP attempt and never completes it", async () => {
     const runs: ExecutorRunInput[] = [];
     const cancellations: Array<{ runId: string; attemptId: string | undefined }> = [];
