@@ -1,4 +1,5 @@
 export * from "./action.js";
+export * from "./feishu-mcp-policy.js";
 export * from "./capability.js";
 export * from "./canonical-json.js";
 export * from "./credential-safety.js";

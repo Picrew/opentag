@@ -27,6 +27,41 @@ describe("governed material actions", () => {
     expect(evaluateActionPermission({ mode: "auto", action: read }).outcome).toBe("authorized");
   });
 
+  it("classifies only allowlisted Feishu MCP resources as low-risk reads", () => {
+    for (const resource of [
+      "mcp__feishu-openapi-readonly__wiki_v2_space_getNode",
+      "mcp__feishu-openapi-readonly__docx_v1_document_rawContent"
+    ]) {
+      const read = normalizeMaterialActionRequest({
+        title: resource,
+        kind: "other",
+        provider: "acp",
+        connectionId: "acp:agent-managed",
+        operation: "other",
+        resource,
+        permissionScopes: ["chat:postMessage", "runner:local"]
+      });
+      expect(read).toMatchObject({
+        actionFamily: "read",
+        material: false,
+        riskTier: "low",
+        scope: { operation: "read", permissionScopes: [] },
+        target: { kind: "read", operation: "read", resource }
+      });
+      expect(evaluateActionPermission({ mode: "auto", action: read }).outcome).toBe("authorized");
+    }
+
+    const nearMiss = normalizeMaterialActionRequest({
+      title: "Unlisted tool",
+      kind: "other",
+      operation: "other",
+      resource: "mcp__feishu-openapi-readonly__wiki_v2_space_deleteNode",
+      permissionScopes: ["chat:postMessage"]
+    });
+    expect(nearMiss).toMatchObject({ actionFamily: "other", material: true, riskTier: "medium" });
+    expect(evaluateActionPermission({ mode: "auto", action: nearMiss }).outcome).toBe("needs_approval");
+  });
+
   it("treats opaque ACP operations as material and separates exact identity from bounded run scope", () => {
     for (const kind of ["execute", "tool", "fetch", "edit", "delete", "move", "other"]) {
       const opaque = normalizeMaterialActionRequest({

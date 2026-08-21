@@ -7,6 +7,7 @@ import type {
   OpenTagRunResult,
   SuggestedChangesSnapshot
 } from "./schema.js";
+import { isFeishuReadOnlyMcpResource } from "./feishu-mcp-policy.js";
 
 export type MaterialActionRequestInput = {
   title: string;
@@ -40,13 +41,20 @@ function targetExtensions(value: Record<string, unknown> | undefined): Record<st
 }
 
 export function normalizeMaterialActionRequest(input: MaterialActionRequestInput): NormalizedMaterialAction {
+  const trustedReadOnlyFeishuTool = isFeishuReadOnlyMcpResource(input.resource);
   const title = input.title.trim().replace(/\s+/gu, " ").slice(0, 240) || "untitled action";
-  const kind = input.kind?.trim().toLowerCase().replace(/[^a-z0-9._:-]+/gu, "_") || "tool";
+  const kind = trustedReadOnlyFeishuTool
+    ? "read"
+    : input.kind?.trim().toLowerCase().replace(/[^a-z0-9._:-]+/gu, "_") || "tool";
   const actionFamily = kind === "tool" ? title.toLowerCase().split(/\s+/u).slice(0, 3).join("_").replace(/[^a-z0-9._:-]+/gu, "_") : kind;
-  const permissionScopes = [...new Set(input.permissionScopes ?? [])].map((scope) => scope.trim()).filter(Boolean).sort();
+  const permissionScopes = trustedReadOnlyFeishuTool
+    ? []
+    : [...new Set(input.permissionScopes ?? [])].map((scope) => scope.trim()).filter(Boolean).sort();
   const provider = input.provider?.trim().toLowerCase() || "acp";
   const connectionId = input.connectionId?.trim() || `${provider}:agent-managed`;
-  const operation = input.operation?.trim().toLowerCase() || actionFamily || kind;
+  const operation = trustedReadOnlyFeishuTool
+    ? "read"
+    : input.operation?.trim().toLowerCase() || actionFamily || kind;
   const resource = input.resource?.trim() || title;
   const resourceVersion = input.resourceVersion?.trim();
   const targetFingerprint = input.targetFingerprint?.trim().toLowerCase();
@@ -87,7 +95,7 @@ export function normalizeMaterialActionRequest(input: MaterialActionRequestInput
       ...(targetFingerprint ? { targetFingerprint } : {}),
       ...(input.targetConstraints ? { targetConstraints: normalizedRecord(input.targetConstraints) } : {}),
       ...(input.grantScope ? { grantScope: normalizedRecord(input.grantScope) } : {}),
-      ...(input.kind ? { kind } : {})
+      ...(input.kind || trustedReadOnlyFeishuTool ? { kind } : {})
     }),
     riskTier,
     material,
